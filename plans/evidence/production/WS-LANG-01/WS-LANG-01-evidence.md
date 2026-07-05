@@ -64,7 +64,7 @@ Two test assertions in `crates/legion-desktop/tests/` were broken by WS-MANUAL-0
 
 ### 3-OS hosted CI deferral (LANG.12)
 
-At original evidence time no `.github/workflows/` directory existed; the current tree has only `.github/workflows/legion-bench.yml` (weekly live-mode bench, not a full CI gate). The repo convention is local xtask commands. The `cargo run -p xtask -- rust-analyzer-smoke` command is implemented and verified on Windows; 3-OS (Linux, macOS, Windows) hosted CI execution of the smoke is deferred pending CI infrastructure — consistent with the existing PR-REL-001 posture that states "no hosted CI workflow currently runs them."
+At original evidence time no `.github/workflows/` directory existed; the current tree has only `.github/workflows/legion-bench.yml` (weekly recorded fixture scoring, not a full CI gate). The repo convention is local xtask commands. The `cargo run -p xtask -- rust-analyzer-smoke` command is implemented and verified on Windows; 3-OS (Linux, macOS, Windows) hosted CI execution of the smoke is deferred pending CI infrastructure — consistent with the existing PR-REL-001 posture that states "no hosted CI workflow currently runs them."
 
 ## Merged-tree gate rerun (2026-07-04, branch m8/lsp-foundation)
 
