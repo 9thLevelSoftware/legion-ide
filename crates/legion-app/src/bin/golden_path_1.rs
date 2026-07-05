@@ -492,7 +492,13 @@ fn run_s3(
 
     // Initial pump: let rust-analyzer settle (bounded 30s).
     eprintln!("[s3] initial pump (up to 30s) ...");
-    let _ = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
+    let initial_pump_started = Instant::now();
+    let initial = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
+    eprintln!(
+        "[s3] initial pump done: notifications_for_uri={} elapsed={}ms",
+        initial.len(),
+        initial_pump_started.elapsed().as_millis()
+    );
 
     // --- introduce compile error ---
     eprintln!("[s3] introducing compile error via app edit path ...");
@@ -538,6 +544,28 @@ fn run_s3(
     let got_error = session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(120));
     eprintln!("[s3] error diagnostic received: {got_error}");
     if !got_error {
+        // Post-mortem: distinguish "rust-analyzer silent for the whole
+        // wait" (starvation / stall) from "notifications arrived but never
+        // matched the error predicate" (product-side race or fingerprint
+        // mismatch). Flake observed locally under concurrent builds and on
+        // ubuntu CI (run 28747873556).
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(&scratchpad_uri);
+        let buffered = session.buffered_diagnostic_notifications();
+        eprintln!(
+            "[s3] POST-MORTEM: expected uri_hash={expected_hash:?} buffered_notifications={}",
+            buffered.len()
+        );
+        for (i, n) in buffered.iter().enumerate() {
+            eprintln!(
+                "[s3] buffered[{i}] uri_hash={:?} match={} diagnostics={} errors={} warnings={}",
+                n.uri_hash,
+                n.uri_hash == expected_hash,
+                n.diagnostic_count,
+                n.error_count,
+                n.warning_count
+            );
+        }
+        eprintln!("[s3] health: {:?}", session.health());
         return Err(
             "s3: expected >=1 error diagnostic after introducing type mismatch; \
              none arrived within 120s deadline"
@@ -840,8 +868,9 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     // Cargo flags:
     //   -q           suppress per-test status lines (only show summary)
     //   --color=never strip ANSI escape codes (they inflate character count)
-    // Both are needed to keep output + SMOKE_EXIT: well under the product's
-    // 240-char per-row scrollback limit.
+    // The product splits output chunks into per-line rows and caps each ROW
+    // at 240 chars, so the marker only needs its own short line; the flags
+    // keep individual lines short and the scrollback quiet.
     // Write the runner script into the OS temp dir (NOT the fixture workspace git
     // root) so it never shows up as an untracked file during the s6 git step (I-2).
     let temp_str = temp_dir.to_string_lossy();
