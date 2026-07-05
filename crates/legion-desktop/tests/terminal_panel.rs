@@ -5,6 +5,56 @@ use legion_protocol::{
     TerminalScrollbackProjection, TerminalSessionId,
 };
 
+/// All status kind labels must be lowercase human text — no Rust debug strings (no PascalCase).
+#[test]
+fn status_label_is_human_readable_for_all_kinds() {
+    let all_kinds = [
+        TerminalPanelStatusKind::Disabled,
+        TerminalPanelStatusKind::Denied,
+        TerminalPanelStatusKind::Idle,
+        TerminalPanelStatusKind::Starting,
+        TerminalPanelStatusKind::Running,
+        TerminalPanelStatusKind::Exited,
+        TerminalPanelStatusKind::Failed,
+        TerminalPanelStatusKind::Degraded,
+        TerminalPanelStatusKind::Unavailable,
+        TerminalPanelStatusKind::Crashed,
+        TerminalPanelStatusKind::PolicyBlocked,
+    ];
+
+    for kind in all_kinds {
+        let mut projection = TerminalPanelProjection::empty();
+        projection.status = TerminalPanelStatus {
+            kind,
+            message: String::new(),
+        };
+        let model = TerminalPanelRenderModel::from_projection(&projection, 10);
+        let label = &model.status_label;
+
+        // Must start with "status=" prefix.
+        assert!(
+            label.starts_with("status="),
+            "status_label must start with 'status='; got: {label:?}"
+        );
+        let text = &label["status=".len()..];
+
+        // Must not be a Rust debug string (no PascalCase: no uppercase letter after lowercase).
+        let has_pascal = text.chars().enumerate().any(|(i, c)| {
+            i > 0 && c.is_uppercase() && text.chars().nth(i - 1).is_some_and(|p| p.is_lowercase())
+        });
+        assert!(
+            !has_pascal,
+            "status_label must not contain PascalCase (no Rust debug format); kind={kind:?}, label={label:?}"
+        );
+
+        // Must not be empty.
+        assert!(
+            !text.is_empty(),
+            "status_label text must not be empty for kind={kind:?}"
+        );
+    }
+}
+
 fn row(sequence: u64, payload: &str, stderr: bool) -> TerminalOutputRowProjection {
     TerminalOutputRowProjection {
         session_id: TerminalSessionId(42),
@@ -38,7 +88,7 @@ fn terminal_panel_render_model_exposes_grid_status_and_scrollback() {
 
     let model = TerminalPanelRenderModel::from_projection(&projection, 100);
 
-    assert_eq!(model.status_label, "status=Running");
+    assert_eq!(model.status_label, "status=running");
     assert_eq!(model.active_session_label.as_deref(), Some("session=42"));
     assert_eq!(model.runtime_label.as_deref(), Some("runtime=Running"));
     assert_eq!(model.scrollback_label, "visible=2 omitted=5 matches=0");

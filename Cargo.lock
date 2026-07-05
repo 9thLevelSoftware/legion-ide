@@ -3785,6 +3785,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "globset",
+ "hex",
  "legion-agent",
  "legion-ai",
  "legion-ai-providers",
@@ -3807,6 +3808,7 @@ dependencies = [
  "legion-ui",
  "regex",
  "serde_json",
+ "sha2",
  "syntect",
  "thiserror 2.0.18",
  "uuid",

@@ -366,6 +366,88 @@ impl LanguageServerAdapterPlan {
     }
 }
 
+/// Resolution inputs for locating a rust-analyzer binary (design §5).
+#[derive(Debug, Clone, Default)]
+pub struct RustAnalyzerDiscovery {
+    /// Explicit user/workspace-configured path.
+    pub configured_path: Option<std::path::PathBuf>,
+    /// Project-local vendored binary path.
+    pub project_local_path: Option<std::path::PathBuf>,
+    /// Application-bundled binary path.
+    pub bundled_path: Option<std::path::PathBuf>,
+    /// Raw `PATH` environment value to scan for `rust-analyzer`.
+    pub path_env: Option<String>,
+}
+
+/// Outcome of binary discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveredBinary {
+    /// A binary was resolved with the given provenance.
+    Found {
+        /// Resolved binary path.
+        path: std::path::PathBuf,
+        /// How it was resolved.
+        provenance: legion_protocol::LspServerBinaryProvenance,
+    },
+    /// No binary could be resolved through any source.
+    NotFound,
+}
+
+impl RustAnalyzerDiscovery {
+    /// Resolves the binary in order: configured -> project-local -> PATH -> bundled.
+    pub fn resolve(&self) -> DiscoveredBinary {
+        use legion_protocol::LspServerBinaryProvenance as P;
+        if let Some(p) = &self.configured_path {
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::Configured,
+            };
+        }
+        if let Some(p) = &self.project_local_path {
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::ProjectLocal,
+            };
+        }
+        if let Some(path_env) = &self.path_env {
+            let exe = if cfg!(windows) {
+                "rust-analyzer.exe"
+            } else {
+                "rust-analyzer"
+            };
+            for dir in std::env::split_paths(path_env) {
+                let candidate = dir.join(exe);
+                if candidate.is_file() {
+                    return DiscoveredBinary::Found {
+                        path: candidate,
+                        provenance: P::SystemPath,
+                    };
+                }
+            }
+        }
+        if let Some(p) = &self.bundled_path {
+            return DiscoveredBinary::Found {
+                path: p.clone(),
+                provenance: P::Bundled,
+            };
+        }
+        DiscoveredBinary::NotFound
+    }
+
+    /// Probes `<path> --version`, returning the trimmed stdout line if it runs.
+    pub fn probe_version(path: &std::path::Path) -> Option<String> {
+        let output = std::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() { None } else { Some(text) }
+    }
+}
+
 /// Binary-manifest entry describing a language-server adapter for one workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspServerBinaryManifestEntry {
@@ -2013,6 +2095,16 @@ fn metadata_fingerprint(label: &str, input: &str) -> FileFingerprint {
     }
 }
 
+/// Returns the stable fingerprint used to key `publishDiagnostics` records by URI.
+///
+/// Callers outside this crate (e.g. `legion-app`) use this to filter
+/// [`LspDiagnosticNotificationMetadata`] by document URI without storing the raw
+/// URI string in the metadata record. The fingerprint matches the `uri_hash`
+/// field produced by the LSP transport when recording a notification.
+pub fn lsp_diagnostic_uri_fingerprint(uri: &str) -> FileFingerprint {
+    metadata_fingerprint("lsp.diagnostic.uri", uri)
+}
+
 // -----------------------------------------------------------------------------
 // Process-backed stdio transport (WS03.T1).
 // -----------------------------------------------------------------------------
@@ -2352,6 +2444,40 @@ pub struct LspDiagnosticNotificationMetadata {
     pub schema_version: u16,
 }
 
+/// Result of a bounded notification pump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpOutcome {
+    /// The caller predicate returned true.
+    PredicateMet,
+    /// The deadline elapsed before the predicate was met.
+    Deadline,
+    /// The child closed its stdout before the predicate was met.
+    Closed,
+}
+
+/// Notifications observed during a pump, borrowed for predicate evaluation.
+#[derive(Debug, Default)]
+pub struct PumpedNotifications {
+    /// Diagnostic notifications observed so far.
+    pub diagnostics: Vec<LspDiagnosticNotificationMetadata>,
+    /// Progress notifications observed so far.
+    pub progress: Vec<LspProgressNotification>,
+}
+
+/// Source of asynchronous LSP notifications. `BlockingPump` is the current
+/// single-threaded implementation; a future reader-thread implementation can
+/// replace it without changing callers (design §4, B-ready seam).
+pub trait LspNotificationSource {
+    /// Reads frames until `predicate` returns true, the deadline elapses, or
+    /// the child closes stdout. Id-bearing frames are routed to correlation;
+    /// notification frames are accumulated and surfaced to `predicate`.
+    fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome>;
+}
+
 /// Process-backed stdio LSP session that combines an
 /// [`LspStdioProcess`] handle with an [`LspClient`] correlation table.
 ///
@@ -2541,10 +2667,84 @@ impl LspStdioSession {
         self.ready
     }
 
+    /// Routes a notification-shaped frame into the durable buffers and, when
+    /// pumping, into the caller's accumulator. Returns true if the frame was a
+    /// recognized notification.
+    fn record_notification(
+        &mut self,
+        envelope: &JsonRpcEnvelope,
+        acc: Option<&mut PumpedNotifications>,
+    ) -> bool {
+        match envelope.method.as_deref() {
+            Some("$/progress") => {
+                if let Some(p) = progress_notification_from_params(envelope.params.as_ref()) {
+                    self.progress_notifications.push(p.clone());
+                    if let Some(acc) = acc {
+                        acc.progress.push(p);
+                    }
+                    return true;
+                }
+            }
+            Some("textDocument/publishDiagnostics") => {
+                if let Some(d) = diagnostic_notification_from_params(envelope.params.as_ref()) {
+                    self.diagnostic_notifications.push(d.clone());
+                    if let Some(acc) = acc {
+                        acc.diagnostics.push(d);
+                    }
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Bounded pump for asynchronous notifications (design §4). Accumulated
+    /// notifications also land in `self.diagnostic_notifications` /
+    /// `self.progress_notifications` so existing accessors keep working.
+    ///
+    /// Each iteration uses [`LspStdioProcess::read_envelope_until`] with the
+    /// remaining time budget so a server that is alive but silent cannot block
+    /// the caller forever — `PumpOutcome::Deadline` is always returned before
+    /// or at `deadline`, even when the server never writes another byte.
+    pub fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome> {
+        let mut acc = PumpedNotifications::default();
+        loop {
+            // Fast-path: check the deadline before issuing the read so that a
+            // pre-expired deadline returns immediately without a syscall.
+            if Instant::now() >= deadline {
+                return Ok(PumpOutcome::Deadline);
+            }
+            // Deadline-bounded read: the actual blocking pipe read lives on a
+            // background thread; this waits on the channel with a timeout, so
+            // a silent-but-alive server cannot block the caller past `deadline`.
+            let envelope = match self.process.read_envelope_until(deadline)? {
+                LspReadOutcome::Envelope(envelope) => envelope,
+                LspReadOutcome::TimedOut => return Ok(PumpOutcome::Deadline),
+                LspReadOutcome::Eof => return Ok(PumpOutcome::Closed),
+            };
+            if envelope.id.is_some() {
+                // Out-of-band response while pumping: callers must not pump with
+                // an outstanding request, so we skip id-bearing frames rather
+                // than stash them.
+                continue;
+            }
+            self.record_notification(&envelope, Some(&mut acc));
+            if predicate(&acc) {
+                return Ok(PumpOutcome::PredicateMet);
+            }
+        }
+    }
+
     /// Reads frames from the child until we see a response for
-    /// `target_json_rpc_id`; intermediate notifications are
-    /// discarded so the framing/buffering layer can be exercised
-    /// without affecting correlation.
+    /// `target_json_rpc_id`. Intermediate `$/progress` and
+    /// `textDocument/publishDiagnostics` notifications are recorded into the
+    /// session buffers, while non-target responses are skipped, so the
+    /// framing/buffering layer can be exercised without affecting correlation.
     fn read_until_correlated_response(
         &mut self,
         target_json_rpc_id: u64,
@@ -2600,17 +2800,7 @@ impl LspStdioSession {
                 },
             };
             let Some(id) = envelope.id else {
-                if envelope.method.as_deref() == Some("$/progress")
-                    && let Some(progress) =
-                        progress_notification_from_params(envelope.params.as_ref())
-                {
-                    self.progress_notifications.push(progress);
-                } else if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
-                    && let Some(diagnostics) =
-                        diagnostic_notification_from_params(envelope.params.as_ref())
-                {
-                    self.diagnostic_notifications.push(diagnostics);
-                }
+                self.record_notification(&envelope, None);
                 continue;
             };
             if id != target_json_rpc_id {
@@ -2664,6 +2854,16 @@ impl LspStdioSession {
             .unwrap_or(u64::MAX)
             .max(timeout_ms.saturating_add(1));
         self.client.resolve_timeout(expected_request_id, elapsed_ms)
+    }
+}
+
+impl LspNotificationSource for LspStdioSession {
+    fn pump_until(
+        &mut self,
+        deadline: std::time::Instant,
+        predicate: &mut dyn FnMut(&PumpedNotifications) -> bool,
+    ) -> LspRuntimeResult<PumpOutcome> {
+        LspStdioSession::pump_until(self, deadline, predicate)
     }
 }
 

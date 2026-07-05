@@ -109,12 +109,18 @@ fn desktop_terminal_failures_and_bounds_are_visible() {
     ))
     .expect("desktop runtime should open");
 
+    // Trusted workspaces auto-enable the product terminal gate: the launch
+    // opens the three-tier-selected shell (the label never executes), so the
+    // panel shows a running session rather than the pre-productization
+    // default-denial. Denial-row rendering is covered by the synthetic
+    // projection below and by the untrusted-workspace tests in
+    // legion-app terminal_workflow.
     assert_eq!(
         runtime
             .handle_action(DesktopAction::TerminalLaunch {
                 command_label: "fixture".to_string(),
             })
-            .expect("default-denied terminal launch"),
+            .expect("trusted terminal launch"),
         DesktopWorkflowOutcome::TerminalPanelUpdated
     );
     let terminal_model = DesktopProjectionViewModel::from_snapshot(&runtime.projection_snapshot());
@@ -122,7 +128,13 @@ fn desktop_terminal_failures_and_bounds_are_visible() {
         terminal_model
             .terminal_rows
             .iter()
-            .any(|row| row.contains("terminal denial"))
+            .any(|row| row.contains("terminal: Running"))
+    );
+    assert!(
+        terminal_model
+            .terminal_rows
+            .iter()
+            .any(|row| row.contains("granted=true"))
     );
 
     let mut snapshot = Shell::empty("language-terminal").projection_snapshot();

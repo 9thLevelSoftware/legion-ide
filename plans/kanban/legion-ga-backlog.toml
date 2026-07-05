@@ -405,22 +405,26 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Write a failing integration test launching a mock/rust-analyzer-compatible server through the product registry"
     mode = "Manual"
     readiness_row = "PR-LANG-001"
-    files = ["crates/legion-lsp/tests/rust_analyzer_launch.rs", "crates/legion-lsp/src/registry.rs"]
+    files = ["crates/legion-app/tests/rust_analyzer_session_handshake.rs", "crates/legion-lsp/tests/stdio_transport_contract.rs", "crates/legion-lsp/src/lib.rs"]
     dependencies = []
-    verification = ["cargo test -p legion-lsp --test rust_analyzer_launch"]
+    verification = ["cargo test -p legion-app --test rust_analyzer_session_handshake", "cargo test -p legion-lsp --test stdio_transport_contract"]
     acceptance = ["A mock server launch is proven through the product registry, not a test-only path."]
     stop_condition = "Stop if the test bypasses the production registry."
+    status = "done"
+    evidence = "plans/evidence/production/WS-LANG-01/WS-LANG-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F1.T2"
     title = "Add rust-analyzer binary resolution, workspace config, lifecycle supervision, restart/backoff, and status projection"
     mode = "Manual"
     readiness_row = "PR-LANG-001"
-    files = ["crates/legion-lsp/src/registry.rs", "crates/legion-lsp/src/supervision.rs", "crates/legion-protocol/src/projection.rs"]
+    files = ["crates/legion-lsp/src/lib.rs", "crates/legion-app/src/language/session.rs", "crates/legion-app/src/language/download.rs", "crates/legion-protocol/src/lib.rs"]
     dependencies = ["P2.F1.T1"]
-    verification = ["cargo test -p legion-lsp", "cargo test -p legion-protocol"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-protocol", "cargo test -p legion-app --test language_restart_policy", "cargo test -p legion-desktop --test language_health_view"]
     acceptance = ["rust-analyzer lifecycle is supervised and projected; restart/backoff behavior is testable."]
     stop_condition = "Do not silently swallow supervision failures."
+    status = "done"
+    evidence = "plans/evidence/production/WS-LANG-01/WS-LANG-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F1.T3"
@@ -469,6 +473,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-app --test terminal_workflow"]
     acceptance = ["Manual mode can run `cargo test` in a terminal tab and capture exit status metadata."]
     stop_condition = "Test must fail because runtime is disabled, not because of fixture plumbing."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T2"
@@ -480,6 +486,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-terminal", "cargo test -p legion-app", "cargo test -p legion-security"]
     acceptance = ["Denied/untrusted terminal paths still fail closed."]
     stop_condition = "Do not add a second ad-hoc test-only flag for terminal activation."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T3"
@@ -488,9 +496,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/grid.rs", "crates/legion-desktop/src/view/terminal_panel.rs"]
     dependencies = ["P2.F2.T2"]
-    verification = ["cargo test -p legion-terminal", "cargo test -p legion-desktop"]
+    verification = ["cargo test -p legion-terminal", "cargo test -p legion-desktop --test terminal_panel"]
     acceptance = ["Terminal panel renders, scrolls, accepts input, and respects resize events."]
     stop_condition = "Stop if kill escalation silently drops a running process."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T4"
@@ -499,9 +509,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/osc.rs", "crates/legion-terminal/src/session.rs"]
     dependencies = ["P2.F2.T3"]
-    verification = ["cargo test -p legion-terminal"]
+    verification = ["cargo test -p legion-terminal --test osc_tracking"]
     acceptance = ["OSC sequences are parsed and exposed as metadata; cwd/exit-code are queryable."]
     stop_condition = "Do not trust shell-emitted metadata as security policy."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T5"
@@ -510,9 +522,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/conpty.rs", "crates/legion-platform/src/windows.rs"]
     dependencies = ["P2.F2.T3"]
-    verification = ["cargo test -p legion-terminal --features windows", "cargo test -p legion-platform --features windows"]
+    verification = ["cargo test -p legion-terminal --test platform_shell_smoke", "cargo test -p legion-platform"]
     acceptance = ["Trusted terminal runs equivalently on Windows via ConPTY."]
     stop_condition = "Stop if Windows fallback is silently denied without surfacing it to the user."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
   [[epics.features]]
   id = "P2.F3"

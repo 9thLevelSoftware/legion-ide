@@ -93,12 +93,17 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     assert_eq!(report.status, BetaWorkflowStatus::Passed);
     // Assert the typed outcome fields directly rather than scraping prose status.
     assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
-    assert_eq!(report.terminal_decision, BetaTerminalPolicyDecision::Denied);
+    // Terminal productization: trusted beta workspaces launch the selected
+    // shell through the product gate, so the expected decision is Allowed.
+    assert_eq!(
+        report.terminal_decision,
+        BetaTerminalPolicyDecision::Allowed
+    );
     assert_eq!(report.proposal_mode, BetaProposalMode::PreviewOnly);
     assert!(report.errors.is_empty());
     // Prose status strings remain populated for human-facing evidence only.
     assert!(report.edit_save_status.contains("saved"));
-    assert!(report.terminal_status.contains("denied"));
+    assert!(report.terminal_status.contains("terminal_running_expected"));
     assert!(report.proposal_status.contains("preview"));
 
     let evidence_text = fs::read_to_string(&evidence).expect("evidence should be written");

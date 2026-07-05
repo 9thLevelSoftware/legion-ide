@@ -77,7 +77,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-The only GitHub Actions workflow is `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench, not a full CI gate), so local developer machines must install the CLI before running the full verification suite.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest and golden-path smokes excluded) and `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench). Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 
