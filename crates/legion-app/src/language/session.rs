@@ -55,6 +55,9 @@ pub enum LanguageSessionError {
     Handshake(legion_lsp::LspRuntimeError),
     /// A read request (completion/hover/etc.) failed.
     ReadRequest(legion_lsp::LspRuntimeError),
+    /// The server is not in an initialized/live state (e.g. post-crash backoff
+    /// or budget exhausted). Callers must not send requests to a non-live session.
+    Unavailable,
 }
 
 impl std::fmt::Display for LanguageSessionError {
@@ -67,6 +70,12 @@ impl std::fmt::Display for LanguageSessionError {
             }
             LanguageSessionError::ReadRequest(e) => {
                 write!(f, "rust-analyzer read request failed: {e}")
+            }
+            LanguageSessionError::Unavailable => {
+                write!(
+                    f,
+                    "rust-analyzer session is not initialized or is in backoff"
+                )
             }
         }
     }
@@ -158,6 +167,10 @@ impl RustAnalyzerSession {
     }
 
     /// Sends `textDocument/didOpen` for a buffer.
+    ///
+    /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
+    /// is not in an initialized/live state. No write is made to the transport
+    /// in that case.
     pub fn did_open(
         &mut self,
         uri: &str,
@@ -165,6 +178,9 @@ impl RustAnalyzerSession {
         version: i64,
         text: &str,
     ) -> Result<(), LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
         let params = serde_json::json!({
             "textDocument": {
                 "uri": uri,
@@ -178,21 +194,36 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
-    /// Returns diagnostics for the session, pumping until some arrive or the
-    /// timeout elapses. Short-circuits if diagnostics are already buffered
-    /// (e.g. emitted at/before initialize), so it never blocks needlessly.
+    /// Returns diagnostics for `uri`, pumping until some arrive or the timeout
+    /// elapses. Short-circuits if diagnostics for that specific URI are already
+    /// buffered (e.g. emitted at/before initialize), so it never blocks
+    /// needlessly. Diagnostics for other URIs are not returned.
     pub fn pump_diagnostics(
         &mut self,
-        _uri: &str,
+        uri: &str,
         timeout: std::time::Duration,
     ) -> Vec<legion_lsp::LspDiagnosticNotificationMetadata> {
-        if self.session.diagnostic_notifications().is_empty() {
+        // Compute the expected URI fingerprint once so we can use it in both
+        // the short-circuit check and the pump predicate without storing the
+        // raw URI string.
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(uri);
+        let has_buffered = self
+            .session
+            .diagnostic_notifications()
+            .iter()
+            .any(|n| n.uri_hash == expected_hash);
+        if !has_buffered {
             let deadline = std::time::Instant::now() + timeout;
-            let _ = self
-                .session
-                .pump_until(deadline, &mut |n| !n.diagnostics.is_empty());
+            let _ = self.session.pump_until(deadline, &mut |n| {
+                n.diagnostics.iter().any(|d| d.uri_hash == expected_hash)
+            });
         }
-        self.session.diagnostic_notifications().to_vec()
+        self.session
+            .diagnostic_notifications()
+            .iter()
+            .filter(|n| n.uri_hash == expected_hash)
+            .cloned()
+            .collect()
     }
 
     /// Sends an LSP read request (e.g. `textDocument/completion`) and blocks
@@ -200,11 +231,18 @@ impl RustAnalyzerSession {
     /// raw JSON result, the snapshot the request was issued against, and the
     /// freshness status — allowing callers to gate ingestion via
     /// [`super::is_stale_response`] before projecting into buffer state.
+    ///
+    /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
+    /// is not in an initialized/live state (e.g. post-crash backoff). No write
+    /// is made to the transport in that case.
     pub fn request_read(
         &mut self,
         method: &str,
         params: serde_json::Value,
     ) -> Result<LspReadOutcome, LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
         let response = self
             .session
             .request(method.to_string(), params, super::operation_context())
@@ -230,13 +268,21 @@ impl RustAnalyzerSession {
 
     /// Records a crash, increments `restart_count`, and returns the backoff if
     /// a restart is still permitted (caller performs the relaunch).
+    ///
+    /// `init_status` is set to [`LspResultStatus::Unavailable`] immediately,
+    /// regardless of whether restart budget remains. This prevents callers from
+    /// treating the session as live during the backoff window. After a successful
+    /// re-initialize, `initialize()` restores `init_status` to `Fresh`.
     pub fn note_crash_and_should_restart(
         &mut self,
         policy: &RestartPolicy,
     ) -> Option<std::time::Duration> {
+        // Mark unavailable immediately so callers observe the degraded state
+        // during the backoff window (Finding 3: init_status must not stay Fresh
+        // while the process is crashed/restarting).
+        self.health.init_status = legion_protocol::LspResultStatus::Unavailable;
         let attempt = self.health.restart_count;
         if policy.is_exhausted(attempt) {
-            self.health.init_status = legion_protocol::LspResultStatus::Unavailable;
             return None;
         }
         self.health.restart_count = attempt + 1;

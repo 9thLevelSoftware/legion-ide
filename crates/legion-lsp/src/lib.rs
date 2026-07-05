@@ -2095,6 +2095,16 @@ fn metadata_fingerprint(label: &str, input: &str) -> FileFingerprint {
     }
 }
 
+/// Returns the stable fingerprint used to key `publishDiagnostics` records by URI.
+///
+/// Callers outside this crate (e.g. `legion-app`) use this to filter
+/// [`LspDiagnosticNotificationMetadata`] by document URI without storing the raw
+/// URI string in the metadata record. The fingerprint matches the `uri_hash`
+/// field produced by the LSP transport when recording a notification.
+pub fn lsp_diagnostic_uri_fingerprint(uri: &str) -> FileFingerprint {
+    metadata_fingerprint("lsp.diagnostic.uri", uri)
+}
+
 // -----------------------------------------------------------------------------
 // Process-backed stdio transport (WS03.T1).
 // -----------------------------------------------------------------------------
@@ -2692,6 +2702,11 @@ impl LspStdioSession {
     /// Bounded pump for asynchronous notifications (design §4). Accumulated
     /// notifications also land in `self.diagnostic_notifications` /
     /// `self.progress_notifications` so existing accessors keep working.
+    ///
+    /// Each iteration uses [`LspStdioProcess::read_envelope_until`] with the
+    /// remaining time budget so a server that is alive but silent cannot block
+    /// the caller forever — `PumpOutcome::Deadline` is always returned before
+    /// or at `deadline`, even when the server never writes another byte.
     pub fn pump_until(
         &mut self,
         deadline: std::time::Instant,
@@ -2699,12 +2714,18 @@ impl LspStdioSession {
     ) -> LspRuntimeResult<PumpOutcome> {
         let mut acc = PumpedNotifications::default();
         loop {
-            if std::time::Instant::now() >= deadline {
+            // Fast-path: check the deadline before issuing the read so that a
+            // pre-expired deadline returns immediately without a syscall.
+            if Instant::now() >= deadline {
                 return Ok(PumpOutcome::Deadline);
             }
-            let envelope = match self.process.read_envelope()? {
-                Some(envelope) => envelope,
-                None => return Ok(PumpOutcome::Closed),
+            // Deadline-bounded read: the actual blocking pipe read lives on a
+            // background thread; this waits on the channel with a timeout, so
+            // a silent-but-alive server cannot block the caller past `deadline`.
+            let envelope = match self.process.read_envelope_until(deadline)? {
+                LspReadOutcome::Envelope(envelope) => envelope,
+                LspReadOutcome::TimedOut => return Ok(PumpOutcome::Deadline),
+                LspReadOutcome::Eof => return Ok(PumpOutcome::Closed),
             };
             if envelope.id.is_some() {
                 // Out-of-band response while pumping: callers must not pump with
