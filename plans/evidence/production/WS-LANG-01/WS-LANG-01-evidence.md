@@ -64,4 +64,28 @@ Two test assertions in `crates/legion-desktop/tests/` were broken by WS-MANUAL-0
 
 ### 3-OS hosted CI deferral (LANG.12)
 
-No `.github/workflows/` directory exists in this repository. The repo convention is local xtask commands. The `cargo run -p xtask -- rust-analyzer-smoke` command is implemented and verified on Windows; 3-OS (Linux, macOS, Windows) hosted CI execution of the smoke is deferred pending CI infrastructure — consistent with the existing PR-REL-001 posture that states "no hosted CI workflow currently runs them."
+At original evidence time no `.github/workflows/` directory existed; the current tree has only `.github/workflows/legion-bench.yml` (weekly live-mode bench, not a full CI gate). The repo convention is local xtask commands. The `cargo run -p xtask -- rust-analyzer-smoke` command is implemented and verified on Windows; 3-OS (Linux, macOS, Windows) hosted CI execution of the smoke is deferred pending CI infrastructure — consistent with the existing PR-REL-001 posture that states "no hosted CI workflow currently runs them."
+
+## Merged-tree gate rerun (2026-07-04, branch m8/lsp-foundation)
+
+Context: `codex/ws-lang-01` merged with `main` at `a320d17` (Phase 0 truth repair + slim dev
+profile) as branch `m8/lsp-foundation`; conflicts resolved in `xtask/src/main.rs`,
+`crates/legion-ui/src/lib.rs`, `crates/legion-desktop/tests/projection_rendering.rs`.
+Working directory: `C:/Users/dasbl/RustroverProjects/legion-ide-lsp-a`. Host: Windows 11,
+rust-analyzer 1.95.0, builds at `-j 4`.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| fmt | `cargo fmt --all --check` | PASS |
+| check-deps | `cargo run -p xtask -- check-deps` | PASS |
+| docs-hygiene | `cargo run -p xtask -- docs-hygiene` | PASS |
+| claim-audit | `cargo run -p xtask -- claim-audit` | PASS |
+| no-egui-textedit | `cargo run -p xtask -- no-egui-textedit` | PASS |
+| verify-kanban-backlog | `cargo run -p xtask -- verify-kanban-backlog` | PASS (10 epics, 38 features, 146 tasks) |
+| release-pipeline | `cargo run -p xtask -- release-pipeline --dry-run` + `verify-release-pipeline` | PASS |
+| cargo check | `cargo check --workspace --all-targets` | PASS |
+| tests | `cargo test --workspace --all-targets --no-fail-fast` | PASS after one fix: `legion-desktop --test large_file_guardrails` failed on a semantic merge conflict (both this branch and main independently realigned SCALE.05-stale banner assertions; main's wording shipped). Fixed by adopting main's assertions (`d4fc2df`); target reruns 3/3 green. All other targets passed. |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | PASS (exit 0) |
+| perf-harness | `cargo run -p xtask -- perf-harness` + `verify-perf-harness` | PASS (4/4, strict) |
+| cargo-deny | `cargo deny check` | PASS after extending the documented quick-xml ignore with RUSTSEC-2026-0195 (same plist 1.9.0 pin wall and local-trusted-input rationale as RUSTSEC-2026-0194; unblock condition unchanged: plist compatible with quick-xml >=0.41.0). |
+| rust-analyzer-smoke | `cargo run -p xtask -- rust-analyzer-smoke` | PASS (both `--ignored` smokes against rust-analyzer 1.95.0 on the merged tree) |
