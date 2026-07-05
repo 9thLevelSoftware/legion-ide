@@ -245,10 +245,17 @@ fn beta_acceptance_e2e_policy_gated_local_loop() {
         report.workspace_search_status.contains("completed"),
         "workspace search should complete"
     );
+    // The durable proof of cancellation is the counter, not the transient
+    // status label: with a live rust-analyzer session the composite language
+    // status advances to `Ready` as soon as the session finishes
+    // initializing, which races this assert on CI runners (PR #41 fixed the
+    // in-crate beta gate this way — beta.rs cancellation gate — but this
+    // sibling assert was missed and flaked on the PR #43 windows+macos legs)
+    // while `cancellations=1` remains recorded either way.
     assert!(
-        report.language_status.contains("Cancelled")
-            && report.language_status.contains("cancellations=1"),
-        "3) Rust LSP completion should request and cancel safely"
+        report.language_status.contains("cancellations=1"),
+        "3) Rust LSP completion should request and cancel safely; language_status: {}",
+        report.language_status
     );
     // 12a) terminal policy decision is asserted on the typed field, not prose.
     // Terminal productization: trusted beta workspaces launch the selected
