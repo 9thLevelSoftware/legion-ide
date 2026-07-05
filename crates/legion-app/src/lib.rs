@@ -13268,6 +13268,37 @@ impl AppComposition {
         self.lsp_session.drain()
     }
 
+    /// Sends `textDocument/didChange` to the live LSP session after a buffer
+    /// edit (PKT-LSP-B T3).  Fire-and-forget: errors are silently ignored
+    /// because the session can restart and re-sync independently.  The frame
+    /// path does not block — the underlying write is a buffered stdin write.
+    fn notify_lsp_did_change(
+        &mut self,
+        buffer_id: BufferId,
+        descriptor: &legion_protocol::TextTransactionDescriptor,
+    ) {
+        let Some(session) = self.lsp_session.session_mut() else {
+            return;
+        };
+        let Some(meta) = self.active_documents.metadata_for_buffer(buffer_id) else {
+            return;
+        };
+        let path = meta.identity.canonical_path.0.clone();
+        let uri = {
+            let normalized = path.replace('\\', "/");
+            if normalized.starts_with('/') {
+                format!("file://{normalized}")
+            } else {
+                format!("file:///{normalized}")
+            }
+        };
+        let version = descriptor.post_buffer_version.0 as i64;
+        if let Ok(text) = self.editor.text(buffer_id) {
+            // Ignore errors; the session may be restarting.
+            let _ = session.did_change(&uri, version, text);
+        }
+    }
+
     /// Returns the current LSP server health record, if available.
     ///
     /// Returns `None` when the session is in the Idle state (no workspace
@@ -14112,6 +14143,10 @@ impl AppComposition {
                 )?;
                 self.set_cursor_after_edit(*buffer_id, edit)?;
                 self.emit_transaction_event(&descriptor);
+                // PKT-LSP-B T3: notify live LSP session of the buffer change.
+                // `did_change` is a fire-and-forget notification; the underlying
+                // `send_notification` is a buffered stdin write that does not block.
+                self.notify_lsp_did_change(*buffer_id, &descriptor);
                 return Ok(AppCommandOutcome::Edited(descriptor));
             }
             AppCommandRequest::ClipboardCopy { buffer_id } => {

@@ -104,6 +104,82 @@ fn pump_diagnostics_does_not_return_wrong_uri_diagnostics() {
     );
 }
 
+/// Verify that `did_change` succeeds after `did_open` when the session is Fresh (T3).
+#[test]
+fn did_change_succeeds_after_did_open() {
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
+
+    let config = RustAnalyzerLaunchConfig {
+        discovery: RustAnalyzerDiscovery {
+            configured_path: Some(mock_path),
+            ..Default::default()
+        },
+        supervisor: lsp_mock::mock_supervisor_config(),
+        server_id: LanguageServerId(7),
+        language_id: LanguageId("rust".to_string()),
+    };
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = RustAnalyzerSession::launch(config, &mut launcher)
+        .expect("RustAnalyzerSession::launch should succeed");
+    session
+        .initialize("file:///workspace")
+        .expect("RustAnalyzerSession::initialize should succeed");
+
+    session
+        .did_open(MOCK_DIAG_URI, "rust", 1, "fn main() {}")
+        .expect("did_open should succeed");
+
+    // did_change must succeed when the session is Fresh (T3).
+    session
+        .did_change(MOCK_DIAG_URI, 2, "fn main() { let _x = 1; }")
+        .expect("did_change should succeed while session is Fresh");
+}
+
+/// Verify that `did_change` returns `Unavailable` when the session health is not Fresh.
+#[test]
+fn did_change_while_unavailable_returns_typed_error() {
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
+
+    let config = RustAnalyzerLaunchConfig {
+        discovery: RustAnalyzerDiscovery {
+            configured_path: Some(mock_path),
+            ..Default::default()
+        },
+        supervisor: lsp_mock::mock_supervisor_config(),
+        server_id: LanguageServerId(7),
+        language_id: LanguageId("rust".to_string()),
+    };
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = RustAnalyzerSession::launch(config, &mut launcher)
+        .expect("RustAnalyzerSession::launch should succeed");
+    session
+        .initialize("file:///workspace")
+        .expect("RustAnalyzerSession::initialize should succeed");
+
+    let policy = legion_app::language::RestartPolicy {
+        max_restarts: 2,
+        backoff_base_ms: 10,
+    };
+    session.note_crash_and_should_restart(&policy);
+    assert_eq!(
+        session.health().init_status,
+        legion_protocol::LspResultStatus::Unavailable,
+        "precondition: init_status must be Unavailable after crash"
+    );
+
+    let err = session
+        .did_change(MOCK_DIAG_URI, 2, "fn main() {}")
+        .expect_err("did_change must fail while session is Unavailable");
+    assert!(
+        matches!(err, LanguageSessionError::Unavailable),
+        "expected LanguageSessionError::Unavailable, got: {err}"
+    );
+}
+
 /// Verify that `did_open` returns `Unavailable` when the session health is not Fresh.
 #[test]
 fn did_open_while_unavailable_returns_typed_error() {
