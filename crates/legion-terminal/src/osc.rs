@@ -99,6 +99,75 @@ pub fn parse_terminal_shell_output(payload: &str) -> TerminalShellProjection {
     }
 }
 
+/// Split visible terminal output into display rows.
+///
+/// A PTY read chunk is a transport unit, not a display row: one chunk may
+/// carry many lines, a shell's `\r`-redraw sequence for a single line, or
+/// cursor-repositioning escapes standing in for line breaks (cmd.exe under
+/// ConPTY). Projections that store one row per *chunk* silently hide
+/// everything past a per-row payload cap — observed on macOS CI where a
+/// single bash 3.2 chunk carried banner + prompt + command output + the
+/// GP-1 exit marker, and the cap cut the marker (legion-smoke runs
+/// 28741840232 / 28747873556).
+///
+/// Semantics (screen-visible content wins):
+/// - `\n` ends a row; `\r\n` is one line ending.
+/// - A bare `\r` is a redraw: it discards the drawn-over content of the
+///   current row (progress bars, bash horizontal-scroll echo).
+/// - CSI cursor-position sequences (`ESC[…H` / `ESC[…f`) end the current
+///   row and are dropped; all other escape sequences pass through
+///   untouched.
+/// - Empty and whitespace-only rows are dropped.
+pub fn split_visible_rows(visible_output: &str) -> Vec<String> {
+    fn flush(rows: &mut Vec<String>, current: &mut String) {
+        if current.trim().is_empty() {
+            current.clear();
+        } else {
+            rows.push(std::mem::take(current));
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut chars = visible_output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => flush(&mut rows, &mut current),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    flush(&mut rows, &mut current);
+                } else {
+                    // Redraw: the terminal would overwrite this row.
+                    current.clear();
+                }
+            }
+            '\u{1b}' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut sequence = String::from("\u{1b}[");
+                let mut final_byte = None;
+                for c in chars.by_ref() {
+                    sequence.push(c);
+                    if !(c.is_ascii_digit() || matches!(c, ';' | ':' | '?')) {
+                        final_byte = Some(c);
+                        break;
+                    }
+                }
+                match final_byte {
+                    // Cursor reposition acts as a row boundary.
+                    Some('H') | Some('f') => flush(&mut rows, &mut current),
+                    // Any other CSI (colors, erase, cursor visibility)
+                    // passes through, preserving prior payload behavior.
+                    _ => current.push_str(&sequence),
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    flush(&mut rows, &mut current);
+    rows
+}
+
 fn terminal_shell_cwd_from_osc(sequence: &str) -> Option<String> {
     let value = sequence.strip_prefix("7;")?;
     let value = value.strip_prefix("file://")?;
@@ -189,7 +258,59 @@ fn terminal_shell_boundary_from_osc(sequence: &str) -> Option<TerminalShellBound
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalShellBoundary, parse_terminal_shell_output};
+    use super::{TerminalShellBoundary, parse_terminal_shell_output, split_visible_rows};
+
+    #[test]
+    fn split_visible_rows_breaks_on_line_endings() {
+        assert_eq!(
+            split_visible_rows("alpha\r\nbeta\ngamma"),
+            vec!["alpha", "beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn split_visible_rows_bare_carriage_return_is_a_redraw() {
+        assert_eq!(
+            split_visible_rows(
+                "Compiling 1/10\rCompiling 5/10\rCompiling 10/10 done\r\nfinished\r\n"
+            ),
+            vec!["Compiling 10/10 done", "finished"]
+        );
+    }
+
+    #[test]
+    fn split_visible_rows_cursor_position_sequences_break_rows_and_are_dropped() {
+        // cmd.exe under ConPTY repositions the cursor instead of emitting
+        // newlines between logical lines.
+        assert_eq!(
+            split_visible_rows("test result: ok\u{1b}[9;1HSMOKE_EXIT:0\u{1b}[11;1Hprompt>"),
+            vec!["test result: ok", "SMOKE_EXIT:0", "prompt>"]
+        );
+    }
+
+    #[test]
+    fn split_visible_rows_preserves_non_cursor_escape_sequences() {
+        assert_eq!(
+            split_visible_rows("\u{1b}[38;5;2mok\u{1b}[m\r\n"),
+            vec!["\u{1b}[38;5;2mok\u{1b}[m"]
+        );
+    }
+
+    #[test]
+    fn split_visible_rows_keeps_trailing_prompt_without_newline() {
+        assert_eq!(
+            split_visible_rows("done\r\nbash-3.2$ "),
+            vec!["done", "bash-3.2$ "]
+        );
+    }
+
+    #[test]
+    fn split_visible_rows_drops_blank_rows() {
+        assert_eq!(
+            split_visible_rows("\r\n\r\n  \r\nvalue\r\n\r\n"),
+            vec!["value"]
+        );
+    }
 
     #[test]
     fn parse_terminal_shell_output_strips_osc_markers_and_tracks_metadata() {
