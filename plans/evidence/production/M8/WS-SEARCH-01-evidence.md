@@ -185,3 +185,34 @@ cargo test -p xtask
 cargo build -p xtask
 cargo run -p xtask -- perf-harness --out target/perf
 ```
+
+## Merged-tree standing-gate run (2026-07-05, branch m8/search-polish)
+
+Context: main merged (includes LSP substrate PR #34, terminal productization
+PR #36, CI fixes PR #35/#38); working directory
+C:/Users/dasbl/RustroverProjects/legion-ide-search; Windows 11; builds -j 4.
+Merge-time findings resolved by the controller before green (review trail in
+.superpowers/sdd/progress-m8-campaign.md):
+
+- Dependency-policy pairing added for the perf-workload xtask deps
+  (legion-project/platform/security; scoped tooling-only rationale) after
+  check-deps correctly rejected the unpaired edges.
+- Palette usage persistence wiring relocated from DesktopRuntime::open into
+  AppComposition::enable_palette_usage_persistence, removing an improper
+  legion-desktop -> legion-storage dependency (projection-only boundary);
+  behavior unchanged (persistence test green).
+- Clippy gate: sort_by_key + io::Error::other in legion-storage,
+  SearchQueryOptions bundling for run_search (was 8 args), literal-bool
+  assert in legion-project tests.
+
+| Gate | Result |
+| --- | --- |
+| cargo fmt --all --check | PASS |
+| xtask check-deps / docs-hygiene / claim-audit / no-egui-textedit / verify-kanban-backlog | PASS |
+| xtask release-pipeline --dry-run + verify-release-pipeline | PASS |
+| cargo check --workspace --all-targets | PASS |
+| cargo test --workspace --all-targets --no-fail-fast | PASS (192 test binaries, 0 failures) |
+| cargo clippy --workspace --all-targets -- -D warnings | PASS (exit 0) |
+| xtask perf-harness + verify-perf-harness | PASS |
+| cargo deny check | PASS |
+| xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
