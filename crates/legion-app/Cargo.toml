@@ -9,6 +9,8 @@ publish.workspace = true
 default = ["ai"]
 ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers"]
 offline = []
+# Expose test-only helper methods to integration-test binaries.
+test-helpers = []
 
 [dependencies]
 anyhow = { workspace = true }
@@ -34,9 +36,18 @@ legion-tracker = { workspace = true }
 legion-memory = { workspace = true }
 legion-plugin = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
-sha2 = "0.10"
 hex = "0.4"
+
+[dev-dependencies]
+toml = { workspace = true }
+# Self-referential dev-dependency: activates the test-helpers feature for every
+# test/bench target in this crate WITHOUT `required-features` (which would make
+# cargo silently skip those targets in the standing
+# `cargo test --workspace --all-targets` gate) and without enabling the feature
+# in production builds.
+legion-app = { workspace = true, features = ["test-helpers"] }

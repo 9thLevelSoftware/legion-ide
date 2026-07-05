@@ -16,6 +16,17 @@ Treat the labels as the product source of truth for the current profile and plat
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
 
+## SCM diff review navigation
+
+| Surface | Action | Shortcut label | Notes |
+| --- | --- | --- | --- |
+| SCM diff panel | Next Hunk | `]h` | Move focus to the next changed hunk. Projected from `GitNavNextHunk` intent. |
+| SCM diff panel | Previous Hunk | `[h` | Move focus to the previous changed hunk. Projected from `GitNavPrevHunk` intent. |
+| SCM diff panel | Next File | `]f` | Move focus to the next changed file. Projected from `GitNavNextFile` intent. |
+| SCM diff panel | Previous File | `[f` | Move focus to the previous changed file. Projected from `GitNavPrevFile` intent. |
+
+Navigation state (`focused_hunk_id`) is owned by the application layer and reflected in `GitProjection`; the desktop shell is projection-only.
+
 ## Mode controls
 
 The product mode switch is currently exposed as labeled pills rather than keyboard bindings:

@@ -393,6 +393,9 @@ pub enum GitInspectionError {
     /// Git output could not be interpreted.
     #[error("git output parse error: {0}")]
     Parse(String),
+    /// Input validation failed before any git command was run.
+    #[error("git input validation error: {0}")]
+    InvalidInput(String),
 }
 
 /// Configurable bounds for git projection collection.
@@ -1222,6 +1225,241 @@ pub fn validate_git_commit_message(message: &str) -> Result<(), GitInspectionErr
             "commit subject should be 72 characters or fewer".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Read a single git config value by key (e.g. `"user.name"`).
+///
+/// Returns `Ok(None)` when the key is not set; errors from git invocation are
+/// silently treated as "not configured" since missing config is the normal case
+/// for validation purposes.
+pub fn get_git_config_value(
+    root: impl AsRef<Path>,
+    key: &str,
+) -> Result<Option<String>, GitInspectionError> {
+    match git_stdout(root.as_ref(), &["config", "--get", key], None) {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        // `git config --get` exits non-zero when the key is absent; treat as
+        // "not configured" rather than a hard error.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Result of combined commit message and author validation.
+///
+/// Hard errors block the commit; warn-level messages are advisory only (the
+/// conventional-commits prefix lint lives here).
+#[derive(Debug, Clone, Default)]
+pub struct CommitValidationResult {
+    /// Hard errors that MUST be resolved before the commit is allowed.
+    pub errors: Vec<String>,
+    /// Advisory warnings — surfaced in the UI but do not block the commit.
+    pub warnings: Vec<String>,
+}
+
+impl CommitValidationResult {
+    /// `true` when there are no hard errors (warnings are still permitted).
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Conventional-commits type prefixes recognised by the warn-level lint.
+const CC_PREFIXES: &[&str] = &[
+    "feat", "fix", "refactor", "test", "docs", "build", "chore", "perf", "style", "ci", "revert",
+];
+
+/// Validate a commit message together with the author identity from git config.
+///
+/// Hard errors are returned for:
+/// - an empty or blank commit message,
+/// - a commit message containing NUL bytes,
+/// - missing `user.name` in the local git config,
+/// - missing `user.email` in the local git config.
+///
+/// A single advisory warning is returned when the commit subject does not
+/// start with a recognised conventional-commits type prefix.  This warning
+/// does **not** block the commit.
+pub fn validate_commit_with_author(
+    root: impl AsRef<Path>,
+    message: &str,
+) -> CommitValidationResult {
+    let mut result = CommitValidationResult::default();
+    let root = root.as_ref();
+
+    // Hard error: empty / blank message.
+    let subject = message
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("");
+    if subject.is_empty() {
+        result
+            .errors
+            .push("commit message cannot be empty".to_string());
+        return result;
+    }
+
+    // Hard error: NUL bytes.
+    if message.contains('\0') {
+        result
+            .errors
+            .push("commit message cannot contain NUL bytes".to_string());
+    }
+
+    // Hard error: missing author name.
+    let name = get_git_config_value(root, "user.name")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if name.is_empty() {
+        result.errors.push(
+            "git user.name is not configured; run: git config user.name \"Your Name\"".to_string(),
+        );
+    }
+
+    // Hard error: missing author email.
+    let email = get_git_config_value(root, "user.email")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if email.is_empty() {
+        result.errors.push(
+            "git user.email is not configured; run: git config user.email \"you@example.com\""
+                .to_string(),
+        );
+    }
+
+    // Advisory warning: non-conventional-commits subject prefix.
+    let is_conventional = CC_PREFIXES.iter().any(|prefix| {
+        subject.starts_with(&format!("{prefix}:"))
+            || subject.starts_with(&format!("{prefix}("))
+            || subject.starts_with(&format!("{prefix}!"))
+    });
+    if !is_conventional {
+        result.warnings.push(
+            "subject does not start with a conventional-commits type prefix \
+             (feat/fix/refactor/test/docs/build/chore); \
+             this is advisory only and does not block the commit"
+                .to_string(),
+        );
+    }
+
+    result
+}
+
+/// Walk up `path` until a component exists on disk, canonicalize it, then
+/// re-append the non-existing suffix.  Resolves Windows 8.3 short names
+/// (`RUNNER~1` → `runneradmin`) and macOS /var symlinks, even when the leaf
+/// has not been created yet.  Cannot be imported from `legion-agent` across
+/// the dependency boundary, so it is replicated here.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    let mut existing = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
+fn strip_unc_pathbuf(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped.to_string())
+    } else {
+        p
+    }
+}
+
+/// Create a new git worktree for `branch` at `worktree_path`.
+///
+/// Uses `git worktree add <worktree_path> <branch>`.  The branch must already
+/// exist; creating the branch alongside the worktree is the caller's
+/// responsibility.
+///
+/// # Validation
+///
+/// Rejects paths that contain `..` components, absolute paths that fall outside
+/// the workspace parent directory, and paths that already exist on disk.
+pub fn create_git_worktree(
+    root: impl AsRef<Path>,
+    branch: &str,
+    worktree_path: impl AsRef<Path>,
+) -> Result<(), GitInspectionError> {
+    let worktree_ref = worktree_path.as_ref();
+
+    // Reject `..` traversal components.
+    for component in worktree_ref.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must not contain '..' traversal components".to_string(),
+            ));
+        }
+    }
+
+    // For absolute paths, validate they fall within the workspace parent directory.
+    if worktree_ref.is_absolute() {
+        let root_ref = root.as_ref();
+        let allowed_parent = root_ref.parent().unwrap_or(root_ref);
+
+        // Resolve both sides through their deepest existing ancestor so that
+        // Windows 8.3 short names (RUNNER~1 → runneradmin) and macOS /var
+        // symlinks are expanded before the containment comparison.  The target
+        // worktree may not exist yet, so resolve_existing_prefix canonicalizes
+        // the deepest ancestor that does exist and re-appends the rest.
+        let norm_parent = resolve_existing_prefix(allowed_parent)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| allowed_parent.to_path_buf());
+        let norm_worktree = resolve_existing_prefix(worktree_ref)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| worktree_ref.to_path_buf());
+
+        if !norm_worktree.starts_with(&norm_parent) {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must reside within the workspace parent directory".to_string(),
+            ));
+        }
+    }
+
+    // Reject paths that already exist on disk to prevent accidental overwrites.
+    let resolved = if worktree_ref.is_absolute() {
+        worktree_ref.to_path_buf()
+    } else {
+        root.as_ref()
+            .parent()
+            .unwrap_or(root.as_ref())
+            .join(worktree_ref)
+    };
+    if resolved.exists() {
+        return Err(GitInspectionError::InvalidInput(
+            "worktree path already exists on disk".to_string(),
+        ));
+    }
+
+    let path_str = worktree_ref.to_string_lossy().into_owned();
+    git_stdout(root.as_ref(), &["worktree", "add", &path_str, branch], None)?;
     Ok(())
 }
 

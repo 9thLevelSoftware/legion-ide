@@ -3789,6 +3789,7 @@ dependencies = [
  "legion-agent",
  "legion-ai",
  "legion-ai-providers",
+ "legion-app",
  "legion-collaboration",
  "legion-debug",
  "legion-editor",
@@ -3811,6 +3812,7 @@ dependencies = [
  "sha2",
  "syntect",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "uuid",
 ]
 

@@ -11,7 +11,7 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_ui::GitHunkStageProjection;
+use legion_ui::{GitHunkStageProjection, Shell};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -371,5 +371,42 @@ fn desktop_git_workflow_translates_open_pr_url_from_remote_metadata() {
         DesktopBridgeOutput::AppRequest(DesktopAppRequest::OpenExternalUrl {
             url: "https://github.com/legion/example-repo/compare/master...master".to_string(),
         })
+    );
+}
+
+/// M-2: commit_validation_warnings and commit_validation_errors appear in git_rows.
+///
+/// The desktop `git_rows` renderer must surface both advisory warnings and
+/// hard blockers from the git projection so the commit panel can display them.
+#[test]
+fn desktop_git_rows_includes_commit_validation_warnings_and_errors() {
+    // Build a minimal snapshot using the Shell::empty helper and inject
+    // commit validation state directly into the git_projection field.
+    let mut snapshot = Shell::empty("git-validation-test").projection_snapshot();
+
+    snapshot.git_projection.commit_validation_warnings =
+        vec!["non-CC prefix: advisory only".to_string()];
+    snapshot.git_projection.commit_validation_errors =
+        vec!["git user.name is not configured".to_string()];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        model
+            .git_rows
+            .iter()
+            .any(|row| row.starts_with("git commit-warning:")),
+        "git_rows must include a 'git commit-warning:' row when commit_validation_warnings is set; \
+         got: {:?}",
+        model.git_rows
+    );
+    assert!(
+        model
+            .git_rows
+            .iter()
+            .any(|row| row.starts_with("git commit-error:")),
+        "git_rows must include a 'git commit-error:' row when commit_validation_errors is set; \
+         got: {:?}",
+        model.git_rows
     );
 }

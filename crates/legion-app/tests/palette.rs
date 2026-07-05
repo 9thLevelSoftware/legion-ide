@@ -574,6 +574,10 @@ fn palette_command_mode_covers_registered_command_catalog() {
         "Git: Prune Worktrees",
         "Git: Remove Worktree",
         "Git: Commit Staged Changes",
+        // These commands require an open git workspace; covered by worktree/local-history tests.
+        "Git: Export Worktree Evidence",
+        "Git: Local History",
+        "Git: New Worktree",
     ]
     .into_iter()
     .map(str::to_string)

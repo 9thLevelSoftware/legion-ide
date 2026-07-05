@@ -1725,6 +1725,18 @@ impl DesktopRuntime {
                     message,
                 }
             }
+            AppCommandOutcome::LocalHistoryEntriesUpdated(_) => {
+                // Local history entries are consumed by the shell projection directly;
+                // the desktop runtime has no additional action to take here.
+                DesktopWorkflowOutcome::Noop
+            }
+            AppCommandOutcome::WorktreeEvidenceExported(path) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Worktree evidence exported to {path}"),
+                );
+                DesktopWorkflowOutcome::Noop
+            }
         }
     }
 
