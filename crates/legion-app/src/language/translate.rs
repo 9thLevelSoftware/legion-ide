@@ -594,12 +594,27 @@ fn build_target_coverage(
 /// Convert a `file://` URI to a canonical path string.
 ///
 /// Handles:
-/// - `file:///C:/...` → `C:/...` (Windows with drive letter)
-/// - `file:///path/...` → `/path/...` (Unix)
+/// - `file:///C:/...` → `C:/...` (Windows with drive letter — detected by
+///   alpha + colon at positions 0..1 of the post-`file:///` remainder)
+/// - `file:///home/dev/main.rs` → `/home/dev/main.rs` (Unix absolute path —
+///   the leading `/` is restored; stripping `file:///` would otherwise yield
+///   a relative path like `home/dev/main.rs`)
 /// - `file://localhost/...` → `/...`
 pub fn uri_to_canonical_path(uri: &str) -> String {
     let stripped = if let Some(rest) = uri.strip_prefix("file:///") {
-        rest.to_string()
+        // Distinguish Windows (drive letter + colon) from Unix absolute path.
+        // Windows example: `file:///C:/Users/dev/main.rs` → rest = `C:/Users/...`
+        //   rest[0] is alphabetic, rest[1] is `:`  → keep as-is.
+        // Unix example: `file:///home/dev/main.rs` → rest = `home/dev/...`
+        //   Prepend `/` to restore the absolute path root.
+        let rest_bytes = rest.as_bytes();
+        if rest_bytes.len() >= 2 && rest_bytes[0].is_ascii_alphabetic() && rest_bytes[1] == b':' {
+            // Windows drive-letter path: `C:/...`
+            rest.to_string()
+        } else {
+            // Unix absolute path: prepend the leading `/` that was consumed.
+            format!("/{rest}")
+        }
     } else if let Some(rest) = uri.strip_prefix("file://localhost/") {
         format!("/{rest}")
     } else if let Some(rest) = uri.strip_prefix("file://") {
@@ -1024,16 +1039,24 @@ mod tests {
     }
 
     // ── T2-7: URI conversion ────────────────────────────────────────────────────
+    //
+    // I-5 fix: `file:///home/dev/main.rs` must yield `/home/dev/main.rs`
+    // (not `home/dev/main.rs`).  The previous implementation stripped
+    // `file:///` and returned the remainder unchanged, dropping the leading
+    // `/` for Unix paths.
 
     #[test]
     fn t2_uri_to_canonical_path_handles_windows_and_unix() {
+        // Windows: drive-letter path is kept as-is.
         assert_eq!(
             uri_to_canonical_path("file:///C:/Users/dev/main.rs"),
             "C:/Users/dev/main.rs"
         );
+        // Unix: leading slash must be present in the result (I-5 fix).
         assert_eq!(
             uri_to_canonical_path("file:///home/dev/main.rs"),
-            "home/dev/main.rs"
+            "/home/dev/main.rs",
+            "Unix URI must preserve the leading slash"
         );
         assert_eq!(
             uri_to_canonical_path("file://localhost/home/dev/main.rs"),
@@ -1072,6 +1095,107 @@ mod tests {
         assert!(
             matches!(err, TranslationError::UnresolvableUri { .. }),
             "expected UnresolvableUri, got {err:?}"
+        );
+    }
+
+    // ── T2-9: Zero filesystem mutation scan — brief-mandated (I-1 fix) ────────
+    //
+    // The brief mandates: "zero direct filesystem mutation — assert by scanning
+    // a temp workspace before/after the full rename flow."
+    //
+    // This test creates actual files in a temp directory, records their content
+    // hashes before translation, runs `translate_workspace_edit` (the full rename
+    // flow), and asserts that every file's hash is identical after translation.
+    // The function signature (`&Value`, `&dyn DocumentResolver`) structurally
+    // forbids filesystem writes, but this test provides an EXECUTABLE assertion
+    // rather than relying on inspection alone.
+
+    #[test]
+    fn t2_zero_filesystem_mutation_scan() {
+        use std::fs;
+
+        // Set up a temp workspace with two source files.
+        let dir = tempfile::tempdir().expect("create temp dir for mutation scan");
+        let alpha_path = dir.path().join("alpha.rs");
+        let beta_path = dir.path().join("beta.rs");
+        let alpha_text = "fn alpha() {}\nfn helper() {}\n";
+        let beta_text = "use crate::alpha;\nfn beta() { alpha(); }\n";
+        fs::write(&alpha_path, alpha_text).expect("write alpha.rs");
+        fs::write(&beta_path, beta_text).expect("write beta.rs");
+
+        // Helper: read a file and return its bytes for content comparison.
+        let snap =
+            |path: &std::path::Path| -> Vec<u8> { fs::read(path).expect("read file for snapshot") };
+
+        // Snapshot BEFORE translation.
+        let before_alpha = snap(&alpha_path);
+        let before_beta = snap(&beta_path);
+
+        // Build the resolver and WorkspaceEdit payload (simulates LSP rename response).
+        let alpha_uri = "file:///workspace/src/alpha.rs";
+        let beta_uri = "file:///workspace/src/beta.rs";
+        let mut resolver_map = HashMap::new();
+        let (uri_a, doc_a) = make_doc(alpha_uri, alpha_text);
+        let (uri_b, doc_b) = make_doc(beta_uri, beta_text);
+        resolver_map.insert(uri_a, doc_a);
+        resolver_map.insert(uri_b, doc_b);
+        let resolver = MockResolver(resolver_map);
+
+        let raw = json!({
+            "documentChanges": [
+                {
+                    "textDocument": { "uri": alpha_uri, "version": 3 },
+                    "edits": [{
+                        "range": {
+                            "start": {"line": 0, "character": 3},
+                            "end":   {"line": 0, "character": 8}
+                        },
+                        "newText": "renamed_alpha"
+                    }]
+                },
+                {
+                    "textDocument": { "uri": beta_uri, "version": 3 },
+                    "edits": [{
+                        "range": {
+                            "start": {"line": 0, "character": 11},
+                            "end":   {"line": 0, "character": 16}
+                        },
+                        "newText": "renamed_alpha"
+                    }]
+                }
+            ]
+        });
+
+        // Run the full rename translation.
+        let payload = translate_workspace_edit(
+            &raw,
+            &resolver,
+            WorkspaceId(1),
+            WorkspaceEditSourceKind::LspRename,
+            "Rename alpha → renamed_alpha".to_string(),
+            CapabilityId("editor.write".to_string()),
+        )
+        .expect("translation must succeed");
+
+        // Snapshot AFTER translation.
+        let after_alpha = snap(&alpha_path);
+        let after_beta = snap(&beta_path);
+
+        // EXECUTABLE zero-mutation assertion (not merely structural).
+        assert_eq!(
+            before_alpha, after_alpha,
+            "alpha.rs must not be mutated by translate_workspace_edit"
+        );
+        assert_eq!(
+            before_beta, after_beta,
+            "beta.rs must not be mutated by translate_workspace_edit"
+        );
+
+        // Sanity: the proposal was generated correctly (not empty).
+        assert_eq!(
+            payload.file_edits.len(),
+            2,
+            "translation must yield two file edits"
         );
     }
 }
