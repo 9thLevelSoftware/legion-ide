@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
+use std::io::{Read as IoRead, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -72,6 +72,9 @@ const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
 const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;
 const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
+/// Number of bytes inspected by the binary sniff in the streaming search path.
+/// Matches the 8 KiB heuristic used by `git diff --stat` and GNU `grep`.
+const SEARCH_BINARY_SNIFF_WINDOW: usize = 8192;
 
 type WorkspaceScanResult = (
     Vec<FileTreeNode>,
@@ -207,6 +210,10 @@ pub struct WorkspaceSearchReport {
     pub hit_count: usize,
     pub omitted_hit_count: usize,
     pub omitted_file_count: usize,
+    /// Number of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  These are not counted in `omitted_file_count`
+    /// so callers can distinguish "binary skipped" from "error / oversized".
+    pub skipped_binary_count: usize,
     pub diagnostics: Vec<String>,
     pub cancelled: bool,
 }
@@ -386,6 +393,9 @@ pub enum GitInspectionError {
     /// Git output could not be interpreted.
     #[error("git output parse error: {0}")]
     Parse(String),
+    /// Input validation failed before any git command was run.
+    #[error("git input validation error: {0}")]
+    InvalidInput(String),
 }
 
 /// Configurable bounds for git projection collection.
@@ -1215,6 +1225,241 @@ pub fn validate_git_commit_message(message: &str) -> Result<(), GitInspectionErr
             "commit subject should be 72 characters or fewer".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Read a single git config value by key (e.g. `"user.name"`).
+///
+/// Returns `Ok(None)` when the key is not set; errors from git invocation are
+/// silently treated as "not configured" since missing config is the normal case
+/// for validation purposes.
+pub fn get_git_config_value(
+    root: impl AsRef<Path>,
+    key: &str,
+) -> Result<Option<String>, GitInspectionError> {
+    match git_stdout(root.as_ref(), &["config", "--get", key], None) {
+        Ok(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        // `git config --get` exits non-zero when the key is absent; treat as
+        // "not configured" rather than a hard error.
+        Err(_) => Ok(None),
+    }
+}
+
+/// Result of combined commit message and author validation.
+///
+/// Hard errors block the commit; warn-level messages are advisory only (the
+/// conventional-commits prefix lint lives here).
+#[derive(Debug, Clone, Default)]
+pub struct CommitValidationResult {
+    /// Hard errors that MUST be resolved before the commit is allowed.
+    pub errors: Vec<String>,
+    /// Advisory warnings — surfaced in the UI but do not block the commit.
+    pub warnings: Vec<String>,
+}
+
+impl CommitValidationResult {
+    /// `true` when there are no hard errors (warnings are still permitted).
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Conventional-commits type prefixes recognised by the warn-level lint.
+const CC_PREFIXES: &[&str] = &[
+    "feat", "fix", "refactor", "test", "docs", "build", "chore", "perf", "style", "ci", "revert",
+];
+
+/// Validate a commit message together with the author identity from git config.
+///
+/// Hard errors are returned for:
+/// - an empty or blank commit message,
+/// - a commit message containing NUL bytes,
+/// - missing `user.name` in the local git config,
+/// - missing `user.email` in the local git config.
+///
+/// A single advisory warning is returned when the commit subject does not
+/// start with a recognised conventional-commits type prefix.  This warning
+/// does **not** block the commit.
+pub fn validate_commit_with_author(
+    root: impl AsRef<Path>,
+    message: &str,
+) -> CommitValidationResult {
+    let mut result = CommitValidationResult::default();
+    let root = root.as_ref();
+
+    // Hard error: empty / blank message.
+    let subject = message
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("");
+    if subject.is_empty() {
+        result
+            .errors
+            .push("commit message cannot be empty".to_string());
+        return result;
+    }
+
+    // Hard error: NUL bytes.
+    if message.contains('\0') {
+        result
+            .errors
+            .push("commit message cannot contain NUL bytes".to_string());
+    }
+
+    // Hard error: missing author name.
+    let name = get_git_config_value(root, "user.name")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if name.is_empty() {
+        result.errors.push(
+            "git user.name is not configured; run: git config user.name \"Your Name\"".to_string(),
+        );
+    }
+
+    // Hard error: missing author email.
+    let email = get_git_config_value(root, "user.email")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if email.is_empty() {
+        result.errors.push(
+            "git user.email is not configured; run: git config user.email \"you@example.com\""
+                .to_string(),
+        );
+    }
+
+    // Advisory warning: non-conventional-commits subject prefix.
+    let is_conventional = CC_PREFIXES.iter().any(|prefix| {
+        subject.starts_with(&format!("{prefix}:"))
+            || subject.starts_with(&format!("{prefix}("))
+            || subject.starts_with(&format!("{prefix}!"))
+    });
+    if !is_conventional {
+        result.warnings.push(
+            "subject does not start with a conventional-commits type prefix \
+             (feat/fix/refactor/test/docs/build/chore); \
+             this is advisory only and does not block the commit"
+                .to_string(),
+        );
+    }
+
+    result
+}
+
+/// Walk up `path` until a component exists on disk, canonicalize it, then
+/// re-append the non-existing suffix.  Resolves Windows 8.3 short names
+/// (`RUNNER~1` → `runneradmin`) and macOS /var symlinks, even when the leaf
+/// has not been created yet.  Cannot be imported from `legion-agent` across
+/// the dependency boundary, so it is replicated here.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    let mut existing = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
+/// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).
+fn strip_unc_pathbuf(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped.to_string())
+    } else {
+        p
+    }
+}
+
+/// Create a new git worktree for `branch` at `worktree_path`.
+///
+/// Uses `git worktree add <worktree_path> <branch>`.  The branch must already
+/// exist; creating the branch alongside the worktree is the caller's
+/// responsibility.
+///
+/// # Validation
+///
+/// Rejects paths that contain `..` components, absolute paths that fall outside
+/// the workspace parent directory, and paths that already exist on disk.
+pub fn create_git_worktree(
+    root: impl AsRef<Path>,
+    branch: &str,
+    worktree_path: impl AsRef<Path>,
+) -> Result<(), GitInspectionError> {
+    let worktree_ref = worktree_path.as_ref();
+
+    // Reject `..` traversal components.
+    for component in worktree_ref.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must not contain '..' traversal components".to_string(),
+            ));
+        }
+    }
+
+    // For absolute paths, validate they fall within the workspace parent directory.
+    if worktree_ref.is_absolute() {
+        let root_ref = root.as_ref();
+        let allowed_parent = root_ref.parent().unwrap_or(root_ref);
+
+        // Resolve both sides through their deepest existing ancestor so that
+        // Windows 8.3 short names (RUNNER~1 → runneradmin) and macOS /var
+        // symlinks are expanded before the containment comparison.  The target
+        // worktree may not exist yet, so resolve_existing_prefix canonicalizes
+        // the deepest ancestor that does exist and re-appends the rest.
+        let norm_parent = resolve_existing_prefix(allowed_parent)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| allowed_parent.to_path_buf());
+        let norm_worktree = resolve_existing_prefix(worktree_ref)
+            .map(strip_unc_pathbuf)
+            .unwrap_or_else(|| worktree_ref.to_path_buf());
+
+        if !norm_worktree.starts_with(&norm_parent) {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must reside within the workspace parent directory".to_string(),
+            ));
+        }
+    }
+
+    // Reject paths that already exist on disk to prevent accidental overwrites.
+    let resolved = if worktree_ref.is_absolute() {
+        worktree_ref.to_path_buf()
+    } else {
+        root.as_ref()
+            .parent()
+            .unwrap_or(root.as_ref())
+            .join(worktree_ref)
+    };
+    if resolved.exists() {
+        return Err(GitInspectionError::InvalidInput(
+            "worktree path already exists on disk".to_string(),
+        ));
+    }
+
+    let path_str = worktree_ref.to_string_lossy().into_owned();
+    git_stdout(root.as_ref(), &["worktree", "add", &path_str, branch], None)?;
     Ok(())
 }
 
@@ -4655,6 +4900,20 @@ impl WorkspaceActor {
                     return Ok(report);
                 }
                 continue;
+            }
+
+            // Binary sniff: scan the first SEARCH_BINARY_SNIFF_WINDOW bytes for NUL.
+            // This avoids passing binary files through the UTF-8 text pipeline.
+            {
+                let mut sniff_buf = [0u8; SEARCH_BINARY_SNIFF_WINDOW];
+                let is_binary = std::fs::File::open(path)
+                    .and_then(|mut f| f.read(&mut sniff_buf))
+                    .map(|n| sniff_buf[..n].contains(&0u8))
+                    .unwrap_or(false);
+                if is_binary {
+                    report.skipped_binary_count = report.skipped_binary_count.saturating_add(1);
+                    continue;
+                }
             }
 
             let file_identity = match self.resolve_file(workspace_id, &relative_label) {
@@ -8359,5 +8618,249 @@ mod tests {
                 state.watcher_sequence += 1;
             }
         }
+    }
+
+    // ── Search tests (Tasks 2, 4) ────────────────────────────────────────────
+
+    fn search_query(
+        workspace_id: WorkspaceId,
+        pattern: SearchPattern,
+        text: &str,
+    ) -> WorkspaceSearchQuery {
+        WorkspaceSearchQuery {
+            workspace_id,
+            pattern,
+            search_text: text.to_string(),
+            filters: WorkspaceSearchFilters::default(),
+            result_limit: 500,
+            batch_size: 1,
+            use_indexed_backend: false,
+        }
+    }
+
+    #[test]
+    fn cancellation_stops_workspace_search_walker() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        // Write 10 text files all containing the same needle.
+        for i in 0..10 {
+            save_new_file_for_tests(
+                &actor,
+                opened.workspace_id,
+                &format!("cancel_test_{i}.txt"),
+                "needle_unique_cancel_token\n",
+            )
+            .expect("save test file");
+        }
+
+        let pattern =
+            SearchPattern::literal("needle_unique_cancel_token", true, false).expect("pattern");
+        let query = search_query(opened.workspace_id, pattern, "needle_unique_cancel_token");
+
+        // Return false on the very first batch to cancel the search.
+        let mut batch_count = 0usize;
+        let report = actor
+            .search_workspace_stream(query, |_batch| {
+                batch_count += 1;
+                false // Cancel immediately.
+            })
+            .expect("search_workspace_stream returns Ok even when cancelled");
+
+        assert!(
+            report.cancelled,
+            "report should be marked cancelled when callback returns false"
+        );
+        // The walker must stop before producing all 10 hits (batch_size=1, cancel on first batch).
+        assert!(
+            report.hit_count < 10,
+            "walker should stop before visiting all 10 files; hit_count={}",
+            report.hit_count
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_skips_binary_files_and_counts_them() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        // Write one text file with a needle.
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "text_file.txt",
+            "binary_test_needle text content\n",
+        )
+        .expect("save text file");
+
+        // Write one binary file (contains a NUL byte).
+        let binary_path = root.join("binary_file.bin");
+        let mut binary_content = b"binary_test_needle fake binary\x00data".to_vec();
+        binary_content.extend_from_slice(&[0u8; 64]);
+        std::fs::write(&binary_path, &binary_content).expect("write binary file");
+
+        let pattern = SearchPattern::literal("binary_test_needle", true, false).expect("pattern");
+        let query = WorkspaceSearchQuery {
+            workspace_id: opened.workspace_id,
+            pattern,
+            search_text: "binary_test_needle".to_string(),
+            filters: WorkspaceSearchFilters::default(),
+            result_limit: 100,
+            batch_size: 64,
+            use_indexed_backend: false,
+        };
+
+        let mut all_hits = Vec::new();
+        let report = actor
+            .search_workspace_stream(query, |batch| {
+                all_hits.extend(batch.hits);
+                true
+            })
+            .expect("search succeeds");
+
+        // The text file should yield one hit.
+        assert_eq!(
+            all_hits.len(),
+            1,
+            "expected exactly one hit from the text file"
+        );
+        assert!(
+            all_hits[0].canonical_path.0.contains("text_file"),
+            "hit should be from text_file.txt"
+        );
+
+        // The binary file should be counted as skipped.
+        assert!(
+            report.skipped_binary_count >= 1,
+            "binary file should be counted; skipped_binary_count={}",
+            report.skipped_binary_count
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_options_literal_case_whole_word() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "options_test.txt",
+            "Hello World hello world HELLO\n",
+        )
+        .expect("save test file");
+
+        // Case-sensitive literal: only "Hello" (capital H) matches.
+        let pattern = SearchPattern::literal("Hello", true, false).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "Hello");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        assert_eq!(hits.len(), 1, "case-sensitive: only 1 'Hello' match");
+
+        // Case-insensitive literal: "hello", "Hello", "HELLO" all match.
+        let pattern = SearchPattern::literal("hello", false, false).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "hello");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        assert_eq!(hits.len(), 3, "case-insensitive: 3 'hello' matches");
+
+        // Whole-word: "World" should match but not "hello" part of "helloworld".
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "whole_word_test.txt",
+            "foo foobar\n",
+        )
+        .expect("save file");
+        let pattern = SearchPattern::literal("foo", true, true).expect("pattern");
+        let q = search_query(opened.workspace_id, pattern, "foo");
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+        // Only "foo" (standalone word) should match; "foobar" should not.
+        assert_eq!(hits.len(), 1, "whole-word: only standalone 'foo' matches");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// MIN-4: glob filter (include pattern) restricts search to matching files only.
+    #[test]
+    fn search_glob_filter_restricts_to_matching_files() {
+        let (actor, opened, _, root) = temporary_workspace(WorkspaceTrustState::Trusted);
+        let needle = "GLOB_NEEDLE";
+
+        // Write two files: one .rs and one .txt — both containing the needle.
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "match_me.rs",
+            &format!("{needle} in a rust file\n"),
+        )
+        .expect("save .rs file");
+
+        save_new_file_for_tests(
+            &actor,
+            opened.workspace_id,
+            "skip_me.txt",
+            &format!("{needle} in a text file\n"),
+        )
+        .expect("save .txt file");
+
+        // Build an include-glob that only accepts *.rs files.
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new("*.rs").expect("valid glob"));
+        let include_set = Arc::new(builder.build().expect("build globset"));
+        let filters = WorkspaceSearchFilters {
+            include: Some(include_set),
+            exclude: None,
+        };
+
+        let pattern = SearchPattern::literal(needle, true, false).expect("pattern");
+        let q = WorkspaceSearchQuery {
+            workspace_id: opened.workspace_id,
+            pattern,
+            search_text: needle.to_string(),
+            filters,
+            result_limit: 500,
+            batch_size: 1,
+            use_indexed_backend: false,
+        };
+
+        let mut hits = Vec::new();
+        actor
+            .search_workspace_stream(q, |batch| {
+                hits.extend(batch.hits);
+                true
+            })
+            .expect("search");
+
+        // Only the .rs file should have been searched; skip_me.txt must not appear.
+        assert_eq!(
+            hits.len(),
+            1,
+            "glob include *.rs: exactly 1 hit from .rs file"
+        );
+        let path = &hits[0].canonical_path.0;
+        assert!(
+            path.ends_with("match_me.rs"),
+            "hit must be from match_me.rs, got {path}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

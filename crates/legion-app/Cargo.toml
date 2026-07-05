@@ -9,6 +9,15 @@ publish.workspace = true
 default = ["ai"]
 ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers"]
 offline = []
+# Exposes `*_for_test` seams (e.g. `set_lsp_health_for_test`) to integration
+# test binaries in `tests/`.  Integration tests are compiled as separate crates
+# and cannot see `#[cfg(test)]`-gated items from the library crate, so we use
+# a dedicated feature instead.  The self-referential dev-dependency below
+# enables this feature for all `tests/` binaries in this crate.  Any crate
+# whose integration tests call these seams (e.g. legion-desktop) must similarly
+# add `legion-app = { workspace = true, features = ["test-helpers"] }` under
+# its own `[dev-dependencies]`.
+test-helpers = []
 
 [dependencies]
 anyhow = { workspace = true }
@@ -34,9 +43,19 @@ legion-tracker = { workspace = true }
 legion-memory = { workspace = true }
 legion-plugin = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
-sha2 = "0.10"
 hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+toml = { workspace = true }
+# Self-referential dev-dependency: activates the test-helpers feature for every
+# test/bench target in this crate WITHOUT `required-features` (which would make
+# cargo silently skip those targets in the standing
+# `cargo test --workspace --all-targets` gate) and without enabling the feature
+# in production builds.
+legion-app = { workspace = true, features = ["test-helpers"] }

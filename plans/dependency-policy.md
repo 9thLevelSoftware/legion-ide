@@ -13,6 +13,15 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `xtask` may depend on:
   - `legion-protocol`
   - `legion-text`
+  - `legion-project`
+  - `legion-platform`
+  - `legion-security`
+
+  (`legion-project`/`legion-platform`/`legion-security` are permitted solely so
+  the perf-harness reference workloads exercise the REAL product search stack —
+  streaming walker, native filesystem/watcher, deny-by-default broker — per the
+  WS18.T1 follow-on. `xtask` is tooling at the top of the dependency graph; it
+  gains no product authority and no crate may depend on `xtask`.)
 
 - `legion-protocol` may depend on:
 
@@ -260,6 +269,7 @@ Phase 8 production dependency rebaseline permits the following external crates o
 - Hosted telemetry HTTPS exporter (`legion-telemetry`): either `hyper` plus `hyper-rustls` or a rustls-only `reqwest` profile; native-tls/OpenSSL-backed production profiles are not approved by this policy. The accepted `reqwest` profile must disable default features and enable only rustls-backed TLS plus required request/serialization features.
 - Native terminal PTY (`legion-platform` and `legion-terminal`): `windows` for ConPTY and either `nix` or `rustix` for Unix PTY, process-group, and signal handling.
 - Raw-source production vault (`legion-retention`): `aes-gcm` or `chacha20poly1305`, `rand_core`/`getrandom`, `sha2`, `zeroize`, and `keyring` for the bundled OS key-provider. Cloud KMS SDKs are not bundled in Phase 8; KMS integration is represented by a provider contract and deployment-supplied adapters.
+- Local-history content addressing (`legion-app`, M8 WS-GIT-01): `sha2` for SHA-256 content hashes of save-time local-history snapshots (metadata-only records; content blobs stay workspace-local under `.legion/local-history/`).
 
 These dependency entries are approval boundaries, not activation by themselves. A production runtime may not depend on app/UI/editor/project authority and must reject before network, process, filesystem, or crypto side effects when the security broker denies a request.
 

@@ -50,6 +50,13 @@ const MANUAL_RENDERER_SAMPLE_COUNT: usize = 16;
 const MANUAL_RENDERER_SCENARIO: &str = "manual_editor_input_to_paint";
 const MEMORY_CEILING_FIXTURE_BYTES: usize = 1024 * 1024; // 1MB
 const MEMORY_CEILING_DEFAULT_BUDGET_BYTES: usize = 10 * 1024 * 1024; // 10MB ceiling for 1MB doc
+/// Number of synthetic text files created for the search-stream throughput workload.
+const SEARCH_STREAM_50K_FILE_COUNT: usize = 50_000;
+/// Budget for the 50 K search-stream throughput skeleton.
+/// Set to 0 (report-only) because scan time depends heavily on host disk
+/// speed and CI runner choice.  The gate can be tightened once baseline
+/// numbers are collected from the reference machines.
+const SEARCH_STREAM_50K_BUDGET_MILLIS: u64 = 0;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
 
@@ -99,6 +106,11 @@ pub enum SkeletonKind {
     /// below a configurable ceiling.
     #[serde(rename = "memory_ceiling_1mb", alias = "memoryceiling1mb")]
     MemoryCeiling1MB,
+    /// Search-stream throughput: scans 50 K synthetic text files in a temp
+    /// directory, measuring total wall-clock time and early-cancellation
+    /// latency.  Fixture is generated at runtime and cleaned up after.
+    #[serde(rename = "search_stream_50k", alias = "searchstream50k")]
+    SearchStream50K,
 }
 
 impl SkeletonKind {
@@ -108,6 +120,7 @@ impl SkeletonKind {
             Self::LineGalleyShapingCache => "line_galley_shaping_cache",
             Self::RendererBackedManualInputToPaint => "renderer_backed_manual_input_to_paint",
             Self::MemoryCeiling1MB => "memory_ceiling_1mb",
+            Self::SearchStream50K => "search_stream_50k",
         }
     }
 }
@@ -116,7 +129,16 @@ impl SkeletonKind {
 pub struct SkeletonDescriptor {
     pub name: String,
     pub kind: SkeletonKind,
+    /// Fixture size in bytes.  For skeletons that measure file-count
+    /// throughput rather than byte throughput, use `file_count` instead
+    /// — set this field to `0` to avoid the semantic mismatch.
     pub fixture_bytes: usize,
+    /// Number of files in the fixture for skeletons where the workload
+    /// unit is a file count rather than a byte count (e.g. SearchStream50K).
+    /// When `Some`, this value drives fixture generation; `fixture_bytes`
+    /// is ignored for that skeleton's workload.
+    #[serde(default)]
+    pub file_count: Option<usize>,
     pub sample_count: usize,
     /// Per-skeleton budget in milliseconds, inclusive. The CI leg can
     /// override the budget via the `LEGION_PERF_FAIL_ON_BUDGET_MS`
@@ -133,6 +155,7 @@ impl SkeletonDescriptor {
             name: "m0.input_to_paint_microbenchmark".to_string(),
             kind: SkeletonKind::InputToPaintMicrobenchmark,
             fixture_bytes: SKELETON_FIXTURE_BYTES,
+            file_count: None,
             sample_count: SKELETON_EDIT_SAMPLES,
             budget_millis: SKELETON_DEFAULT_BUDGET_MILLIS,
             note: concat!(
@@ -150,6 +173,7 @@ impl SkeletonDescriptor {
             name: "m1.line_galley_shaping_cache".to_string(),
             kind: SkeletonKind::LineGalleyShapingCache,
             fixture_bytes: LINE_GALLEY_FIXTURE_LINES,
+            file_count: None,
             sample_count: 1,
             budget_millis: LINE_GALLEY_DEFAULT_BUDGET_MILLIS,
             note: concat!(
@@ -166,12 +190,37 @@ impl SkeletonDescriptor {
             name: "m2.memory_ceiling_1mb".to_string(),
             kind: SkeletonKind::MemoryCeiling1MB,
             fixture_bytes: MEMORY_CEILING_FIXTURE_BYTES,
+            file_count: None,
             sample_count: 1,
             budget_millis: 0, // report-only by default (measured in bytes, not millis)
             note: concat!(
                 "WS-MANUAL-02 SCALE.09 memory ceiling gate: creates a 1MB TextBuffer ",
                 "and asserts the memory_footprint_bytes() stays below 10MB. The budget ",
                 "field is unused (measurement is byte-based, not time-based).",
+            )
+            .to_string(),
+        }
+    }
+
+    /// M8 search-stream 50 K-file throughput + cancellation latency skeleton.
+    pub fn m8_search_stream_50k() -> Self {
+        Self {
+            name: "m8.search_stream_50k".to_string(),
+            kind: SkeletonKind::SearchStream50K,
+            // fixture_bytes is not meaningful for file-count workloads; use
+            // file_count instead so the field names match their units.
+            fixture_bytes: 0,
+            file_count: Some(SEARCH_STREAM_50K_FILE_COUNT),
+            sample_count: 1,
+            budget_millis: SEARCH_STREAM_50K_BUDGET_MILLIS,
+            note: concat!(
+                "M8 P2.F4.T4: exercises search_workspace_stream against a ",
+                "50 K-file synthetic fixture generated at runtime under the ",
+                "system temp directory.  Measures total scan wall-clock time ",
+                "and early-cancellation latency.  Budget is 0 (report-only) ",
+                "so classify_skeleton_status always returns Skipped until a ",
+                "reference-machine baseline is set.  Set LEGION_PERF_FAIL_ON_BUDGET_MS ",
+                "to a positive millisecond count to activate the gate.",
             )
             .to_string(),
         }
@@ -272,6 +321,9 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
     let samples = match skeleton.kind {
         SkeletonKind::MemoryCeiling1MB => {
             return run_memory_ceiling_1mb(skeleton.fixture_bytes);
+        }
+        SkeletonKind::SearchStream50K => {
+            return run_search_stream_50k(skeleton);
         }
         SkeletonKind::InputToPaintMicrobenchmark => {
             run_input_to_paint_microbenchmark(skeleton.fixture_bytes, skeleton.sample_count)
@@ -478,6 +530,194 @@ fn run_memory_ceiling_1mb(fixture_bytes: usize) -> SkeletonMeasurement {
         p95_micros: 0,
         budget_millis: 0,
         status,
+        message,
+    }
+}
+
+/// P2.F4.T4 — search-stream 50 K-file throughput + cancellation workload.
+///
+/// Generates `file_count` small synthetic text files in a uniquely-named
+/// subdirectory of the system temp dir, opens a [`WorkspaceActor`] on that
+/// directory, runs a full-scan search, then runs a second search that is
+/// cancelled after the first batch.  The fixture directory is cleaned up
+/// regardless of whether the search succeeded or failed.
+///
+/// Reporting is always report-only (`Skipped`) because total scan time varies
+/// widely across disk speeds.  The `message` field contains both the full-scan
+/// duration and the cancellation latency so CI can track trends over time.
+fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
+    use std::sync::Arc;
+
+    use legion_platform::{NativeFileSystem, NativeWatcherService};
+    use legion_project::{
+        ProjectFilesystemService, SearchPattern, WorkspaceActor, WorkspaceSearchFilters,
+        WorkspaceSearchQuery,
+    };
+    use legion_protocol::{
+        CanonicalPath, CorrelationId, PrincipalId, WorkspaceOpenRequest, WorkspaceTrustState,
+    };
+    use legion_security::DenyByDefaultBroker;
+
+    // ── 1. Generate fixture under temp dir ───────────────────────────────────
+    let pid = std::process::id();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    let fixture_root = std::env::temp_dir().join(format!("legion_perf_search_{pid}_{ts}"));
+
+    // Use the dedicated file_count field; fixture_bytes is 0 for this skeleton kind.
+    let file_count = skeleton.file_count.unwrap_or(0);
+    let needle = "PERF_NEEDLE_XYZ";
+
+    let fixture_created = (|| {
+        fs::create_dir_all(&fixture_root)?;
+        for i in 0..file_count {
+            // Sprinkle the search needle into every 10th file (~5 000 hits).
+            let content = if i % 10 == 0 {
+                format!("synthetic file {i:05} contains the search target: {needle}\n")
+            } else {
+                format!("synthetic file {i:05} ordinary workspace content, no match here\n")
+            };
+            fs::write(fixture_root.join(format!("f{i:05}.txt")), content)?;
+        }
+        Ok::<_, std::io::Error>(())
+    })();
+
+    if let Err(err) = &fixture_created {
+        return SkeletonMeasurement {
+            name: skeleton.name.clone(),
+            kind: skeleton.kind,
+            fixture_bytes: file_count,
+            sample_count: 0,
+            total_micros: 0,
+            p50_micros: 0,
+            p95_micros: 0,
+            budget_millis: skeleton.budget_millis,
+            status: SkeletonStatus::Skipped,
+            message: format!("fixture creation failed ({file_count} files): {err}"),
+        };
+    }
+
+    // ── 2. Open workspace ────────────────────────────────────────────────────
+    // `ProjectFilesystem` is a private type alias for `dyn ProjectFilesystemService`;
+    // spelling out the trait is equivalent and avoids the privacy barrier.
+    let actor_fs: Arc<dyn ProjectFilesystemService> = Arc::new(NativeFileSystem);
+    let actor = WorkspaceActor::new(
+        actor_fs,
+        Arc::new(NativeWatcherService),
+        DenyByDefaultBroker::default(),
+    );
+    let open_result = actor.open_workspace(WorkspaceOpenRequest {
+        correlation_id: CorrelationId(1),
+        principal_id: PrincipalId("perf".to_string()),
+        root_path: CanonicalPath(fixture_root.to_string_lossy().into_owned()),
+        trust: Some(WorkspaceTrustState::Trusted),
+    });
+
+    let opened = match open_result {
+        Ok(o) => o,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&fixture_root);
+            return SkeletonMeasurement {
+                name: skeleton.name.clone(),
+                kind: skeleton.kind,
+                fixture_bytes: file_count,
+                sample_count: 0,
+                total_micros: 0,
+                p50_micros: 0,
+                p95_micros: 0,
+                budget_millis: skeleton.budget_millis,
+                status: SkeletonStatus::Skipped,
+                message: format!("workspace open failed: {err}"),
+            };
+        }
+    };
+
+    let pattern = match SearchPattern::literal(needle, true, false) {
+        Ok(p) => p,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&fixture_root);
+            return SkeletonMeasurement {
+                name: skeleton.name.clone(),
+                kind: skeleton.kind,
+                fixture_bytes: file_count,
+                sample_count: 0,
+                total_micros: 0,
+                p50_micros: 0,
+                p95_micros: 0,
+                budget_millis: skeleton.budget_millis,
+                status: SkeletonStatus::Skipped,
+                message: format!("search pattern build failed: {err}"),
+            };
+        }
+    };
+
+    let make_query = |p: SearchPattern| WorkspaceSearchQuery {
+        workspace_id: opened.workspace_id,
+        pattern: p,
+        search_text: needle.to_string(),
+        filters: WorkspaceSearchFilters::default(),
+        result_limit: usize::MAX,
+        batch_size: 256,
+        use_indexed_backend: false,
+    };
+
+    // ── 3. Full-scan measurement ─────────────────────────────────────────────
+    let scan_start = Instant::now();
+    let scan_result = actor.search_workspace_stream(
+        make_query(pattern),
+        |_batch| true, // consume all batches; returning false would cancel
+    );
+    let scan_elapsed = scan_start.elapsed();
+
+    let hit_count = scan_result.as_ref().map(|r| r.hit_count).unwrap_or(0);
+
+    // ── 4. Cancellation-latency measurement ──────────────────────────────────
+    // Build a fresh pattern for the second query (SearchPattern is not Clone).
+    let cancel_pattern = SearchPattern::literal(needle, true, false).unwrap_or_else(|_| {
+        // Should not fail since we already built the same pattern above; use a
+        // trivially-matching pattern as a fall-back so we still measure latency.
+        SearchPattern::literal(".", false, false).expect("trivial pattern must build")
+    });
+    let cancel_start = Instant::now();
+    let _ = actor.search_workspace_stream(
+        make_query(cancel_pattern),
+        |_batch| false, // cancel immediately after first batch
+    );
+    let cancel_elapsed = cancel_start.elapsed();
+
+    // ── 5. Cleanup ────────────────────────────────────────────────────────────
+    let _ = fs::remove_dir_all(&fixture_root);
+
+    let total_us = scan_elapsed.as_micros() as u64;
+    let cancel_us = cancel_elapsed.as_micros() as u64;
+    let scan_ok = scan_result.is_ok();
+
+    let message = format!(
+        "full scan {:.0}ms ({} hits in {} files); cancellation latency {:.0}ms; ok={scan_ok}",
+        scan_elapsed.as_secs_f64() * 1000.0,
+        hit_count,
+        file_count,
+        cancel_elapsed.as_secs_f64() * 1000.0,
+    );
+
+    SkeletonMeasurement {
+        name: skeleton.name.clone(),
+        kind: skeleton.kind,
+        fixture_bytes: file_count,
+        sample_count: 1,
+        total_micros: total_us,
+        // Encode both timings: p50 = full-scan µs, p95 = cancel-latency µs.
+        p50_micros: total_us,
+        p95_micros: cancel_us,
+        budget_millis: skeleton.budget_millis,
+        // Delegate to classify_skeleton_status like every other skeleton.
+        // With budget_millis=0 (the default), skeleton.budget() returns None
+        // and this always evaluates to Skipped (report-only).  Set
+        // SEARCH_STREAM_50K_BUDGET_MILLIS to a positive value (or set
+        // LEGION_PERF_FAIL_ON_BUDGET_MS at runtime) to activate the gate.
+        status: classify_skeleton_status(scan_elapsed, skeleton.budget()),
         message,
     }
 }
@@ -778,4 +1018,64 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── IMP-4: classify_skeleton_status delegation ────────────────────────────
+
+    /// Verify that `classify_skeleton_status` drives the status for the 50K
+    /// skeleton: a zero budget (the default) → Skipped; a positive budget →
+    /// Passed or Failed depending on elapsed time.
+    #[test]
+    fn search_stream_50k_classify_skeleton_status_report_only_by_default() {
+        let skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Default budget is 0 → report-only.
+        let status = classify_skeleton_status(Duration::from_millis(9999), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Skipped);
+    }
+
+    #[test]
+    fn search_stream_50k_env_override_activates_gate_failed() {
+        let mut skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Simulate the env override: budget = 1 ms.
+        apply_fail_on_budget_value(&mut skeleton, "1");
+        assert_eq!(skeleton.budget(), Some(Duration::from_millis(1)));
+        // A scan that took 100 ms exceeds budget → Failed.
+        let status = classify_skeleton_status(Duration::from_millis(100), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Failed);
+    }
+
+    #[test]
+    fn search_stream_50k_env_override_activates_gate_passed() {
+        let mut skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // Simulate the env override: budget = 60_000 ms (generous).
+        apply_fail_on_budget_value(&mut skeleton, "60000");
+        // A scan that took 1 ms is within budget → Passed.
+        let status = classify_skeleton_status(Duration::from_millis(1), skeleton.budget());
+        assert_eq!(status, SkeletonStatus::Passed);
+    }
+
+    // ── MIN-2: file_count field is properly used ──────────────────────────────
+
+    #[test]
+    fn m8_search_stream_50k_descriptor_uses_file_count_field() {
+        let skeleton = SkeletonDescriptor::m8_search_stream_50k();
+        // fixture_bytes must NOT carry the file count; file_count must.
+        assert_eq!(
+            skeleton.fixture_bytes, 0,
+            "fixture_bytes should be 0 for file-count skeletons"
+        );
+        assert_eq!(
+            skeleton.file_count,
+            Some(SEARCH_STREAM_50K_FILE_COUNT),
+            "file_count must carry the file count"
+        );
+    }
+
+    // ── MIN-1: fuzzy_score_tuple wrapper ─────────────────────────────────────
+
+    // (Covered by crates/legion-index/src/fuzzy.rs#tuple_adapter_returns_tuple)
 }

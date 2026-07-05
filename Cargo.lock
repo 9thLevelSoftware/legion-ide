@@ -3789,6 +3789,7 @@ dependencies = [
  "legion-agent",
  "legion-ai",
  "legion-ai-providers",
+ "legion-app",
  "legion-collaboration",
  "legion-debug",
  "legion-editor",
@@ -3810,7 +3811,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "syntect",
+ "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.23",
  "uuid",
 ]
 
@@ -3861,6 +3864,7 @@ dependencies = [
  "legion-terminal",
  "legion-ui",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -8337,7 +8341,10 @@ version = "0.1.0"
 dependencies = [
  "cargo_metadata",
  "clap",
+ "legion-platform",
+ "legion-project",
  "legion-protocol",
+ "legion-security",
  "legion-text",
  "serde",
  "toml 0.8.23",

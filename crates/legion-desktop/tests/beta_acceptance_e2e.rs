@@ -220,7 +220,13 @@ fn beta_acceptance_e2e_policy_gated_local_loop() {
         beta_workspace.clone(),
         evidence.clone(),
     ))
-    .expect("beta workflow should pass");
+    .unwrap_or_else(|err| {
+        // CI runners discard the evidence file with the job workspace, making
+        // remote failures undebuggable; surface its content in the test log.
+        let evidence_text = std::fs::read_to_string(&evidence)
+            .unwrap_or_else(|read_err| format!("<unable to read evidence: {read_err}>"));
+        panic!("beta workflow should pass: {err}\n--- evidence ---\n{evidence_text}");
+    });
 
     assert_eq!(report.status, BetaWorkflowStatus::Passed);
     assert!(

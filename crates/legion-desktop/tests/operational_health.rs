@@ -81,6 +81,9 @@ fn operational_health_snapshot_and_view_rows_are_metadata_only() {
             scope: SearchScopeProjection::ActiveFile,
             query: "SECRET".to_string(),
             limit: 10,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("search should route through app authority");
     runtime

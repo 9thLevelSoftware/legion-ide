@@ -576,6 +576,12 @@ pub enum DesktopAction {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive toggle; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word toggle; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode toggle; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run bounded structural search and rewrite preview through app authority.
     RunStructuralSearch {
@@ -646,6 +652,44 @@ pub enum DesktopAction {
     CancelLanguageOperation {
         /// Operation identifier.
         operation_id: String,
+    },
+    /// Navigate to a diagnostic problem location (D3).
+    ///
+    /// Opens the file at `path` and positions the cursor at (line, 0). Emits
+    /// `CommandDispatchIntent::OpenPathAtPosition` through app authority.
+    /// `path` is the raw canonical path from the problem projection;
+    /// `line` is the zero-based LSP start line from the problem range.
+    NavigateToProblem {
+        /// Canonical path of the file containing the problem.
+        path: String,
+        /// Zero-based line number from the problem range start.
+        line: u32,
+    },
+    /// Move keyboard focus to the next problem in the Problems panel (T4).
+    ProblemNext,
+    /// Move keyboard focus to the previous problem in the Problems panel (T4).
+    ProblemPrev,
+    /// Activate (navigate to) the currently focused problem in the Problems panel (T4).
+    ProblemActivate,
+    /// Move selection down in the LSP completion popup (T6).
+    CompletionNext,
+    /// Move selection up in the LSP completion popup (T6).
+    CompletionPrev,
+    /// Accept the currently selected item in the LSP completion popup (T6).
+    ///
+    /// Inserts the selected completion label into the active buffer through
+    /// the existing editor insert path (editor authority).
+    CompletionAccept,
+    /// Dismiss the LSP completion popup without accepting any item (T6).
+    CompletionDismiss,
+    /// Dismiss the LSP hover tooltip (T7).
+    HoverDismiss,
+    /// Navigate to a specific definition location by index (T7).
+    ///
+    /// `index` is a zero-based position into `language_tooling_projection.definitions`.
+    NavigateToDefinition {
+        /// Zero-based index into the projected definitions list.
+        index: usize,
     },
     /// Launch a terminal session through app authority.
     TerminalLaunch {
@@ -1663,10 +1707,16 @@ impl DesktopCommandBridge {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             } => DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
                 scope,
                 query,
                 limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
             }),
             DesktopAction::RunStructuralSearch {
                 scope,
@@ -1776,6 +1826,32 @@ impl DesktopCommandBridge {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelLanguageOperation {
                     operation_id,
                 })
+            }
+            DesktopAction::NavigateToProblem { path, line } => {
+                // D3: open the file at the diagnostic's start line.
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPathAtPosition {
+                    path,
+                    position: legion_protocol::TextCoordinate {
+                        line,
+                        character: 0,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
+                })
+            }
+            // T4: problems panel keyboard-nav intercepted in DesktopRuntime::handle_action.
+            DesktopAction::ProblemNext
+            | DesktopAction::ProblemPrev
+            | DesktopAction::ProblemActivate => DesktopBridgeOutput::Noop,
+            // T6: completion popup actions are intercepted in DesktopRuntime::handle_action
+            // before reaching the bridge.  These arms exist solely for exhaustiveness.
+            DesktopAction::CompletionNext
+            | DesktopAction::CompletionPrev
+            | DesktopAction::CompletionAccept
+            | DesktopAction::CompletionDismiss => DesktopBridgeOutput::Noop,
+            // T7: hover/definition actions intercepted in DesktopRuntime::handle_action.
+            DesktopAction::HoverDismiss | DesktopAction::NavigateToDefinition { .. } => {
+                DesktopBridgeOutput::Noop
             }
             DesktopAction::TerminalLaunch { command_label } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch { command_label })

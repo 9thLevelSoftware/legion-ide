@@ -1250,6 +1250,10 @@ pub struct SearchResultProjection {
     pub snippet: String,
     /// Whether the snippet was truncated.
     pub snippet_truncated: bool,
+    /// `true` when this result belongs to a superseded query.  The desktop
+    /// should render stale rows de-emphasised (dimmed) until they are replaced
+    /// by results from the current query.
+    pub stale: bool,
 }
 
 /// Projection-only bounded search surface.
@@ -1271,6 +1275,16 @@ pub struct SearchProjection {
     pub omitted_result_count: usize,
     /// Count of files skipped or omitted by bounds/errors.
     pub omitted_file_count: usize,
+    /// Count of files skipped because they were detected as binary by the
+    /// NUL-byte heuristic.  Distinct from `omitted_file_count` which
+    /// covers error / oversized skips.
+    pub skipped_binary_count: usize,
+    /// Effective case-sensitive setting for this search result.
+    pub case_sensitive: bool,
+    /// Effective whole-word setting for this search result.
+    pub whole_word: bool,
+    /// Effective regex mode for this search result.
+    pub use_regex: bool,
     /// Display-safe diagnostics for skipped/limited search.
     pub diagnostics: Vec<String>,
     /// Projection generation timestamp.
@@ -1291,6 +1305,10 @@ impl SearchProjection {
             result_limit: 0,
             omitted_result_count: 0,
             omitted_file_count: 0,
+            skipped_binary_count: 0,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
             diagnostics: Vec::new(),
             generated_at: TimestampMillis(0),
             schema_version: 1,
@@ -1544,6 +1562,19 @@ pub struct GitWorktreeProjection {
     pub prunable: bool,
 }
 
+/// One local history entry for the active file, projected for the panel surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalHistoryEntryProjection {
+    /// Stable entry identifier.
+    pub entry_id: String,
+    /// Human-readable timestamp label (seconds since epoch as a string).
+    pub timestamp_label: String,
+    /// SHA-256 content hash hex string.
+    pub content_hash: String,
+    /// Content size in bytes.
+    pub size_bytes: u64,
+}
+
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
@@ -1575,6 +1606,18 @@ pub struct GitProjection {
     pub generated_at: TimestampMillis,
     /// Projection schema version.
     pub schema_version: u32,
+    /// Hunk identifier of the currently keyboard-focused hunk in the diff review surface.
+    /// `None` when no hunk has been explicitly focused by navigation.
+    pub focused_hunk_id: Option<String>,
+    /// Advisory commit-message validation warnings (e.g. missing CC prefix).
+    /// Empty when the last validated message was clean.
+    pub commit_validation_warnings: Vec<String>,
+    /// Hard commit-message validation errors (e.g. empty summary, missing author identity).
+    /// Non-empty means the commit action is blocked until these are resolved.
+    pub commit_validation_errors: Vec<String>,
+    /// Local history entries for the currently active file, newest first.
+    /// Populated by `RequestLocalHistoryEntries`; empty on idle.
+    pub local_history_entries: Vec<LocalHistoryEntryProjection>,
 }
 
 impl GitProjection {
@@ -1595,6 +1638,10 @@ impl GitProjection {
             diagnostics: Vec::new(),
             generated_at: TimestampMillis(0),
             schema_version: 1,
+            focused_hunk_id: None,
+            commit_validation_warnings: Vec::new(),
+            commit_validation_errors: Vec::new(),
+            local_history_entries: Vec::new(),
         }
     }
 }
@@ -2500,6 +2547,12 @@ pub enum CommandDispatchIntent {
         query: String,
         /// Requested result limit; zero means app default.
         limit: usize,
+        /// Explicit case-sensitive override; `None` defers to text-prefix parsing.
+        case_sensitive: Option<bool>,
+        /// Explicit whole-word override; `None` defers to text-prefix parsing.
+        whole_word: Option<bool>,
+        /// Explicit regex mode override; `None` defers to text-prefix parsing.
+        use_regex: Option<bool>,
     },
     /// Run deterministic structural search/rewrite preview through app authority.
     RunStructuralSearch {
@@ -2572,6 +2625,40 @@ pub enum CommandDispatchIntent {
     RemoveGitWorktree {
         /// Projected worktree path.
         path: String,
+    },
+    /// Create a new git worktree at the given path, optionally checking out a new branch.
+    CreateGitWorktree {
+        /// Branch name to create or check out.
+        branch: String,
+        /// Filesystem path for the new worktree (absolute or relative to workspace root).
+        worktree_path: String,
+    },
+    /// Navigate to the next diff hunk in the diff review surface.
+    GitNavNextHunk,
+    /// Navigate to the previous diff hunk in the diff review surface.
+    GitNavPrevHunk,
+    /// Navigate to the first hunk in the next changed file.
+    GitNavNextFile,
+    /// Navigate to the first hunk in the previous changed file.
+    GitNavPrevFile,
+    /// Request local history entries for the given canonical file path.
+    RequestLocalHistoryEntries {
+        /// Canonical path of the file to fetch history for.
+        path: String,
+    },
+    /// Restore a file from a local history entry via proposal route.
+    RestoreFromLocalHistory {
+        /// Canonical path of the file to restore.
+        path: String,
+        /// Entry identifier from a prior `RequestLocalHistoryEntries` response.
+        entry_id: String,
+    },
+    /// Export worktree state evidence to `.legion/evidence/` as a metadata-only TOML.
+    ExportWorktreeEvidence,
+    /// Validate a git commit message and surface warnings to the projection.
+    ValidateGitCommitMessage {
+        /// Draft commit message to validate.
+        message: String,
     },
     /// Refresh debugger configuration projections.
     RefreshDebugConfigurations,
@@ -4152,6 +4239,9 @@ impl Shell {
                 scope: SearchScopeProjection::ActiveFile,
                 query: query.trim().to_string(),
                 limit: 0,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })));
         }
         if let Some(query) = trimmed.strip_prefix(":search-workspace ") {
@@ -4159,6 +4249,9 @@ impl Shell {
                 scope: SearchScopeProjection::Workspace,
                 query: query.trim().to_string(),
                 limit: 0,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })));
         }
         if let Some(query_id) = trimmed.strip_prefix(":search-cancel ") {
@@ -4340,6 +4433,67 @@ impl Shell {
                 CommandDispatchIntent::ResolveGitConflict {
                     path: path.trim().to_string(),
                     choice: GitConflictChoiceProjection::AcceptIncoming,
+                },
+            )));
+        }
+        if trimmed == ":git-nav-next-hunk" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::GitNavNextHunk),
+            ));
+        }
+        if trimmed == ":git-nav-prev-hunk" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::GitNavPrevHunk),
+            ));
+        }
+        if trimmed == ":git-nav-next-file" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::GitNavNextFile),
+            ));
+        }
+        if trimmed == ":git-nav-prev-file" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::GitNavPrevFile),
+            ));
+        }
+        if let Some(rest) = trimmed.strip_prefix(":git-new-worktree ") {
+            let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::CreateGitWorktree {
+                        branch: parts[0].to_string(),
+                        worktree_path: parts[1].to_string(),
+                    },
+                )));
+            }
+        }
+        if let Some(path) = trimmed.strip_prefix(":git-local-history ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RequestLocalHistoryEntries {
+                    path: path.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(rest) = trimmed.strip_prefix(":git-restore-history ") {
+            let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::RestoreFromLocalHistory {
+                        path: parts[0].to_string(),
+                        entry_id: parts[1].to_string(),
+                    },
+                )));
+            }
+        }
+        if trimmed == ":git-export-evidence" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::ExportWorktreeEvidence),
+            ));
+        }
+        if let Some(msg) = trimmed.strip_prefix(":git-validate-commit ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::ValidateGitCommitMessage {
+                    message: msg.to_string(),
                 },
             )));
         }

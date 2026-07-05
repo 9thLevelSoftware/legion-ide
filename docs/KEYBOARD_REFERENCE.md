@@ -15,6 +15,23 @@ Treat the labels as the product source of truth for the current profile and plat
 | App command palette | Refresh Explorer | `F5` | Reload the workspace tree projection. |
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
+| Completion popup | Navigate next | `↓` (Down Arrow) | Move selection down in the completion list. |
+| Completion popup | Navigate previous | `↑` (Up Arrow) | Move selection up in the completion list. |
+| Completion popup | Accept selected item | `Tab` / `Enter` | Insert the selected label through editor authority. |
+| Completion popup | Dismiss | `Esc` | Close the popup without inserting. |
+| Hover tooltip | Dismiss | `Esc` | Close the hover tooltip (re-opens only when new hover data arrives). |
+| Editor | Go to definition | Command palette → `GoToDefinition` | Navigate to the definition site for the symbol under the cursor. |
+
+## SCM diff review navigation
+
+| Surface | Action | Shortcut label | Notes |
+| --- | --- | --- | --- |
+| SCM diff panel | Next Hunk | `]h` | Move focus to the next changed hunk. Projected from `GitNavNextHunk` intent. |
+| SCM diff panel | Previous Hunk | `[h` | Move focus to the previous changed hunk. Projected from `GitNavPrevHunk` intent. |
+| SCM diff panel | Next File | `]f` | Move focus to the next changed file. Projected from `GitNavNextFile` intent. |
+| SCM diff panel | Previous File | `[f` | Move focus to the previous changed file. Projected from `GitNavPrevFile` intent. |
+
+Navigation state (`focused_hunk_id`) is owned by the application layer and reflected in `GitProjection`; the desktop shell is projection-only.
 
 ## Mode controls
 

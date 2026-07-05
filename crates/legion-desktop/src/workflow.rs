@@ -6,13 +6,14 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Result, anyhow};
 use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
-    AppSaveOutcome, AppSessionRestoreOutcome,
+    AppSaveOutcome, AppSessionRestoreOutcome, LspDebounceKind,
 };
 use legion_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationOperationId, CollaborationParticipantId,
@@ -544,6 +545,20 @@ pub struct DesktopRuntime {
     last_status: Option<StatusMessageProjection>,
     last_status_details: Vec<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
+    /// Whether the LSP completion popup is currently visible (T6).
+    completion_popup_open: bool,
+    /// Zero-based index of the selected item in the completion popup (T6).
+    completion_selected_index: usize,
+    /// Whether the LSP hover tooltip should be shown (T7).
+    hover_tooltip_visible: bool,
+    /// Whether a GoToDefinition response navigation is pending (T7).
+    definition_navigation_queued: bool,
+    /// Definition count from the last projection refresh, for detecting new arrivals (T7).
+    last_definition_count: usize,
+    /// Keyboard-focused row index in the Problems panel (T4).
+    problems_selected_index: usize,
+    // NOTE: completion_debounce, last_completion_count, hover_debounce, last_hover_id
+    // have moved to AppComposition (I1 boundary fix: timing state is app authority).
 }
 
 impl DesktopRuntime {
@@ -559,6 +574,11 @@ impl DesktopRuntime {
             WorkspaceTrustState::Trusted,
             config.principal.clone(),
         )?;
+
+        // Palette usage persistence is app-composition work: the app owns the
+        // storage wiring (workspace-local `.legion/` state dir); the renderer
+        // edge only asks for it, keeping legion-desktop free of storage deps.
+        app.enable_palette_usage_persistence(&config.workspace_root);
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
@@ -619,6 +639,12 @@ impl DesktopRuntime {
             last_status: Some(status),
             last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
+            completion_popup_open: false,
+            completion_selected_index: 0,
+            hover_tooltip_visible: false,
+            definition_navigation_queued: false,
+            last_definition_count: 0,
+            problems_selected_index: 0,
         };
         runtime.persist_diagnostics_if_configured();
         Ok(runtime)
@@ -641,8 +667,166 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(DesktopWorkflowOutcome::Noop)
             }
+            // T4: problems panel keyboard navigation — handled before the bridge.
+            // Refresh first so the snapshot reflects any diagnostics just injected,
+            // then read the current problem count for index arithmetic.
+            DesktopAction::ProblemNext => {
+                self.refresh_projection()?;
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .problems
+                    .len();
+                if count > 0 {
+                    self.problems_selected_index = (self.problems_selected_index + 1) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ProblemPrev => {
+                self.refresh_projection()?;
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .problems
+                    .len();
+                if count > 0 {
+                    self.problems_selected_index =
+                        (self.problems_selected_index + count.saturating_sub(1)) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ProblemActivate => {
+                self.refresh_projection()?;
+                let outcome = self.activate_selected_problem()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
+            // T6: completion popup navigation — handled before the bridge.
+            DesktopAction::CompletionNext => {
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .completions
+                    .len();
+                if count > 0 {
+                    self.completion_selected_index = (self.completion_selected_index + 1) % count;
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionPrev => {
+                let count = self
+                    .shell
+                    .projection_snapshot()
+                    .language_tooling_projection
+                    .completions
+                    .len();
+                if count > 0 {
+                    self.completion_selected_index =
+                        (self.completion_selected_index + count.saturating_sub(1)) % count;
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionDismiss => {
+                self.completion_popup_open = false;
+                self.app.disarm_lsp_completion_debounce();
+                // Pre-sync the completion count so refresh_projection doesn't
+                // treat the same batch as "newly arrived" and re-open the popup.
+                if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                    self.app.pre_sync_lsp_completion_count(
+                        snap.language_tooling_projection.completions.len(),
+                    );
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::CompletionAccept => {
+                let outcome = self.accept_completion()?;
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
+            // T7: hover tooltip dismiss — handled before the bridge.
+            DesktopAction::HoverDismiss => {
+                self.hover_tooltip_visible = false;
+                self.app.disarm_lsp_hover_debounce();
+                // Pre-sync last_hover_id so refresh_projection won't re-open the
+                // same hover data on the very next frame (mirrors CompletionDismiss).
+                if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                    self.app.pre_sync_lsp_hover_id(
+                        snap.language_tooling_projection
+                            .hover
+                            .as_ref()
+                            .map(|h| h.hover_id.clone()),
+                    );
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            // T7: navigate to a projected definition location.
+            DesktopAction::NavigateToDefinition { index } => {
+                let outcome = self.navigate_to_definition(index)?;
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
             action => {
                 let snapshot = self.shell.projection_snapshot();
+
+                // T6: dismiss popup and arm debounce on text-edit actions.
+                if let Some((buffer_id, at)) = completion_debounce_info(&action, &snapshot) {
+                    self.completion_popup_open = false;
+                    self.app.arm_lsp_completion_debounce(buffer_id, at);
+                }
+
+                // T6: dismiss popup on tab switch/close (stale popup rule).
+                // T7: dismiss hover tooltip on tab switch too.
+                if matches!(
+                    action,
+                    DesktopAction::SwitchTab { .. } | DesktopAction::CloseTab { .. }
+                ) {
+                    self.completion_popup_open = false;
+                    self.app.disarm_lsp_completion_debounce();
+                    self.completion_selected_index = 0;
+                    self.hover_tooltip_visible = false;
+                    self.app.disarm_lsp_hover_debounce();
+                    // Do NOT clear last_hover_id: the old id prevents the dismissed
+                    // tooltip from re-appearing on the new tab until a genuinely new
+                    // hover response arrives with a different id.
+                }
+
+                // T7: arm hover debounce on cursor movement (200ms settle window).
+                if let Some((buffer_id, at)) = hover_debounce_info(&action, &snapshot) {
+                    self.hover_tooltip_visible = false;
+                    self.app.arm_lsp_hover_debounce(buffer_id, at);
+                }
+
+                // T7: flag that a definition navigation is expected on next refresh.
+                if matches!(action, DesktopAction::GoToDefinition { .. }) {
+                    self.definition_navigation_queued = true;
+                }
+
                 if editor_text_action_blocked_by_palette(&action, &snapshot) {
                     self.set_status(
                         StatusSeverity::Info,
@@ -973,6 +1157,156 @@ impl DesktopRuntime {
             dock_layouts: self.dock_layouts.clone(),
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
             first_run_onboarding_visible: self.onboarding_visible,
+            completion_popup_open: self.completion_popup_open,
+            completion_selected_index: self.completion_selected_index,
+            hover_tooltip_visible: self.hover_tooltip_visible,
+            problems_selected_index: self.problems_selected_index,
+        }
+    }
+
+    /// Navigate to a specific definition location by zero-based index (T7).
+    ///
+    /// Returns `Noop` when the index is out of range or the definition lacks
+    /// path/range data.  Returns `Opened` on successful navigation.
+    fn navigate_to_definition(&mut self, index: usize) -> Result<DesktopWorkflowOutcome> {
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let Some(def) = snapshot.language_tooling_projection.definitions.get(index) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        let (Some(path), Some(range)) = (&def.path, &def.range) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        self.dispatch_intent(CommandDispatchIntent::OpenPathAtPosition {
+            path: path.0.clone(),
+            position: range.start,
+        })
+    }
+
+    /// Accept the currently selected completion item by inserting its label
+    /// into the active buffer through the existing editor insert path (T6).
+    ///
+    /// Returns `Noop` when no completions are projected or the active buffer
+    /// is unknown; returns `Edited` on successful insertion.
+    fn accept_completion(&mut self) -> Result<DesktopWorkflowOutcome> {
+        // Read current app state directly so we see the latest completions
+        // even if the shell snapshot is one frame stale.
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let completions = &snapshot.language_tooling_projection.completions;
+        let Some(completion) = completions.get(self.completion_selected_index) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        // M3: honor `insert_text` (LSP `insertText` field) first; fall back to label.
+        // `textEdit` is not yet handled (write-side, deferred); `insertText` covers
+        // snippet-free items that provide a different insertion string than the label.
+        let text = completion
+            .insert_text
+            .as_deref()
+            .unwrap_or(&completion.label)
+            .to_owned();
+        let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        // Locate the primary cursor from the per-buffer viewport state.
+        let cursor = snapshot
+            .daily_editing_projection
+            .viewport_states
+            .iter()
+            .find(|vs| vs.buffer_id == buffer_id)
+            .and_then(|vs| vs.cursor)
+            .unwrap_or(TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            });
+        self.completion_popup_open = false;
+        self.app.disarm_lsp_completion_debounce();
+        self.completion_selected_index = 0;
+        // Pre-sync count so refresh_projection doesn't re-open for same batch.
+        self.app
+            .pre_sync_lsp_completion_count(snapshot.language_tooling_projection.completions.len());
+        self.dispatch_intent(CommandDispatchIntent::Insert {
+            buffer_id,
+            at: cursor,
+            text,
+        })
+    }
+
+    /// Navigate to the currently selected problem in the Problems panel (T4).
+    ///
+    /// Returns `Noop` when there are no problems or no path/range on the
+    /// selected problem; returns `Edited`-equivalent on successful navigation.
+    fn activate_selected_problem(&mut self) -> Result<DesktopWorkflowOutcome> {
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let problems = &snapshot.language_tooling_projection.problems;
+        let Some(problem) = problems.get(self.problems_selected_index) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        let (Some(path), line) = (
+            problem.path.as_ref().map(|p| p.0.clone()),
+            problem.range.as_ref().map(|r| r.start.line).unwrap_or(0),
+        ) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        self.dispatch_intent(CommandDispatchIntent::OpenPathAtPosition {
+            path,
+            position: legion_protocol::TextCoordinate {
+                line,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            },
+        })
+    }
+
+    /// Test-only accessor to inject app-level state for completion popup tests.
+    ///
+    /// Exposed as `pub` so integration tests (tests/*) can reach it without a
+    /// feature flag.  Named with a `_for_test` suffix to signal that production
+    /// code must never call this.
+    pub fn app_mut_for_test(&mut self) -> &mut AppComposition {
+        &mut self.app
+    }
+
+    /// Expose problems selected index for assertion in tests.
+    pub fn problems_selected_index_for_test(&self) -> usize {
+        self.problems_selected_index
+    }
+
+    /// Test-only setter for completion popup visibility.
+    pub fn set_completion_popup_open_for_test(&mut self, open: bool) {
+        self.completion_popup_open = open;
+    }
+
+    /// Expose popup state for assertion in tests.
+    pub fn completion_popup_open_for_test(&self) -> bool {
+        self.completion_popup_open
+    }
+
+    /// Expose selected index for assertion in tests.
+    pub fn completion_selected_index_for_test(&self) -> usize {
+        self.completion_selected_index
+    }
+
+    /// Expose hover tooltip visibility for assertion in tests.
+    pub fn hover_tooltip_visible_for_test(&self) -> bool {
+        self.hover_tooltip_visible
+    }
+
+    /// Set hover tooltip visibility for test setup.
+    pub fn set_hover_tooltip_visible_for_test(&mut self, visible: bool) {
+        self.hover_tooltip_visible = visible;
+        if visible {
+            // Pre-sync hover id so refresh_projection doesn't immediately
+            // re-open the tooltip it just sees as "already known".
+            if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                self.app.pre_sync_lsp_hover_id(
+                    snap.language_tooling_projection
+                        .hover
+                        .as_ref()
+                        .map(|h| h.hover_id.clone()),
+                );
+            }
         }
     }
 
@@ -1720,6 +2054,18 @@ impl DesktopRuntime {
                     message,
                 }
             }
+            AppCommandOutcome::LocalHistoryEntriesUpdated(_) => {
+                // Local history entries are consumed by the shell projection directly;
+                // the desktop runtime has no additional action to take here.
+                DesktopWorkflowOutcome::Noop
+            }
+            AppCommandOutcome::WorktreeEvidenceExported(path) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Worktree evidence exported to {path}"),
+                );
+                DesktopWorkflowOutcome::Noop
+            }
         }
     }
 
@@ -1806,7 +2152,78 @@ impl DesktopRuntime {
     }
 
     fn refresh_projection(&mut self) -> Result<()> {
+        // T6/T7: check all armed debounces (completion=50ms, hover=200ms).
+        // Decision logic lives in AppComposition; desktop dispatches returned events.
+        for event in self.app.tick_lsp_debounces(Instant::now()) {
+            let intent = match event.kind {
+                LspDebounceKind::Completion => CommandDispatchIntent::RequestCompletion {
+                    buffer_id: event.buffer_id,
+                    position: event.position,
+                },
+                LspDebounceKind::Hover => CommandDispatchIntent::RequestHover {
+                    buffer_id: event.buffer_id,
+                    position: event.position,
+                },
+            };
+            // Non-fatal: LSP may be unavailable; swallow error.
+            let _ = self.app.dispatch_ui_intent(intent);
+        }
+
+        // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
+        self.app.drain_lsp_session();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+
+        // T6: auto-open popup when new completions arrive from the LSP worker.
+        let new_count = snapshot.language_tooling_projection.completions.len();
+        if new_count > 0 && new_count != self.app.last_lsp_completion_count() {
+            self.completion_popup_open = true;
+            self.completion_selected_index = 0;
+        }
+        if new_count == 0 {
+            // Completions were cleared (e.g. new request in-flight); close popup.
+            self.completion_popup_open = false;
+        }
+        self.app.pre_sync_lsp_completion_count(new_count);
+
+        // T7: auto-show hover tooltip only when a genuinely new hover_id arrives.
+        // Comparing ids prevents dismissed tooltips from re-opening for the same data.
+        let new_hover_id = snapshot
+            .language_tooling_projection
+            .hover
+            .as_ref()
+            .map(|h| h.hover_id.clone());
+        if let Some(ref id) = new_hover_id {
+            if self.app.last_lsp_hover_id() != Some(id.as_str()) {
+                // Different hover data arrived → auto-show.
+                self.hover_tooltip_visible = true;
+                self.app.pre_sync_lsp_hover_id(Some(id.clone()));
+            }
+        } else {
+            // No hover data → hide tooltip.
+            self.hover_tooltip_visible = false;
+        }
+
+        // T7: auto-navigate to definition when a queued GoToDefinition response arrives.
+        let new_def_count = snapshot.language_tooling_projection.definitions.len();
+        if self.definition_navigation_queued
+            && new_def_count > 0
+            && new_def_count != self.last_definition_count
+        {
+            self.definition_navigation_queued = false;
+            // Navigate to the first definition location.  Non-fatal if unavailable.
+            if let Some(def) = snapshot.language_tooling_projection.definitions.first()
+                && let (Some(path), Some(range)) = (&def.path, &def.range)
+            {
+                let _ = self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::OpenPathAtPosition {
+                        path: path.0.clone(),
+                        position: range.start,
+                    });
+            }
+        }
+        self.last_definition_count = new_def_count;
+
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());
         }
@@ -2090,6 +2507,45 @@ fn editor_text_action_blocked_by_palette(
         )
 }
 
+/// Extract `(buffer_id, cursor)` from text-edit actions that should arm the
+/// completion debounce timer (T6).  Returns `None` for non-edit actions.
+///
+/// M5: `DeleteRange` re-arms the debounce so backspace/delete triggers a fresh
+/// completion request (the preceding token may have changed).
+fn completion_debounce_info(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<(BufferId, TextCoordinate)> {
+    let at = match action {
+        DesktopAction::InsertText { at, .. }
+        | DesktopAction::ClipboardPaste { at, .. }
+        | DesktopAction::ImeCommit { at, .. } => *at,
+        // M5: treat delete/backspace as an edit that re-arms completion.
+        // Use the start of the deleted range as the new trigger position.
+        DesktopAction::DeleteRange { range } => range.start,
+        _ => return None,
+    };
+    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+    Some((buffer_id, at))
+}
+
+/// Extract `(buffer_id, cursor)` from cursor-movement actions that should arm
+/// the hover debounce timer (T7).  Returns `None` for non-cursor actions.
+fn hover_debounce_info(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<(BufferId, TextCoordinate)> {
+    let cursor = match action {
+        DesktopAction::SetCursor {
+            cursor,
+            buffer_id: _,
+        } => *cursor,
+        _ => return None,
+    };
+    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+    Some((buffer_id, cursor))
+}
+
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {
     match intent {
         CommandDispatchIntent::InvokePluginCommand {
@@ -2232,6 +2688,30 @@ impl DesktopEframeApp {
         })
     }
 
+    /// Headless test seam that runs a **complete** frame — `handle_keyboard`,
+    /// the full workbench projection view (so `render_problems_keyboard` and
+    /// similar view-level key bindings fire), and the command-palette overlay.
+    ///
+    /// Use this when a test needs to assert that a key event wired in
+    /// `view.rs` dispatches the expected action (e.g. ArrowDown →
+    /// `ProblemNext`).  For tests that only need to exercise editor shortcuts
+    /// or command-palette routing, prefer the lighter `run_headless_input`.
+    pub fn run_headless_full_frame(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
+        let ctx = self.ctx.clone();
+        ctx.run_ui(raw_input, |ui| {
+            self.render_app_frame(ui);
+        })
+    }
+
+    /// Return the zero-based index of the currently selected problem row.
+    ///
+    /// Test-only delegate that forwards to the runtime so tests that wrap a
+    /// [`DesktopEframeApp`] can assert navigation state without reaching inside
+    /// the runtime directly.
+    pub fn problems_selected_index_for_test(&self) -> usize {
+        self.runtime.problems_selected_index_for_test()
+    }
+
     /// Render one full application frame: keyboard handling, the projection
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
@@ -2363,6 +2843,37 @@ impl DesktopEframeApp {
                     actions.push(DesktopAction::Redo);
                 } else {
                     actions.push(DesktopAction::Undo);
+                }
+            }
+
+            // T4: Problems-panel keyboard navigation.
+            //
+            // Handled here in `handle_keyboard` (from a cloned `InputState`)
+            // rather than in a view-layer `ctx.input(|i| {...})` overlay
+            // function.  The view layer runs inside `egui::Panel` closures
+            // whose internal scroll areas can consume Arrow events through
+            // egui's focus-navigation mechanism before any overlay function
+            // gets to read them, making the key invisible even when called
+            // first in the render pass.  Cloning the `InputState` up-front
+            // (as `handle_keyboard` does for all other shortcuts) sidesteps
+            // that consumption window.
+            //
+            // Focus scope: fires only when the problems list is non-empty
+            // AND the completion popup is not open (completion popup already
+            // owns ArrowUp / ArrowDown / Enter through its own handler).
+            {
+                let view_state = self.runtime.projection_view_state();
+                let problems_non_empty = !snapshot.language_tooling_projection.problems.is_empty();
+                if problems_non_empty && !view_state.completion_popup_open {
+                    if input.key_pressed(egui::Key::ArrowDown) {
+                        actions.push(DesktopAction::ProblemNext);
+                    }
+                    if input.key_pressed(egui::Key::ArrowUp) {
+                        actions.push(DesktopAction::ProblemPrev);
+                    }
+                    if input.key_pressed(egui::Key::Enter) {
+                        actions.push(DesktopAction::ProblemActivate);
+                    }
                 }
             }
 

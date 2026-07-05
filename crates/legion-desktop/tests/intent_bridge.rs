@@ -474,11 +474,17 @@ fn intent_bridge_routes_search_actions() {
             scope: SearchScopeProjection::ActiveFile,
             query: "needle".to_string(),
             limit: 7,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         }),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::RunSearch {
             scope: SearchScopeProjection::ActiveFile,
             query: "needle".to_string(),
             limit: 7,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
     );
     assert_eq!(
@@ -1010,6 +1016,35 @@ fn intent_bridge_rejects_unknown_tabs_and_explorer_files() {
             &snapshot,
         ),
         DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPathInput)
+    );
+}
+
+/// D3: NavigateToProblem emits OpenPathAtPosition with the correct path and line.
+#[test]
+fn intent_bridge_routes_navigate_to_problem_action() {
+    let snapshot = Shell::empty("Bridge").projection_snapshot();
+    let bridge = DesktopCommandBridge::new();
+
+    let result = bridge.translate(
+        DesktopAction::NavigateToProblem {
+            path: "C:/repo/src/main.rs".to_string(),
+            line: 10,
+        },
+        &snapshot,
+    );
+
+    assert_eq!(
+        result,
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPathAtPosition {
+            path: "C:/repo/src/main.rs".to_string(),
+            position: TextCoordinate {
+                line: 10,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: None,
+            },
+        }),
+        "NavigateToProblem must emit OpenPathAtPosition with line and character=0"
     );
 }
 

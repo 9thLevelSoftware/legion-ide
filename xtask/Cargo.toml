@@ -12,3 +12,6 @@ serde = { workspace = true }
 toml = { workspace = true }
 legion-text = { workspace = true }
 legion-protocol = { workspace = true }
+legion-project = { workspace = true }
+legion-platform = { workspace = true }
+legion-security = { workspace = true }

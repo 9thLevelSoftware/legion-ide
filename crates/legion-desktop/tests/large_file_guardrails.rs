@@ -149,6 +149,9 @@ fn large_file_guardrails_search_is_bounded() {
                 scope: SearchScopeProjection::ActiveFile,
                 query: "HIDDEN_NEEDLE_AFTER_VIEWPORT".to_string(),
                 limit: 10,
+                case_sensitive: None,
+                whole_word: None,
+                use_regex: None,
             })
             .expect("bounded degraded search"),
         DesktopWorkflowOutcome::SearchUpdated

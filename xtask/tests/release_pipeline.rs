@@ -81,10 +81,25 @@ fn release_pipeline_plan_is_deterministic_for_same_inputs() {
     let repo = TempRepo::new("deterministic");
     let config = test_config();
 
-    let first = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let mut first = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
         .expect("plan first release pipeline");
-    let second = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let mut second = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
         .expect("plan second release pipeline");
+
+    // The plan embeds a wall-clock `built_at_utc`; two back-to-back plans can
+    // legitimately straddle a second boundary (this flaked PR #41's windows
+    // CI leg). Determinism means: identical for the same inputs at the same
+    // instant — normalize the timestamps before comparing everything else.
+    let stamp = "1970-01-01T00:00:00Z".to_string();
+    first.version_stamp.built_at_utc = stamp.clone();
+    second.version_stamp.built_at_utc = stamp.clone();
+    for descriptor in first
+        .descriptors
+        .iter_mut()
+        .chain(second.descriptors.iter_mut())
+    {
+        descriptor.version_stamp.built_at_utc = stamp.clone();
+    }
 
     assert_eq!(first, second);
 }

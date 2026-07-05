@@ -436,6 +436,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop --test headless_input", "cargo test -p legion-lsp"]
     acceptance = ["In the Legion repo, a real Rust diagnostic appears and clears after fixing."]
     stop_condition = "Stop if diagnostics are wired only to the app API and not to the desktop harness."
+    status = "in-progress"
+    evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F1.T4"
@@ -447,6 +449,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-desktop"]
     acceptance = ["Each LSP feature is reachable from the editor and is covered by a test."]
     stop_condition = "Do not implement features that are not requested by the LSP server's capability set."
+    status = "in-progress"
+    evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F1.T5"
@@ -601,6 +605,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-project", "cargo test -p legion-index", "cargo test -p legion-desktop"]
     acceptance = ["Search is fast enough for the Legion repo."]
     stop_condition = "Stop if cancellation does not actually stop the underlying search job."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T2"
@@ -623,6 +629,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop --test palette_coverage"]
     acceptance = ["Every command exposed in the palette is reachable from a keybinding or command-id list."]
     stop_condition = "Stop if a palette entry lacks a test that proves it can dispatch."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T4"
@@ -634,6 +642,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo run -p xtask -- perf-harness"]
     acceptance = ["Search is bounded for large fixtures."]
     stop_condition = "Stop if the fixture is regenerated as a side effect of running the harness."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
   [[epics.features]]
   id = "P2.F5"
@@ -649,6 +659,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
     acceptance = ["GP-1: open Legion repo, edit, see diff, stage hunk, commit, and optionally push."]
     stop_condition = "Stop if diff/blame data is read once and never refreshed."
+    status = "in-progress"
 
     [[epics.features.tasks]]
     id = "P2.F5.T2"
@@ -660,6 +671,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
     acceptance = ["Hunk staging and commit work end-to-end through the UI."]
     stop_condition = "Do not bypass the workspace's path policy for push/fetch/pull."
+    status = "in-progress"
 
     [[epics.features.tasks]]
     id = "P2.F5.T3"
@@ -682,6 +694,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-security", "cargo test -p legion-project"]
     acceptance = ["Every network/auth operation shows its policy decision to the user."]
     stop_condition = "Stop if a network operation is allowed without an audit row."
+    status = "in-progress"
 
 # ---------------------------------------------------------------------------
 # EPIC P3 — Proposal apply, checkpoints, and trust review

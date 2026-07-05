@@ -84,6 +84,9 @@ fn run_search(
             scope,
             query: query.to_string(),
             limit,
+            case_sensitive: None,
+            whole_word: None,
+            use_regex: None,
         })
         .expect("search intent should dispatch")
     {

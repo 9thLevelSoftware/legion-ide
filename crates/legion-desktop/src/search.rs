@@ -40,6 +40,12 @@ impl DesktopSearchViewModel {
         if projection.omitted_file_count > 0 {
             status_rows.push(format!("{} files skipped", projection.omitted_file_count));
         }
+        if projection.skipped_binary_count > 0 {
+            status_rows.push(format!(
+                "{} binary files skipped",
+                projection.skipped_binary_count
+            ));
+        }
         if projection.status.kind == SearchStatusKindProjection::Idle {
             status_rows.push("Search idle".to_string());
         }
@@ -58,12 +64,16 @@ impl DesktopSearchViewModel {
                 } else {
                     ""
                 };
+                // Stale results (superseded by a newer query) are tagged so
+                // the renderer can apply a de-emphasised visual treatment.
+                let stale_tag = if row.stale { " [stale]" } else { "" };
                 format!(
-                    "{}:{}:{}{} {}",
+                    "{}:{}:{}{}{} {}",
                     path,
                     row.line_number + 1,
                     row.range.start.character + 1,
                     truncated,
+                    stale_tag,
                     normalize_snippet(&row.snippet)
                 )
             })
@@ -76,8 +86,31 @@ impl DesktopSearchViewModel {
             diagnostic_rows.push("No results".to_string());
         }
 
+        // Build a compact option tag reflecting *non-default* active toggles.
+        // Only emit a tag for options that deviate from the plain default:
+        //   [Cc]  — case-sensitive mode explicitly active
+        //   [W]   — whole-word matching active
+        //   [.*]  — regex mode active
+        // Case-insensitive (the plain user default) produces no tag so that
+        // ordinary searches keep a clean header.
+        let mut option_tags = String::new();
+        if projection.case_sensitive {
+            option_tags.push_str("[Cc]");
+        }
+        if projection.whole_word {
+            option_tags.push_str("[W]");
+        }
+        if projection.use_regex {
+            option_tags.push_str("[.*]");
+        }
+        let header = if option_tags.is_empty() {
+            format!("Search {scope}: {query}")
+        } else {
+            format!("Search {scope}: {query} {option_tags}")
+        };
+
         Self {
-            header: format!("Search {scope}: {query}"),
+            header,
             status_rows,
             result_rows,
             diagnostic_rows,
