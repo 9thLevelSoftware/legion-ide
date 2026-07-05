@@ -77,7 +77,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly live-mode legion-bench), and `.github/workflows/legion-smoke.yml` (GP-1 golden-path smoke on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring; live provider calls are a future M13 scope), and `.github/workflows/legion-smoke.yml` (GP-1 golden-path smoke on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 
