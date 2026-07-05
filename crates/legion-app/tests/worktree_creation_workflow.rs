@@ -171,6 +171,75 @@ fn create_git_worktree_via_intent_creates_directory() {
     let _ = fs::remove_dir_all(&worktree_path);
 }
 
+// ─── I-4: create_git_worktree input validation ────────────────────────────────
+
+/// I-4: Reject paths that contain `..` traversal components.
+#[test]
+fn create_git_worktree_rejects_dotdot_traversal() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+    run_git(repo.path(), ["branch", "feature/wt-reject1"]);
+
+    let result = legion_project::create_git_worktree(
+        repo.path(),
+        "feature/wt-reject1",
+        "../../../evil_escape",
+    );
+    assert!(
+        matches!(
+            result,
+            Err(legion_project::GitInspectionError::InvalidInput(_))
+        ),
+        ".. traversal must be rejected with InvalidInput; got {result:?}"
+    );
+}
+
+/// I-4: Reject absolute paths that fall outside the workspace parent directory.
+#[test]
+fn create_git_worktree_rejects_absolute_outside_parent() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+    run_git(repo.path(), ["branch", "feature/wt-reject2"]);
+
+    // Build a path provably outside the workspace parent by going two levels up
+    // from the repo root (grandparent > parent = allowed_parent).
+    let outside_path = repo
+        .path()
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace grandparent must exist")
+        .join("legion_outside_test_reject");
+
+    let result =
+        legion_project::create_git_worktree(repo.path(), "feature/wt-reject2", &outside_path);
+    assert!(
+        matches!(
+            result,
+            Err(legion_project::GitInspectionError::InvalidInput(_))
+        ),
+        "absolute path outside workspace parent must be rejected; got {result:?}"
+    );
+}
+
+/// I-4: Reject paths that already exist on disk.
+#[test]
+fn create_git_worktree_rejects_existing_path() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+    run_git(repo.path(), ["branch", "feature/wt-reject3"]);
+
+    // Use the repo root itself — it already exists on disk.
+    let result =
+        legion_project::create_git_worktree(repo.path(), "feature/wt-reject3", repo.path());
+    assert!(
+        matches!(
+            result,
+            Err(legion_project::GitInspectionError::InvalidInput(_))
+        ),
+        "already-existing path must be rejected with InvalidInput; got {result:?}"
+    );
+}
+
 #[test]
 fn git_new_worktree_palette_command_exists() {
     // Verify that "Git: New Worktree" appears in the palette projection.

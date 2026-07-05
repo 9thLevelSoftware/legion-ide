@@ -9,6 +9,8 @@ publish.workspace = true
 default = ["ai"]
 ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers"]
 offline = []
+# Expose test-only helper methods to integration-test binaries.
+test-helpers = []
 
 [dependencies]
 anyhow = { workspace = true }
@@ -34,6 +36,7 @@ legion-tracker = { workspace = true }
 legion-memory = { workspace = true }
 legion-plugin = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
@@ -41,3 +44,8 @@ syntect = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
+
+# Integration tests that exercise the test-helper API surface need this feature.
+[[test]]
+name = "local_history_workflow"
+required-features = ["test-helpers"]

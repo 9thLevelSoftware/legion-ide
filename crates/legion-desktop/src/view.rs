@@ -7173,6 +7173,20 @@ fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .take(8)
             .map(|diagnostic| format!("git diagnostic {diagnostic}")),
     );
+    // Commit validation errors (hard blockers) — shown near the commit action.
+    rows.extend(
+        git.commit_validation_errors
+            .iter()
+            .take(4)
+            .map(|err| format!("git commit-error: {err}")),
+    );
+    // Advisory commit validation warnings — shown near the commit action.
+    rows.extend(
+        git.commit_validation_warnings
+            .iter()
+            .take(4)
+            .map(|warn| format!("git commit-warning: {warn}")),
+    );
     rows
 }
 

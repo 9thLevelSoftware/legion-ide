@@ -670,6 +670,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-security", "cargo test -p legion-project"]
     acceptance = ["Every network/auth operation shows its policy decision to the user."]
     stop_condition = "Stop if a network operation is allowed without an audit row."
+    status = "in-progress"
 
 # ---------------------------------------------------------------------------
 # EPIC P3 — Proposal apply, checkpoints, and trust review

@@ -1,4 +1,4 @@
-/// Task 3: Local history snapshots.
+/// Task 3: Local history snapshots — fix-round tests covering C-1/C-2/I-2/I-3/M-3/M-5.
 ///
 /// On every successful save, a bounded local-history entry is recorded
 /// (file identity, content hash, timestamp, correlation id) and the content
@@ -93,34 +93,338 @@ fn open_app_with_file(
     (app, path)
 }
 
+fn save_file(app: &mut AppComposition) {
+    let buf = app.active_buffer_id().expect("active buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
+        .expect("save should dispatch");
+}
+
+fn get_entries(
+    app: &mut AppComposition,
+    path: &Path,
+) -> Vec<legion_ui::LocalHistoryEntryProjection> {
+    match app
+        .dispatch_ui_intent(CommandDispatchIntent::RequestLocalHistoryEntries {
+            path: path.to_string_lossy().to_string(),
+        })
+        .expect("local history request should dispatch")
+    {
+        AppCommandOutcome::LocalHistoryEntriesUpdated(e) => e,
+        other => panic!("expected LocalHistoryEntriesUpdated, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C-1: SHA-256 content hash is stable and well-formed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_history_sha256_hash_is_stable_and_64_chars() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/hashtest.rs", "fn stable() {}\n");
+    save_file(&mut app);
+
+    let entries = get_entries(&mut app, &path);
+    assert_eq!(entries.len(), 1, "one save → one entry");
+
+    let hash = &entries[0].content_hash;
+    // SHA-256 produces 32 bytes = 64 hex characters.
+    assert_eq!(
+        hash.len(),
+        64,
+        "SHA-256 hash must be 64 hex chars, got '{hash}'"
+    );
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash must be lowercase hex: '{hash}'"
+    );
+
+    // Saving the same content again produces the same hash (stability).
+    let buf = app.active_buffer_id().expect("buf");
+    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
+        .expect("save 2");
+    let entries2 = get_entries(&mut app, &path);
+    assert!(entries2.len() >= 2, "two saves → two entries");
+    // Newest entry is entries2[0] (newest-first ordering); oldest is last.
+    assert_eq!(
+        entries2[0].content_hash, *hash,
+        "same content must produce the same SHA-256 hash"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C-2: .legion/local-history/ is self-ignoring via a generated .gitignore
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_history_creates_gitignore_in_legion_subdir() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/gi_test.rs", "fn gi() {}\n");
+    save_file(&mut app);
+    let _ = get_entries(&mut app, &path); // ensure entry is recorded
+
+    let gitignore = ws
+        .path()
+        .join(".legion")
+        .join("local-history")
+        .join(".gitignore");
+    assert!(
+        gitignore.exists(),
+        ".legion/local-history/.gitignore must be created by the first save"
+    );
+    let content = fs::read_to_string(&gitignore).expect("read .gitignore");
+    assert!(
+        content.trim() == "*",
+        ".legion/local-history/.gitignore must contain '*'; found: {content:?}"
+    );
+}
+
+#[test]
+fn local_history_blobs_not_visible_to_git_status() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/gitstatus.rs", "fn status_test() {}\n");
+    save_file(&mut app);
+    let _ = get_entries(&mut app, &path);
+
+    // Run git status --porcelain from the workspace root.
+    let output = Command::new("git")
+        .current_dir(ws.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git status should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // No .legion/ entries should appear.
+    assert!(
+        !stdout.contains(".legion"),
+        "git status must not show .legion/ entries after save; got:\n{stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I-2: prune deletes evicted blob files from disk
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prune_deletes_blob_files_on_eviction() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/prune_test.rs", "fn v0() {}\n");
+    let buf = app.active_buffer_id().expect("buf");
+
+    // Produce 4 saves with distinct content.
+    for i in 1..=4u32 {
+        app.dispatch_ui_intent(CommandDispatchIntent::Insert {
+            buffer_id: buf,
+            at: legion_protocol::TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: Some(0),
+                utf16_offset: Some(0),
+            },
+            text: format!("// v{i}\n"),
+        })
+        .expect("insert");
+        save_file(&mut app);
+    }
+
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let canon_str = canonical.to_string_lossy();
+    // Strip Windows UNC prefix manually for path-key derivation check.
+    let stripped = canon_str.trim_start_matches(r"\\?\");
+    let path_key = stripped.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let blob_dir = ws
+        .path()
+        .join(".legion")
+        .join("local-history")
+        .join(&path_key);
+
+    let blobs_before: Vec<_> = fs::read_dir(&blob_dir)
+        .expect("blob dir should exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("blob"))
+        .collect();
+    let count_before = blobs_before.len();
+    assert!(
+        count_before >= 3,
+        "should have >= 3 blobs before prune; got {count_before}"
+    );
+
+    // Use test helper to prune to 2 entries.
+    let evicted = app.test_prune_local_history(&canonical.to_string_lossy(), 2);
+    assert!(!evicted.is_empty(), "prune should evict entries");
+
+    let count_after = fs::read_dir(&blob_dir)
+        .expect("blob dir still exists")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("blob"))
+        .count();
+    assert!(
+        count_after <= 2,
+        "blob count should drop to <= 2 after prune to 2; got {count_after}"
+    );
+    assert!(
+        count_after < count_before,
+        "prune must delete blob files (before={count_before}, after={count_after})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I-3: entry_id is a UUID (unique, collision-proof)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn entry_ids_are_unique_across_saves() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/uuid_test.rs", "fn a() {}\n");
+    let buf = app.active_buffer_id().expect("buf");
+
+    for i in 0..5u32 {
+        app.dispatch_ui_intent(CommandDispatchIntent::Insert {
+            buffer_id: buf,
+            at: legion_protocol::TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: Some(0),
+                utf16_offset: Some(0),
+            },
+            text: format!("// {i}\n"),
+        })
+        .expect("insert");
+        save_file(&mut app);
+    }
+
+    let entries = get_entries(&mut app, &path);
+    assert!(entries.len() >= 5, "should have 5 entries");
+
+    let ids: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.entry_id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        entries.len(),
+        "all entry_ids must be unique (UUID); found duplicates"
+    );
+    // UUID v7 format: 8-4-4-4-12 hex groups.
+    for e in &entries {
+        assert!(
+            e.entry_id.len() == 36 && e.entry_id.chars().filter(|c| *c == '-').count() == 4,
+            "entry_id must be a UUID (36 chars with 4 hyphens): '{}'",
+            e.entry_id
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M-3: Retention cap test exercises the actual eviction boundary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_history_retention_cap_is_enforced_at_boundary() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/capped.rs", "fn v0() {}\n");
+    let buf = app.active_buffer_id().expect("buf");
+
+    // Produce 4 saves, then prune to 3 with the test helper.
+    for i in 1..=4u32 {
+        app.dispatch_ui_intent(CommandDispatchIntent::Insert {
+            buffer_id: buf,
+            at: legion_protocol::TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: Some(0),
+                utf16_offset: Some(0),
+            },
+            text: format!("// v{i}\n"),
+        })
+        .expect("insert");
+        save_file(&mut app);
+    }
+
+    // In-memory count before prune.
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let count_before = app.test_local_history_entry_count(&canonical.to_string_lossy());
+    assert_eq!(count_before, 4, "should have 4 entries before prune");
+
+    // Prune to 3 — exercises the count eviction boundary.
+    let evicted = app.test_prune_local_history(&canonical.to_string_lossy(), 3);
+    assert_eq!(evicted.len(), 1, "exactly 1 entry should be evicted");
+    assert_eq!(
+        app.test_local_history_entry_count(&canonical.to_string_lossy()),
+        3,
+        "count must be 3 after prune to 3"
+    );
+
+    // The production 50-entry cap is separately verified to be ≤ 50.
+    let entries = get_entries(&mut app, &path);
+    assert!(
+        entries.len() <= 50,
+        "entries must not exceed production cap"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M-5: Blob write errors surface as a degraded-mode diagnostic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blob_write_error_sets_degraded_diagnostic() {
+    let ws = TempWorkspace::new();
+    // Create a file at the path where the blob DIRECTORY would go, preventing
+    // dir creation and causing a write error.
+    let (mut app, path) = open_app_with_file(&ws, "src/err_test.rs", "fn err() {}\n");
+
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let canon_str = canonical.to_string_lossy();
+    let stripped = canon_str.trim_start_matches(r"\\?\");
+    let path_key = stripped.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    // Place a *file* where the blob dir should go so create_dir_all fails.
+    let history_base = ws.path().join(".legion").join("local-history");
+    fs::create_dir_all(&history_base).expect("create base");
+    let blocker_path = history_base.join(&path_key);
+    // Only place a blocker if the path doesn't already exist as a directory.
+    if !blocker_path.exists() {
+        fs::write(&blocker_path, b"blocker").expect("write blocker file");
+    }
+
+    // Attempt to save — the blob write will fail but the save itself should succeed.
+    let save_result = app.dispatch_ui_intent(CommandDispatchIntent::Save {
+        buffer_id: app.active_buffer_id().expect("buf"),
+    });
+    // Save outcome itself should be OK (blob write failure is non-fatal).
+    assert!(
+        save_result.is_ok(),
+        "save should succeed even if blob write fails: {:?}",
+        save_result.err()
+    );
+
+    // The degraded write error should be accessible.
+    let write_err = app.test_local_history_last_write_error();
+    assert!(
+        write_err.is_some(),
+        "a blob write error should set the degraded diagnostic"
+    );
+
+    // After a git refresh the error propagates into diagnostics.
+    let git_proj = app.refresh_git_projection();
+    assert!(
+        git_proj
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("local_history.write_degraded")),
+        "degraded write error must appear in git_projection.diagnostics; got: {:?}",
+        git_proj.diagnostics
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (preserve)
+// ---------------------------------------------------------------------------
+
 #[test]
 fn local_history_records_entry_after_save() {
     let ws = TempWorkspace::new();
     let (mut app, path) = open_app_with_file(&ws, "src/file.rs", "fn main() {}\n");
+    save_file(&mut app);
 
-    // Save the file.
-    let save_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::Save {
-            buffer_id: app.active_buffer_id().expect("active buffer"),
-        })
-        .expect("save should dispatch");
-    assert!(
-        matches!(save_result, AppCommandOutcome::Save(_)),
-        "expected Save outcome, got {save_result:?}"
-    );
-
-    // Query local history for this file.
-    let entries_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::RequestLocalHistoryEntries {
-            path: path.to_string_lossy().to_string(),
-        })
-        .expect("local history request should dispatch");
-
-    let entries = match entries_result {
-        AppCommandOutcome::LocalHistoryEntriesUpdated(e) => e,
-        other => panic!("expected LocalHistoryEntriesUpdated, got {other:?}"),
-    };
-
+    let entries = get_entries(&mut app, &path);
     assert_eq!(
         entries.len(),
         1,
@@ -136,14 +440,10 @@ fn local_history_records_entry_after_save() {
 fn local_history_records_multiple_saves() {
     let ws = TempWorkspace::new();
     let (mut app, path) = open_app_with_file(&ws, "src/multi.rs", "fn v1() {}\n");
-
     let buf = app.active_buffer_id().expect("active buffer");
 
-    // First save.
-    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
-        .expect("save 1");
+    save_file(&mut app);
 
-    // Modify content and save again.
     app.dispatch_ui_intent(CommandDispatchIntent::Insert {
         buffer_id: buf,
         at: legion_protocol::TextCoordinate {
@@ -155,26 +455,14 @@ fn local_history_records_multiple_saves() {
         text: "fn v2() {}\n".to_string(),
     })
     .expect("insert");
-    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
-        .expect("save 2");
+    save_file(&mut app);
 
-    let entries_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::RequestLocalHistoryEntries {
-            path: path.to_string_lossy().to_string(),
-        })
-        .expect("history request");
-
-    let entries = match entries_result {
-        AppCommandOutcome::LocalHistoryEntriesUpdated(e) => e,
-        other => panic!("{other:?}"),
-    };
-
+    let entries = get_entries(&mut app, &path);
     assert!(
         entries.len() >= 2,
         "two saves should produce at least two history entries; got {}",
         entries.len()
     );
-    // Entries should have distinct hashes (different content).
     let hashes: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.content_hash.as_str()).collect();
     assert!(
@@ -184,77 +472,17 @@ fn local_history_records_multiple_saves() {
 }
 
 #[test]
-fn local_history_retention_cap_is_enforced() {
-    let ws = TempWorkspace::new();
-    let (mut app, path) = open_app_with_file(&ws, "src/capped.rs", "fn v0() {}\n");
-
-    let buf = app.active_buffer_id().expect("active buffer");
-
-    // Produce MORE saves than the retention cap (50).
-    // For testing we just verify the cap is ≤ 50 after many saves.
-    // We'll do 5 saves with distinct content (cheaper test).
-    for i in 1..=5u32 {
-        app.dispatch_ui_intent(CommandDispatchIntent::Insert {
-            buffer_id: buf,
-            at: legion_protocol::TextCoordinate {
-                line: 0,
-                character: 0,
-                byte_offset: Some(0),
-                utf16_offset: Some(0),
-            },
-            text: format!("// v{i}\n"),
-        })
-        .expect("insert");
-        app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
-            .expect("save");
-    }
-
-    let entries = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RequestLocalHistoryEntries {
-            path: path.to_string_lossy().to_string(),
-        })
-        .expect("history")
-    {
-        AppCommandOutcome::LocalHistoryEntriesUpdated(e) => e,
-        other => panic!("{other:?}"),
-    };
-
-    assert!(
-        entries.len() <= 50,
-        "local history should be capped at 50 entries; got {}",
-        entries.len()
-    );
-    assert!(
-        entries.len() >= 1,
-        "should have at least one entry after saving"
-    );
-}
-
-#[test]
 fn restore_from_local_history_uses_proposal_route() {
     let ws = TempWorkspace::new();
     let (mut app, path) = open_app_with_file(&ws, "src/restore.rs", "fn original() {}\n");
-
     let buf = app.active_buffer_id().expect("active buffer");
 
-    // Save original content.
-    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
-        .expect("save original");
+    save_file(&mut app);
 
-    // Get the entry id.
-    let entries = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RequestLocalHistoryEntries {
-            path: path.to_string_lossy().to_string(),
-        })
-        .expect("history request")
-    {
-        AppCommandOutcome::LocalHistoryEntriesUpdated(e) => e,
-        other => panic!("{other:?}"),
-    };
+    let entries = get_entries(&mut app, &path);
     assert!(!entries.is_empty(), "should have history entry");
     let entry_id = entries[0].entry_id.clone();
 
-    // Modify content.
     app.dispatch_ui_intent(CommandDispatchIntent::Insert {
         buffer_id: buf,
         at: legion_protocol::TextCoordinate {
@@ -266,23 +494,18 @@ fn restore_from_local_history_uses_proposal_route() {
         text: "// modified\n".to_string(),
     })
     .expect("insert");
-    app.dispatch_ui_intent(CommandDispatchIntent::Save { buffer_id: buf })
-        .expect("save modified");
+    save_file(&mut app);
 
-    // Restore from history — should go through proposal/edit route, NOT a direct write.
     let restore_result = app.dispatch_ui_intent(CommandDispatchIntent::RestoreFromLocalHistory {
         path: path.to_string_lossy().to_string(),
         entry_id,
     });
 
-    // The result should be OK (not an Err), and should be an edit or save outcome.
     assert!(
         restore_result.is_ok(),
         "restore should succeed, got: {:?}",
         restore_result.err()
     );
-    // Content blob must have been written under .legion/local-history, NOT directly back to disk by restore.
-    // We verify the .legion/local-history dir exists.
     let history_dir = ws.path().join(".legion").join("local-history");
     assert!(
         history_dir.exists(),

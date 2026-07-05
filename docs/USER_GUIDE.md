@@ -77,7 +77,7 @@ Content blobs are written to `.legion/local-history/<path-key>/` inside the work
 
 To browse or restore from local history:
 
-1. Open the command palette and run **File: Show Local History**.
+1. Open the command palette and run **Git: Local History**.
 2. Select the entry to restore.
 3. The restore goes through the standard proposal/save workflow — it inherits fingerprint, version, generation, and correlation/causality tracking; no direct writes occur.
 

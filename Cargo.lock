@@ -3807,6 +3807,7 @@ dependencies = [
  "legion-ui",
  "regex",
  "serde_json",
+ "sha2",
  "syntect",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -4045,6 +4046,7 @@ dependencies = [
  "legion-security",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "uuid",
 ]

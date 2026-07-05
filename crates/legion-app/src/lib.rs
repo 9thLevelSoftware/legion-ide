@@ -11879,6 +11879,7 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         // Navigation state and local history entries are injected at the app layer after build.
         focused_hunk_id: None,
         commit_validation_warnings: Vec::new(),
+        commit_validation_errors: Vec::new(),
         local_history_entries: Vec::new(),
     }
 }
@@ -13087,6 +13088,8 @@ pub struct AppComposition {
     focused_git_hunk_id: Option<String>,
     /// In-memory local history metadata store (content blobs live on disk).
     local_history_store: legion_storage::local_history::LocalHistoryMetadataStore,
+    /// Last blob-write error, if any, propagated as a degraded-mode diagnostic.
+    local_history_last_write_error: Option<String>,
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
@@ -13156,6 +13159,7 @@ impl AppComposition {
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
+            local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
@@ -14457,8 +14461,19 @@ impl AppComposition {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
+                // Hard-fail validation: empty summary or missing author identity block the commit.
+                let validation =
+                    legion_project::validate_commit_with_author(Path::new(root_path), &message);
+                if !validation.is_valid() {
+                    self.git_projection.commit_validation_errors = validation.errors;
+                    self.git_projection.commit_validation_warnings = validation.warnings;
+                    return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
+                }
                 commit_git_changes(Path::new(root_path), &message)
                     .map_err(git_inspection_protocol_error)?;
+                // Clear stale validation state after a successful commit.
+                self.git_projection.commit_validation_errors = Vec::new();
+                self.git_projection.commit_validation_warnings = Vec::new();
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
             AppCommandRequest::SwitchGitBranch { branch } => {
@@ -14592,13 +14607,14 @@ impl AppComposition {
             }
             AppCommandRequest::ValidateGitCommitMessage { message } => {
                 let root_path = self.active_documents.workspace_root_path.as_deref();
-                let warnings = if let Some(root) = root_path {
+                let (errors, warnings) = if let Some(root) = root_path {
                     let result =
                         legion_project::validate_commit_with_author(Path::new(root), &message);
-                    result.warnings
+                    (result.errors, result.warnings)
                 } else {
-                    vec![]
+                    (vec![], vec![])
                 };
+                self.git_projection.commit_validation_errors = errors;
                 self.git_projection.commit_validation_warnings = warnings;
                 Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()))
             }
@@ -18467,6 +18483,12 @@ impl AppComposition {
         // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
         // not in the project snapshot, so it must be injected after each build.
         self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        // Propagate any local-history blob-write degradation as a diagnostic.
+        if let Some(ref err) = self.local_history_last_write_error {
+            self.git_projection
+                .diagnostics
+                .push(format!("local_history.write_degraded: {err}"));
+        }
         self.git_projection.clone()
     }
 
@@ -18545,6 +18567,40 @@ impl AppComposition {
             .collect()
     }
 
+    /// Return the count of in-memory history entries for a given canonical path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_local_history_entry_count(&self, path: &str) -> usize {
+        self.local_history_store.entry_count(path)
+    }
+
+    /// Prune history for `path` to `max_count` entries and delete evicted blobs.
+    ///
+    /// Test-only helper for exercising the eviction boundary without needing
+    /// the production 50-entry cap.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_prune_local_history(&mut self, path: &str, max_count: usize) -> Vec<String> {
+        let evicted = self.local_history_store.prune(path, max_count, u64::MAX);
+        if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
+            let canonical_without_unc = strip_unc_prefix(path);
+            let path_key =
+                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let blob_dir = std::path::PathBuf::from(root)
+                .join(".legion")
+                .join("local-history")
+                .join(&path_key);
+            for hash in &evicted {
+                let _ = std::fs::remove_file(blob_dir.join(format!("{hash}.blob")));
+            }
+        }
+        evicted
+    }
+
+    /// Return the last local-history write error, if any.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_local_history_last_write_error(&self) -> Option<&str> {
+        self.local_history_last_write_error.as_deref()
+    }
+
     /// Record a local history entry for the given file save.
     ///
     /// This writes the content blob to `.legion/local-history/<path_key>/<hash>.blob`
@@ -18556,15 +18612,16 @@ impl AppComposition {
         content: &str,
         correlation_id_str: &str,
     ) {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         let size_bytes = content.len() as u64;
 
-        // Compute a deterministic hash from the content (hex string).
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        let content_hash = format!("{:016x}", hasher.finish());
+        // Compute a stable SHA-256 content hash (hex string, 64 chars).
+        let content_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
 
         // Build the blob directory path.
         let blob_dir = if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
@@ -18581,17 +18638,40 @@ impl AppComposition {
             return; // No workspace; skip.
         };
 
-        // Write blob (best-effort; do not fail save if this fails).
-        let _ = std::fs::create_dir_all(&blob_dir);
-        let blob_path = blob_dir.join(format!("{content_hash}.blob"));
-        let _ = std::fs::write(&blob_path, content.as_bytes());
+        // Ensure the .legion/local-history/ parent dir has a .gitignore so user git
+        // never picks up content blobs, regardless of the root .gitignore.
+        if let Some(parent) = blob_dir.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                self.local_history_last_write_error = Some(format!("create_dir {e}"));
+                return;
+            }
+            let gi_path = parent.join(".gitignore");
+            if !gi_path.exists() {
+                let _ = std::fs::write(&gi_path, "*\n");
+            }
+        }
+
+        // Write blob; capture errors for degraded-mode diagnostic — do not fail the save.
+        let dir_err = std::fs::create_dir_all(&blob_dir).err();
+        let write_err = if dir_err.is_none() {
+            let blob_path = blob_dir.join(format!("{content_hash}.blob"));
+            std::fs::write(&blob_path, content.as_bytes()).err()
+        } else {
+            dir_err
+        };
+        if let Some(err) = write_err {
+            self.local_history_last_write_error = Some(err.to_string());
+        } else {
+            self.local_history_last_write_error = None;
+        }
 
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let entry_id = format!("{}-{}", canonical_path.len(), timestamp_ms);
+        // Collision-proof entry identifier using UUID v7.
+        let entry_id = uuid::Uuid::now_v7().to_string();
 
         let record = legion_storage::local_history::LocalHistoryRecord {
             entry_id,
@@ -18605,8 +18685,15 @@ impl AppComposition {
         };
 
         self.local_history_store.push_record(record);
-        self.local_history_store
+        // Prune returns evicted content hashes; delete the corresponding blob files.
+        let blob_dir_for_prune = blob_dir.clone();
+        let evicted_hashes = self
+            .local_history_store
             .prune(canonical_path, 50, 50 * 1024 * 1024);
+        for hash in evicted_hashes {
+            let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
+            let _ = std::fs::remove_file(&evicted_blob);
+        }
     }
 
     /// Restore a file from a local history entry by applying a full-replace edit through the
@@ -18711,6 +18798,11 @@ impl AppComposition {
                 &format!("cannot create evidence directory: {e}"),
             )
         })?;
+        // Ensure evidence dir has a .gitignore so user git never picks up evidence files.
+        let gi_path = evidence_dir.join(".gitignore");
+        if !gi_path.exists() {
+            let _ = std::fs::write(&gi_path, "*\n");
+        }
 
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

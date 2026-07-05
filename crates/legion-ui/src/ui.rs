@@ -1594,6 +1594,9 @@ pub struct GitProjection {
     /// Advisory commit-message validation warnings (e.g. missing CC prefix).
     /// Empty when the last validated message was clean.
     pub commit_validation_warnings: Vec<String>,
+    /// Hard commit-message validation errors (e.g. empty summary, missing author identity).
+    /// Non-empty means the commit action is blocked until these are resolved.
+    pub commit_validation_errors: Vec<String>,
     /// Local history entries for the currently active file, newest first.
     /// Populated by `RequestLocalHistoryEntries`; empty on idle.
     pub local_history_entries: Vec<LocalHistoryEntryProjection>,
@@ -1619,6 +1622,7 @@ impl GitProjection {
             schema_version: 1,
             focused_hunk_id: None,
             commit_validation_warnings: Vec::new(),
+            commit_validation_errors: Vec::new(),
             local_history_entries: Vec::new(),
         }
     }

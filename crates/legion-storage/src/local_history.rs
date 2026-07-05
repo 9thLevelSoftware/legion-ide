@@ -87,20 +87,30 @@ impl LocalHistoryMetadataStore {
     /// Removes the oldest entries until both:
     /// - the count is at most `max_count`, and
     /// - the total `size_bytes` is at most `max_size_bytes`.
-    pub fn prune(&mut self, canonical_path: &str, max_count: usize, max_size_bytes: u64) {
+    ///
+    /// Returns the `content_hash` values of every evicted record so the caller
+    /// can delete the corresponding on-disk blob files.
+    pub fn prune(
+        &mut self,
+        canonical_path: &str,
+        max_count: usize,
+        max_size_bytes: u64,
+    ) -> Vec<String> {
         let Some(list) = self.records.get_mut(canonical_path) else {
-            return;
+            return Vec::new();
         };
+        let mut evicted_hashes = Vec::new();
         // Count cap: remove from front (oldest).
         while list.len() > max_count {
-            list.remove(0);
+            evicted_hashes.push(list.remove(0).content_hash);
         }
         // Size cap: remove from front until under budget.
         let mut total: u64 = list.iter().map(|r| r.size_bytes).sum();
         while total > max_size_bytes && !list.is_empty() {
             total = total.saturating_sub(list[0].size_bytes);
-            list.remove(0);
+            evicted_hashes.push(list.remove(0).content_hash);
         }
+        evicted_hashes
     }
 
     /// Return the number of recorded entries for the given path.
@@ -170,7 +180,10 @@ mod tests {
                 100,
             ));
         }
-        store.prune("src/c.rs", 5, u64::MAX);
+        let evicted = store.prune("src/c.rs", 5, u64::MAX);
+        // Five oldest entries evicted.
+        assert_eq!(evicted.len(), 5);
+        assert!(evicted.contains(&"h0".to_string()));
         assert_eq!(store.entry_count("src/c.rs"), 5);
         // Oldest entries should have been removed.
         let records = store.records_for_file("src/c.rs", 10);
@@ -189,8 +202,25 @@ mod tests {
             ));
         }
         // Cap at 400 bytes: should keep 2 newest.
-        store.prune("src/d.rs", 100, 400);
+        let evicted = store.prune("src/d.rs", 100, 400);
+        assert_eq!(evicted.len(), 3);
         assert_eq!(store.entry_count("src/d.rs"), 2);
+    }
+
+    #[test]
+    fn prune_returns_evicted_content_hashes() {
+        let mut store = LocalHistoryMetadataStore::new();
+        store.push_record(make_record("e1", "src/g.rs", "old-hash-1", 50));
+        store.push_record(make_record("e2", "src/g.rs", "old-hash-2", 50));
+        store.push_record(make_record("e3", "src/g.rs", "keep-hash", 50));
+
+        // Cap to 1 entry; oldest two should be evicted.
+        let evicted = store.prune("src/g.rs", 1, u64::MAX);
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&"old-hash-1".to_string()));
+        assert!(evicted.contains(&"old-hash-2".to_string()));
+        assert!(!evicted.contains(&"keep-hash".to_string()));
+        assert_eq!(store.entry_count("src/g.rs"), 1);
     }
 
     #[test]

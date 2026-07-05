@@ -386,6 +386,9 @@ pub enum GitInspectionError {
     /// Git output could not be interpreted.
     #[error("git output parse error: {0}")]
     Parse(String),
+    /// Input validation failed before any git command was run.
+    #[error("git input validation error: {0}")]
+    InvalidInput(String),
 }
 
 /// Configurable bounds for git projection collection.
@@ -1350,12 +1353,73 @@ pub fn validate_commit_with_author(
 /// Uses `git worktree add <worktree_path> <branch>`.  The branch must already
 /// exist; creating the branch alongside the worktree is the caller's
 /// responsibility.
+///
+/// # Validation
+///
+/// Rejects paths that contain `..` components, absolute paths that fall outside
+/// the workspace parent directory, and paths that already exist on disk.
 pub fn create_git_worktree(
     root: impl AsRef<Path>,
     branch: &str,
     worktree_path: impl AsRef<Path>,
 ) -> Result<(), GitInspectionError> {
-    let path_str = worktree_path.as_ref().to_string_lossy().into_owned();
+    let worktree_ref = worktree_path.as_ref();
+
+    // Reject `..` traversal components.
+    for component in worktree_ref.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must not contain '..' traversal components".to_string(),
+            ));
+        }
+    }
+
+    // For absolute paths, validate they fall within the workspace parent directory.
+    if worktree_ref.is_absolute() {
+        let root_ref = root.as_ref();
+        let allowed_parent = root_ref.parent().unwrap_or(root_ref);
+        // Canonicalize allowed_parent if possible; fall back to plain comparison.
+        // On Windows, canonicalize returns a UNC path (`\\?\C:\...`).  Strip that
+        // prefix so that raw (non-canonicalized) worktree paths — which may not
+        // exist on disk yet — can still be compared with starts_with.
+        let starts_within_parent = std::fs::canonicalize(allowed_parent)
+            .map(|canon_parent| {
+                let canon_str = canon_parent.to_string_lossy();
+                let normalized_str = canon_str.strip_prefix(r"\\?\").unwrap_or(&canon_str);
+                let normalized_parent = PathBuf::from(normalized_str);
+                std::fs::canonicalize(worktree_ref)
+                    .map(|canon_wt| {
+                        let wt_str = canon_wt.to_string_lossy();
+                        let wt_stripped = wt_str.strip_prefix(r"\\?\").unwrap_or(&wt_str);
+                        PathBuf::from(wt_stripped).starts_with(&normalized_parent)
+                    })
+                    // Not yet on disk: compare raw path against de-UNC'd parent.
+                    .unwrap_or_else(|_| worktree_ref.starts_with(&normalized_parent))
+            })
+            .unwrap_or_else(|_| worktree_ref.starts_with(allowed_parent));
+        if !starts_within_parent {
+            return Err(GitInspectionError::InvalidInput(
+                "worktree path must reside within the workspace parent directory".to_string(),
+            ));
+        }
+    }
+
+    // Reject paths that already exist on disk to prevent accidental overwrites.
+    let resolved = if worktree_ref.is_absolute() {
+        worktree_ref.to_path_buf()
+    } else {
+        root.as_ref()
+            .parent()
+            .unwrap_or(root.as_ref())
+            .join(worktree_ref)
+    };
+    if resolved.exists() {
+        return Err(GitInspectionError::InvalidInput(
+            "worktree path already exists on disk".to_string(),
+        ));
+    }
+
+    let path_str = worktree_ref.to_string_lossy().into_owned();
     git_stdout(root.as_ref(), &["worktree", "add", &path_str, branch], None)?;
     Ok(())
 }

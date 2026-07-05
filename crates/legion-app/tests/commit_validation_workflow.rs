@@ -1,7 +1,8 @@
-/// Task 2: Commit message and author validation.
+/// Task 2 + fix-round I-1: Commit message and author validation.
 ///
-/// Non-empty message + author config are hard errors; non-conventional-commits
-/// prefix is a warn-only advisory that still allows the commit to proceed.
+/// Non-empty message + author config are hard errors that block CommitGitChanges
+/// (returned as projected errors in commit_validation_errors, not as Err).
+/// Non-conventional-commits prefix is a warn-only advisory (commit proceeds).
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -69,8 +70,7 @@ impl TempGitRepo {
         fs::create_dir(&root).expect("temp dir");
         run_git(&root, ["init"]);
         run_git(&root, ["branch", "-M", "master"]);
-        // Do NOT configure user.name or user.email so validation picks that up.
-        // Also unset any global config by overriding with empty values.
+        // Explicitly empty name/email so validate_commit_with_author sees missing identity.
         run_git(&root, ["config", "user.name", ""]);
         run_git(&root, ["config", "user.email", ""]);
         Self { root }
@@ -105,18 +105,14 @@ impl Drop for TempGitRepo {
 }
 
 fn run_git<const N: usize>(root: &Path, args: [&str; N]) {
-    let status = Command::new("git")
+    let _ = Command::new("git")
         .current_dir(root)
         .args(args)
         .status()
         .expect("git command");
-    // Some git invocations (like config with empty values) may return non-zero.
-    // We allow them here intentionally.
-    let _ = status;
 }
 
 fn setup_staged_change(repo: &TempGitRepo) {
-    // Create and commit an initial file, then stage a change.
     repo.write("src/lib.rs", "pub fn hello() {}\n");
     let _ = Command::new("git")
         .current_dir(repo.path())
@@ -164,7 +160,6 @@ fn commit_validation_blank_message_is_hard_error() {
 fn commit_validation_missing_author_is_hard_error() {
     let repo = TempGitRepo::new_without_author();
     let result = legion_project::validate_commit_with_author(repo.path(), "feat: add thing");
-    // Should error on missing author (name or email)
     assert!(
         !result.errors.is_empty(),
         "missing git author should produce hard errors; got warnings={:?} errors={:?}",
@@ -177,7 +172,6 @@ fn commit_validation_missing_author_is_hard_error() {
 fn commit_validation_non_cc_prefix_is_warning_only() {
     let repo = TempGitRepo::new_with_author();
     let result = legion_project::validate_commit_with_author(repo.path(), "add new feature");
-    // No hard errors (author is configured), but should have a CC warning.
     assert!(
         result.errors.is_empty(),
         "non-CC subject with configured author should have no hard errors; errors={:?}",
@@ -210,7 +204,7 @@ fn commit_validation_cc_prefix_is_warning_free() {
     }
 }
 
-// ─── App-level: commit projection contains validation warnings ─────────────────
+// ─── App-level: ValidateGitCommitMessage propagates both errors and warnings ──
 
 #[test]
 fn commit_validation_warnings_surfaced_in_git_projection() {
@@ -225,7 +219,6 @@ fn commit_validation_warnings_surfaced_in_git_projection() {
     )
     .expect("workspace open");
 
-    // Validate a message with no CC prefix through the intent.
     let projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::ValidateGitCommitMessage {
             message: "add thing without prefix".to_string(),
@@ -239,6 +232,40 @@ fn commit_validation_warnings_surfaced_in_git_projection() {
     assert!(
         !projection.commit_validation_warnings.is_empty(),
         "non-CC message should produce warnings in projection"
+    );
+    // No hard errors because author is configured.
+    assert!(
+        projection.commit_validation_errors.is_empty(),
+        "non-CC message with valid author should have no errors"
+    );
+}
+
+#[test]
+fn commit_validation_missing_author_errors_surfaced_via_validate_intent() {
+    let repo = TempGitRepo::new_without_author();
+    setup_staged_change(&repo);
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("val-test".to_string()),
+    )
+    .expect("workspace open");
+
+    let projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::ValidateGitCommitMessage {
+            message: "feat: something".to_string(),
+        })
+        .expect("validate should dispatch")
+    {
+        AppCommandOutcome::GitUpdated(p) => p,
+        other => panic!("expected GitUpdated, got {other:?}"),
+    };
+
+    assert!(
+        !projection.commit_validation_errors.is_empty(),
+        "missing author identity must surface as commit_validation_errors in the projection"
     );
 }
 
@@ -269,8 +296,16 @@ fn commit_validation_cc_message_clears_warnings() {
         projection.commit_validation_warnings.is_empty(),
         "CC message should clear all validation warnings"
     );
+    assert!(
+        projection.commit_validation_errors.is_empty(),
+        "CC message with valid author should have no errors"
+    );
 }
 
+// ─── App-level I-1: CommitGitChanges hard-fails on invalid commit ─────────────
+
+/// I-1: CommitGitChanges with an empty summary must return a projected error
+/// (commit_validation_errors non-empty) without actually committing.
 #[test]
 fn commit_with_empty_message_is_blocked_by_app() {
     let repo = TempGitRepo::new_with_author();
@@ -286,11 +321,66 @@ fn commit_with_empty_message_is_blocked_by_app() {
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("refresh");
 
-    let outcome = app.dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
-        message: "".to_string(),
-    });
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
+            message: "".to_string(),
+        })
+        .expect("CommitGitChanges should not return Err; hard-fail is projected");
+
+    let projection = match outcome {
+        AppCommandOutcome::GitUpdated(p) => p,
+        other => panic!("expected GitUpdated with errors, got {other:?}"),
+    };
+
     assert!(
-        outcome.is_err(),
-        "committing with empty message should return an error"
+        !projection.commit_validation_errors.is_empty(),
+        "empty message must produce commit_validation_errors; got: {:?}",
+        projection.commit_validation_errors
+    );
+}
+
+/// I-1: CommitGitChanges with missing author identity must return a projected
+/// error and must NOT create a new commit.
+#[test]
+fn commit_with_missing_author_is_blocked_end_to_end() {
+    let repo = TempGitRepo::new_without_author();
+    setup_staged_change(&repo);
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("val-test".to_string()),
+    )
+    .expect("workspace open");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("refresh");
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
+            message: "feat: should be blocked".to_string(),
+        })
+        .expect("CommitGitChanges should return Ok even when blocked");
+
+    let projection = match outcome {
+        AppCommandOutcome::GitUpdated(p) => p,
+        other => panic!("expected GitUpdated with errors, got {other:?}"),
+    };
+
+    assert!(
+        !projection.commit_validation_errors.is_empty(),
+        "missing author must produce commit_validation_errors"
+    );
+
+    // Verify no commit was actually made.
+    let log_output = Command::new("git")
+        .current_dir(repo.path())
+        .args(["log", "--oneline", "-5"])
+        .output()
+        .expect("git log");
+    let log = String::from_utf8_lossy(&log_output.stdout);
+    assert!(
+        !log.contains("should be blocked"),
+        "no commit should have been made; git log:\n{log}"
     );
 }
