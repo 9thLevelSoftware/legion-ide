@@ -343,3 +343,212 @@ fn unix_env_deny_list_stripped_at_pty_spawn() {
         outcome.audit.session_id.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 5 (TERM.07): passthrough=false smoke — minimal baseline only.
+//
+// The policy with passthrough_env=false must produce a minimal safe baseline,
+// NOT an empty env. An empty env crashes cmd.exe (missing SystemRoot) and
+// degrades Unix shells (missing PATH/HOME). The baseline must also still apply
+// the deny-prefix filter so no LEGION_SECRET* vars slip through.
+//
+// Assertions:
+//   (a) the shell runs a trivial command successfully (env is non-empty / valid)
+//   (b) a secret var set in the test process is absent from the shell's output
+//   (c) an arbitrary non-baseline var set in the test process is also absent
+// ---------------------------------------------------------------------------
+
+/// Windows: the minimal baseline env (SystemRoot+PATH+…) is sufficient for cmd.exe to
+/// start, execute a command, and exit — and it excludes secret + non-baseline vars.
+///
+/// This test builds the baseline manually (mirroring `TerminalEnvPolicy::effective_env`
+/// when `passthrough_env=false`) to avoid a circular crate dependency, but exercises the
+/// same PTY spawn path as the full product.
+#[cfg(windows)]
+#[test]
+fn windows_passthrough_false_minimal_baseline_is_safe_and_isolated() {
+    use legion_platform::{NativePtyService, PtyRequest, PtyService};
+
+    const SECRET_KEY: &str = "LEGION_SECRET_PASSTHROUGH_FALSE_TEST";
+    const SECRET_VAL: &str = "should-be-absent-baseline-test";
+    const CUSTOM_KEY: &str = "TERM_TEST_CUSTOM_NON_BASELINE_ISOLATION";
+    const CUSTOM_VAL: &str = "should-also-be-absent-baseline-test";
+
+    // SAFETY: env mutations are test-local; unique keys cleaned up before assertions.
+    unsafe {
+        std::env::set_var(SECRET_KEY, SECRET_VAL);
+        std::env::set_var(CUSTOM_KEY, CUSTOM_VAL);
+    }
+
+    // Build the Windows baseline env (mirrors PLATFORM_BASELINE_KEYS in terminal_policy.rs).
+    // LEGION_SECRET* prefixed keys are excluded (deny-list). The custom test key is not
+    // in the baseline set so it must also be absent from the output.
+    const BASELINE_KEYS: &[&str] = &[
+        "SystemRoot",
+        "SystemDrive",
+        "PATH",
+        "TEMP",
+        "TMP",
+        "COMSPEC",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "windir",
+    ];
+    let baseline: Vec<(String, String)> = BASELINE_KEYS
+        .iter()
+        .filter(|&&key| !key.to_ascii_uppercase().starts_with("LEGION_SECRET"))
+        .filter_map(|&key| {
+            std::env::vars()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| (key.to_string(), v))
+        })
+        .collect();
+
+    // Pre-condition: baseline must contain SystemRoot and PATH, and NOT our custom vars.
+    assert!(
+        baseline
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")),
+        "Windows baseline must include SystemRoot"
+    );
+    assert!(
+        baseline.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH")),
+        "baseline must include PATH"
+    );
+    assert!(
+        !baseline.iter().any(|(k, _)| k == CUSTOM_KEY),
+        "non-baseline custom var must not be in the baseline"
+    );
+    assert!(
+        !baseline.iter().any(|(k, _)| k == SECRET_KEY),
+        "secret var must be stripped from the baseline"
+    );
+
+    // Spawn cmd echoing the vars. If SystemRoot is missing cmd.exe won't start at all.
+    let service = NativePtyService;
+    let request = PtyRequest {
+        command: "cmd".to_string(),
+        args: vec![
+            "/C".to_string(),
+            format!(
+                "echo secret=%{}% custom=%{}% path_ok=%PATH%",
+                SECRET_KEY, CUSTOM_KEY
+            ),
+        ],
+        cwd: None,
+        env: Some(baseline),
+    };
+    let session = service
+        .spawn_pty(&request)
+        .expect("baseline-env cmd spawn must succeed");
+
+    // Poll for output until we see "path_ok=" or timeout.
+    let mut output = session.output.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !output.contains("path_ok=") && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        match service.read_pty(&session.id, 64 * 1024) {
+            Ok(chunk) => {
+                output.push_str(&chunk.output);
+                if chunk.exited {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    unsafe {
+        std::env::remove_var(SECRET_KEY);
+        std::env::remove_var(CUSTOM_KEY);
+    }
+
+    eprintln!("[TERM-PASSTHROUGH-FALSE windows] output={output:?}");
+
+    // (a) Shell ran successfully — PATH was expanded.
+    assert!(
+        output.contains("path_ok="),
+        "cmd.exe must run with baseline env; output: {output:?}"
+    );
+    // (b) Secret var is absent.
+    assert!(
+        !output.contains(SECRET_VAL),
+        "secret var must NOT appear in baseline-env cmd output; output: {output:?}"
+    );
+    // (c) Non-baseline custom var is absent.
+    assert!(
+        !output.contains(CUSTOM_VAL),
+        "non-baseline custom var must NOT appear in baseline-env cmd output; output: {output:?}"
+    );
+}
+
+/// Unix: the minimal baseline env (PATH+HOME+…) is sufficient for bash to start and
+/// execute a trivial command, and it excludes secret + non-baseline vars.
+#[cfg(unix)]
+#[test]
+fn unix_passthrough_false_minimal_baseline_is_safe_and_isolated() {
+    const SECRET_KEY: &str = "LEGION_SECRET_PASSTHROUGH_FALSE_TEST";
+    const SECRET_VAL: &str = "should-be-absent-baseline-test";
+    const CUSTOM_KEY: &str = "TERM_TEST_CUSTOM_NON_BASELINE_ISOLATION";
+    const CUSTOM_VAL: &str = "should-also-be-absent-baseline-test";
+
+    unsafe {
+        std::env::set_var(SECRET_KEY, SECRET_VAL);
+        std::env::set_var(CUSTOM_KEY, CUSTOM_VAL);
+    }
+
+    // Build Unix baseline (mirrors PLATFORM_BASELINE_KEYS in terminal_policy.rs).
+    const BASELINE_KEYS: &[&str] = &["PATH", "HOME", "TERM", "USER", "SHELL", "LOGNAME"];
+    let baseline: Vec<(String, String)> = BASELINE_KEYS
+        .iter()
+        .filter_map(|&key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
+        .collect();
+
+    assert!(
+        baseline.iter().any(|(k, _)| k == "PATH"),
+        "Unix baseline must include PATH"
+    );
+    assert!(
+        !baseline.iter().any(|(k, _)| k == CUSTOM_KEY),
+        "non-baseline custom var must not be in the baseline"
+    );
+
+    let request = make_launch_request_with_env(
+        "bash",
+        vec![
+            "-c".to_string(),
+            format!(
+                "printf 'secret=${{{}}} custom=${{{}}} path_ok=${{PATH}}'",
+                SECRET_KEY, CUSTOM_KEY
+            ),
+        ],
+        baseline,
+    );
+
+    let runtime = TerminalRuntime::new(TerminalRuntimeConfig::enabled(), NativePtyService);
+    let outcome = runtime
+        .launch(request)
+        .expect("baseline-env bash launch must succeed");
+
+    unsafe {
+        std::env::remove_var(SECRET_KEY);
+        std::env::remove_var(CUSTOM_KEY);
+    }
+
+    let output = &outcome.output.redacted_payload;
+    eprintln!("[TERM-PASSTHROUGH-FALSE unix] output={output:?}");
+
+    assert!(
+        output.contains("path_ok="),
+        "bash must run with baseline env; output: {output:?}"
+    );
+    assert!(
+        !output.contains(SECRET_VAL),
+        "secret var must NOT appear; output: {output:?}"
+    );
+    assert!(
+        !output.contains(CUSTOM_VAL),
+        "non-baseline custom var must NOT appear; output: {output:?}"
+    );
+}

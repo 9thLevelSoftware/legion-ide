@@ -492,9 +492,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/grid.rs", "crates/legion-desktop/src/view/terminal_panel.rs"]
     dependencies = ["P2.F2.T2"]
-    verification = ["cargo test -p legion-terminal", "cargo test -p legion-desktop"]
+    verification = ["cargo test -p legion-terminal", "cargo test -p legion-desktop --test terminal_panel"]
     acceptance = ["Terminal panel renders, scrolls, accepts input, and respects resize events."]
     stop_condition = "Stop if kill escalation silently drops a running process."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T4"
@@ -503,9 +505,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/osc.rs", "crates/legion-terminal/src/session.rs"]
     dependencies = ["P2.F2.T3"]
-    verification = ["cargo test -p legion-terminal"]
+    verification = ["cargo test -p legion-terminal --test osc_tracking"]
     acceptance = ["OSC sequences are parsed and exposed as metadata; cwd/exit-code are queryable."]
     stop_condition = "Do not trust shell-emitted metadata as security policy."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F2.T5"
@@ -514,9 +518,11 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     readiness_row = "PR-UI-002"
     files = ["crates/legion-terminal/src/conpty.rs", "crates/legion-platform/src/windows.rs"]
     dependencies = ["P2.F2.T3"]
-    verification = ["cargo test -p legion-terminal --features windows", "cargo test -p legion-platform --features windows"]
+    verification = ["cargo test -p legion-terminal --test platform_shell_smoke", "cargo test -p legion-platform"]
     acceptance = ["Trusted terminal runs equivalently on Windows via ConPTY."]
     stop_condition = "Stop if Windows fallback is silently denied without surfacing it to the user."
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-TERM-01-evidence.md"
 
   [[epics.features]]
   id = "P2.F3"

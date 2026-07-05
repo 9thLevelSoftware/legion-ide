@@ -1633,8 +1633,11 @@ fn push_windows_backslashes(output: &mut String, count: usize) {
 
 #[cfg(windows)]
 fn windows_environment_block(vars: &[(String, String)]) -> Vec<u16> {
+    // CreateProcessW requires the environment block to be sorted case-insensitively by key.
+    let mut sorted: Vec<&(String, String)> = vars.iter().collect();
+    sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
     let mut block = Vec::new();
-    for (key, value) in vars {
+    for (key, value) in sorted {
         block.extend(wide_null(&format!("{key}={value}")));
     }
     block.push(0);
@@ -2630,5 +2633,31 @@ mod tests {
         fake.write_text_file(Path::new("/tmp"), "x").expect("ok");
         assert_eq!(text, "ok");
         assert_eq!(list.len(), 2);
+    }
+
+    /// CreateProcessW requires the env block to be sorted case-insensitively by key.
+    #[test]
+    #[cfg(windows)]
+    fn windows_environment_block_is_sorted_case_insensitively() {
+        let vars = vec![
+            ("zeta".to_string(), "1".to_string()),
+            ("ALPHA".to_string(), "2".to_string()),
+            ("Beta".to_string(), "3".to_string()),
+            ("GAMMA".to_string(), "4".to_string()),
+            ("alpha_extra".to_string(), "5".to_string()),
+        ];
+        let block = windows_environment_block(&vars);
+
+        // Decode the wide block back to key=value strings (strip the trailing double-null).
+        let block_str = String::from_utf16_lossy(&block);
+        let entries: Vec<&str> = block_str.trim_end_matches('\0').split('\0').collect();
+        let keys: Vec<&str> = entries.iter().filter_map(|e| e.split('=').next()).collect();
+
+        // Keys must appear in case-insensitive alphabetical order.
+        let expected = ["ALPHA", "alpha_extra", "Beta", "GAMMA", "zeta"];
+        assert_eq!(
+            keys, expected,
+            "windows_environment_block keys must be sorted case-insensitively; got: {keys:?}"
+        );
     }
 }

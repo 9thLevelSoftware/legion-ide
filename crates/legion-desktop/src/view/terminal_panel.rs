@@ -31,7 +31,7 @@ impl TerminalPanelRenderModel {
     /// Build a terminal render model from protocol projection state.
     pub fn from_projection(projection: &TerminalPanelProjection, max_rows: usize) -> Self {
         Self {
-            status_label: format!("status={:?}", projection.status.kind),
+            status_label: format!("status={}", projection.status.kind.display_label()),
             active_session_label: projection
                 .active_session_id
                 .map(|session_id| format!("session={}", session_id.0)),

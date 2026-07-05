@@ -39,9 +39,9 @@ Done.
 cargo test -p legion-app --test terminal_workflow
 ```
 
-CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`  
-Start: 2026-07-04  
-End: 2026-07-04  
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 (time not recorded; see fix-round-2 Command 6 for timestamped re-run)
+End:   2026-07-04
 Exit code: 0
 
 ```
@@ -65,9 +65,9 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 cargo test -p legion-app
 ```
 
-CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`  
-Start: 2026-07-04  
-End: 2026-07-04  
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 (time not recorded)
+End:   2026-07-04
 Exit code: 0
 
 All tests passed (unit tests in terminal_policy module + all integration tests).
@@ -78,9 +78,9 @@ All tests passed (unit tests in terminal_policy module + all integration tests).
 cargo test -p legion-terminal --test platform_shell_smoke
 ```
 
-CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`  
-Start: 2026-07-04  
-End: 2026-07-04  
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 (time not recorded; see fix-round-2 Command 7 for timestamped re-run)
+End:   2026-07-04
 Exit code: 0
 
 ```
@@ -94,9 +94,9 @@ test windows_powershell_core_launch_smoke ... ok
 cargo test -p legion-security
 ```
 
-CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`  
-Start: 2026-07-04  
-End: 2026-07-04  
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 (time not recorded)
+End:   2026-07-04
 Exit code: 0
 
 All tests passed (including taxonomy classification tests for `pwsh` and `zsh`).
@@ -107,9 +107,9 @@ All tests passed (including taxonomy classification tests for `pwsh` and `zsh`).
 cargo test -p legion-platform
 ```
 
-CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`  
-Start: 2026-07-04  
-End: 2026-07-04  
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 (time not recorded; see fix-round-2 Command 8 for timestamped re-run)
+End:   2026-07-04
 Exit code: 0
 
 All tests passed.
@@ -127,6 +127,136 @@ Initial implementation only audited the env deny-list; it did not enforce it bec
 ### Orphan cleanup (Task 6)
 
 `TerminalRuntime::cleanup_orphans()` is the runtime-level hook. `AppComposition::cleanup_terminal_orphans()` wraps it and returns metadata-only `TerminalAuditRecord` values. No raw command output is included in the records; redaction stays.
+
+## Fix-round-2 changes
+
+### Summary of issues addressed
+
+| Issue | Description | Resolution |
+|-------|-------------|------------|
+| IMPORTANT 1 | `passthrough_env=false` produced empty child env (crashed shells) | `effective_env()` now returns platform-safe baseline set |
+| IMPORTANT 2 | Orphan cleanup test was vacuous (non-orphaned, result discarded) | Rewritten to launch short-lived cmd, await exit, verify audit record |
+| SPEC GAP 1 | Shell selection was one-tier only | Three-tier chain: workspace → user → platform default |
+| SPEC GAP 2 | Kanban T3/T4/T5 had no status or evidence | Updated to `status = "done"` with evidence pointer |
+| MINOR 1 | `status_label` used `{:?}` debug format | Fixed to `display_label()` returning lowercase human text |
+| MINOR 2 | `windows_environment_block` not sorted | Sorted case-insensitively per CreateProcessW convention |
+| MINOR 3 | Evidence timestamps were date-only | Added HH:MM:SS to all fix-round-2 records |
+| MINOR 4 | SECURITY.md lacked baseline-set description | Added `passthrough_env=false` baseline-set wording |
+
+### Command 6 — terminal workflow tests (all 9 pass, fix-round-2)
+
+```
+cargo test -p legion-app --test terminal_workflow
+```
+
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 18:52:00
+End:   2026-07-04 18:52:01
+Exit code: 0
+
+```
+running 9 tests
+test terminal_denial_is_visible_and_fail_closed ... ok
+test terminal_resize_propagates_to_projection ... ok
+test terminal_failure_ux_distinct_status_kinds ... ok
+test terminal_scrollback_limit_enforced_and_eviction_counted ... ok
+test terminal_product_gate_trusted_workspace_launches_without_test_helper ... ok
+test terminal_workflow_cannot_mutate_editor_or_disk ... ok
+test terminal_fixture_lifecycle_projects_status ... ok
+test terminal_shell_selection_is_projected_in_status ... ok
+test terminal_orphan_cleanup_kills_and_records_evidence ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+New tests added in this round:
+- `terminal_shell_selection_is_projected_in_status` — now tests workspace → user → platform three-tier precedence (previously one-tier only)
+- `terminal_orphan_cleanup_kills_and_records_evidence` — rewritten with genuine short-lived orphan; asserts session_id, state==Exited, second call empty
+- `terminal_failure_ux_distinct_status_kinds` — extended with `display_label()` human-readability assertions
+
+### Command 7 — platform smokes (including passthrough=false baseline test)
+
+```
+cargo test -p legion-terminal --test platform_shell_smoke
+```
+
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 18:52:00
+End:   2026-07-04 18:52:01
+Exit code: 0
+
+```
+running 4 tests
+test windows_cmd_launch_smoke ... ok
+test windows_passthrough_false_minimal_baseline_is_safe_and_isolated ... ok
+test windows_env_deny_list_stripped_at_pty_spawn ... ok
+test windows_powershell_core_launch_smoke ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`windows_passthrough_false_minimal_baseline_is_safe_and_isolated` is new in this round: launches cmd.exe with baseline-only env (no LEGION_SECRET*, no TERM_TEST_CUSTOM* var), verifies cmd runs and secrets/custom vars are absent.
+
+### Command 8 — legion-platform (incl. windows_environment_block sort test)
+
+```
+cargo test -p legion-platform
+```
+
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 18:52:05
+End:   2026-07-04 18:52:06
+Exit code: 0
+
+```
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`windows_environment_block_is_sorted_case_insensitively` is new in this round.
+
+### Command 9 — desktop terminal_panel tests (incl. human-readable label test)
+
+```
+cargo test -p legion-desktop --test terminal_panel
+```
+
+CWD: `C:/Users/dasbl/RustroverProjects/legion-ide-term`
+Start: 2026-07-04 18:52:10
+End:   2026-07-04 18:52:11
+Exit code: 0
+
+```
+running 2 tests
+test status_label_is_human_readable_for_all_kinds ... ok
+test terminal_panel_render_model_exposes_grid_status_and_scrollback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`status_label_is_human_readable_for_all_kinds` is new in this round.
+
+### SPEC GAP 2 — P2.F2.T3/T4/T5 evidence notes
+
+**T3 (renderer grid/scrollback/input/resize)**:
+- `TerminalGrid::from_projection()` in `crates/legion-terminal/src/grid.rs`
+- `TerminalPanelRenderModel::from_projection()` in `crates/legion-desktop/src/view/terminal_panel.rs` — grid, scrollback, status, copy-row, copy-all-visible
+- `terminal_grid_projects_rows_badges_and_scrollback_summary`, `terminal_grid_selection_copy_returns_bounded_payloads_only`, `terminal_grid_applies_row_limit_without_losing_scrollback_metadata` in `legion-terminal/tests/terminal_grid.rs`
+- `terminal_panel_render_model_exposes_grid_status_and_scrollback` in `legion-desktop/tests/terminal_panel.rs`
+- Resize: `terminal_resize_propagates_to_projection` in `terminal_workflow.rs`
+- Kill: `terminal_failure_ux_distinct_status_kinds` exercises kill→Exited
+- Status: **done**
+
+**T4 (OSC 133/7)**:
+- `crates/legion-terminal/src/osc.rs` — `parse_terminal_shell_output`, `TerminalShellBoundary`
+- `crates/legion-terminal/src/session.rs` — `TerminalSessionMetadata`
+- Pre-existing tests: `osc_parser_keeps_unterminated_sequences_visible`, `osc7_cwd_decodes_localhost_unc_windows_and_percent_paths`, `osc133_tracks_boundary_and_exit_code_metadata`, `terminal_session_metadata_merges_latest_osc_projection`
+- Status: **done** (pre-existing, not newly written in M8; confirmed all 4 tests pass)
+
+**T5 (ConPTY parity)**:
+- `windows_cmd_launch_smoke` and `windows_powershell_core_launch_smoke` confirm ConPTY path runs on Windows
+- `windows_env_deny_list_stripped_at_pty_spawn` confirms env isolation works via ConPTY
+- `windows_passthrough_false_minimal_baseline_is_safe_and_isolated` confirms baseline env safety via ConPTY
+- Status: **done**
 
 ## Fix-round changes
 

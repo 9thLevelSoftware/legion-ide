@@ -61,6 +61,20 @@ impl TerminalShellSelection {
         }
     }
 
+    /// Parse a shell selection from a settings label string.
+    ///
+    /// Returns `None` for empty strings or unknown labels (caller falls back to next tier).
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim() {
+            "" => None,
+            "pwsh" | "PowerShell" => Some(Self::PowerShell),
+            "cmd" | "cmd.exe" | "Cmd" => Some(Self::Cmd),
+            "bash" | "Bash" => Some(Self::Bash),
+            "zsh" | "Zsh" => Some(Self::Zsh),
+            other => Some(Self::Explicit(other.to_string())),
+        }
+    }
+
     /// Return the platform default shell selection.
     pub fn platform_default() -> Self {
         #[cfg(windows)]
@@ -104,24 +118,75 @@ impl Default for TerminalEnvPolicy {
     }
 }
 
+/// Platform-safe baseline variable names injected when `passthrough_env=false`.
+///
+/// These are the minimum variables required for a shell to function at all.
+/// Values are taken from the parent process environment so they are always valid
+/// paths/settings for the current machine. The deny-prefix filter is applied on
+/// top, so none of these names conflict with the hard secret deny-list in practice.
+#[cfg(windows)]
+const PLATFORM_BASELINE_KEYS: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "PATH",
+    "TEMP",
+    "TMP",
+    "COMSPEC",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "windir",
+];
+
+#[cfg(unix)]
+const PLATFORM_BASELINE_KEYS: &[&str] = &["PATH", "HOME", "TERM", "USER", "SHELL", "LOGNAME"];
+
+#[cfg(not(any(windows, unix)))]
+const PLATFORM_BASELINE_KEYS: &[&str] = &["PATH", "HOME"];
+
 impl TerminalEnvPolicy {
     /// Build the effective environment list from `std::env::vars()`, applying deny-list.
     ///
-    /// Always strips variables whose names start with any `deny_prefix`. Returns `None`
-    /// when `passthrough_env` is `false` (the PTY inherits its default env from the
-    /// platform process; callers pass an empty override when they want isolation).
+    /// - `passthrough_env=true` (default): returns all parent env vars minus denied prefixes.
+    /// - `passthrough_env=false`: returns only the minimal platform-safe baseline vars
+    ///   (platform-specific small set required for the shell binary to start), still minus
+    ///   denied prefixes. Never returns an empty set — that would crash `cmd.exe` on Windows.
+    ///
+    /// The returned `Vec` is always `Some`; the caller may pass it verbatim to `PtyRequest::env`.
     pub fn effective_env(&self) -> Option<Vec<(String, String)>> {
-        if !self.passthrough_env {
-            return None;
-        }
         let deny_prefixes: Vec<_> = self.deny_prefixes.iter().map(|s| s.as_str()).collect();
-        let env: Vec<(String, String)> = std::env::vars()
-            .filter(|(key, _)| {
-                let ku = key.to_ascii_uppercase();
-                !deny_prefixes.iter().any(|prefix| ku.starts_with(prefix))
-            })
-            .collect();
-        Some(env)
+        let is_denied = |key: &str| {
+            let ku = key.to_ascii_uppercase();
+            deny_prefixes.iter().any(|prefix| ku.starts_with(prefix))
+        };
+
+        if self.passthrough_env {
+            // Full passthrough: all parent vars minus denied prefixes.
+            let env: Vec<(String, String)> = std::env::vars()
+                .filter(|(key, _)| !is_denied(key))
+                .collect();
+            Some(env)
+        } else {
+            // Isolation mode: only the minimal baseline keys, minus denied prefixes.
+            let env: Vec<(String, String)> = PLATFORM_BASELINE_KEYS
+                .iter()
+                .filter(|&&key| !is_denied(key))
+                .filter_map(|&key| {
+                    // Case-insensitive lookup: on Windows, env vars are case-insensitive.
+                    #[cfg(windows)]
+                    {
+                        std::env::vars()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                            .map(|(_, v)| (key.to_string(), v))
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        std::env::var(key).ok().map(|v| (key.to_string(), v))
+                    }
+                })
+                .collect();
+            Some(env)
+        }
     }
 }
 
@@ -170,15 +235,48 @@ mod tests {
         }
     }
 
+    /// Task 5 (TERM.07): passthrough=false must return a minimal platform-safe baseline,
+    /// not an empty env (an empty env crashes cmd.exe on Windows and degrades Unix shells).
     #[test]
-    fn env_policy_none_when_passthrough_disabled() {
+    fn passthrough_false_returns_minimal_safe_baseline_not_empty() {
         let policy = TerminalEnvPolicy {
             passthrough_env: false,
             ..TerminalEnvPolicy::default()
         };
+        let env = policy
+            .effective_env()
+            .expect("passthrough=false should still return Some(baseline)");
+
+        // Baseline must be non-empty: shells cannot start without PATH (and SystemRoot on
+        // Windows).
         assert!(
-            policy.effective_env().is_none(),
-            "passthrough_env=false should return None"
+            !env.is_empty(),
+            "passthrough=false baseline must not be empty; shells cannot start without PATH"
+        );
+
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+
+        // PATH must always be present on any platform.
+        assert!(
+            keys.iter().any(|k| k.eq_ignore_ascii_case("PATH")),
+            "baseline must include PATH; keys: {keys:?}"
+        );
+
+        // Windows must include SystemRoot.
+        #[cfg(windows)]
+        assert!(
+            keys.iter().any(|k| k.eq_ignore_ascii_case("SystemRoot")),
+            "Windows baseline must include SystemRoot; keys: {keys:?}"
+        );
+
+        // Non-baseline vars must NOT leak through even if they are set in the parent env.
+        const TEST_NON_BASELINE_KEY: &str = "TERM_TEST_NON_BASELINE_PASSTHROUGH_FALSE_XYZ";
+        unsafe { std::env::set_var(TEST_NON_BASELINE_KEY, "should-not-leak") }
+        let env2 = policy.effective_env().expect("second call must succeed");
+        unsafe { std::env::remove_var(TEST_NON_BASELINE_KEY) }
+        assert!(
+            !env2.iter().any(|(k, _)| k == TEST_NON_BASELINE_KEY),
+            "non-baseline parent var must NOT appear in passthrough=false env"
         );
     }
 

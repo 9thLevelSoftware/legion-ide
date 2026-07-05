@@ -5197,8 +5197,10 @@ struct TerminalWorkflow {
     /// Set to `true` the first time a trusted-workspace explicit launch succeeds the
     /// product-gate check; prevents redundant re-initialization on subsequent launches.
     product_enabled: bool,
-    /// Selected shell override (workspace settings → user settings → platform default).
+    /// Workspace-level shell override (highest precedence).
     shell_selection: Option<TerminalShellSelection>,
+    /// User-level shell preference (overrides platform default; overridden by workspace).
+    user_shell_selection: Option<TerminalShellSelection>,
     /// Maximum scrollback rows retained in the projection (sane default 5000).
     scrollback_max_rows: usize,
     /// Env passthrough policy for PTY spawns (deny-list always applied).
@@ -5293,6 +5295,7 @@ impl Default for TerminalWorkflow {
             current_cwd: None,
             product_enabled: false,
             shell_selection: None,
+            user_shell_selection: None,
             scrollback_max_rows: SCROLLBACK_DEFAULT_MAX_ROWS,
             env_policy: TerminalEnvPolicy::default(),
         }
@@ -5415,13 +5418,16 @@ impl TerminalWorkflow {
         let runtime_label = std::any::type_name::<
             legion_terminal::TerminalRuntime<legion_platform::NativePtyService>,
         >();
-        // Compute the PTY env: parent env minus deny-prefix vars (enforced at spawn).
-        // `effective_env()` returns Some(filtered) for passthrough=true and None for
-        // passthrough=false; we convert None → Some(Vec::new()) so the PTY always gets
-        // an explicit env (no inherited-parent fallback when passthrough is disabled).
+        // Compute the PTY env: enforced at spawn via PtyRequest::env.
+        // passthrough=true  → all parent vars minus deny-prefix secrets.
+        // passthrough=false → minimal platform-safe baseline (SystemRoot+PATH on Windows,
+        //                     PATH+HOME on Unix) minus deny-prefix secrets. Never empty.
         let env_passthrough = self.env_policy.passthrough_env;
         let env_deny_count = self.env_policy.deny_prefixes.len();
-        let pty_env: Vec<(String, String)> = self.env_policy.effective_env().unwrap_or_default();
+        let pty_env: Vec<(String, String)> = self
+            .env_policy
+            .effective_env()
+            .expect("effective_env always returns Some");
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
@@ -5436,9 +5442,12 @@ impl TerminalWorkflow {
                 self.current_cwd = None;
                 self.projection.active_session_id = Some(session_id);
                 self.projection.runtime_state = Some(runtime_state);
+                // Use the same three-tier precedence for the label as for the actual command:
+                // workspace settings → user settings → platform default.
                 let shell_label = self
                     .shell_selection
                     .as_ref()
+                    .or(self.user_shell_selection.as_ref())
                     .map(|s| s.label())
                     .unwrap_or_else(|| TerminalShellSelection::platform_default().label());
                 self.projection.status = TerminalPanelStatus {
@@ -6144,16 +6153,25 @@ impl TerminalWorkflow {
 
     /// Resolve the effective shell command and args using shell-selection precedence:
     /// workspace settings → user settings → platform default.
+    /// Resolve the effective shell using the three-tier precedence chain:
+    /// workspace settings → user settings → platform default.
     fn effective_shell_command(&self) -> (String, Vec<String>) {
         self.shell_selection
             .as_ref()
+            .or(self.user_shell_selection.as_ref())
             .map(|s| s.to_command_args())
             .unwrap_or_else(TerminalShellSelection::platform_default_command_args)
     }
 
-    /// Set the terminal shell selection (workspace or user setting).
+    /// Set the workspace-level terminal shell selection (highest precedence).
     fn set_shell_selection(&mut self, selection: TerminalShellSelection) {
         self.shell_selection = Some(selection);
+    }
+
+    /// Set the user-level terminal shell preference (overrides platform default;
+    /// overridden by any workspace-level setting).
+    fn set_user_shell_selection(&mut self, selection: Option<TerminalShellSelection>) {
+        self.user_shell_selection = selection;
     }
 }
 
@@ -10091,6 +10109,7 @@ fn workbench_settings_record_from_projection(
         indexed_workspace_search_enabled: settings.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
+        terminal_shell_selection: settings.terminal_shell_selection.clone(),
         schema_version: settings.schema_version,
     }
 }
@@ -10128,6 +10147,7 @@ fn settings_projection_from_workbench_record(
         },
         indexed_workspace_search_enabled: record.indexed_workspace_search_enabled,
         next_edit_prediction_enabled: record.next_edit_prediction_enabled,
+        terminal_shell_selection: record.terminal_shell_selection.clone(),
         schema_version: record.schema_version,
     }
     .normalized()
@@ -18396,6 +18416,19 @@ impl AppComposition {
         self.terminal_workflow.set_shell_selection(selection);
     }
 
+    /// Set the user-level terminal shell preference.
+    ///
+    /// This is the second tier in the shell selection precedence chain:
+    /// workspace settings → user settings (this call) → platform default.
+    /// A workspace-level setting (set via `set_terminal_shell_selection`) overrides
+    /// this; `None` clears the user preference and falls back to the platform default.
+    pub fn set_user_terminal_shell_selection(
+        &mut self,
+        selection: Option<crate::terminal_policy::TerminalShellSelection>,
+    ) {
+        self.terminal_workflow.set_user_shell_selection(selection);
+    }
+
     /// Set the terminal scrollback row limit.
     ///
     /// The default is `SCROLLBACK_DEFAULT_MAX_ROWS` (5000 rows). Rows beyond this limit
@@ -18414,6 +18447,39 @@ impl AppComposition {
             .runtime
             .cleanup_orphans()
             .map_err(|err| AppCompositionError::Terminal(format!("orphan cleanup failed: {err}")))
+    }
+
+    /// For testing: launch a terminal session using an explicit command and args,
+    /// bypassing the product gate and shell selection. This lets tests create sessions
+    /// with short-lived commands (e.g. `cmd /C exit`) so the process exits on its own
+    /// and the session becomes a genuine orphan for `cleanup_terminal_orphans` testing.
+    ///
+    /// The runtime must be enabled first via `enable_terminal_runtime_for_tests()` and a
+    /// workspace must be opened with `open_workspace()`.
+    pub fn launch_terminal_raw_for_orphan_test(
+        &mut self,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<legion_terminal::TerminalRuntimeLaunchOutcome, AppCompositionError> {
+        let context = self.active_documents.require_workspace_context()?;
+        self.terminal_workflow
+            .runtime
+            .launch(legion_terminal::TerminalRuntimeLaunchRequest {
+                policy: legion_protocol::TerminalLaunchPolicyContract {
+                    principal_id: context.principal,
+                    workspace_id: context.workspace_id,
+                    trust_state: context.trust,
+                    capability_id: CapabilityId("terminal.launch".to_string()),
+                    cwd_policy: "workspace-root".to_string(),
+                    output_byte_limit: 64 * 1024,
+                    timeout_seconds: 30,
+                    schema_version: 1,
+                },
+                command,
+                args,
+                env: None,
+            })
+            .map_err(|err| AppCompositionError::Terminal(format!("raw launch failed: {err}")))
     }
 
     /// Enable the DAP debug runtime for app integration tests.
@@ -20494,6 +20560,11 @@ impl AppComposition {
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        // Apply user-level terminal shell preference from loaded settings.
+        self.terminal_workflow
+            .set_user_shell_selection(TerminalShellSelection::from_label(
+                &record.workbench_settings.terminal_shell_selection,
+            ));
         if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
             let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
                 .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;

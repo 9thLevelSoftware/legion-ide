@@ -132,6 +132,7 @@ The terminal runtime is gated behind workspace trust and capability policy:
 - Untrusted workspaces are denied at the product gate — unconditionally, before any capability broker evaluation. `enable_terminal_runtime_for_tests()` cannot override this for untrusted callers.
 - Trusted workspaces in Manual mode auto-enable the terminal on the first explicit launch intent.
 - The `LEGION_SECRET*` and `LEGION_TOKEN*` environment variable prefixes are on the hard deny-list and are stripped before any PTY spawn, regardless of trust state or `passthrough_env` setting. The effective env configuration (passthrough enabled/disabled + deny-prefix count) is recorded in the launch audit record as metadata only.
+- When `passthrough_env=false`, the child process receives a minimal platform-safe baseline (Windows: `SystemRoot`, `SystemDrive`, `PATH`, `TEMP`, `TMP`, `COMSPEC`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `windir`; Unix: `PATH`, `HOME`, `TERM`, `USER`, `SHELL`, `LOGNAME`) — no other parent variables are forwarded. The deny-list is still applied on top of this baseline. This prevents the shell from crashing while ensuring parent variables outside the baseline are not inadvertently inherited.
 - No raw command output, shell command lines, or process arguments are written to audit records. Redaction stays.
 - Shell binary taxonomy: only classified shell binaries (`cmd`, `powershell`, `pwsh`, `bash`, `sh`, `zsh`) are permitted; unrecognized commands are denied by `DenyByDefaultBroker`.
 

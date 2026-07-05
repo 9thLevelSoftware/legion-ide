@@ -2126,6 +2126,10 @@ pub struct SettingsProjection {
     pub indexed_workspace_search_enabled: bool,
     /// Whether next-edit prediction should auto-trigger after edits.
     pub next_edit_prediction_enabled: bool,
+    /// User-level terminal shell preference label (e.g. `"pwsh"`, `"bash"`, `"cmd"`).
+    /// Empty string means "use platform default." Workspace-level setting overrides this.
+    #[serde(default)]
+    pub terminal_shell_selection: String,
     /// Projection schema version.
     pub schema_version: u16,
 }
@@ -2209,6 +2213,7 @@ impl Default for SettingsProjection {
             telemetry: WorkbenchTelemetryConsent::default(),
             indexed_workspace_search_enabled: false,
             next_edit_prediction_enabled: false,
+            terminal_shell_selection: String::new(),
             schema_version: 1,
         }
     }
