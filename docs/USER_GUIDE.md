@@ -42,6 +42,55 @@ Use it for task graphs, approval gates, risk tracking, and release-oriented orch
 - For diagnostic exports, session state, and bug-report payloads, use `docs/TROUBLESHOOTING.md`.
 - For release-readiness status, check `plans/product-readiness-ledger.md`.
 
+## Source control (SCM)
+
+Legion integrates with Git through the command palette and the SCM panel.
+
+### Diff review navigation
+
+When a diff is open, use the following palette commands (or their projected key bindings) to move through changes:
+
+| Command | Description |
+| --- | --- |
+| Git: Next Hunk | Move focus to the next changed hunk in the current file. |
+| Git: Previous Hunk | Move focus to the previous changed hunk in the current file. |
+| Git: Next File | Move focus to the next changed file in the diff. |
+| Git: Previous File | Move focus to the previous changed file in the diff. |
+
+Focus state is tracked in the application layer; the desktop projection reflects the current `focused_hunk_id` from `GitProjection`.
+
+### Commit validation
+
+Before committing, Legion validates:
+
+- **Summary line** — must be non-empty (hard error; the commit action is blocked).
+- **Author identity** — name and email are read from `git config`; missing values are a hard error.
+- **Conventional Commits prefix** — if the summary does not start with a recognised CC prefix (`feat`, `fix`, `refactor`, etc.) an advisory warning is surfaced, but the commit is not blocked.
+
+### Local file history
+
+Legion records a content snapshot every time a file is successfully saved through the proposal workflow.
+Snapshots are bounded to 50 entries or 50 MiB per file (whichever limit is reached first).
+
+Metadata (timestamps, content hash, file identity) is stored in memory by `LocalHistoryMetadataStore`.
+Content blobs are written to `.legion/local-history/<path-key>/` inside the workspace and are workspace-local — they are never pushed to remote.
+
+To browse or restore from local history:
+
+1. Open the command palette and run **File: Show Local History**.
+2. Select the entry to restore.
+3. The restore goes through the standard proposal/save workflow — it inherits fingerprint, version, generation, and correlation/causality tracking; no direct writes occur.
+
+### Git worktrees
+
+Use the **Git: New Worktree** palette command to create a linked worktree for an existing branch.
+Worktree creation never touches the network.
+
+### Evidence export
+
+Run **Git: Export Worktree Evidence** to write a metadata-only TOML snapshot of the current worktree state to `.legion/evidence/`.
+The export contains only metadata (branch, HEAD, path); no file content is included.
+
 ## What this guide does not cover
 
 - low-level architecture ownership rules: see `docs/ARCHITECTURE_AUTHORITY_BOUNDARIES.md`;

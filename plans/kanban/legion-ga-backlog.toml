@@ -635,6 +635,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
     acceptance = ["GP-1: open Legion repo, edit, see diff, stage hunk, commit, and optionally push."]
     stop_condition = "Stop if diff/blame data is read once and never refreshed."
+    status = "in-progress"
 
     [[epics.features.tasks]]
     id = "P2.F5.T2"
@@ -646,6 +647,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
     acceptance = ["Hunk staging and commit work end-to-end through the UI."]
     stop_condition = "Do not bypass the workspace's path policy for push/fetch/pull."
+    status = "in-progress"
 
     [[epics.features.tasks]]
     id = "P2.F5.T3"
