@@ -28,8 +28,7 @@ pub use ui::{
     SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
     SearchStatusProjection, SettingsProjection, Shell, ShellCommandError, ShellLayoutProjection,
     ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection,
-    StructuralSearchProjection, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
-    ToastActionProjection, ToastProjection, ToastStackProjection, ToastVerbosityProjection,
-    project_lsp_health,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
+    TOAST_VISIBLE_LIMIT, ThemePreferenceProjection, ToastActionProjection, ToastProjection,
+    ToastStackProjection, ToastVerbosityProjection, project_lsp_health,
 };

@@ -100,3 +100,16 @@ legion-debug = { path = "crates/legion-debug" }
 legion-telemetry = { path = "crates/legion-telemetry" }
 legion-retention = { path = "crates/legion-retention" }
 legion-sandbox = { path = "crates/legion-sandbox" }
+
+# Build-size discipline: full-debuginfo PDBs for this 30-crate workspace peaked at
+# ~100GB of target/ artifacts and repeatedly exhausted the build drive (see
+# .superpowers/sdd/progress.md Phase 0 environment notes). Dev and test builds keep
+# line tables, so panic backtraces and line-level profiling stay accurate. When you
+# need full variable-level debuginfo to step through a crate in a debugger, build it
+# with the `dev-full` profile instead: `cargo build --profile dev-full -p <crate>`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev-full]
+inherits = "dev"
+debug = "full"
