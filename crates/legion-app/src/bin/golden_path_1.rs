@@ -434,6 +434,10 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
         .initialize(&root_uri)
         .map_err(|e| format!("initialize: {e}"))?;
 
+    // Spawn the background stderr drain thread so post-mortem diagnostics in
+    // s3 can dump RA stderr via the ring buffer (PKT-LSP-C T4 / Controller C).
+    session.start_stderr_drain();
+
     eprintln!(
         "[s2] session initialized; health={:?}",
         session.health().init_status
@@ -599,6 +603,22 @@ fn run_s3(
             );
         }
         eprintln!("[s3] health: {:?}", session.health());
+        // Dump redacted stderr ring from the background drain thread
+        // (PKT-LSP-C T4 / Controller C).  This is the primary post-mortem
+        // channel for RA silent-stall diagnosis: if RA logged the stall cause
+        // (e.g. "analysis is not ready") it will appear here.
+        {
+            let ring = session.stderr_ring();
+            if let Ok(guard) = ring.lock() {
+                eprintln!("[s3-stderr] ring buffer ({} lines):", guard.len());
+                for line in guard.iter() {
+                    eprintln!("[s3-stderr] {line}");
+                }
+                if guard.is_empty() {
+                    eprintln!("[s3-stderr] (empty — no stderr lines captured yet)");
+                }
+            }
+        }
         return Err(
             "s3: expected >=1 error diagnostic after introducing type mismatch; \
              none arrived within 120s deadline"

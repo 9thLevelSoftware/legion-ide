@@ -465,6 +465,45 @@ impl RustAnalyzerSession {
         self.session.take_stderr()
     }
 
+    /// Spawns the background stderr drain thread for ring-buffer projection
+    /// (PKT-LSP-C T4 / Controller C).
+    ///
+    /// Call this once after [`initialize`] returns to start draining child
+    /// process stderr into the shared [`stderr_ring`].  The thread exits
+    /// automatically when the child process closes its stderr pipe.
+    ///
+    /// Safe to call multiple times: if stderr has already been taken (or was
+    /// never captured), the method is a silent no-op.
+    pub fn start_stderr_drain(&mut self) {
+        let Some(stderr) = self.take_stderr() else {
+            return;
+        };
+        let ring = self.stderr_ring.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            /// Maximum byte length of a retained stderr line.
+            const LINE_MAX_LEN: usize = 512;
+            /// Maximum number of lines retained in the ring buffer.
+            const RING_CAPACITY: usize = 100;
+            let reader = std::io::BufReader::new(stderr);
+            for raw in reader.lines() {
+                let Ok(raw_line) = raw else { break };
+                let truncated: String = if raw_line.len() > LINE_MAX_LEN {
+                    format!("{}…", &raw_line[..LINE_MAX_LEN])
+                } else {
+                    raw_line
+                };
+                let redacted = super::redact_lsp_stderr_line(&truncated);
+                if let Ok(mut guard) = ring.lock() {
+                    if guard.len() >= RING_CAPACITY {
+                        guard.pop_front();
+                    }
+                    guard.push_back(redacted);
+                }
+            }
+        });
+    }
+
     /// Returns a clone of the shared stderr ring-buffer `Arc` so callers can
     /// store it in a worker handle and later read it for projection
     /// (PKT-LSP-C T4).
