@@ -5214,6 +5214,7 @@ impl LanguageToolingWorkflow {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
             lsp_health_records: previous_projection.lsp_health_records,
+            lsp_session_status: previous_projection.lsp_session_status,
         };
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -14077,6 +14078,21 @@ impl AppComposition {
         self.lsp_session.failure_reason()
     }
 
+    /// Test-only: returns `true` if the LSP session is in the `BackingOff`
+    /// state (waiting for a backoff timer).  PKT-LSP-C T3.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_backing_off_for_test(&self) -> bool {
+        self.lsp_session.is_backing_off()
+    }
+
+    /// Test-only: inject a `BackingOff` state with the given restart count.
+    /// See `LspSessionHandle::set_backing_off_for_test`.  PKT-LSP-C T3.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_lsp_backing_off_for_test(&mut self, restart_count: u32, deadline_passed: bool) {
+        self.lsp_session
+            .set_backing_off_for_test(restart_count, deadline_passed);
+    }
+
     /// Attempt to start the LSP session for the currently-open workspace.
     ///
     /// Called from the lazy-start trigger in `bind_opened_file` (first `.rs`
@@ -22420,9 +22436,14 @@ impl AppComposition {
             debug_projection: self.debug_workflow.projection(),
             language_tooling_projection: {
                 // D2: inject live LSP health records from the background session handle.
+                // PKT-LSP-C T3: also inject session lifecycle status (backoff countdown etc).
                 let mut p = self.language_tooling.projection();
                 if let Some(record) = self.lsp_session.health_record() {
                     p.lsp_health_records.push(record);
+                }
+                let status = self.lsp_session.session_status_projection();
+                if !matches!(status.lifecycle, legion_protocol::LspSessionLifecycleKind::Idle) {
+                    p.lsp_session_status = Some(status);
                 }
                 p
             },
