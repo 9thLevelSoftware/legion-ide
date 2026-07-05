@@ -2835,10 +2835,8 @@ fn render_manual_context_inspector(
         });
     }
     section_label(ui, "Problems", None);
-    ui.label(theme::muted(format!(
-        "{} problems",
-        snapshot.language_tooling_projection.problems.len()
-    )));
+    // D3: clickable per-diagnostic rows with file:line navigation.
+    render_problem_rows(ui, snapshot, actions);
     section_label(ui, "LSP Health", None);
     render_compact_rows(
         ui,
@@ -3814,6 +3812,63 @@ fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
             ui.label(theme::code_muted(trim_middle(row, 88)));
         }
     });
+}
+
+/// Renders per-diagnostic problem rows as clickable labels (D3).
+///
+/// Each row shows `severity path:line message`. Clicking opens the file at
+/// the problem's start line via `DesktopAction::NavigateToProblem`.
+/// Problems without a path or range render as non-clickable text.
+fn render_problem_rows(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let problems = &snapshot.language_tooling_projection.problems;
+    if problems.is_empty() {
+        ui.label(theme::muted("No problems"));
+        return;
+    }
+    const LIMIT: usize = 12;
+    for problem in problems.iter().take(LIMIT) {
+        let location = problem
+            .path
+            .as_ref()
+            .map(|path| {
+                if let Some(range) = &problem.range {
+                    format!("{}:{}", path.0, range.start.line)
+                } else {
+                    path.0.clone()
+                }
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let label = trim_middle(
+            &format!("{:?} {} {}", problem.severity, location, problem.message),
+            110,
+        );
+        // Only show clickable link if we have a path; otherwise plain text.
+        if let (Some(path), nav_line) = (
+            problem.path.as_ref().map(|p| p.0.clone()),
+            problem.range.as_ref().map(|r| r.start.line).unwrap_or(0),
+        ) {
+            let response =
+                ui.add(egui::Label::new(theme::body(&label)).sense(egui::Sense::click()));
+            if response.clicked() {
+                actions.push(DesktopAction::NavigateToProblem {
+                    path,
+                    line: nav_line,
+                });
+            }
+        } else {
+            ui.label(theme::body(&label));
+        }
+    }
+    if problems.len() > LIMIT {
+        ui.label(theme::muted(format!(
+            "{} more problems",
+            problems.len() - LIMIT
+        )));
+    }
 }
 
 fn render_compact_rows(ui: &mut egui::Ui, rows: &[String], empty: &str, limit: usize) {
@@ -7047,18 +7102,31 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     rows
 }
 
-/// Projection-only LSP health rows derived from the snapshot.
+/// Projection-only LSP health rows derived from the snapshot (D2 wired).
 ///
-/// The snapshot does not yet carry `LspServerHealthRecord` data directly (that
-/// requires app-layer wiring); this function reserves the render slot and
-/// returns an empty vec until the snapshot is extended.  No authority is
-/// claimed here — all rendering is read-only.
-fn lsp_health_rows(_snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    // Deferred: the ShellProjectionSnapshot does not yet expose
-    // LspServerHealthRecord entries.  The projection struct and
-    // `project_lsp_health` mapping are complete; wiring the app layer to
-    // populate the snapshot is tracked separately.
-    Vec::new()
+/// Reads `LspServerHealthRecord` entries from
+/// `snapshot.language_tooling_projection.lsp_health_records` — populated by
+/// `AppComposition::shell_projection_snapshot()` via the background
+/// `LspSessionHandle`.  Returns an empty vec when no health data is available.
+/// No authority is claimed here; all rendering is projection-only read-only.
+fn lsp_health_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    use legion_ui::project_lsp_health;
+    snapshot
+        .language_tooling_projection
+        .lsp_health_records
+        .iter()
+        .map(|record| {
+            let proj = project_lsp_health(record, false);
+            format!(
+                "lsp server={} provenance={} version={} status={} restarts={}",
+                proj.server_label,
+                proj.provenance_label,
+                proj.version_label,
+                proj.status_label,
+                proj.restart_count,
+            )
+        })
+        .collect()
 }
 
 fn structural_search_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

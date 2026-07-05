@@ -9218,6 +9218,7 @@ fn language_terminal_projection_roundtrips_language_surface() {
         generated_at: TimestampMillis(1800),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
+        lsp_health_records: Vec::new(),
     };
 
     let encoded = serde_json::to_value(&projection).expect("language projection serializes");

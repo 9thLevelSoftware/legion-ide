@@ -5073,6 +5073,7 @@ impl LanguageToolingWorkflow {
             generated_at: TimestampMillis::now(),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
+            lsp_health_records: previous_projection.lsp_health_records,
         };
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -12977,6 +12978,8 @@ pub struct AppComposition {
     debug_workflow: DebugWorkflow,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
+    /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
+    lsp_session: crate::language::LspSessionHandle,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13044,6 +13047,7 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
+            lsp_session: crate::language::LspSessionHandle::new(),
         }
     }
 
@@ -13240,11 +13244,40 @@ impl AppComposition {
             }
         };
         self.active_documents
-            .bind_workspace(opened.clone(), root_path, principal, trust);
+            .bind_workspace(opened.clone(), root_path, principal, trust.clone());
         self.debug_workflow.clear_workspace_state();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
+
+        // PKT-LSP-B T1 (D4): Start LSP session for trusted Rust workspaces.
+        // `start_for_workspace` checks for Cargo.toml and refuses immediately if
+        // absent, so this is always safe to call for any trusted workspace.
+        if trust == WorkspaceTrustState::Trusted {
+            self.lsp_session.start_for_workspace(root.as_ref(), true);
+        }
+
         Ok(opened)
+    }
+
+    /// Non-blocking LSP session drain. Call once per frame tick (mirrors
+    /// `TerminalWorkflow::poll`). Returns `true` if session state changed,
+    /// indicating the projection snapshot should be refreshed.
+    ///
+    /// PKT-LSP-B T1 / D4.
+    pub fn drain_lsp_session(&mut self) -> bool {
+        self.lsp_session.drain()
+    }
+
+    /// Returns the current LSP server health record, if available.
+    ///
+    /// Returns `None` when the session is in the Idle state (no workspace
+    /// opened or startup not yet attempted). Returns `Some` with
+    /// `init_status = Unavailable` when the session is Refused/Failed/Starting,
+    /// and `Some` with `init_status = Fresh` when it is Live.
+    ///
+    /// PKT-LSP-B T1 / D2.
+    pub fn lsp_server_health_record(&self) -> Option<legion_protocol::LspServerHealthRecord> {
+        self.lsp_session.health_record()
     }
 
     /// Open a file through workspace authority and bind it into editor engine.
@@ -20684,7 +20717,14 @@ impl AppComposition {
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
             debug_projection: self.debug_workflow.projection(),
-            language_tooling_projection: self.language_tooling.projection(),
+            language_tooling_projection: {
+                // D2: inject live LSP health records from the background session handle.
+                let mut p = self.language_tooling.projection();
+                if let Some(record) = self.lsp_session.health_record() {
+                    p.lsp_health_records.push(record);
+                }
+                p
+            },
             terminal_panel_projection: self.terminal_workflow.projection(),
         })
     }

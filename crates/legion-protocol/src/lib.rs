@@ -16231,6 +16231,14 @@ pub struct LanguageToolingProjection {
     pub redaction_hints: Vec<RedactionHint>,
     /// Projection schema version.
     pub schema_version: u16,
+    /// Live LSP server health records for the active workspace (D2).
+    ///
+    /// Populated by `AppComposition::shell_projection_snapshot()` from the
+    /// background `LspSessionHandle`.  Empty when no LSP session is active.
+    /// `lsp_health_rows()` in `legion-desktop` renders these into the
+    /// language tooling status section.
+    #[serde(default)]
+    pub lsp_health_records: Vec<LspServerHealthRecord>,
 }
 
 impl LanguageToolingProjection {
@@ -16259,6 +16267,7 @@ impl LanguageToolingProjection {
             generated_at: TimestampMillis(0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
+            lsp_health_records: Vec::new(),
         }
     }
 }

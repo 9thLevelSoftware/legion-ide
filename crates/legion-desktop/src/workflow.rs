@@ -1806,6 +1806,8 @@ impl DesktopRuntime {
     }
 
     fn refresh_projection(&mut self) -> Result<()> {
+        // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
+        self.app.drain_lsp_session();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());

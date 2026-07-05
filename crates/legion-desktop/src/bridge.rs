@@ -647,6 +647,18 @@ pub enum DesktopAction {
         /// Operation identifier.
         operation_id: String,
     },
+    /// Navigate to a diagnostic problem location (D3).
+    ///
+    /// Opens the file at `path` and positions the cursor at (line, 0). Emits
+    /// `CommandDispatchIntent::OpenPathAtPosition` through app authority.
+    /// `path` is the raw canonical path from the problem projection;
+    /// `line` is the zero-based LSP start line from the problem range.
+    NavigateToProblem {
+        /// Canonical path of the file containing the problem.
+        path: String,
+        /// Zero-based line number from the problem range start.
+        line: u32,
+    },
     /// Launch a terminal session through app authority.
     TerminalLaunch {
         /// Command label.
@@ -1775,6 +1787,18 @@ impl DesktopCommandBridge {
             DesktopAction::CancelLanguageOperation { operation_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelLanguageOperation {
                     operation_id,
+                })
+            }
+            DesktopAction::NavigateToProblem { path, line } => {
+                // D3: open the file at the diagnostic's start line.
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPathAtPosition {
+                    path,
+                    position: legion_protocol::TextCoordinate {
+                        line,
+                        character: 0,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
                 })
             }
             DesktopAction::TerminalLaunch { command_label } => {

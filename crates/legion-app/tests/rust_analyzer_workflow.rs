@@ -233,7 +233,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 10 },
     });
     let completion_outcome = session
-        .request_read("textDocument/completion", completion_params)
+        .request_read(
+            "textDocument/completion",
+            completion_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("completion request_read should not error");
     eprintln!(
         "completion result type: {}",
@@ -254,7 +258,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 7 },
     });
     let hover_outcome = session
-        .request_read("textDocument/hover", hover_params)
+        .request_read(
+            "textDocument/hover",
+            hover_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("hover request_read should not error");
     eprintln!(
         "hover result type: {}",
@@ -272,7 +280,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 7 },
     });
     let definition_outcome = session
-        .request_read("textDocument/definition", definition_params)
+        .request_read(
+            "textDocument/definition",
+            definition_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("definition request_read should not error");
     eprintln!(
         "definition result type: {}",
@@ -293,7 +305,11 @@ fn rust_analyzer_full_workflow() {
         "context": { "includeDeclaration": true },
     });
     let references_outcome = session
-        .request_read("textDocument/references", references_params)
+        .request_read(
+            "textDocument/references",
+            references_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("references request_read should not error");
     eprintln!(
         "references result type: {}",
@@ -311,7 +327,11 @@ fn rust_analyzer_full_workflow() {
         "options": { "tabSize": 4, "insertSpaces": true },
     });
     let formatting_outcome = session
-        .request_read("textDocument/formatting", formatting_params)
+        .request_read(
+            "textDocument/formatting",
+            formatting_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("formatting request_read should not error");
     eprintln!(
         "formatting result type: {}",
@@ -338,7 +358,11 @@ fn rust_analyzer_full_workflow() {
         "newName": "add_renamed",
     });
     let rename_outcome = session
-        .request_read("textDocument/rename", rename_params)
+        .request_read(
+            "textDocument/rename",
+            rename_params,
+            legion_protocol::SnapshotId(0),
+        )
         .expect("rename request_read should not fail at the transport layer");
     eprintln!(
         "rename result status: {:?}, type: {}",

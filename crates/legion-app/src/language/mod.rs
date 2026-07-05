@@ -22,6 +22,9 @@ pub use proposal::workspace_edit_to_proposal_input;
 mod redaction;
 pub use redaction::{StderrSummary, redact_lsp_stderr};
 
+mod app_lsp;
+pub use app_lsp::LspSessionHandle;
+
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};
 
@@ -53,20 +56,30 @@ pub fn is_stale_response(issued: SnapshotId, current: SnapshotId) -> bool {
 ///
 /// [`LspOperationContext`]: legion_protocol::LspOperationContext
 pub(crate) fn operation_context() -> legion_protocol::LspOperationContext {
+    operation_context_for_snapshot(SnapshotId(0))
+}
+
+/// Builds an [`LspOperationContext`] for a read request at a specific buffer
+/// snapshot.  `snapshot_id` is threaded into `issued_snapshot` in the
+/// returned [`LspReadOutcome`], enabling the `is_stale_response` gate.
+///
+/// [`LspOperationContext`]: legion_protocol::LspOperationContext
+pub(crate) fn operation_context_for_snapshot(
+    snapshot_id: SnapshotId,
+) -> legion_protocol::LspOperationContext {
     use legion_protocol::*;
     LspOperationContext {
-        request_id: LspRequestId(uuid::Uuid::from_u128(1)),
+        request_id: LspRequestId(uuid::Uuid::now_v7()),
         workspace_id: WorkspaceId(55),
-        // Bootstrap/handshake context: no document is open yet, so document-scoped ids are 0.
         file_id: FileId(0),
         buffer_id: BufferId(0),
-        snapshot_id: SnapshotId(0),
+        snapshot_id,
         buffer_version: BufferVersion(0),
         language_id: LanguageId("rust".to_string()),
         correlation_id: CorrelationId(1u64),
-        causality_id: CausalityId(uuid::Uuid::from_u128(1001)),
+        causality_id: CausalityId(uuid::Uuid::now_v7()),
         timeout_ms: 5000,
-        cancellation_token: CancellationTokenId(uuid::Uuid::from_u128(2001)),
+        cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
         content_hash: None,
         privacy_scope: SemanticPrivacyScope::Workspace,
         schema_version: 1,
