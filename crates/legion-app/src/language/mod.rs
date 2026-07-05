@@ -23,7 +23,7 @@ mod redaction;
 pub use redaction::{StderrSummary, redact_lsp_stderr};
 
 mod app_lsp;
-pub use app_lsp::LspSessionHandle;
+pub use app_lsp::{LspReadKind, LspRequestTag, LspSessionHandle, LspWorkerResult};
 
 // Re-export discovery types consumed by tests and callers.
 pub use legion_lsp::{DiscoveredBinary, RustAnalyzerDiscovery};

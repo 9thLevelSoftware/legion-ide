@@ -289,6 +289,15 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
+    /// Non-blocking drain of raw `publishDiagnostics` notification params.
+    ///
+    /// Delegates to [`LspStdioSession::try_drain_diagnostic_params`].  Safe to
+    /// call only when no request is in flight (i.e. the session worker thread
+    /// should call this in the idle/timeout branch of its recv loop).
+    pub fn try_drain_diagnostic_params(&mut self) -> Vec<serde_json::Value> {
+        self.session.try_drain_diagnostic_params()
+    }
+
     /// Mutable access to the underlying stdio session (for later tasks: doc sync, restart).
     #[allow(dead_code)]
     pub(crate) fn session_mut(&mut self) -> &mut LspStdioSession {

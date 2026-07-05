@@ -71,6 +71,8 @@ pub struct DesktopProjectionViewState {
     pub completion_popup_open: bool,
     /// Zero-based index of the selected completion item (T6).
     pub completion_selected_index: usize,
+    /// Whether the LSP hover tooltip is currently visible (T7).
+    pub hover_tooltip_visible: bool,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -83,6 +85,7 @@ impl Default for DesktopProjectionViewState {
             first_run_onboarding_visible: false,
             completion_popup_open: false,
             completion_selected_index: 0,
+            hover_tooltip_visible: false,
         }
     }
 }
@@ -797,6 +800,7 @@ impl ProjectionView {
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
+        render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -1361,6 +1365,60 @@ fn render_completion_popup(
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(theme::muted("↑↓ navigate  Tab accept  Esc dismiss"));
+                    });
+                });
+        });
+}
+
+/// Render the LSP hover tooltip overlay (T7).
+///
+/// Visible only when `state.hover_tooltip_visible` is true AND the snapshot
+/// carries hover data.  Esc appends `HoverDismiss` to `actions`.
+/// The tooltip is redaction-safe: it shows `label` and `summary` fields from
+/// `LanguageHoverProjection` which are already bounded/redacted by the app layer.
+fn render_hover_tooltip(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if !state.hover_tooltip_visible {
+        return;
+    }
+    let Some(hover) = &snapshot.language_tooling_projection.hover else {
+        return;
+    };
+
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            actions.push(DesktopAction::HoverDismiss);
+        }
+    });
+
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_hover_tooltip".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -160.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(theme::body_strong(&hover.label));
+                        if !hover.summary.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(theme::code_muted(&hover.summary));
+                        }
+                        if hover.degraded {
+                            ui.add_space(2.0);
+                            ui.label(theme::muted("(degraded)"));
+                        }
+                        ui.add_space(4.0);
+                        ui.label(theme::muted("Esc dismiss"));
                     });
                 });
         });

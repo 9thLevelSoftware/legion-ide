@@ -179,6 +179,125 @@ fn app_composition_refused_lsp_projects_health_record() {
     }
 }
 
+// ─── Task 4 (D3): ProblemsProjection — app-level projection test ─────────────
+
+/// LSP diagnostics ingested via `ingest_lsp_publish_diagnostics_for_buffer`
+/// appear in `language_tooling_projection.problems` and carry the buffer's
+/// canonical path (so `render_problem_rows` can render clickable rows).
+#[test]
+fn lsp_diagnostics_appear_in_problems_projection() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {}\n").expect("write src file");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    // Synthetic publishDiagnostics params (mirrors the LSP spec shape).
+    let uri = format!("file:///{}", src_file.to_string_lossy().replace('\\', "/"));
+    let params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 4}
+            },
+            "severity": 1,
+            "code": "E0001",
+            "source": "test-lsp",
+            "message": "test diagnostic"
+        }]
+    });
+
+    // Ingest through the redaction layer (same path used in production drain).
+    let projection = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &params, true, None)
+        .expect("ingest diagnostics");
+
+    // The problem must appear in the projection.
+    assert!(
+        !projection.problems.is_empty(),
+        "LSP diagnostics must appear in the LanguageToolingProjection"
+    );
+    let problem = &projection.problems[0];
+    // Severity must be preserved.
+    assert_eq!(
+        problem.severity,
+        legion_protocol::ProtocolDiagnosticSeverity::Error,
+        "severity must round-trip"
+    );
+    // Canonical path must be set so the problems panel can render a clickable row.
+    assert!(
+        problem.path.is_some(),
+        "problem path must be set for clickable panel navigation; got: {problem:?}"
+    );
+
+    // The problem must also appear in the shell projection snapshot.
+    let snapshot = app
+        .shell_projection_snapshot("test")
+        .expect("shell projection");
+    assert!(
+        !snapshot.language_tooling_projection.problems.is_empty(),
+        "problems must be visible in the shell projection snapshot"
+    );
+}
+
+/// A `publishDiagnostics` batch with an empty diagnostics array clears the
+/// problems for that file.
+#[test]
+fn lsp_empty_diagnostics_clears_problems() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("lib.rs");
+    std::fs::write(&src_file, "pub fn foo() {}\n").expect("write src file");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    let uri = format!("file:///{}", src_file.to_string_lossy().replace('\\', "/"));
+
+    // First: add an error.
+    let add_params = serde_json::json!({
+        "uri": uri,
+        "diagnostics": [{ "severity": 1, "message": "initial error", "range": { "start": {"line":0,"character":0}, "end": {"line":0,"character":1} } }]
+    });
+    let p1 = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &add_params, false, None)
+        .expect("ingest add");
+    assert!(!p1.problems.is_empty(), "error must be present after add");
+
+    // Second: clear diagnostics (empty array).
+    let clear_params = serde_json::json!({ "uri": uri, "diagnostics": [] });
+    let p2 = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &clear_params, false, None)
+        .expect("ingest clear");
+    // After clearing, only non-LSP problems (e.g. legion-index) should remain.
+    let lsp_problems = p2
+        .problems
+        .iter()
+        .filter(|p| p.source_label.as_deref() != Some("legion-index"))
+        .count();
+    assert_eq!(
+        lsp_problems, 0,
+        "LSP problems must be cleared after empty diagnostics batch"
+    );
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 fn tempdir_with_cargo_toml() -> tempfile::TempDir {

@@ -553,6 +553,16 @@ pub struct DesktopRuntime {
     completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Completion count from the last projection refresh, for detecting new arrivals (T6).
     last_completion_count: usize,
+    /// Whether the LSP hover tooltip should be shown (T7).
+    hover_tooltip_visible: bool,
+    /// Debounce state for hover requests: (cursor_settle_instant, buffer_id, position) (T7).
+    hover_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Last hover_id that auto-opened the tooltip; used to detect genuinely new hover data (T7).
+    last_hover_id: Option<String>,
+    /// Whether a GoToDefinition response navigation is pending (T7).
+    definition_navigation_queued: bool,
+    /// Definition count from the last projection refresh, for detecting new arrivals (T7).
+    last_definition_count: usize,
 }
 
 impl DesktopRuntime {
@@ -632,6 +642,11 @@ impl DesktopRuntime {
             completion_selected_index: 0,
             completion_debounce: None,
             last_completion_count: 0,
+            hover_tooltip_visible: false,
+            hover_debounce: None,
+            last_hover_id: None,
+            definition_navigation_queued: false,
+            last_definition_count: 0,
         };
         runtime.persist_diagnostics_if_configured();
         Ok(runtime)
@@ -707,6 +722,34 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
             }
+            // T7: hover tooltip dismiss — handled before the bridge.
+            DesktopAction::HoverDismiss => {
+                self.hover_tooltip_visible = false;
+                self.hover_debounce = None;
+                // Pre-sync last_hover_id so refresh_projection won't re-open the
+                // same hover data on the very next frame (mirrors CompletionDismiss
+                // pre-sync of last_completion_count).
+                if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                    self.last_hover_id = snap
+                        .language_tooling_projection
+                        .hover
+                        .as_ref()
+                        .map(|h| h.hover_id.clone());
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            // T7: navigate to a projected definition location.
+            DesktopAction::NavigateToDefinition { index } => {
+                let outcome = self.navigate_to_definition(index)?;
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
             action => {
                 let snapshot = self.shell.projection_snapshot();
 
@@ -717,6 +760,7 @@ impl DesktopRuntime {
                 }
 
                 // T6: dismiss popup on tab switch/close (stale popup rule).
+                // T7: dismiss hover tooltip on tab switch too.
                 if matches!(
                     action,
                     DesktopAction::SwitchTab { .. } | DesktopAction::CloseTab { .. }
@@ -724,6 +768,22 @@ impl DesktopRuntime {
                     self.completion_popup_open = false;
                     self.completion_debounce = None;
                     self.completion_selected_index = 0;
+                    self.hover_tooltip_visible = false;
+                    self.hover_debounce = None;
+                    // Keep last_hover_id (do NOT clear to None).  The old hover id
+                    // prevents the dismissed tooltip from re-appearing on the new tab
+                    // until a genuinely new hover response arrives with a different id.
+                }
+
+                // T7: arm hover debounce on cursor movement (200ms settle window).
+                if let Some((buffer_id, at)) = hover_debounce_info(&action, &snapshot) {
+                    self.hover_tooltip_visible = false;
+                    self.hover_debounce = Some((Instant::now(), buffer_id, at));
+                }
+
+                // T7: flag that a definition navigation is expected on next refresh.
+                if matches!(action, DesktopAction::GoToDefinition { .. }) {
+                    self.definition_navigation_queued = true;
                 }
 
                 if editor_text_action_blocked_by_palette(&action, &snapshot) {
@@ -1058,7 +1118,26 @@ impl DesktopRuntime {
             first_run_onboarding_visible: self.onboarding_visible,
             completion_popup_open: self.completion_popup_open,
             completion_selected_index: self.completion_selected_index,
+            hover_tooltip_visible: self.hover_tooltip_visible,
         }
+    }
+
+    /// Navigate to a specific definition location by zero-based index (T7).
+    ///
+    /// Returns `Noop` when the index is out of range or the definition lacks
+    /// path/range data.  Returns `Opened` on successful navigation.
+    fn navigate_to_definition(&mut self, index: usize) -> Result<DesktopWorkflowOutcome> {
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let Some(def) = snapshot.language_tooling_projection.definitions.get(index) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        let (Some(path), Some(range)) = (&def.path, &def.range) else {
+            return Ok(DesktopWorkflowOutcome::Noop);
+        };
+        self.dispatch_intent(CommandDispatchIntent::OpenPathAtPosition {
+            path: path.0.clone(),
+            position: range.start,
+        })
     }
 
     /// Accept the currently selected completion item by inserting its label
@@ -1125,6 +1204,27 @@ impl DesktopRuntime {
     /// Expose selected index for assertion in tests.
     pub fn completion_selected_index_for_test(&self) -> usize {
         self.completion_selected_index
+    }
+
+    /// Expose hover tooltip visibility for assertion in tests.
+    pub fn hover_tooltip_visible_for_test(&self) -> bool {
+        self.hover_tooltip_visible
+    }
+
+    /// Set hover tooltip visibility for test setup.
+    pub fn set_hover_tooltip_visible_for_test(&mut self, visible: bool) {
+        self.hover_tooltip_visible = visible;
+        if visible {
+            // Sync last_hover_id so refresh_projection doesn't immediately
+            // re-open the tooltip it just sees as "already known".
+            if let Ok(snap) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+                self.last_hover_id = snap
+                    .language_tooling_projection
+                    .hover
+                    .as_ref()
+                    .map(|h| h.hover_id.clone());
+            }
+        }
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
@@ -1971,6 +2071,19 @@ impl DesktopRuntime {
             }
         }
 
+        // T7: fire pending hover request when cursor settle debounce has elapsed.
+        if let Some((settled_at, buffer_id, position)) = self.hover_debounce {
+            if settled_at.elapsed() >= Duration::from_millis(200) {
+                self.hover_debounce = None;
+                let _ = self
+                    .app
+                    .dispatch_ui_intent(CommandDispatchIntent::RequestHover {
+                        buffer_id,
+                        position,
+                    });
+            }
+        }
+
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
@@ -1986,6 +2099,45 @@ impl DesktopRuntime {
             self.completion_popup_open = false;
         }
         self.last_completion_count = new_count;
+
+        // T7: auto-show hover tooltip only when a genuinely new hover_id arrives.
+        // Comparing ids prevents dismissed tooltips from re-opening for the same data.
+        let new_hover_id = snapshot
+            .language_tooling_projection
+            .hover
+            .as_ref()
+            .map(|h| h.hover_id.clone());
+        if let Some(ref id) = new_hover_id {
+            if self.last_hover_id.as_deref() != Some(id.as_str()) {
+                // Different hover data arrived → auto-show.
+                self.hover_tooltip_visible = true;
+                self.last_hover_id = Some(id.clone());
+            }
+        } else {
+            // No hover data → hide tooltip.
+            self.hover_tooltip_visible = false;
+        }
+
+        // T7: auto-navigate to definition when a queued GoToDefinition response arrives.
+        let new_def_count = snapshot.language_tooling_projection.definitions.len();
+        if self.definition_navigation_queued
+            && new_def_count > 0
+            && new_def_count != self.last_definition_count
+        {
+            self.definition_navigation_queued = false;
+            // Navigate to the first definition location.  Non-fatal if unavailable.
+            if let Some(def) = snapshot.language_tooling_projection.definitions.first() {
+                if let (Some(path), Some(range)) = (&def.path, &def.range) {
+                    let _ =
+                        self.app
+                            .dispatch_ui_intent(CommandDispatchIntent::OpenPathAtPosition {
+                                path: path.0.clone(),
+                                position: range.start,
+                            });
+                }
+            }
+        }
+        self.last_definition_count = new_def_count;
 
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());
@@ -2284,6 +2436,23 @@ fn completion_debounce_info(
     };
     let buffer_id = snapshot.active_buffer_projection.buffer_id?;
     Some((buffer_id, at))
+}
+
+/// Extract `(buffer_id, cursor)` from cursor-movement actions that should arm
+/// the hover debounce timer (T7).  Returns `None` for non-cursor actions.
+fn hover_debounce_info(
+    action: &DesktopAction,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<(BufferId, TextCoordinate)> {
+    let cursor = match action {
+        DesktopAction::SetCursor {
+            cursor,
+            buffer_id: _,
+        } => *cursor,
+        _ => return None,
+    };
+    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+    Some((buffer_id, cursor))
 }
 
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {

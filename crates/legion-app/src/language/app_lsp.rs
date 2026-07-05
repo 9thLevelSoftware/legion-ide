@@ -1,20 +1,36 @@
 //! Background LSP session lifecycle for `AppComposition` (WS-LANG-01 PKT-LSP-B T1).
 //!
 //! `LspSessionHandle` manages the startup/live/failed lifecycle of a
-//! `RustAnalyzerSession` that runs on a background thread.  The design mirrors
-//! `TerminalWorkflow::poll`: the frame path calls `drain()` via `try_recv` and
-//! never blocks.
+//! `RustAnalyzerSession` that runs on a dedicated worker thread.  The design
+//! mirrors `TerminalWorkflow::poll`: the frame path calls `drain()` via
+//! `try_recv` and never blocks.
+//!
+//! ## Worker-thread architecture (T6/T7 enabler)
+//!
+//! Once the session is Live, all LSP I/O (requests + notifications) happens on
+//! a dedicated "session thread".  The frame path communicates via two MPSC
+//! channels:
+//!   - `request_tx`:  send `LspWorkerRequest` (completion, hover, did_change …)
+//!   - `result_rx`:   receive `LspWorkerResult` (read outcomes, diagnostic batches)
+//!
+//! `try_drain_results()` drains the result channel non-blockingly each frame;
+//! `issue_request()` sends a request non-blockingly (drops the request if the
+//! bounded channel is full — callers retry on the next keystroke/frame).
 
 use std::{
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
-use legion_protocol::{LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord};
+use legion_protocol::{
+    BufferId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord, SnapshotId,
+};
 
 use super::{
-    LanguageSessionError, RustAnalyzerDiscovery, RustAnalyzerLaunchConfig, RustAnalyzerSession,
+    LanguageSessionError, LspReadOutcome, RustAnalyzerDiscovery, RustAnalyzerLaunchConfig,
+    RustAnalyzerSession,
 };
 use legion_lsp::{LspServerProcessConfig, LspStdioLauncher, LspSupervisorConfig};
 use legion_protocol::{
@@ -27,14 +43,87 @@ use uuid::Uuid;
 /// Result type delivered from the background startup thread.
 pub type LspStartResult = Result<RustAnalyzerSession, LanguageSessionError>;
 
+/// Tag carried with a worker request so the drain side can route the result.
+#[derive(Debug, Clone)]
+pub struct LspRequestTag {
+    /// Buffer the request was issued against.
+    pub buffer_id: BufferId,
+    /// What kind of read is this.
+    pub kind: LspReadKind,
+    /// Snapshot when the request was issued (stale-gate).
+    pub snapshot_id: SnapshotId,
+}
+
+/// Discriminator for routing worker read results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspReadKind {
+    /// Completion request (`textDocument/completion`).
+    Completion,
+    /// Hover request (`textDocument/hover`).
+    Hover,
+    /// Go-to-definition request (`textDocument/definition`).
+    Definition,
+}
+
+/// Message sent from the frame path to the worker thread.
+pub enum LspWorkerRequest {
+    /// Issue a blocking LSP read request on the worker thread.
+    RequestRead {
+        method: String,
+        params: serde_json::Value,
+        tag: LspRequestTag,
+    },
+    /// Fire-and-forget: send a `textDocument/didChange` notification.
+    DidChange {
+        uri: String,
+        version: i64,
+        text: String,
+    },
+    /// Fire-and-forget: send a `textDocument/didOpen` notification.
+    DidOpen {
+        uri: String,
+        language_id: String,
+        version: i64,
+        text: String,
+    },
+}
+
+/// Message sent from the worker thread back to the frame path.
+pub enum LspWorkerResult {
+    /// A read request completed (or failed).
+    ReadResult {
+        /// The LSP request outcome or error.
+        outcome: Result<LspReadOutcome, LanguageSessionError>,
+        /// Routing tag identifying the buffer and request kind.
+        tag: LspRequestTag,
+    },
+    /// A `textDocument/publishDiagnostics` notification arrived.
+    DiagnosticBatch {
+        /// Raw JSON params as sent by the LSP server. Never stored in logs;
+        /// callers must project through `legion_lsp::project_publish_diagnostics`
+        /// immediately.
+        raw_params: serde_json::Value,
+    },
+}
+
+/// Live-session handle: channels to the worker thread + cached health record.
+struct LspWorkerHandle {
+    /// Cached health record updated when the session went Live.
+    health: LspServerHealthRecord,
+    /// Send requests to the worker thread (bounded: drops when full).
+    request_tx: mpsc::SyncSender<LspWorkerRequest>,
+    /// Receive results from the worker thread (non-blocking drain each frame).
+    result_rx: mpsc::Receiver<LspWorkerResult>,
+}
+
 /// Internal lifecycle state.
 enum LspSessionState {
     /// No startup attempted yet.
     Idle,
     /// Background thread has been spawned; waiting for the result.
     Starting { rx: mpsc::Receiver<LspStartResult> },
-    /// Session is live and initialized.
-    Live(RustAnalyzerSession),
+    /// Session worker thread is live.
+    Live(LspWorkerHandle),
     /// Launch was refused (untrusted, no binary, policy denied, etc.).
     Refused { reason: String },
     /// Session started but handshake or discovery failed.
@@ -43,8 +132,11 @@ enum LspSessionState {
 
 /// Manages the background startup and live-session lifecycle for one
 /// `RustAnalyzerSession`.  All blocking work (discovery, process spawn, and
-/// LSP `initialize` round-trip) happens on the background thread; the frame
-/// path only calls `drain()` which is a non-blocking `try_recv`.
+/// LSP `initialize` round-trip) happens on the background startup thread; the
+/// frame path only calls `drain()` which is a non-blocking `try_recv`.
+///
+/// Once Live, I/O happens on a dedicated worker thread; the frame path
+/// communicates through bounded MPSC channels.
 pub struct LspSessionHandle {
     state: LspSessionState,
     /// Workspace root passed at startup time, retained for diagnostics.
@@ -71,7 +163,7 @@ impl LspSessionHandle {
         matches!(self.state, LspSessionState::Idle)
     }
 
-    /// Returns `true` if the session is live and initialized.
+    /// Returns `true` if the session worker thread is live.
     pub fn is_live(&self) -> bool {
         matches!(self.state, LspSessionState::Live(_))
     }
@@ -136,15 +228,22 @@ impl LspSessionHandle {
 
     /// Non-blocking drain — call once per frame tick.
     ///
-    /// If Starting and a result is available, transitions to Live or Failed.
-    /// Returns `true` when state changed (used to decide whether to refresh projection).
+    /// If Starting and a result is available, transitions to Live (spawning
+    /// the worker thread) or Failed.  Returns `true` when state changed.
     pub fn drain(&mut self) -> bool {
         let LspSessionState::Starting { rx } = &self.state else {
             return false;
         };
         match rx.try_recv() {
             Ok(Ok(session)) => {
-                self.state = LspSessionState::Live(session);
+                // Spawn the worker thread; it owns the session from here on.
+                let health = session.health().clone();
+                let worker = spawn_session_worker(session);
+                self.state = LspSessionState::Live(LspWorkerHandle {
+                    health,
+                    request_tx: worker.0,
+                    result_rx: worker.1,
+                });
                 true
             }
             Ok(Err(err)) => {
@@ -163,32 +262,95 @@ impl LspSessionHandle {
         }
     }
 
+    /// Non-blocking drain of completed worker results.  Call once per frame
+    /// after `drain()`.  Returns all pending `LspWorkerResult`s.
+    pub fn try_drain_results(&mut self) -> Vec<LspWorkerResult> {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        loop {
+            match worker.result_rx.try_recv() {
+                Ok(result) => results.push(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker thread exited; treat as session failure.
+                    self.state = LspSessionState::Failed {
+                        reason: "LSP worker thread exited unexpectedly".to_string(),
+                    };
+                    break;
+                }
+            }
+        }
+        results
+    }
+
+    /// Issue a non-blocking read request (completion, hover, definition).
+    ///
+    /// Sends the request to the worker thread via the bounded channel.  If
+    /// the channel is full (a prior request is still in flight), the new
+    /// request is silently dropped — the caller retries on the next
+    /// debounce/keystroke.  Returns `false` if the session is not Live.
+    pub fn issue_request(
+        &mut self,
+        method: impl Into<String>,
+        params: serde_json::Value,
+        tag: LspRequestTag,
+    ) -> bool {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return false;
+        };
+        let request = LspWorkerRequest::RequestRead {
+            method: method.into(),
+            params,
+            tag,
+        };
+        // SyncSender::try_send is non-blocking; drops when full (capacity = 1).
+        worker.request_tx.try_send(request).is_ok()
+    }
+
+    /// Send a fire-and-forget `textDocument/didChange` notification.
+    ///
+    /// Returns `false` if the session is not Live.  Errors are silently dropped;
+    /// the session can restart and re-sync independently.
+    pub fn send_did_change(&mut self, uri: String, version: i64, text: String) -> bool {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return false;
+        };
+        let request = LspWorkerRequest::DidChange { uri, version, text };
+        worker.request_tx.try_send(request).is_ok()
+    }
+
+    /// Send a fire-and-forget `textDocument/didOpen` notification.
+    pub fn send_did_open(
+        &mut self,
+        uri: String,
+        language_id: String,
+        version: i64,
+        text: String,
+    ) -> bool {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return false;
+        };
+        let request = LspWorkerRequest::DidOpen {
+            uri,
+            language_id,
+            version,
+            text,
+        };
+        worker.request_tx.try_send(request).is_ok()
+    }
+
     /// Returns the current health record if the session is live (or a
     /// synthetic unavailable record if refused/failed).  Returns `None` when
     /// idle or starting.
     pub fn health_record(&self) -> Option<LspServerHealthRecord> {
         match &self.state {
             LspSessionState::Idle | LspSessionState::Starting { .. } => None,
-            LspSessionState::Live(session) => Some(session.health().clone()),
+            LspSessionState::Live(worker) => Some(worker.health.clone()),
             LspSessionState::Refused { .. } | LspSessionState::Failed { .. } => {
                 Some(unavailable_health_record())
             }
-        }
-    }
-
-    /// Returns a shared reference to the live session, or `None` otherwise.
-    pub fn session(&self) -> Option<&RustAnalyzerSession> {
-        match &self.state {
-            LspSessionState::Live(session) => Some(session),
-            _ => None,
-        }
-    }
-
-    /// Returns an exclusive reference to the live session, or `None` otherwise.
-    pub fn session_mut(&mut self) -> Option<&mut RustAnalyzerSession> {
-        match &mut self.state {
-            LspSessionState::Live(session) => Some(session),
-            _ => None,
         }
     }
 
@@ -203,8 +365,82 @@ impl LspSessionHandle {
     }
 }
 
+/// Spawns the session worker thread.  Returns `(request_tx, result_rx)`.
+///
+/// The channel capacities are intentionally small:
+///   - `request_tx`: capacity 1 — one in-flight LSP request at a time;
+///     subsequent sends are dropped and retried on the next keystroke.
+///   - `result_rx`: capacity 16 — allow batching of diagnostic notifications.
+fn spawn_session_worker(
+    mut session: RustAnalyzerSession,
+) -> (
+    mpsc::SyncSender<LspWorkerRequest>,
+    mpsc::Receiver<LspWorkerResult>,
+) {
+    let (request_tx, request_rx) = mpsc::sync_channel::<LspWorkerRequest>(1);
+    let (result_tx, result_rx) = mpsc::sync_channel::<LspWorkerResult>(16);
+
+    thread::spawn(move || {
+        run_session_worker(&mut session, request_rx, result_tx);
+    });
+
+    (request_tx, result_rx)
+}
+
+/// Worker thread main loop.
+///
+/// - Waits up to `NOTIFICATION_POLL_INTERVAL` for an incoming request.
+/// - If a request arrives, executes it (blocking LSP call).
+/// - On timeout (no request), drains any buffered `publishDiagnostics`
+///   notifications from the reader channel and forwards them to the frame path.
+fn run_session_worker(
+    session: &mut RustAnalyzerSession,
+    request_rx: mpsc::Receiver<LspWorkerRequest>,
+    result_tx: mpsc::SyncSender<LspWorkerResult>,
+) {
+    const NOTIFICATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    loop {
+        match request_rx.recv_timeout(NOTIFICATION_POLL_INTERVAL) {
+            Ok(LspWorkerRequest::RequestRead {
+                method,
+                params,
+                tag,
+            }) => {
+                let outcome = session.request_read(&method, params, tag.snapshot_id);
+                // Best-effort send; if the result channel is full the result
+                // is dropped.  The caller will retry on next keystroke.
+                let _ = result_tx.try_send(LspWorkerResult::ReadResult { outcome, tag });
+            }
+            Ok(LspWorkerRequest::DidChange { uri, version, text }) => {
+                let _ = session.did_change(&uri, version, &text);
+            }
+            Ok(LspWorkerRequest::DidOpen {
+                uri,
+                language_id,
+                version,
+                text,
+            }) => {
+                let _ = session.did_open(&uri, &language_id, version, &text);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No requests pending.  Drain any buffered diagnostic
+                // notifications that arrived since the last check.
+                for raw_params in session.try_drain_diagnostic_params() {
+                    let _ = result_tx.try_send(LspWorkerResult::DiagnosticBatch { raw_params });
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The frame-path end of the channel was dropped (app shutting
+                // down).  Exit cleanly.
+                break;
+            }
+        }
+    }
+}
+
 /// Runs full startup sequence: discovery → launch → initialize.
-/// Called on the background thread only.
+/// Called on the background startup thread only.
 fn startup_session(
     workspace_root: &Path,
     root_uri: &str,

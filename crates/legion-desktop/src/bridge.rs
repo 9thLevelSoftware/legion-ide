@@ -670,6 +670,15 @@ pub enum DesktopAction {
     CompletionAccept,
     /// Dismiss the LSP completion popup without accepting any item (T6).
     CompletionDismiss,
+    /// Dismiss the LSP hover tooltip (T7).
+    HoverDismiss,
+    /// Navigate to a specific definition location by index (T7).
+    ///
+    /// `index` is a zero-based position into `language_tooling_projection.definitions`.
+    NavigateToDefinition {
+        /// Zero-based index into the projected definitions list.
+        index: usize,
+    },
     /// Launch a terminal session through app authority.
     TerminalLaunch {
         /// Command label.
@@ -1818,6 +1827,10 @@ impl DesktopCommandBridge {
             | DesktopAction::CompletionPrev
             | DesktopAction::CompletionAccept
             | DesktopAction::CompletionDismiss => DesktopBridgeOutput::Noop,
+            // T7: hover/definition actions intercepted in DesktopRuntime::handle_action.
+            DesktopAction::HoverDismiss | DesktopAction::NavigateToDefinition { .. } => {
+                DesktopBridgeOutput::Noop
+            }
             DesktopAction::TerminalLaunch { command_label } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::TerminalLaunch { command_label })
             }
