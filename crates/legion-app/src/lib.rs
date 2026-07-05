@@ -11594,7 +11594,7 @@ impl AssistInlinePredictionState {
 /// Explicit search option overrides. `None` means "fall through to
 /// text-prefix parsing" for the corresponding option.
 #[derive(Debug, Clone, Copy, Default)]
-struct SearchQueryOptions {
+pub struct SearchQueryOptions {
     /// Override case-sensitivity. `None` defers to `case` / `icase` prefixes.
     pub case_sensitive: Option<bool>,
     /// Override whole-word matching. `None` defers to `word:` prefix.
@@ -14461,9 +14461,11 @@ impl AppComposition {
                 scope,
                 query,
                 limit,
-                case_sensitive,
-                whole_word,
-                use_regex,
+                SearchQueryOptions {
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                },
             )?)),
             AppCommandRequest::RunStructuralSearch {
                 query_id,
@@ -18287,9 +18289,7 @@ impl AppComposition {
         scope: SearchScopeProjection,
         query: String,
         limit: usize,
-        case_sensitive: Option<bool>,
-        whole_word: Option<bool>,
-        use_regex: Option<bool>,
+        options: SearchQueryOptions,
     ) -> Result<SearchProjection, AppCompositionError> {
         // Mark current results stale before running the new query so that any
         // caller holding a snapshot sees them de-emphasised.
@@ -18335,11 +18335,6 @@ impl AppComposition {
             return Ok(self.search_projection.clone());
         }
 
-        let options = SearchQueryOptions {
-            case_sensitive,
-            whole_word,
-            use_regex,
-        };
         let result = match scope {
             SearchScopeProjection::ActiveFile => {
                 self.run_active_file_search(&query_id, &query_label, result_limit, options)?

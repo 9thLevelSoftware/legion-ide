@@ -8486,9 +8486,8 @@ mod tests {
             1,
             "expected exactly one hit from the text file"
         );
-        assert_eq!(
+        assert!(
             all_hits[0].canonical_path.0.contains("text_file"),
-            true,
             "hit should be from text_file.txt"
         );
 
