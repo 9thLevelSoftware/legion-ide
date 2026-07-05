@@ -103,7 +103,7 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     assert!(report.errors.is_empty());
     // Prose status strings remain populated for human-facing evidence only.
     assert!(report.edit_save_status.contains("saved"));
-    assert!(report.terminal_status.contains("denied"));
+    assert!(report.terminal_status.contains("terminal_running_expected"));
     assert!(report.proposal_status.contains("preview"));
 
     let evidence_text = fs::read_to_string(&evidence).expect("evidence should be written");
