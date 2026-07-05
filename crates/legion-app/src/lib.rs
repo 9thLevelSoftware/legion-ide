@@ -12209,6 +12209,7 @@ fn collect_search_results_for_line(input: SearchLineInput<'_>) {
             },
             snippet,
             snippet_truncated,
+            stale: false,
         };
         push_bounded_search_result(input.result, input.limit, row);
     }
@@ -17983,6 +17984,10 @@ impl AppComposition {
     }
 
     /// Run bounded lexical search through app-owned editor/workspace authority.
+    ///
+    /// When a new query supersedes previous results, the existing
+    /// `SearchResultProjection` rows are immediately marked `stale = true` so
+    /// that callers can show de-emphasised results while the new search runs.
     pub fn run_search(
         &mut self,
         query_id: String,
@@ -17990,6 +17995,21 @@ impl AppComposition {
         query: String,
         limit: usize,
     ) -> Result<SearchProjection, AppCompositionError> {
+        // Mark current results stale before running the new query so that any
+        // caller holding a snapshot sees them de-emphasised.
+        let incoming_query_id = query_id.as_str();
+        let current_is_different = self
+            .search_projection
+            .query_id
+            .as_deref()
+            .is_none_or(|prev| prev != incoming_query_id);
+        if current_is_different && !self.search_projection.results.is_empty() {
+            for row in &mut self.search_projection.results {
+                row.stale = true;
+            }
+            self.search_projection.generated_at = TimestampMillis::now();
+        }
+
         let result_limit = normalize_search_limit(limit);
         let query_label = query.trim().to_string();
         if query_label.is_empty() {
@@ -19934,6 +19954,7 @@ impl AppComposition {
                         },
                         snippet: hit.snippet,
                         snippet_truncated: hit.snippet_truncated,
+                        stale: false,
                     });
                 }
                 true

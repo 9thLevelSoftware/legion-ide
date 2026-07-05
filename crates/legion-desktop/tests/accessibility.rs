@@ -228,6 +228,7 @@ fn focus_order_follows_the_projected_accessibility_node_sequence() {
             range: range(0, 1),
             snippet: "match".to_string(),
             snippet_truncated: false,
+            stale: false,
         }],
         result_limit: 1,
         omitted_result_count: 0,

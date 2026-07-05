@@ -58,12 +58,16 @@ impl DesktopSearchViewModel {
                 } else {
                     ""
                 };
+                // Stale results (superseded by a newer query) are tagged so
+                // the renderer can apply a de-emphasised visual treatment.
+                let stale_tag = if row.stale { " [stale]" } else { "" };
                 format!(
-                    "{}:{}:{}{} {}",
+                    "{}:{}:{}{}{} {}",
                     path,
                     row.line_number + 1,
                     row.range.start.character + 1,
                     truncated,
+                    stale_tag,
                     normalize_snippet(&row.snippet)
                 )
             })

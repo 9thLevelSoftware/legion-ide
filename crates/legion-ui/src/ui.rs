@@ -1250,6 +1250,10 @@ pub struct SearchResultProjection {
     pub snippet: String,
     /// Whether the snippet was truncated.
     pub snippet_truncated: bool,
+    /// `true` when this result belongs to a superseded query.  The desktop
+    /// should render stale rows de-emphasised (dimmed) until they are replaced
+    /// by results from the current query.
+    pub stale: bool,
 }
 
 /// Projection-only bounded search surface.

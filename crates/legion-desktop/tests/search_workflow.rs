@@ -272,6 +272,7 @@ fn search_workflow_displays_degraded_limited_projection() {
             range: range(0, 6),
             snippet: "needle visible".to_string(),
             snippet_truncated: false,
+            stale: false,
         }],
         result_limit: 10,
         omitted_result_count: 0,
