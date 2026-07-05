@@ -228,14 +228,21 @@ fn windows_env_deny_list_stripped_at_pty_spawn() {
         "secret var must be stripped from the filtered env"
     );
 
-    // Spawn cmd /C to echo both vars and exit. The filtered env is passed directly so
-    // the PTY child cannot see LEGION_SECRET* vars.
+    // Probe: use cmd's IF DEFINED to emit a neutral sentinel instead of echoing the variable
+    // NAME, which would embed "SECRET"/"TOKEN" in the PTY output and trip the classifier.
+    //
+    //   IF DEFINED X (echo deny=LEAKED)  → "deny=LEAKED" if secret is in child env (leak!)
+    //   ELSE (echo deny=absent)          → "deny=absent" if correctly filtered
+    //   & echo allow=%CONTROL_KEY%       → always echoes the control value
     let service = NativePtyService;
     let request = PtyRequest {
         command: "cmd".to_string(),
         args: vec![
             "/C".to_string(),
-            format!("echo deny=%{}% allow=%{}%", SECRET_KEY, CONTROL_KEY),
+            format!(
+                "IF DEFINED {} (echo deny=LEAKED) ELSE (echo deny=absent) & echo allow=%{}%",
+                SECRET_KEY, CONTROL_KEY
+            ),
         ],
         cwd: None,
         env: Some(filtered_env),
@@ -244,7 +251,7 @@ fn windows_env_deny_list_stripped_at_pty_spawn() {
         .spawn_pty(&request)
         .expect("env-deny-list cmd spawn must succeed");
 
-    // Poll for output until we see the echo result or timeout (5 s).
+    // Poll for output until we see the allow= line or timeout (5 s).
     let mut output = session.output.clone();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !output.contains("allow=") && std::time::Instant::now() < deadline {
@@ -267,10 +274,12 @@ fn windows_env_deny_list_stripped_at_pty_spawn() {
     }
 
     eprintln!("[TERM-ENV-DENY windows] output={output:?}");
+    // Secret var was denied — IF DEFINED sentinel must NOT have fired.
     assert!(
-        !output.contains(SECRET_VAL),
-        "PTY env must NOT expose the denied secret var; output: {output:?}"
+        !output.contains("LEAKED"),
+        "PTY env must NOT expose the denied secret var (sentinel triggered); output: {output:?}"
     );
+    // Control var is present in the filtered env — its value must appear.
     assert!(
         output.contains(CONTROL_VAL) || output.contains("allow="),
         "PTY env MUST expose the allowed control var; output: {output:?}"
@@ -307,12 +316,19 @@ fn unix_env_deny_list_stripped_at_pty_spawn() {
         "secret var must be stripped from the filtered env"
     );
 
+    // Probe: use bash conditional expansion ${VAR:+SENTINEL} so the variable NAMES
+    // (which contain "SECRET"/"TOKEN") never appear in the PTY output. The output
+    // classifier `contains_forbidden_phase8_payload` would deny the launch if those
+    // substrings appeared, since they are on the forbidden-pattern list.
+    //
+    //   ${SECRET_KEY:+LEAKED} → "LEAKED" if secret is set (leak detected), "" if absent
+    //   ${CONTROL_KEY}        → expands to the control value (no forbidden substrings)
     let request = make_launch_request_with_env(
         "bash",
         vec![
             "-c".to_string(),
             format!(
-                "printf 'deny=${{{}}} allow=${{{}}}'",
+                "printf 'sec=%s ctl=%s' \"${{{}:+LEAKED}}\" \"${{{}}}\"",
                 SECRET_KEY, CONTROL_KEY
             ),
         ],
@@ -330,12 +346,14 @@ fn unix_env_deny_list_stripped_at_pty_spawn() {
     }
 
     let output = &outcome.output.redacted_payload;
+    // Secret was denied → conditional sentinel "LEAKED" must NOT appear in output.
     assert!(
-        !output.contains(SECRET_VAL),
-        "PTY env must NOT expose the denied secret var; output: {output:?}"
+        !output.contains("LEAKED"),
+        "PTY env must NOT expose the denied secret var (sentinel triggered); output: {output:?}"
     );
+    // Control var is present → its value must appear in the output.
     assert!(
-        output.contains(CONTROL_VAL) || output.contains("allow="),
+        output.contains(CONTROL_VAL),
         "PTY env MUST expose the allowed control var; output: {output:?}"
     );
     eprintln!(
@@ -425,14 +443,17 @@ fn windows_passthrough_false_minimal_baseline_is_safe_and_isolated() {
         "secret var must be stripped from the baseline"
     );
 
-    // Spawn cmd echoing the vars. If SystemRoot is missing cmd.exe won't start at all.
+    // Probe: use cmd's IF DEFINED sentinel pattern (aligned with Unix ${VAR:+LEAKED} style)
+    // so neither the secret var NAME (contains "secret") nor the custom var NAME lands in
+    // the PTY output and trips the classifier. %PATH% is echoed directly since its
+    // expansion is neutral — any non-empty value proves the baseline env is valid.
     let service = NativePtyService;
     let request = PtyRequest {
         command: "cmd".to_string(),
         args: vec![
             "/C".to_string(),
             format!(
-                "echo secret=%{}% custom=%{}% path_ok=%PATH%",
+                "IF DEFINED {} (echo sec=LEAKED) ELSE (echo sec=absent) & IF DEFINED {} (echo cust=LEAKED) ELSE (echo cust=absent) & echo path_ok=%PATH%",
                 SECRET_KEY, CUSTOM_KEY
             ),
         ],
@@ -466,20 +487,15 @@ fn windows_passthrough_false_minimal_baseline_is_safe_and_isolated() {
 
     eprintln!("[TERM-PASSTHROUGH-FALSE windows] output={output:?}");
 
-    // (a) Shell ran successfully — PATH was expanded.
+    // (a) Shell ran successfully — PATH was non-empty in the baseline env.
     assert!(
         output.contains("path_ok="),
         "cmd.exe must run with baseline env; output: {output:?}"
     );
-    // (b) Secret var is absent.
+    // (b+c) Neither the secret var nor the custom var leaked into the baseline env.
     assert!(
-        !output.contains(SECRET_VAL),
-        "secret var must NOT appear in baseline-env cmd output; output: {output:?}"
-    );
-    // (c) Non-baseline custom var is absent.
-    assert!(
-        !output.contains(CUSTOM_VAL),
-        "non-baseline custom var must NOT appear in baseline-env cmd output; output: {output:?}"
+        !output.contains("LEAKED"),
+        "secret or custom var must NOT appear in the passthrough=false baseline; output: {output:?}"
     );
 }
 
@@ -514,12 +530,19 @@ fn unix_passthrough_false_minimal_baseline_is_safe_and_isolated() {
         "non-baseline custom var must not be in the baseline"
     );
 
+    // Probe: use ${VAR:+SENTINEL} conditional expansion throughout so no variable NAME
+    // containing "secret" or "token" ever lands in the PTY output (which would trip
+    // the `contains_forbidden_phase8_payload` classifier and deny the launch).
+    //
+    //   ${PATH:+OK}       → "OK" if PATH set (proves baseline env is non-empty)
+    //   ${SECRET_KEY:+LEAKED} → "LEAKED" if secret leaked into baseline (test fail)
+    //   ${CUSTOM_KEY:+LEAKED} → "LEAKED" if custom var leaked into baseline (test fail)
     let request = make_launch_request_with_env(
         "bash",
         vec![
             "-c".to_string(),
             format!(
-                "printf 'secret=${{{}}} custom=${{{}}} path_ok=${{PATH}}'",
+                "printf 'path=%s sec=%s cust=%s' \"${{PATH:+OK}}\" \"${{{}:+LEAKED}}\" \"${{{}:+LEAKED}}\"",
                 SECRET_KEY, CUSTOM_KEY
             ),
         ],
@@ -539,16 +562,14 @@ fn unix_passthrough_false_minimal_baseline_is_safe_and_isolated() {
     let output = &outcome.output.redacted_payload;
     eprintln!("[TERM-PASSTHROUGH-FALSE unix] output={output:?}");
 
+    // (a) PATH is set in the baseline — bash ran and PATH was available.
     assert!(
-        output.contains("path_ok="),
-        "bash must run with baseline env; output: {output:?}"
+        output.contains("path=OK"),
+        "bash must run with PATH in the baseline env; output: {output:?}"
     );
+    // (b+c) Neither the secret var nor the custom var leaked into the baseline env.
     assert!(
-        !output.contains(SECRET_VAL),
-        "secret var must NOT appear; output: {output:?}"
-    );
-    assert!(
-        !output.contains(CUSTOM_VAL),
-        "non-baseline custom var must NOT appear; output: {output:?}"
+        !output.contains("LEAKED"),
+        "secret or custom var must NOT appear in the passthrough=false baseline; output: {output:?}"
     );
 }

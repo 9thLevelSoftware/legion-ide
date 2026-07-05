@@ -425,10 +425,22 @@ fn terminal_shell_selection_is_projected_in_status() {
     .expect("open workspace");
 
     // ── Tier 1: Workspace overrides user overrides platform ─────────────────────────────
-    // Set user-level preference to PowerShell, workspace to Cmd.
-    // Workspace must win → expect "cmd.exe" in status.
-    app.set_user_terminal_shell_selection(Some(TerminalShellSelection::PowerShell));
-    app.set_terminal_shell_selection(TerminalShellSelection::Cmd);
+    // Use platform-appropriate shells so we never spawn a binary that doesn't exist:
+    //   Windows: user=PowerShell, workspace=Cmd  → "cmd.exe" must appear in status
+    //   Unix:    user=Explicit("sh"), workspace=Bash → "bash" must appear in status
+    #[cfg(windows)]
+    let (user_t1, ws_t1): (TerminalShellSelection, TerminalShellSelection) = (
+        TerminalShellSelection::PowerShell,
+        TerminalShellSelection::Cmd,
+    );
+    #[cfg(not(windows))]
+    let (user_t1, ws_t1): (TerminalShellSelection, TerminalShellSelection) = (
+        TerminalShellSelection::Explicit("sh".to_string()),
+        TerminalShellSelection::Bash,
+    );
+
+    app.set_user_terminal_shell_selection(Some(user_t1));
+    app.set_terminal_shell_selection(ws_t1);
 
     let projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::TerminalLaunch {
@@ -445,15 +457,23 @@ fn terminal_shell_selection_is_projected_in_status() {
         "workspace-override launch must succeed; status: {:?}",
         projection.status
     );
+    #[cfg(windows)]
     assert!(
         projection.status.message.contains("cmd.exe"),
         "workspace Cmd must override user PowerShell; status: {:?}",
         projection.status.message
     );
+    #[cfg(not(windows))]
+    assert!(
+        projection.status.message.contains("bash"),
+        "workspace Bash must override user sh; status: {:?}",
+        projection.status.message
+    );
 
     // ── Tier 2: User overrides platform default ──────────────────────────────────────────
-    // Clear workspace selection → user-level PowerShell must win.
-    // Use a fresh AppComposition to avoid leftover session state.
+    // User setting must beat the platform default when no workspace override is set.
+    //   Windows: user=PowerShell → platform default is Cmd; "pwsh" must appear in status
+    //   Unix:    user=Explicit("sh") → platform default is Bash; "shell=sh" in status
     let root2 = create_root();
     let mut app2 = AppComposition::new();
     app2.open_workspace(
@@ -462,7 +482,11 @@ fn terminal_shell_selection_is_projected_in_status() {
         PrincipalId("principal-shell-user".to_string()),
     )
     .expect("open workspace for user-tier test");
-    app2.set_user_terminal_shell_selection(Some(TerminalShellSelection::PowerShell));
+    #[cfg(windows)]
+    let user_t2 = TerminalShellSelection::PowerShell;
+    #[cfg(not(windows))]
+    let user_t2 = TerminalShellSelection::Explicit("sh".to_string());
+    app2.set_user_terminal_shell_selection(Some(user_t2));
     // No workspace-level override — user pref should win over platform default.
 
     let projection2 = match app2
@@ -480,9 +504,16 @@ fn terminal_shell_selection_is_projected_in_status() {
         "user-pref launch must succeed; status: {:?}",
         projection2.status
     );
+    #[cfg(windows)]
     assert!(
         projection2.status.message.contains("pwsh"),
-        "user PowerShell must override platform default; status: {:?}",
+        "user PowerShell must override platform default (cmd.exe); status: {:?}",
+        projection2.status.message
+    );
+    #[cfg(not(windows))]
+    assert!(
+        projection2.status.message.contains("shell=sh"),
+        "user sh must override platform default (bash); status: {:?}",
         projection2.status.message
     );
 }
