@@ -221,33 +221,6 @@ impl RustAnalyzerSession {
 
     /// Sends `textDocument/didChange` with a full-document replacement.
     ///
-    /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
-    /// is not in an initialized/live state. No write is made to the transport
-    /// in that case.
-    ///
-    /// `version` must be strictly greater than the version used in the matching
-    /// `did_open` (or prior `did_change`) call per the LSP spec.
-    pub fn did_change(
-        &mut self,
-        uri: &str,
-        version: i64,
-        text: &str,
-    ) -> Result<(), LanguageSessionError> {
-        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
-            return Err(LanguageSessionError::Unavailable);
-        }
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": uri,
-                "version": version,
-            },
-            "contentChanges": [{"text": text}]
-        });
-        self.session
-            .send_notification("textDocument/didChange", params)
-            .map_err(LanguageSessionError::Handshake)
-    }
-
     /// Returns and removes the most recently received raw `publishDiagnostics`
     /// params for `uri`, if any.
     ///
@@ -417,7 +390,9 @@ impl RustAnalyzerSession {
     /// can be added later when performance requires it.
     ///
     /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
-    /// is not in an initialized/live state.
+    /// is not in an initialized/live state (no write reaches the transport).
+    /// Per the LSP spec, `version` must be strictly greater than the version
+    /// used in the matching `did_open` (or prior `did_change`) call.
     pub fn did_change(
         &mut self,
         uri: &str,
