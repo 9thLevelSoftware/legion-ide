@@ -430,8 +430,24 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
         RustAnalyzerSession::launch(config, &mut launcher).map_err(|e| format!("launch: {e}"))?;
 
     let root_uri = path_to_file_uri(temp_dir);
+    // Configure rust-analyzer for CLIENT-side file watching. RA's default
+    // server-side `notify` watcher fails on temp workspace paths and wedges
+    // the analysis loop behind it — captured verbatim by the s3 stderr ring
+    // ("notify error: Input watch path is neither a file nor a directory";
+    // 5 occurrences across Windows local + ubuntu CI runs 28747873556 /
+    // 28752070723, didChange-immune, nudges refuted). The smoke drives every
+    // change through didOpen/didChange and never needs disk watching, so the
+    // client simply never sends watched-file events. The capabilities object
+    // advertises didChangeWatchedFiles dynamic registration so RA honours
+    // the client-watcher config.
     session
-        .initialize(&root_uri)
+        .initialize_with_options(
+            &root_uri,
+            Some(serde_json::json!({"files": {"watcher": "client"}})),
+            Some(serde_json::json!({
+                "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
+            })),
+        )
         .map_err(|e| format!("initialize: {e}"))?;
 
     // Spawn the background stderr drain thread so post-mortem diagnostics in

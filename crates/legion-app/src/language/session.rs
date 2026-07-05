@@ -151,12 +151,31 @@ impl RustAnalyzerSession {
     /// Sends the LSP `initialize` request and the `initialized` notification,
     /// then updates `health.init_status` from the correlated response.
     pub fn initialize(&mut self, root_uri: &str) -> Result<(), LanguageSessionError> {
-        let params = serde_json::json!({
-            "processId": std::process::id(),
-            "rootUri": root_uri,
-            "capabilities": {},
-            "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
-        });
+        self.initialize_with_options(root_uri, None, None)
+    }
+
+    /// [`initialize`] with explicit `initializationOptions` and client
+    /// `capabilities`.
+    ///
+    /// `initialization_options`, when `Some`, is serialized as the LSP
+    /// `initializationOptions` field (rust-analyzer reads its config from
+    /// it — e.g. `{"files": {"watcher": "client"}}` disables the server-side
+    /// `notify` file watcher, whose failure on temp workspace paths wedges
+    /// RA's analysis loop; captured verbatim by the stderr ring during the
+    /// GP-1 s3 investigation: "notify error: Input watch path is neither a
+    /// file nor a directory").
+    ///
+    /// `client_capabilities`, when `Some`, replaces the default empty
+    /// capabilities object (e.g. advertising
+    /// `workspace.didChangeWatchedFiles.dynamicRegistration` so a
+    /// client-watcher config is honoured).
+    pub fn initialize_with_options(
+        &mut self,
+        root_uri: &str,
+        initialization_options: Option<serde_json::Value>,
+        client_capabilities: Option<serde_json::Value>,
+    ) -> Result<(), LanguageSessionError> {
+        let params = build_initialize_params(root_uri, initialization_options, client_capabilities);
 
         let response = self
             .session
@@ -532,5 +551,60 @@ impl RustAnalyzerSession {
         }
         self.health.restart_count = attempt + 1;
         Some(policy.backoff_for_attempt(attempt))
+    }
+}
+
+/// Builds the LSP `initialize` request params.
+///
+/// Pure so the wire shape is unit-testable: `initializationOptions` is
+/// emitted only when provided (the LSP spec makes it optional), and the
+/// client `capabilities` object defaults to empty when not provided.
+fn build_initialize_params(
+    root_uri: &str,
+    initialization_options: Option<serde_json::Value>,
+    client_capabilities: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "processId": std::process::id(),
+        "rootUri": root_uri,
+        "capabilities": client_capabilities.unwrap_or_else(|| serde_json::json!({})),
+        "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
+    });
+    if let Some(options) = initialization_options {
+        params["initializationOptions"] = options;
+    }
+    params
+}
+
+#[cfg(test)]
+mod initialize_params_tests {
+    use super::build_initialize_params;
+
+    #[test]
+    fn default_params_have_empty_capabilities_and_no_initialization_options() {
+        let params = build_initialize_params("file:///tmp/ws", None, None);
+        assert_eq!(params["rootUri"], "file:///tmp/ws");
+        assert_eq!(params["capabilities"], serde_json::json!({}));
+        assert!(
+            params.get("initializationOptions").is_none(),
+            "initializationOptions must be omitted (not null) when unset"
+        );
+        assert_eq!(params["workspaceFolders"][0]["uri"], "file:///tmp/ws");
+    }
+
+    #[test]
+    fn initialization_options_are_serialized_verbatim() {
+        let options = serde_json::json!({"files": {"watcher": "client"}});
+        let params = build_initialize_params("file:///tmp/ws", Some(options.clone()), None);
+        assert_eq!(params["initializationOptions"], options);
+    }
+
+    #[test]
+    fn client_capabilities_replace_the_default_empty_object() {
+        let caps = serde_json::json!({
+            "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
+        });
+        let params = build_initialize_params("file:///tmp/ws", None, Some(caps.clone()));
+        assert_eq!(params["capabilities"], caps);
     }
 }
