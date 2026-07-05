@@ -49,6 +49,8 @@ use std::process::Command;
 use std::sync::Arc;
 use thiserror::Error;
 
+use legion_platform::resolve_existing_prefix;
+
 /// Agent runtime errors.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AgentError {
@@ -809,39 +811,6 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentEr
     }
 
     Ok(relative.to_path_buf())
-}
-
-/// Resolves the deepest existing ancestor of `path` through
-/// `std::fs::canonicalize` and re-appends the non-existent remainder (which
-/// is already lexically clean — no `..`/`.` components survive the caller's
-/// normalization). Returns `None` when the deepest existing component is a
-/// symlink that cannot be canonicalized (dangling): writing "through" such a
-/// link would create the target at an unverified location, so containment
-/// must fail closed.
-fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
-    let mut existing = path;
-    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        // `symlink_metadata` (not `exists`) so a dangling symlink counts as a
-        // present-but-unresolvable component instead of being walked past.
-        if existing.symlink_metadata().is_ok() {
-            break;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                suffix.push(name.to_os_string());
-                existing = parent;
-            }
-            // No existing ancestor at all: nothing on disk to resolve; the
-            // lexically-cleaned path is the best available representation.
-            _ => return Some(path.to_path_buf()),
-        }
-    }
-    let mut resolved = std::fs::canonicalize(existing).ok()?;
-    for part in suffix.into_iter().rev() {
-        resolved.push(part);
-    }
-    Some(resolved)
 }
 
 /// Proposal generator inside `legion-agent`.

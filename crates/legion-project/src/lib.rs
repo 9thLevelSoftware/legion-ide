@@ -29,7 +29,7 @@ use legion_observability::{
 };
 use legion_platform::{
     FileSystemEntryKind, FileSystemMetadata, FileSystemService, PathNormalizationService,
-    PlatformError, WatcherService,
+    PlatformError, WatcherService, resolve_existing_prefix,
 };
 use legion_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityRequestContext, CausalityId,
@@ -1353,34 +1353,6 @@ pub fn validate_commit_with_author(
     }
 
     result
-}
-
-/// Walk up `path` until a component exists on disk, canonicalize it, then
-/// re-append the non-existing suffix.  Resolves Windows 8.3 short names
-/// (`RUNNER~1` → `runneradmin`) and macOS /var symlinks, even when the leaf
-/// has not been created yet.  Cannot be imported from `legion-agent` across
-/// the dependency boundary, so it is replicated here.
-fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
-    use std::ffi::OsString;
-    let mut existing = path;
-    let mut suffix: Vec<OsString> = Vec::new();
-    loop {
-        if existing.symlink_metadata().is_ok() {
-            break;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                suffix.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return Some(path.to_path_buf()),
-        }
-    }
-    let mut resolved = std::fs::canonicalize(existing).ok()?;
-    for part in suffix.into_iter().rev() {
-        resolved.push(part);
-    }
-    Some(resolved)
 }
 
 /// Strip the Windows UNC prefix `\\?\` from a `PathBuf` (no-op elsewhere).

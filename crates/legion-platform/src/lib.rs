@@ -2178,6 +2178,56 @@ pub fn shell_title() -> &'static str {
     "Legion IDE - Platform Shell"
 }
 
+/// Resolves the deepest existing ancestor of `path` through
+/// [`std::fs::canonicalize`] and re-appends the non-existent remainder.
+///
+/// The suffix (the non-existent tail) must already be lexically clean —
+/// no `..` or `.` components — so that re-appending it yields the correct
+/// canonical form for the whole path.
+///
+/// This helper solves two platform canonicalization defects that break
+/// path-identity checks when only one side of a comparison is resolved:
+///
+/// - **Windows 8.3 short names** (`RUNNER~1` → `runneradmin`): GitHub-runner
+///   environments often supply paths in 8.3 form; single-sided canonicalization
+///   then fails `starts_with` because the other side expands the long form.
+/// - **macOS `/var` → `/private/var`** symlink: `std::env::temp_dir()` returns
+///   `/var/folders/…`, while `fs::canonicalize` yields `/private/var/folders/…`.
+///   Mixed comparisons (one side resolved, the other not) silently reject
+///   every valid in-sandbox path.
+///
+/// Returns `None` when the deepest **existing** ancestor is a symlink that
+/// cannot be canonicalized (i.e. it is dangling).  Writing "through" such a
+/// symlink would create the target at an unverified location outside the
+/// intended directory tree, so callers must treat this case as a fail-closed
+/// error rather than falling back to the raw lexical path.
+pub fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut existing = path;
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        // Use `symlink_metadata` (not `exists` / `metadata`) so that a
+        // dangling symlink is treated as present-but-unresolvable rather than
+        // being silently walked past as if it did not exist.
+        if existing.symlink_metadata().is_ok() {
+            break;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                suffix.push(name.to_os_string());
+                existing = parent;
+            }
+            // No existing ancestor reachable on disk: return the original
+            // lexical path as the best available representation.
+            _ => return Some(path.to_path_buf()),
+        }
+    }
+    let mut resolved = std::fs::canonicalize(existing).ok()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2659,5 +2709,79 @@ mod tests {
             keys, expected,
             "windows_environment_block keys must be sorted case-insensitively; got: {keys:?}"
         );
+    }
+
+    // ── resolve_existing_prefix unit tests ──────────────────────────────────
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "legion-rep-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// An entirely existing path must canonicalize successfully.
+    #[test]
+    fn rep_existing_path_canonicalizes() {
+        let dir = unique_temp_dir("existing");
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "x").expect("write");
+
+        let result = resolve_existing_prefix(&file).expect("Some");
+        // The result must point to the same filesystem object.
+        assert_eq!(
+            std::fs::canonicalize(&file).expect("canonicalize"),
+            result,
+            "resolve_existing_prefix must return canonical form for existing path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose leaf does not exist yet: the existing prefix is resolved
+    /// and the non-existent leaf is re-appended.
+    #[test]
+    fn rep_nonexistent_leaf_reappended() {
+        let dir = unique_temp_dir("newfile");
+        let file = dir.join("not_yet.rs");
+
+        let result = resolve_existing_prefix(&file).expect("Some");
+        // The directory part must be canonical; the leaf must be preserved.
+        let expected_dir = std::fs::canonicalize(&dir).expect("canonicalize dir");
+        assert_eq!(result, expected_dir.join("not_yet.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dangling symlink in the prefix must return None (fail closed).
+    #[test]
+    #[cfg(unix)]
+    fn rep_dangling_symlink_returns_none() {
+        let sandbox = unique_temp_dir("rep-dangling");
+        let target = unique_temp_dir("rep-dangling-target");
+        let link = sandbox.join("dangling");
+        if std::os::unix::fs::symlink(&target, &link).is_err() {
+            eprintln!("skipping: symlink creation not permitted");
+            let _ = std::fs::remove_dir_all(&sandbox);
+            let _ = std::fs::remove_dir_all(&target);
+            return;
+        }
+        // Remove the target so the symlink dangles.
+        std::fs::remove_dir_all(&target).expect("remove target");
+
+        let path = link.join("file.txt");
+        let result = resolve_existing_prefix(&path);
+        assert!(
+            result.is_none(),
+            "dangling symlink in prefix must return None (fail closed), got {result:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 }

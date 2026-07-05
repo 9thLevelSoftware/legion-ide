@@ -1,4 +1,4 @@
-name: Legion Bench
+name: Legion Bench Recorded
 
 on:
   schedule:
@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  live:
-    name: Legion bench live weekly (${{ matrix.os }})
+  recorded:
+    name: Legion bench recorded weekly (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -25,8 +25,8 @@ jobs:
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
-      - name: Legion bench live mode
-        run: cargo run -p xtask -- legion-bench --mode live
+      - name: Legion bench recorded mode
+        run: cargo run -p xtask -- legion-bench --mode recorded
 
       - name: Legion bench verify
         run: cargo run -p xtask -- verify-legion-bench
