@@ -318,15 +318,18 @@ fn poll_terminal_for_marker(
                 | TerminalPanelStatusKind::Crashed
         );
         if session_done || Instant::now() >= deadline {
-            // Dump accumulated rows for post-mortem diagnostics.
+            // Dump accumulated rows for post-mortem diagnostics.  Full
+            // scrollback, full payloads: rows are already capped by the
+            // product's per-row limit, and a failed s5 has at most a few
+            // dozen rows — completeness beats brevity when the only
+            // diagnostics channel is a CI log (LSP-B lesson).
             eprintln!("[s5-poll] loop exit: session_done={session_done} rows={row_count}");
-            for (i, row) in projection.output_rows.iter().enumerate().rev().take(5) {
+            for (i, row) in projection.output_rows.iter().enumerate() {
                 eprintln!(
                     "[s5-poll] row[{i}] len={} truncated={} payload={:?}",
                     row.redacted_payload.len(),
                     row.truncated,
-                    // Limit to 120 chars to avoid flooding stderr.
-                    &row.redacted_payload.chars().take(120).collect::<String>()
+                    row.redacted_payload
                 );
             }
             break;
@@ -489,7 +492,13 @@ fn run_s3(
 
     // Initial pump: let rust-analyzer settle (bounded 30s).
     eprintln!("[s3] initial pump (up to 30s) ...");
-    let _ = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
+    let initial_pump_started = Instant::now();
+    let initial = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
+    eprintln!(
+        "[s3] initial pump done: notifications_for_uri={} elapsed={}ms",
+        initial.len(),
+        initial_pump_started.elapsed().as_millis()
+    );
 
     // --- introduce compile error ---
     eprintln!("[s3] introducing compile error via app edit path ...");
@@ -535,6 +544,28 @@ fn run_s3(
     let got_error = session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(120));
     eprintln!("[s3] error diagnostic received: {got_error}");
     if !got_error {
+        // Post-mortem: distinguish "rust-analyzer silent for the whole
+        // wait" (starvation / stall) from "notifications arrived but never
+        // matched the error predicate" (product-side race or fingerprint
+        // mismatch). Flake observed locally under concurrent builds and on
+        // ubuntu CI (run 28747873556).
+        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(&scratchpad_uri);
+        let buffered = session.buffered_diagnostic_notifications();
+        eprintln!(
+            "[s3] POST-MORTEM: expected uri_hash={expected_hash:?} buffered_notifications={}",
+            buffered.len()
+        );
+        for (i, n) in buffered.iter().enumerate() {
+            eprintln!(
+                "[s3] buffered[{i}] uri_hash={:?} match={} diagnostics={} errors={} warnings={}",
+                n.uri_hash,
+                n.uri_hash == expected_hash,
+                n.diagnostic_count,
+                n.error_count,
+                n.warning_count
+            );
+        }
+        eprintln!("[s3] health: {:?}", session.health());
         return Err(
             "s3: expected >=1 error diagnostic after introducing type mismatch; \
              none arrived within 120s deadline"
@@ -837,8 +868,9 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     // Cargo flags:
     //   -q           suppress per-test status lines (only show summary)
     //   --color=never strip ANSI escape codes (they inflate character count)
-    // Both are needed to keep output + SMOKE_EXIT: well under the product's
-    // 240-char per-row scrollback limit.
+    // The product splits output chunks into per-line rows and caps each ROW
+    // at 240 chars, so the marker only needs its own short line; the flags
+    // keep individual lines short and the scrollback quiet.
     // Write the runner script into the OS temp dir (NOT the fixture workspace git
     // root) so it never shows up as an untracked file during the s6 git step (I-2).
     let temp_str = temp_dir.to_string_lossy();
@@ -858,8 +890,25 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
         (bat_path, cmd)
     } else {
         let sh_path = std::env::temp_dir().join(format!("gp1_smoke_test_{pid}.sh"));
+        // Sidecar transcript: ground truth that survives even when the PTY
+        // scrollback projection loses rows (observed on macOS CI, run
+        // 28741840232: block exited 0 in 173ms yet no script output row —
+        // including the marker — ever appeared in the projection).  The
+        // script records (1) whether/where cargo resolves and (2) the real
+        // exit code, WITHOUT altering what flows to the PTY: cargo's
+        // stdout/stderr and the marker echo reach the terminal exactly as
+        // before.
+        let sidecar = std::env::temp_dir().join(format!("gp1_smoke_sidecar_{pid}.txt"));
+        let sidecar_str = sidecar.to_string_lossy();
         let sh_content = format!(
-            "#!/bin/sh\ncd '{temp_str}'; cargo test -q --no-fail-fast --color=never; echo \"SMOKE_EXIT:$?\"\n"
+            "#!/bin/sh\n\
+             command -v cargo > '{sidecar_str}' 2>&1\n\
+             echo \"PROBE_CARGO_STATUS:$?\" >> '{sidecar_str}'\n\
+             cd '{temp_str}'\n\
+             cargo test -q --no-fail-fast --color=never\n\
+             gp1_code=$?\n\
+             echo \"SMOKE_EXIT:$gp1_code\" >> '{sidecar_str}'\n\
+             echo \"SMOKE_EXIT:$gp1_code\"\n"
         );
         fs::write(&sh_path, sh_content.as_bytes()).map_err(|e| format!("s5: write script: {e}"))?;
         let cmd = format!("sh '{}'\n", sh_path.to_string_lossy());
@@ -888,9 +937,27 @@ fn run_s5(temp_dir: &Path, app: &mut AppComposition) -> Result<Option<String>, S
     let hit = poll_terminal_for_marker(app, session_id, SMOKE_EXIT_MARKER, deadline);
 
     match hit {
-        None => Err(format!(
-            "s5: timeout ({TERMINAL_POLL_DEADLINE_SECS}s) waiting for '{SMOKE_EXIT_MARKER}' in terminal output"
-        )),
+        None => {
+            // Post-mortem: dump the sidecar transcript (Unix script writes
+            // it; absent on Windows or if the script never ran).  This is
+            // the ground-truth channel when the PTY projection lost rows.
+            let sidecar = std::env::temp_dir().join(format!("gp1_smoke_sidecar_{pid}.txt"));
+            match fs::read_to_string(&sidecar) {
+                Ok(text) => {
+                    eprintln!("[s5] sidecar transcript ({}):", sidecar.display());
+                    for line in text.lines() {
+                        eprintln!("[s5-sidecar] {line}");
+                    }
+                }
+                Err(e) => eprintln!(
+                    "[s5] sidecar transcript unavailable ({}): {e}",
+                    sidecar.display()
+                ),
+            }
+            Err(format!(
+                "s5: timeout ({TERMINAL_POLL_DEADLINE_SECS}s) waiting for '{SMOKE_EXIT_MARKER}' in terminal output"
+            ))
+        }
         Some(row) => {
             eprintln!("[s5] exit marker found in row: {row:?}");
             // Parse exit code from the marker payload (best-effort; redaction may truncate).

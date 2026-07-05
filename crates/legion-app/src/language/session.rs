@@ -191,6 +191,19 @@ impl RustAnalyzerSession {
         &self.health
     }
 
+    /// Snapshot of the buffered diagnostic-notification metadata.
+    ///
+    /// Read-only post-mortem introspection for smokes and tests (same class
+    /// as [`health`]): when a diagnostics pump times out, the buffer shows
+    /// whether the server published anything at all during the wait —
+    /// distinguishing "server silent" from "notifications arrived but the
+    /// predicate never matched". Metadata-only (hashes and counts).
+    pub fn buffered_diagnostic_notifications(
+        &self,
+    ) -> Vec<legion_lsp::LspDiagnosticNotificationMetadata> {
+        self.session.diagnostic_notifications().to_vec()
+    }
+
     /// Sends `textDocument/didOpen` for a buffer.
     ///
     /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
