@@ -1809,32 +1809,10 @@ mod tests {
         PrivacyClassification, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind,
         RedactionHint, WorkspaceId, validate_legion_workflow_session,
     };
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     fn causality(value: u128) -> CausalityId {
         CausalityId(Uuid::from_u128(value))
-    }
-
-    /// Creates a unique temporary directory for per-test sandbox isolation.
-    /// Uses PID + nanosecond timestamp to avoid collisions between parallel
-    /// test threads in the same binary.
-    fn unique_sandbox_root(tag: &str) -> PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let unique = format!(
-            "legion-agent-unit-sb-{tag}-{}-{nanos:x}",
-            std::process::id()
-        );
-        let path = std::env::temp_dir().join(unique);
-        if path.exists() {
-            std::fs::remove_dir_all(&path).expect("remove stale temp dir");
-        }
-        std::fs::create_dir_all(&path).expect("create temp sandbox root");
-        path
     }
 
     #[test]
@@ -2035,9 +2013,7 @@ mod tests {
 
     #[test]
     fn test_sandbox_orchestration_and_containment_and_proposal_generation() {
-        let sandbox_root = unique_sandbox_root("orch-proposal");
-        let mut orchestrator =
-            DelegatedTaskSandboxOrchestrator::with_sandbox_root(&sandbox_root, "test-run", None);
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("test-run");
         let permission = approved_sandbox_permission("sandbox:init");
         orchestrator
             .initialize(&permission)
@@ -2105,17 +2081,11 @@ mod tests {
         // Cleanup
         orchestrator.cleanup(&permission).expect("cleanup sandbox");
         assert!(!sandbox_path.exists());
-        let _ = std::fs::remove_dir_all(&sandbox_root);
     }
 
     #[test]
     fn delegated_sandbox_requires_approved_write_tool_permission() {
-        let sandbox_root = unique_sandbox_root("perm-denied");
-        let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
-            &sandbox_root,
-            "permission-test-run",
-            None,
-        );
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new("permission-test-run");
         let denied = legion_protocol::delegated_task_tool_permission_request(
             legion_protocol::DelegatedTaskToolPermissionRequestInput {
                 request_id: "sandbox:denied".to_string(),
@@ -2134,7 +2104,6 @@ mod tests {
             .expect_err("denied permission blocks sandbox init");
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!orchestrator.sandbox_path().exists());
-        let _ = std::fs::remove_dir_all(&sandbox_root);
     }
 
     fn approved_sandbox_permission(
