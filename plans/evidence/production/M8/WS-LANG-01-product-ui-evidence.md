@@ -251,3 +251,27 @@ returning `Some(range.start)` so backspace/delete trigger debounce re-arm.
 - `cargo test -p legion-desktop --test hover_definition` — 7/7 pass
 - `cargo test -p legion-protocol --test dto_contracts` — 111/111 pass
 - `cargo test -p legion-lsp` — 8 pass, 1 ignored (live rust-analyzer smoke)
+
+## Merged-tree standing-gate run (2026-07-05, branch m8/lsp-read-ui)
+
+Context: main merged (SEARCH #39, GIT #40, containment #37, CI fixes #35/#38);
+working directory C:/Users/dasbl/RustroverProjects/legion-ide-lsp-b; Windows
+11; builds -j 4. Merge resolutions: legion-app Cargo.toml feature/dev-deps
+union (both lanes independently converged on the identical test-helpers
+design), AppComposition struct-field + constructor union (LSP session state +
+palette usage repo), TROUBLESHOOTING.md section union, ledger PR-LANG row
+union. Recovery note: the first merge commit briefly contained unresolved
+markers in three files due to a shell-tooling failure masking git status —
+caught by a repo-wide marker sweep before any push, resolved, amended.
+
+| Gate | Result |
+| --- | --- |
+| cargo fmt --all --check | PASS |
+| xtask check-deps / docs-hygiene / claim-audit / no-egui-textedit / verify-kanban-backlog | PASS |
+| xtask release-pipeline --dry-run + verify-release-pipeline | PASS |
+| cargo check --workspace --all-targets | PASS |
+| cargo test --workspace --all-targets --no-fail-fast | PASS |
+| cargo clippy --workspace --all-targets -- -D warnings | PASS (after while-let drain, collapsed if, boxed Live variant; app_lsp_composition re-run 17/17) |
+| xtask perf-harness + verify-perf-harness | PASS |
+| cargo deny check | PASS |
+| xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
