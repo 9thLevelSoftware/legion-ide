@@ -2742,6 +2742,13 @@ impl LspStdioSession {
     pub fn try_drain_diagnostic_params(&mut self) -> Vec<serde_json::Value> {
         let mut raw_params = Vec::new();
         while let Some(Ok(envelope)) = self.process.try_recv_envelope() {
+            // Server→client requests must be answered here too — the
+            // per-frame drain is the only consumer running between explicit
+            // requests, so an unanswered registration would otherwise sit
+            // until the next blocking call (or forever).
+            if let Ok(true) = self.answer_server_request(&envelope) {
+                continue;
+            }
             if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
                 && let Some(params) = envelope.params.clone()
             {
@@ -2756,6 +2763,46 @@ impl LspStdioSession {
     /// `initialize` exchange.
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    /// Answers a server→client REQUEST (a frame carrying BOTH `id` and
+    /// `method`), if the envelope is one. Returns `true` when it was.
+    ///
+    /// LSP requires the client to respond to every server request; a dropped
+    /// request can stall server features that block on the reply (observed:
+    /// rust-analyzer's `client/registerCapability` for client-side file
+    /// watching). Capability (un)registration is acknowledged with a `null`
+    /// result — the client accepts the registration and simply never emits
+    /// the associated events. Any other server request receives the
+    /// protocol-correct JSON-RPC MethodNotFound (-32601) error, signalling
+    /// "unsupported" so the server can degrade instead of waiting.
+    fn answer_server_request(&mut self, envelope: &JsonRpcEnvelope) -> LspRuntimeResult<bool> {
+        let (Some(id), Some(method)) = (envelope.id, envelope.method.as_deref()) else {
+            return Ok(false);
+        };
+        let response = match method {
+            "client/registerCapability" | "client/unregisterCapability" => JsonRpcEnvelope {
+                jsonrpc: "2.0".to_string(),
+                id: Some(id),
+                method: None,
+                params: None,
+                result: Some(Value::Null),
+                error: None,
+            },
+            _ => JsonRpcEnvelope {
+                jsonrpc: "2.0".to_string(),
+                id: Some(id),
+                method: None,
+                params: None,
+                result: None,
+                error: Some(serde_json::json!({
+                    "code": -32601,
+                    "message": "method not supported by this client",
+                })),
+            },
+        };
+        self.process.write_envelope(&response)?;
+        Ok(true)
     }
 
     /// Routes a notification-shaped frame into the durable buffers and, when
@@ -2825,9 +2872,13 @@ impl LspStdioSession {
                 LspReadOutcome::Eof => return Ok(PumpOutcome::Closed),
             };
             if envelope.id.is_some() {
-                // Out-of-band response while pumping: callers must not pump with
-                // an outstanding request, so we skip id-bearing frames rather
-                // than stash them.
+                // Server→client requests must be answered even mid-pump
+                // (rust-analyzer registers its client-side watcher while the
+                // caller pumps for diagnostics). Other id-bearing frames are
+                // out-of-band responses: callers must not pump with an
+                // outstanding request, so those are skipped rather than
+                // stashed.
+                self.answer_server_request(&envelope)?;
                 continue;
             }
             self.record_notification(&envelope, Some(&mut acc));
@@ -2900,6 +2951,12 @@ impl LspStdioSession {
                 self.record_notification(&envelope, None);
                 continue;
             };
+            // A frame with BOTH id and method is a server→client request —
+            // answer it and keep waiting for the target response.
+            if envelope.method.is_some() {
+                self.answer_server_request(&envelope)?;
+                continue;
+            }
             if id != target_json_rpc_id {
                 // A response for a *different* in-flight request. Correlate it
                 // and stash it by JSON-RPC id so a later `read_response_for`

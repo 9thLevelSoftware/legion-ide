@@ -430,8 +430,20 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
         RustAnalyzerSession::launch(config, &mut launcher).map_err(|e| format!("launch: {e}"))?;
 
     let root_uri = path_to_file_uri(temp_dir);
+    // Client-side file watching: RA's server-side notify watcher can fail on
+    // temp workspace paths and wedge the analysis loop behind it (forensics:
+    // plans/evidence/production/M8/PKT-SMOKE-MACOS-evidence.md). The smoke
+    // drives every change via didOpen/didChange, so no watch events are ever
+    // needed. The dynamicRegistration advertisement is required — RA only
+    // honours `files.watcher: client` when the client can register watchers.
     session
-        .initialize(&root_uri)
+        .initialize_with_options(
+            &root_uri,
+            Some(serde_json::json!({"files": {"watcher": "client"}})),
+            Some(serde_json::json!({
+                "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
+            })),
+        )
         .map_err(|e| format!("initialize: {e}"))?;
 
     // Spawn the background stderr drain thread so post-mortem diagnostics in

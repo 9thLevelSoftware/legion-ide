@@ -188,6 +188,123 @@ fn stdio_lsp_session_initializes_against_mock_server() {
     }));
 }
 
+/// A server→client REQUEST (`client/registerCapability`) arriving while the
+/// client blocks on its own request must be ANSWERED, not dropped: the mock
+/// only responds to the original request after its registration is
+/// acknowledged with a null result — modeling rust-analyzer's behavior when
+/// configured for client-side file watching (PR #47 review, Codex P2).
+#[test]
+fn stdio_lsp_session_answers_server_register_capability_during_blocking_request() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(700, 5000),
+        )
+        .unwrap();
+
+    let response = session
+        .request(
+            "mock.registerThenDiagnose",
+            json!({}),
+            operation_context(701, 5000),
+        )
+        .unwrap();
+
+    assert_eq!(
+        response.status,
+        LspResultStatus::Fresh,
+        "mock acks only after its registerCapability request is answered"
+    );
+    let registered_hash =
+        legion_lsp::lsp_diagnostic_uri_fingerprint("file:///workspace/src/registered.rs");
+    assert!(
+        session
+            .diagnostic_notifications()
+            .iter()
+            .any(|n| n.uri_hash == registered_hash),
+        "diagnostics emitted after the registration ack must be buffered"
+    );
+}
+
+/// The same server→client request arriving during a `pump_until` (the GP-1
+/// s3 shape: pumping for diagnostics while rust-analyzer registers its
+/// client-side watcher) must be answered so the pump can complete.
+#[test]
+fn stdio_lsp_session_answers_server_requests_while_pumping() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(710, 5000),
+        )
+        .unwrap();
+
+    // Notification-shaped trigger: no response frame will arrive, so every
+    // subsequent frame is consumed by the pump path.
+    session
+        .send_notification("mock.registerThenDiagnose", json!({}))
+        .unwrap();
+
+    let registered_hash =
+        legion_lsp::lsp_diagnostic_uri_fingerprint("file:///workspace/src/registered.rs");
+    let outcome = session
+        .pump_until(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &mut |acc| {
+                acc.diagnostics
+                    .iter()
+                    .any(|n| n.uri_hash == registered_hash)
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        outcome,
+        legion_lsp::PumpOutcome::PredicateMet,
+        "pump must answer the server's registerCapability request and then observe diagnostics"
+    );
+}
+
+/// A server→client request the client does not implement must receive a
+/// JSON-RPC MethodNotFound (-32601) error — the protocol-correct signal that
+/// lets the server degrade gracefully instead of waiting forever.
+#[test]
+fn stdio_lsp_session_rejects_unknown_server_requests_with_method_not_found() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(720, 5000),
+        )
+        .unwrap();
+
+    let response = session
+        .request(
+            "mock.unknownServerRequest",
+            json!({}),
+            operation_context(721, 5000),
+        )
+        .unwrap();
+
+    assert_eq!(
+        response.status,
+        LspResultStatus::Fresh,
+        "mock acks only after receiving a -32601 answer to its unknown request"
+    );
+    let unknown_hash =
+        legion_lsp::lsp_diagnostic_uri_fingerprint("file:///workspace/src/unknown.rs");
+    assert!(
+        session
+            .diagnostic_notifications()
+            .iter()
+            .any(|n| n.uri_hash == unknown_hash),
+        "diagnostics emitted after the MethodNotFound answer must be buffered"
+    );
+}
+
 #[test]
 fn stdio_lsp_session_reuses_one_process_across_multiple_requests() {
     let mut launcher = legion_lsp::LspStdioLauncher::new();
