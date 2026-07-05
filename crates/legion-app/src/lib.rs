@@ -13071,8 +13071,9 @@ impl AppComposition {
     /// Replace the palette usage repository with a disk-backed implementation.
     ///
     /// Call this before any palette operations to enable persistence.  The
-    /// CLI and desktop binaries wire in a `FilePaletteUsageRepository` here;
-    /// tests continue to use the in-memory default.
+    /// desktop binary (`legion-desktop`) wires in a `FilePaletteUsageRepository`
+    /// inside `DesktopRuntime::open`; tests continue to use the in-memory
+    /// default.
     pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
         self.palette_usage = repo;
     }

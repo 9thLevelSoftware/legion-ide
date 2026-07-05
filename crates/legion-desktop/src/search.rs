@@ -86,12 +86,16 @@ impl DesktopSearchViewModel {
             diagnostic_rows.push("No results".to_string());
         }
 
-        // Build a compact option tag reflecting active toggles, e.g. "[Cc][W][.*]".
+        // Build a compact option tag reflecting *non-default* active toggles.
+        // Only emit a tag for options that deviate from the plain default:
+        //   [Cc]  — case-sensitive mode explicitly active
+        //   [W]   — whole-word matching active
+        //   [.*]  — regex mode active
+        // Case-insensitive (the plain user default) produces no tag so that
+        // ordinary searches keep a clean header.
         let mut option_tags = String::new();
         if projection.case_sensitive {
             option_tags.push_str("[Cc]");
-        } else {
-            option_tags.push_str("[ci]");
         }
         if projection.whole_word {
             option_tags.push_str("[W]");

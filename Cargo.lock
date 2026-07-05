@@ -3856,6 +3856,7 @@ dependencies = [
  "legion-protocol",
  "legion-remote",
  "legion-sandbox",
+ "legion-storage",
  "legion-terminal",
  "legion-ui",
  "serde_json",
