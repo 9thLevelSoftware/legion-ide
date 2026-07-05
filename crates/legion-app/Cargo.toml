@@ -44,8 +44,9 @@ syntect = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
-
-# Integration tests that exercise the test-helper API surface need this feature.
-[[test]]
-name = "local_history_workflow"
-required-features = ["test-helpers"]
+# Self-referential dev-dependency: activates the test-helpers feature for every
+# test/bench target in this crate WITHOUT `required-features` (which would make
+# cargo silently skip those targets in the standing
+# `cargo test --workspace --all-targets` gate) and without enabling the feature
+# in production builds.
+legion-app = { workspace = true, features = ["test-helpers"] }

@@ -128,6 +128,12 @@ fn local_history_sha256_hash_is_stable_and_64_chars() {
     assert_eq!(entries.len(), 1, "one save → one entry");
 
     let hash = &entries[0].content_hash;
+    // Known vector: SHA-256("fn stable() {}\n") — pins the implementation to
+    // real SHA-256, not merely any deterministic 64-hex-char digest.
+    assert_eq!(
+        hash, "af2f02ad0b09831697256fb0fa84a89bbed8e7cd6463b181242686078e735da1",
+        "content hash must be the SHA-256 of the saved file content"
+    );
     // SHA-256 produces 32 bytes = 64 hex characters.
     assert_eq!(
         hash.len(),

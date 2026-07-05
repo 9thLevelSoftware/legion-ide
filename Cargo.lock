@@ -3788,6 +3788,7 @@ dependencies = [
  "legion-agent",
  "legion-ai",
  "legion-ai-providers",
+ "legion-app",
  "legion-collaboration",
  "legion-debug",
  "legion-editor",
@@ -4046,7 +4047,6 @@ dependencies = [
  "legion-security",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
  "uuid",
 ]
