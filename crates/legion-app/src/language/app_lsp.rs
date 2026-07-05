@@ -64,7 +64,7 @@ pub struct LspRequestTag {
 }
 
 /// Discriminator for routing worker read results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LspReadKind {
     /// Completion request (`textDocument/completion`).
     Completion,
@@ -72,6 +72,14 @@ pub enum LspReadKind {
     Hover,
     /// Go-to-definition request (`textDocument/definition`).
     Definition,
+    /// Rename request (`textDocument/rename`).
+    ///
+    /// Carries the replacement identifier so the drain-side handler can
+    /// create the proposal title without re-reading the request params.
+    Rename {
+        /// The new identifier the user requested.
+        new_name: String,
+    },
 }
 
 /// Message sent from the frame path to the worker thread.

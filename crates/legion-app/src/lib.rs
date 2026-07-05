@@ -13526,6 +13526,66 @@ struct InlinePredictionRequestArgs<'a> {
     event_context: EventContext,
 }
 
+/// Production [`crate::language::DocumentResolver`] backed by live
+/// `AppComposition` document state (PKT-LSP-C I-2).
+///
+/// Built by snapshotting `active_documents` and editor text at the start of
+/// rename-result ingestion so the translator has consistent version context for
+/// all currently-open buffers.  Only files open in the editor are resolvable;
+/// renames touching non-open files surface as
+/// [`crate::language::TranslationError::UnresolvableUri`].
+struct AppDocumentResolver {
+    /// Maps file URI (e.g. `file:///C:/path/main.rs`) → resolved context.
+    by_uri: HashMap<String, crate::language::ResolvedDocument>,
+}
+
+impl AppDocumentResolver {
+    /// Snapshot the current state of all open buffers into a URI-keyed map.
+    fn build(active_documents: &ActiveDocumentController, editor: &EditorEngine) -> Self {
+        let mut by_uri = HashMap::new();
+        for (buffer_id, meta) in &active_documents.buffer_file_metadata {
+            let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+            let text = editor.text(*buffer_id).ok().map(|t| t.to_string());
+            let snapshot = editor.current_snapshot(*buffer_id).ok();
+            let buffer_version = snapshot.as_ref().map(|s| s.buffer_version);
+            let snapshot_id = snapshot.map(|s| s.snapshot_id);
+            let doc = crate::language::ResolvedDocument {
+                file: meta.identity.clone(),
+                buffer_id: Some(*buffer_id),
+                text,
+                file_content_version: meta.file_content_version,
+                buffer_version,
+                workspace_generation: meta.workspace_generation,
+                snapshot_id,
+                fingerprint: Some(meta.fingerprint.clone()),
+                file_length: meta.file_length,
+                modified_at: meta.modified_at,
+            };
+            by_uri.insert(uri, doc);
+        }
+        Self { by_uri }
+    }
+}
+
+impl crate::language::DocumentResolver for AppDocumentResolver {
+    fn resolve(&self, uri: &str) -> Option<crate::language::ResolvedDocument> {
+        self.by_uri
+            .get(uri)
+            .map(|doc| crate::language::ResolvedDocument {
+                file: doc.file.clone(),
+                buffer_id: doc.buffer_id,
+                text: doc.text.clone(),
+                file_content_version: doc.file_content_version,
+                buffer_version: doc.buffer_version,
+                workspace_generation: doc.workspace_generation,
+                snapshot_id: doc.snapshot_id,
+                fingerprint: doc.fingerprint.clone(),
+                file_length: doc.file_length,
+                modified_at: doc.modified_at,
+            })
+    }
+}
+
 impl AppComposition {
     /// Build composition with native platform adapters and default-deny security broker.
     pub fn new() -> Self {
@@ -13894,7 +13954,206 @@ impl AppComposition {
                     None,
                 );
             }
+            LspReadKind::Rename { new_name } => {
+                self.ingest_lsp_rename_result(tag.buffer_id, new_name, &lsp_outcome.result);
+            }
         }
+    }
+
+    /// Ingests a completed LSP `textDocument/rename` result from the worker
+    /// thread (PKT-LSP-C I-2).
+    ///
+    /// Translates the raw `WorkspaceEdit` JSON via [`translate_workspace_edit`]
+    /// using an [`AppDocumentResolver`] backed by the current active-document
+    /// state.  On success, creates and registers a proposal through the
+    /// coordinator and records it in the language-tooling projection.
+    ///
+    /// Generation only: the resulting proposal is NOT applied.  Application is
+    /// P3.F1.T2/M9 scope.
+    fn ingest_lsp_rename_result(
+        &mut self,
+        buffer_id: BufferId,
+        new_name: String,
+        raw: &serde_json::Value,
+    ) {
+        use crate::language::translate_workspace_edit;
+
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            return;
+        };
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return;
+        };
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .unwrap_or_else(|| PrincipalId("system".to_string()));
+
+        let event_context = self.next_event_context();
+        let text = self
+            .editor
+            .text(buffer_id)
+            .ok()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let snapshot_id = self
+            .editor
+            .current_snapshot(buffer_id)
+            .ok()
+            .map(|s| s.snapshot_id)
+            .unwrap_or(legion_protocol::SnapshotId(0));
+        let buffer_version = self
+            .editor
+            .buffer_version(buffer_id)
+            .ok()
+            .unwrap_or(BufferVersion(0));
+
+        let input = LanguageRequestInput {
+            workspace_id,
+            buffer_id,
+            metadata: meta.clone(),
+            principal,
+            text,
+            snapshot_id,
+            buffer_version,
+            event_context,
+        };
+
+        let title = format!("Rename symbol to {}", bounded_label(&new_name, 64));
+        let capability = CapabilityId("fs.write".to_string());
+
+        // Build the production DocumentResolver from the current open-buffer state.
+        let resolver = AppDocumentResolver::build(&self.active_documents, &self.editor);
+
+        let workspace_edit = match translate_workspace_edit(
+            raw,
+            &resolver,
+            workspace_id,
+            WorkspaceEditSourceKind::LspRename,
+            title.clone(),
+            capability.clone(),
+        ) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let _ = self.language_tooling.record_proposal_failure(
+                    &input,
+                    LanguageProposalKind::Rename,
+                    format!("LSP rename translation failed: {err}"),
+                );
+                return;
+            }
+        };
+
+        let preconditions = ProposalVersionPreconditions {
+            file_version: Some(meta.file_content_version),
+            buffer_version: Some(input.buffer_version),
+            snapshot_id: Some(input.snapshot_id),
+            generation: Some(meta.workspace_generation),
+            file_content_version: Some(meta.file_content_version),
+            workspace_generation: Some(meta.workspace_generation),
+            expected_fingerprint: Some(meta.fingerprint.clone()),
+            expected_file_length: meta.file_length,
+            expected_modified_at: meta.modified_at,
+        };
+
+        let proposal_id = self.proposal_coordinator.next_id();
+        let request = LspRequestCorrelation {
+            request_id: legion_protocol::LspRequestId(uuid::Uuid::now_v7()),
+            server_id: legion_protocol::LanguageServerId(1),
+            workspace_id: input.workspace_id,
+            file_id: Some(meta.identity.file_id),
+            snapshot_id: Some(input.snapshot_id),
+            buffer_version: Some(input.buffer_version),
+            correlation_id: input.event_context.correlation_id,
+            causality_id: input.event_context.causality_id,
+            cancellation_token: Some(CancellationTokenId(uuid::Uuid::now_v7())),
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            issued_at: TimestampMillis::now(),
+            schema_version: 1,
+        };
+
+        let proposal = match legion_protocol::convert_lsp_edit_to_workspace_proposal(
+            LspEditProposalConversionInput {
+                proposal_id,
+                principal: input.principal.clone(),
+                capability,
+                request,
+                workspace_edit,
+                preconditions,
+                lifecycle_state: ProposalLifecycleState::Created,
+                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                preview: PreviewSummary {
+                    summary: title.clone(),
+                    details: vec![
+                        "language_tooling.lsp_rename".to_string(),
+                        format!("new_name={}", bounded_label(&new_name, 64)),
+                    ],
+                },
+                expires_at: None,
+                created_at: TimestampMillis::now(),
+                diagnostics: Vec::new(),
+                schema_version: 1,
+            },
+        ) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = self.language_tooling.record_proposal_failure(
+                    &input,
+                    LanguageProposalKind::Rename,
+                    format!("rename proposal creation failed: {err:?}"),
+                );
+                return;
+            }
+        };
+
+        self.proposal_coordinator
+            .register_lifecycle_context(proposal.proposal_id, input.event_context);
+        let created = self.proposal_coordinator.created_response(&proposal);
+        if !matches!(created, ProposalResponse::Created(_)) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal coordinator rejected: {created:?}"),
+            );
+            return;
+        }
+        let validated = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()));
+        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal validation failed: {validated:?}"),
+            );
+            return;
+        }
+        let previewed = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Preview(proposal.clone()));
+        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal preview failed: {previewed:?}"),
+            );
+            return;
+        }
+        let _ = self.language_tooling.record_proposal(
+            &input,
+            LanguageProposalKind::Rename,
+            proposal.proposal_id,
+            None,
+            format!(
+                "Rename proposal generated ({})",
+                bounded_label(&new_name, 64)
+            ),
+        );
     }
 
     /// Ingests a raw `publishDiagnostics` notification batch from the worker.
@@ -14043,6 +14302,92 @@ impl AppComposition {
         };
         self.lsp_session
             .issue_request("textDocument/definition", params, tag)
+    }
+
+    /// Issues a non-blocking LSP rename request on the worker thread
+    /// (PKT-LSP-C I-2).
+    ///
+    /// Sends `textDocument/rename` through the live session worker.  The result
+    /// arrives via [`LspWorkerResult::ReadResult`] with
+    /// [`LspReadKind::Rename { new_name }`] and is ingested by
+    /// [`ingest_lsp_rename_result`].
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `renameProvider` in the initialize response (silent skip).
+    ///
+    /// Generation only: the resulting proposal is NOT applied.  Application is
+    /// P3.F1.T2/M9 scope.
+    pub fn issue_lsp_rename_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("renameProvider") {
+            return false;
+        }
+        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
+    }
+
+    /// Test-only: issues a rename request bypassing the `renameProvider`
+    /// capability gate.  Needed for mock servers that do not advertise
+    /// `renameProvider` in their `initialize` response.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn issue_lsp_rename_request_for_test(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
+    }
+
+    /// Inner rename request sender — shared by the gated and ungated paths.
+    fn issue_lsp_rename_request_inner(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "newName": new_name,
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Rename { new_name },
+            snapshot_id: snapshot.snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/rename", params, tag)
+    }
+
+    /// Test-only: starts the LSP session using an explicit server binary path,
+    /// bypassing PATH-based discovery.  Allows integration tests to inject the
+    /// mock server without mutating the process environment (which races in
+    /// parallel test execution).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_lsp_start_with_server_path_for_test(&mut self, server_path: std::path::PathBuf) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        self.lsp_session.start_for_workspace_with_server_path(
+            std::path::Path::new(&root),
+            true,
+            Some(server_path),
+        );
     }
 
     /// Test-only: inject a live health record with given capabilities, so tests
@@ -21363,6 +21708,16 @@ impl AppComposition {
         };
         let (workspace_edit, diagnostics) = match kind {
             LanguageProposalKind::Rename => {
+                // When the LSP session is live, route through `textDocument/rename`
+                // for multi-file rename coverage (PKT-LSP-C I-2).  The result
+                // arrives asynchronously via `ingest_lsp_rename_result` and is
+                // projected into `language_tooling` on the next drain call.
+                if self.lsp_session.is_live()
+                    && self.issue_lsp_rename_request_inner(buffer_id, position, label.clone())
+                {
+                    return Ok(self.language_tooling.projection());
+                }
+                // --- local (non-LSP) rename path ---
                 let replacement = bounded_label(&label, 128);
                 if replacement.trim().is_empty() {
                     return Ok(self.language_tooling.record_proposal_failure(

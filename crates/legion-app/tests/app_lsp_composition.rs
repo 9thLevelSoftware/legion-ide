@@ -544,6 +544,140 @@ fn t7_capability_gated_partial_support() {
     );
 }
 
+// ─── T8 (I-2): End-to-end rename wire-up ────────────────────────────────────
+
+/// T8: `textDocument/rename` flows from AppComposition → mock server →
+/// translate → proposal, with zero direct filesystem mutation.
+///
+/// Verifies PKT-LSP-C I-2: the production route that sends `textDocument/rename`
+/// through the live LSP session, translates the `WorkspaceEdit` response via
+/// `translate_workspace_edit`, and surfaces the resulting proposal through the
+/// `language_tooling` projection.
+///
+/// Zero-mutation assertion: the temp workspace files are hashed before and
+/// after the full rename flow; content must be identical (no direct FS write).
+#[test]
+fn t8_lsp_rename_via_mock_server_generates_proposal_zero_mutation() {
+    let Some(mock_path) = lsp_mock::mock_server_path() else {
+        eprintln!("skip: mock_lsp_server binary not found");
+        return;
+    };
+
+    // Create a real temp workspace so AppComposition can open the file.
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = \"rename-test\"\n",
+    )
+    .expect("write Cargo.toml");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn my_function() {}\n").expect("write main.rs");
+
+    // ── Snapshot workspace before the rename flow (zero-mutation check) ──────
+    let before_hash = hash_dir(root.path());
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("t8-test".to_string()),
+    )
+    .expect("open_workspace");
+
+    // Start the mock server BEFORE opening any .rs file: opening a .rs file
+    // triggers the lazy-start of the LSP session (try_start_lsp_session_for_
+    // current_workspace). If we call force_lsp_start_with_server_path_for_test
+    // after open_file the session is already in Starting state and the mock-
+    // start is a no-op, leaving the real rust-analyzer in flight.
+    app.force_lsp_start_with_server_path_for_test(mock_path);
+
+    app.open_file(src_file.to_string_lossy())
+        .expect("open src file");
+    let buffer_id = app.active_buffer_id().expect("active buffer after open");
+
+    // Poll until the session transitions to Live or gives up (10 s cap).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !app.drain_lsp_session() {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The mock server may not finish starting in one drain; keep polling
+    // until actually live.
+    let mut is_live = false;
+    let deadline2 = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        app.drain_lsp_session();
+        let snap = app.shell_projection_snapshot("t8").expect("snapshot");
+        let health = snap
+            .language_tooling_projection
+            .lsp_health_records
+            .first()
+            .cloned();
+        if health.is_some_and(|h| h.init_status == legion_protocol::LspResultStatus::Fresh) {
+            is_live = true;
+            break;
+        }
+        if std::time::Instant::now() > deadline2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if !is_live {
+        eprintln!("skip: mock server did not go Live within 10s");
+        return;
+    }
+
+    // Issue the rename request (bypasses capability gate since mock does not
+    // advertise renameProvider in its initialize response).
+    let pos = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 3,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    assert!(
+        app.issue_lsp_rename_request_for_test(buffer_id, pos, "my_renamed".to_string()),
+        "rename request must be issued when session is Live"
+    );
+
+    // Drain until the rename result arrives and is projected into the
+    // language_tooling projection (up to 5 s).
+    let mut proposal_projected = false;
+    let deadline3 = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        app.drain_lsp_session();
+        let snap = app.shell_projection_snapshot("t8").expect("snapshot");
+        let ops = &snap.language_tooling_projection.operations;
+        if ops.iter().any(|op| {
+            matches!(op.status, legion_protocol::LanguageToolingStatusKind::Ready)
+                && op.proposal_id.is_some()
+        }) {
+            proposal_projected = true;
+            break;
+        }
+        if std::time::Instant::now() > deadline3 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    assert!(
+        proposal_projected,
+        "rename proposal must be projected via language_tooling after mock server response"
+    );
+
+    // ── Zero-mutation check: workspace files must be unchanged ───────────────
+    let after_hash = hash_dir(root.path());
+    assert_eq!(
+        before_hash, after_hash,
+        "rename flow must not mutate any file in the workspace (generation-only: \
+         apply is P3.F1.T2/M9 scope)"
+    );
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 fn tempdir_with_cargo_toml() -> tempfile::TempDir {
@@ -583,6 +717,40 @@ fn health_with_caps(caps: &[(&str, bool)]) -> legion_protocol::LspServerHealthRe
         download_decision_id: None,
         schema_version: 1,
     }
+}
+
+/// Produce a stable hash of all files in `dir` (sorted by path) for
+/// zero-mutation assertions.  Returns a `String` of the form
+/// `"<path>:<len>:<content_hash>|..."` so any file addition, deletion, or
+/// content change is detected.
+fn hash_dir(dir: &std::path::Path) -> String {
+    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+    fn visit(dir: &std::path::Path, entries: &mut Vec<(String, u64, u64)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, entries);
+            } else if path.is_file() {
+                let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let content = std::fs::read(&path).unwrap_or_default();
+                // Simple FNV-1a 64-bit hash of file content.
+                let hash = content.iter().fold(14695981039346656037u64, |acc, &b| {
+                    acc.wrapping_mul(1099511628211) ^ u64::from(b)
+                });
+                entries.push((path.to_string_lossy().into_owned(), len, hash));
+            }
+        }
+    }
+    visit(dir, &mut entries);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .iter()
+        .map(|(p, l, h)| format!("{p}:{l}:{h}"))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// Build a `LspServerHealthRecord` with Fresh status and empty capabilities list.
