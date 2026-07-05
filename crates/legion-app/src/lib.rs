@@ -5214,6 +5214,8 @@ impl LanguageToolingWorkflow {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
             lsp_health_records: previous_projection.lsp_health_records,
+            lsp_session_status: previous_projection.lsp_session_status,
+            lsp_session_log: previous_projection.lsp_session_log,
         };
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -8387,6 +8389,10 @@ pub enum AppCommandRequest {
         /// Participant identifier selected from projection data.
         participant_id: CollaborationParticipantId,
     },
+    /// Start the language server session for the active workspace (PKT-LSP-C T1).
+    LspStartSession,
+    /// Restart the language server session, resetting the circuit breaker (PKT-LSP-C T1/T3).
+    LspRestartSession,
 }
 
 /// Minimal editor command port used by app command routing.
@@ -8667,7 +8673,9 @@ impl CommandExecutionService {
             | AppCommandRequest::InvokePluginCommand { .. }
             | AppCommandRequest::JoinCollaborationSession { .. }
             | AppCommandRequest::LeaveCollaborationSession { .. }
-            | AppCommandRequest::PublishCollaborationPresence { .. } => Ok(None),
+            | AppCommandRequest::PublishCollaborationPresence { .. }
+            | AppCommandRequest::LspStartSession
+            | AppCommandRequest::LspRestartSession => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -9256,6 +9264,8 @@ impl CommandDispatcher {
                 session_id,
                 participant_id,
             }),
+            CommandDispatchIntent::LspStartSession => Ok(AppCommandRequest::LspStartSession),
+            CommandDispatchIntent::LspRestartSession => Ok(AppCommandRequest::LspRestartSession),
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
             | CommandDispatchIntent::RejectProposal { .. }
@@ -12624,6 +12634,19 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Restore default workbench settings",
             shortcut_label: None,
         },
+        // PKT-LSP-C T1: language server lifecycle commands.
+        PaletteCommandSpec {
+            id: "lsp-start-session",
+            title: "Language Server: Start",
+            detail: "Start the language server for the current workspace",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "lsp-restart-session",
+            title: "Language Server: Restart",
+            detail: "Restart the language server, resetting the circuit breaker",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -12659,6 +12682,9 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
             Some(CommandDispatchIntent::SetZoomPercent { zoom_percent: 100 })
         }
         "preferences-settings-reset" => Some(CommandDispatchIntent::ResetSettings),
+        // PKT-LSP-C T1: language server lifecycle palette commands.
+        "lsp-start-session" => Some(CommandDispatchIntent::LspStartSession),
+        "lsp-restart-session" => Some(CommandDispatchIntent::LspRestartSession),
         _ => None,
     }
 }
@@ -13500,6 +13526,66 @@ struct InlinePredictionRequestArgs<'a> {
     event_context: EventContext,
 }
 
+/// Production [`crate::language::DocumentResolver`] backed by live
+/// `AppComposition` document state (PKT-LSP-C I-2).
+///
+/// Built by snapshotting `active_documents` and editor text at the start of
+/// rename-result ingestion so the translator has consistent version context for
+/// all currently-open buffers.  Only files open in the editor are resolvable;
+/// renames touching non-open files surface as
+/// [`crate::language::TranslationError::UnresolvableUri`].
+struct AppDocumentResolver {
+    /// Maps file URI (e.g. `file:///C:/path/main.rs`) → resolved context.
+    by_uri: HashMap<String, crate::language::ResolvedDocument>,
+}
+
+impl AppDocumentResolver {
+    /// Snapshot the current state of all open buffers into a URI-keyed map.
+    fn build(active_documents: &ActiveDocumentController, editor: &EditorEngine) -> Self {
+        let mut by_uri = HashMap::new();
+        for (buffer_id, meta) in &active_documents.buffer_file_metadata {
+            let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+            let text = editor.text(*buffer_id).ok().map(|t| t.to_string());
+            let snapshot = editor.current_snapshot(*buffer_id).ok();
+            let buffer_version = snapshot.as_ref().map(|s| s.buffer_version);
+            let snapshot_id = snapshot.map(|s| s.snapshot_id);
+            let doc = crate::language::ResolvedDocument {
+                file: meta.identity.clone(),
+                buffer_id: Some(*buffer_id),
+                text,
+                file_content_version: meta.file_content_version,
+                buffer_version,
+                workspace_generation: meta.workspace_generation,
+                snapshot_id,
+                fingerprint: Some(meta.fingerprint.clone()),
+                file_length: meta.file_length,
+                modified_at: meta.modified_at,
+            };
+            by_uri.insert(uri, doc);
+        }
+        Self { by_uri }
+    }
+}
+
+impl crate::language::DocumentResolver for AppDocumentResolver {
+    fn resolve(&self, uri: &str) -> Option<crate::language::ResolvedDocument> {
+        self.by_uri
+            .get(uri)
+            .map(|doc| crate::language::ResolvedDocument {
+                file: doc.file.clone(),
+                buffer_id: doc.buffer_id,
+                text: doc.text.clone(),
+                file_content_version: doc.file_content_version,
+                buffer_version: doc.buffer_version,
+                workspace_generation: doc.workspace_generation,
+                snapshot_id: doc.snapshot_id,
+                fingerprint: doc.fingerprint.clone(),
+                file_length: doc.file_length,
+                modified_at: doc.modified_at,
+            })
+    }
+}
+
 impl AppComposition {
     /// Build composition with native platform adapters and default-deny security broker.
     pub fn new() -> Self {
@@ -13791,12 +13877,11 @@ impl AppComposition {
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
-        // PKT-LSP-B T1 (D4): Start LSP session for trusted Rust workspaces.
-        // `start_for_workspace` checks for Cargo.toml and refuses immediately if
-        // absent, so this is always safe to call for any trusted workspace.
-        if trust == WorkspaceTrustState::Trusted {
-            self.lsp_session.start_for_workspace(root.as_ref(), true);
-        }
+        // PKT-LSP-C T1: LSP session start is now LAZY — triggered on first
+        // `.rs` buffer open or explicit palette command, not on workspace open.
+        // (The eager start was removed here; see `bind_opened_file` for the
+        // lazy trigger and `try_start_lsp_session_for_current_workspace` for
+        // the palette command path.)
 
         Ok(opened)
     }
@@ -13869,7 +13954,206 @@ impl AppComposition {
                     None,
                 );
             }
+            LspReadKind::Rename { new_name } => {
+                self.ingest_lsp_rename_result(tag.buffer_id, new_name, &lsp_outcome.result);
+            }
         }
+    }
+
+    /// Ingests a completed LSP `textDocument/rename` result from the worker
+    /// thread (PKT-LSP-C I-2).
+    ///
+    /// Translates the raw `WorkspaceEdit` JSON via [`translate_workspace_edit`]
+    /// using an [`AppDocumentResolver`] backed by the current active-document
+    /// state.  On success, creates and registers a proposal through the
+    /// coordinator and records it in the language-tooling projection.
+    ///
+    /// Generation only: the resulting proposal is NOT applied.  Application is
+    /// P3.F1.T2/M9 scope.
+    fn ingest_lsp_rename_result(
+        &mut self,
+        buffer_id: BufferId,
+        new_name: String,
+        raw: &serde_json::Value,
+    ) {
+        use crate::language::translate_workspace_edit;
+
+        let Some(workspace_id) = self.active_documents.workspace_id() else {
+            return;
+        };
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return;
+        };
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .unwrap_or_else(|| PrincipalId("system".to_string()));
+
+        let event_context = self.next_event_context();
+        let text = self
+            .editor
+            .text(buffer_id)
+            .ok()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let snapshot_id = self
+            .editor
+            .current_snapshot(buffer_id)
+            .ok()
+            .map(|s| s.snapshot_id)
+            .unwrap_or(legion_protocol::SnapshotId(0));
+        let buffer_version = self
+            .editor
+            .buffer_version(buffer_id)
+            .ok()
+            .unwrap_or(BufferVersion(0));
+
+        let input = LanguageRequestInput {
+            workspace_id,
+            buffer_id,
+            metadata: meta.clone(),
+            principal,
+            text,
+            snapshot_id,
+            buffer_version,
+            event_context,
+        };
+
+        let title = format!("Rename symbol to {}", bounded_label(&new_name, 64));
+        let capability = CapabilityId("fs.write".to_string());
+
+        // Build the production DocumentResolver from the current open-buffer state.
+        let resolver = AppDocumentResolver::build(&self.active_documents, &self.editor);
+
+        let workspace_edit = match translate_workspace_edit(
+            raw,
+            &resolver,
+            workspace_id,
+            WorkspaceEditSourceKind::LspRename,
+            title.clone(),
+            capability.clone(),
+        ) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let _ = self.language_tooling.record_proposal_failure(
+                    &input,
+                    LanguageProposalKind::Rename,
+                    format!("LSP rename translation failed: {err}"),
+                );
+                return;
+            }
+        };
+
+        let preconditions = ProposalVersionPreconditions {
+            file_version: Some(meta.file_content_version),
+            buffer_version: Some(input.buffer_version),
+            snapshot_id: Some(input.snapshot_id),
+            generation: Some(meta.workspace_generation),
+            file_content_version: Some(meta.file_content_version),
+            workspace_generation: Some(meta.workspace_generation),
+            expected_fingerprint: Some(meta.fingerprint.clone()),
+            expected_file_length: meta.file_length,
+            expected_modified_at: meta.modified_at,
+        };
+
+        let proposal_id = self.proposal_coordinator.next_id();
+        let request = LspRequestCorrelation {
+            request_id: legion_protocol::LspRequestId(uuid::Uuid::now_v7()),
+            server_id: legion_protocol::LanguageServerId(1),
+            workspace_id: input.workspace_id,
+            file_id: Some(meta.identity.file_id),
+            snapshot_id: Some(input.snapshot_id),
+            buffer_version: Some(input.buffer_version),
+            correlation_id: input.event_context.correlation_id,
+            causality_id: input.event_context.causality_id,
+            cancellation_token: Some(CancellationTokenId(uuid::Uuid::now_v7())),
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            issued_at: TimestampMillis::now(),
+            schema_version: 1,
+        };
+
+        let proposal = match legion_protocol::convert_lsp_edit_to_workspace_proposal(
+            LspEditProposalConversionInput {
+                proposal_id,
+                principal: input.principal.clone(),
+                capability,
+                request,
+                workspace_edit,
+                preconditions,
+                lifecycle_state: ProposalLifecycleState::Created,
+                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                preview: PreviewSummary {
+                    summary: title.clone(),
+                    details: vec![
+                        "language_tooling.lsp_rename".to_string(),
+                        format!("new_name={}", bounded_label(&new_name, 64)),
+                    ],
+                },
+                expires_at: None,
+                created_at: TimestampMillis::now(),
+                diagnostics: Vec::new(),
+                schema_version: 1,
+            },
+        ) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = self.language_tooling.record_proposal_failure(
+                    &input,
+                    LanguageProposalKind::Rename,
+                    format!("rename proposal creation failed: {err:?}"),
+                );
+                return;
+            }
+        };
+
+        self.proposal_coordinator
+            .register_lifecycle_context(proposal.proposal_id, input.event_context);
+        let created = self.proposal_coordinator.created_response(&proposal);
+        if !matches!(created, ProposalResponse::Created(_)) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal coordinator rejected: {created:?}"),
+            );
+            return;
+        }
+        let validated = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Validate(proposal.clone()));
+        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal validation failed: {validated:?}"),
+            );
+            return;
+        }
+        let previewed = self
+            .proposal_coordinator
+            .handle(ProposalRequest::Preview(proposal.clone()));
+        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
+            let _ = self.language_tooling.record_proposal_failure(
+                &input,
+                LanguageProposalKind::Rename,
+                format!("rename proposal preview failed: {previewed:?}"),
+            );
+            return;
+        }
+        let _ = self.language_tooling.record_proposal(
+            &input,
+            LanguageProposalKind::Rename,
+            proposal.proposal_id,
+            None,
+            format!(
+                "Rename proposal generated ({})",
+                bounded_label(&new_name, 64)
+            ),
+        );
     }
 
     /// Ingests a raw `publishDiagnostics` notification batch from the worker.
@@ -14020,6 +14304,92 @@ impl AppComposition {
             .issue_request("textDocument/definition", params, tag)
     }
 
+    /// Issues a non-blocking LSP rename request on the worker thread
+    /// (PKT-LSP-C I-2).
+    ///
+    /// Sends `textDocument/rename` through the live session worker.  The result
+    /// arrives via [`LspWorkerResult::ReadResult`] with
+    /// [`LspReadKind::Rename { new_name }`] and is ingested by
+    /// [`ingest_lsp_rename_result`].
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `renameProvider` in the initialize response (silent skip).
+    ///
+    /// Generation only: the resulting proposal is NOT applied.  Application is
+    /// P3.F1.T2/M9 scope.
+    pub fn issue_lsp_rename_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("renameProvider") {
+            return false;
+        }
+        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
+    }
+
+    /// Test-only: issues a rename request bypassing the `renameProvider`
+    /// capability gate.  Needed for mock servers that do not advertise
+    /// `renameProvider` in their `initialize` response.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn issue_lsp_rename_request_for_test(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
+    }
+
+    /// Inner rename request sender — shared by the gated and ungated paths.
+    fn issue_lsp_rename_request_inner(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        new_name: String,
+    ) -> bool {
+        let Some(meta) = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "newName": new_name,
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Rename { new_name },
+            snapshot_id: snapshot.snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/rename", params, tag)
+    }
+
+    /// Test-only: starts the LSP session using an explicit server binary path,
+    /// bypassing PATH-based discovery.  Allows integration tests to inject the
+    /// mock server without mutating the process environment (which races in
+    /// parallel test execution).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_lsp_start_with_server_path_for_test(&mut self, server_path: std::path::PathBuf) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        self.lsp_session.start_for_workspace_with_server_path(
+            std::path::Path::new(&root),
+            true,
+            Some(server_path),
+        );
+    }
+
     /// Test-only: inject a live health record with given capabilities, so tests
     /// can drive capability-gated code paths without starting a real server.
     /// Named with `_for_test` suffix to signal that production code must never
@@ -14028,6 +14398,96 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
         self.lsp_session.set_live_health_for_test(health);
+    }
+
+    /// Test-only: returns `true` if the LSP session handle is in the `Idle`
+    /// state (no start attempted).  Used by T1 tests to assert that lazy start
+    /// does NOT fire on workspace open.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_idle_for_test(&self) -> bool {
+        self.lsp_session.is_idle()
+    }
+
+    /// Test-only: returns `true` if the LSP session handle is in the
+    /// `Starting` state.  Used by T1 tests to assert that lazy start fires
+    /// after the first `.rs` buffer is bound.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_starting_for_test(&self) -> bool {
+        self.lsp_session.is_starting()
+    }
+
+    /// Test-only: returns the failure/refusal reason if the LSP session is in
+    /// a non-live terminal state, or `None`.  Used by T1 tests to assert
+    /// refusal when workspace is untrusted.  PKT-LSP-C T1.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_failure_reason_for_test(&self) -> Option<&str> {
+        self.lsp_session.failure_reason()
+    }
+
+    /// Test-only: returns `true` if the LSP session is in the `BackingOff`
+    /// state (waiting for a backoff timer).  PKT-LSP-C T3.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_is_backing_off_for_test(&self) -> bool {
+        self.lsp_session.is_backing_off()
+    }
+
+    /// Test-only: inject a `BackingOff` state with the given restart count.
+    /// See `LspSessionHandle::set_backing_off_for_test`.  PKT-LSP-C T3.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_lsp_backing_off_for_test(&mut self, restart_count: u32, deadline_passed: bool) {
+        self.lsp_session
+            .set_backing_off_for_test(restart_count, deadline_passed);
+    }
+
+    /// Test-only: explicitly trigger a session start for the current workspace,
+    /// mirroring what the lazy trigger or palette command does.  Useful for
+    /// tests that want to put the session into Refused/Starting state without
+    /// opening an actual `.rs` file.  PKT-LSP-C T1 / T5.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_lsp_start_for_test(&mut self) {
+        self.try_start_lsp_session_for_current_workspace();
+    }
+
+    /// Attempt to start the LSP session for the currently-open workspace.
+    ///
+    /// Called from the lazy-start trigger in `bind_opened_file` (first `.rs`
+    /// buffer open) and from the "Start language server" palette command.
+    /// If the session is already Starting or Live this is a no-op.
+    /// If the workspace is untrusted the session immediately enters Refused.
+    /// PKT-LSP-C T1.
+    fn try_start_lsp_session_for_current_workspace(&mut self) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .as_ref()
+            .cloned()
+            .unwrap_or(WorkspaceTrustState::Untrusted);
+        let trusted = trust == WorkspaceTrustState::Trusted;
+        self.lsp_session
+            .start_for_workspace(std::path::Path::new(&root), trusted);
+    }
+
+    /// Restart the LSP session for the currently-open workspace, resetting
+    /// any prior Refused/Failed/BackingOff state so the circuit breaker
+    /// gets a fresh attempt.
+    ///
+    /// Called from the "Restart language server" palette command (PKT-LSP-C T1/T3).
+    fn restart_lsp_session_for_current_workspace(&mut self) {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .as_ref()
+            .cloned()
+            .unwrap_or(WorkspaceTrustState::Untrusted);
+        let trusted = trust == WorkspaceTrustState::Trusted;
+        self.lsp_session
+            .restart_for_workspace(std::path::Path::new(&root), trusted);
     }
 
     /// Sends `textDocument/didChange` to the live LSP session after a buffer
@@ -14197,6 +14657,19 @@ impl AppComposition {
         self.language_tooling.refresh_retrieval_document(&document);
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
+
+        // PKT-LSP-C T1: Lazy LSP session start triggered on first language-matching
+        // buffer open.  Rust files (".rs") are the only supported language server
+        // language right now; extend this check when more servers land.
+        if identity
+            .canonical_path
+            .0
+            .to_ascii_lowercase()
+            .ends_with(".rs")
+        {
+            self.try_start_lsp_session_for_current_workspace();
+        }
+
         Ok(identity.file_id)
     }
 
@@ -15823,6 +16296,15 @@ impl AppComposition {
                 Ok(AppCommandOutcome::CollaborationPresencePublished(
                     session_id,
                 ))
+            }
+            // PKT-LSP-C T1: lazy-start palette commands.
+            AppCommandRequest::LspStartSession => {
+                self.try_start_lsp_session_for_current_workspace();
+                Ok(AppCommandOutcome::Noop)
+            }
+            AppCommandRequest::LspRestartSession => {
+                self.restart_lsp_session_for_current_workspace();
+                Ok(AppCommandOutcome::Noop)
             }
             _ => unreachable!("command execution service handled non-workflow command"),
         }
@@ -21226,6 +21708,16 @@ impl AppComposition {
         };
         let (workspace_edit, diagnostics) = match kind {
             LanguageProposalKind::Rename => {
+                // When the LSP session is live, route through `textDocument/rename`
+                // for multi-file rename coverage (PKT-LSP-C I-2).  The result
+                // arrives asynchronously via `ingest_lsp_rename_result` and is
+                // projected into `language_tooling` on the next drain call.
+                if self.lsp_session.is_live()
+                    && self.issue_lsp_rename_request_inner(buffer_id, position, label.clone())
+                {
+                    return Ok(self.language_tooling.projection());
+                }
+                // --- local (non-LSP) rename path ---
                 let replacement = bounded_label(&label, 128);
                 if replacement.trim().is_empty() {
                     return Ok(self.language_tooling.record_proposal_failure(
@@ -22309,9 +22801,21 @@ impl AppComposition {
             debug_projection: self.debug_workflow.projection(),
             language_tooling_projection: {
                 // D2: inject live LSP health records from the background session handle.
+                // PKT-LSP-C T3: also inject session lifecycle status (backoff countdown etc).
                 let mut p = self.language_tooling.projection();
                 if let Some(record) = self.lsp_session.health_record() {
                     p.lsp_health_records.push(record);
+                }
+                let status = self.lsp_session.session_status_projection();
+                if !matches!(
+                    status.lifecycle,
+                    legion_protocol::LspSessionLifecycleKind::Idle
+                ) {
+                    p.lsp_session_status = Some(status);
+                }
+                // PKT-LSP-C T4: inject redacted stderr ring-buffer projection.
+                if let Some(log) = self.lsp_session.stderr_log_projection() {
+                    p.lsp_session_log = Some(log);
                 }
                 p
             },
@@ -27387,5 +27891,172 @@ mod tests {
         assert_eq!(target.scheme, "https");
         assert_eq!(target.host, "[::1]");
         assert_eq!(target.port, Some(9443));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-LSP-C T1: Lazy session start — TDD tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod lsp_lazy_start_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("legion-lsp-t1-{prefix}-{nanos}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    /// After `open_workspace(Trusted)` the LSP session must stay `Idle`.
+    /// PKT-LSP-C T1: lazy start means no server is spawned at workspace open.
+    #[test]
+    fn t1_open_workspace_trusted_leaves_lsp_idle() {
+        let root = unique_temp_dir("ws-open");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "LSP session must remain Idle after workspace open (lazy start)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Opening a non-.rs file must NOT trigger lazy LSP start.
+    /// PKT-LSP-C T1.
+    #[test]
+    fn t1_open_non_rs_file_does_not_trigger_lsp_start() {
+        let root = unique_temp_dir("non-rs");
+        let txt_path = root.join("readme.txt");
+        fs::write(&txt_path, "hello").expect("write txt");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        let _ = app.open_file(txt_path.to_string_lossy().as_ref());
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "LSP session must remain Idle after opening a non-.rs file"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Opening a `.rs` file must trigger lazy LSP start and move the session
+    /// out of `Idle`.  Without a `Cargo.toml` in the workspace root the
+    /// session transitions immediately to `Refused`.  PKT-LSP-C T1.
+    #[test]
+    fn t1_open_rs_file_triggers_lazy_lsp_start() {
+        let root = unique_temp_dir("rs-open");
+        let rs_path = root.join("main.rs");
+        fs::write(&rs_path, "fn main() {}").expect("write main.rs");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        assert!(
+            app.lsp_is_idle_for_test(),
+            "must be Idle before first .rs open"
+        );
+        let _ = app.open_file(rs_path.to_string_lossy().as_ref());
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "LSP session must leave Idle after opening a .rs file (lazy start fired)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// "Language Server: Start" and "Language Server: Restart" palette commands
+    /// must be discoverable via `palette_command_specs()`.  PKT-LSP-C T1.
+    #[test]
+    fn t1_palette_commands_registered() {
+        let specs = palette_command_specs();
+        assert!(
+            specs.iter().any(|s| s.id == "lsp-start-session"),
+            "lsp-start-session palette command must be registered"
+        );
+        assert!(
+            specs.iter().any(|s| s.id == "lsp-restart-session"),
+            "lsp-restart-session palette command must be registered"
+        );
+    }
+
+    /// `palette_command_intent` must route the two LSP commands to the correct
+    /// `CommandDispatchIntent` variants.  PKT-LSP-C T1.
+    #[test]
+    fn t1_palette_command_intent_routes_lsp_commands() {
+        assert!(
+            matches!(
+                palette_command_intent("lsp-start-session"),
+                Some(CommandDispatchIntent::LspStartSession)
+            ),
+            "lsp-start-session must map to LspStartSession"
+        );
+        assert!(
+            matches!(
+                palette_command_intent("lsp-restart-session"),
+                Some(CommandDispatchIntent::LspRestartSession)
+            ),
+            "lsp-restart-session must map to LspRestartSession"
+        );
+    }
+
+    /// After a Refused session, dispatching `LspRestartSession` must reset
+    /// state and attempt a new start (ending in Refused again if no Cargo.toml).
+    /// PKT-LSP-C T1/T3.
+    #[test]
+    fn t1_restart_resets_refused_session() {
+        let root = unique_temp_dir("restart");
+        let rs_path = root.join("lib.rs");
+        fs::write(&rs_path, "").expect("write lib.rs");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+
+        // Trigger lazy start: session will refuse (no Cargo.toml).
+        let _ = app.open_file(rs_path.to_string_lossy().as_ref());
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "should have left Idle after .rs open"
+        );
+        assert!(
+            !app.lsp_is_starting_for_test(),
+            "should not be Starting without Cargo.toml"
+        );
+        assert!(
+            app.lsp_failure_reason_for_test().is_some(),
+            "should have a failure reason (Refused: no Cargo.toml)"
+        );
+
+        // Restart via the palette command dispatch path.
+        let result = app.dispatch_ui_intent(CommandDispatchIntent::LspRestartSession);
+        assert!(result.is_ok(), "restart dispatch must succeed");
+        // Session was reset to Idle and re-attempted immediately; without
+        // Cargo.toml it ends up Refused again — still "not Idle".
+        assert!(
+            !app.lsp_is_idle_for_test(),
+            "session must have re-attempted (Refused again) after restart"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

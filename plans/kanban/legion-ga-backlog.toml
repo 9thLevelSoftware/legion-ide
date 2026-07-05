@@ -457,11 +457,14 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Route write-side actions (rename, format, code actions, organize imports) through proposals"
     mode = "Manual"
     readiness_row = "PR-LANG-002"
-    files = ["crates/legion-lsp/src/features.rs", "crates/legion-app/src/proposal.rs", "crates/legion-protocol/src/proposal.rs"]
+    status = "in-progress"
+    evidence = "plans/evidence/production/M8/WS-LANG-01-write-side-evidence.md"
+    files = ["crates/legion-app/src/language/translate.rs", "crates/legion-protocol/src/lib.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-app/src/language/redaction.rs"]
     dependencies = ["P2.F1.T4", "P3.F1.T2"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-app"]
     acceptance = ["Rename across files is reviewable and reversible."]
     stop_condition = "Write-side actions must never bypass the proposal pipeline."
+    notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply activation (P3.F1.T2) is deferred to M9; this task stays in-progress until the apply path lands."
 
   [[epics.features]]
   id = "P2.F2"

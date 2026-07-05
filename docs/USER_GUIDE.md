@@ -67,7 +67,22 @@ Use it for task graphs, approval gates, risk tracking, and release-oriented orch
 ### Language tooling (Rust LSP — read-side)
 
 Language tooling is available for trusted Rust workspaces that contain a `Cargo.toml`.
-It activates automatically when the workspace is opened with `WorkspaceTrustState::Trusted`.
+
+**When does rust-analyzer start?** The session starts *lazily*: it is not spawned on
+workspace open. Instead it starts when either:
+
+1. You open the first `.rs` buffer in a trusted workspace (automatic lazy trigger), or
+2. You run the **"Language Server: Start"** command from the command palette (`>`).
+
+This avoids paying the rust-analyzer spawn cost for workspaces where you never open a Rust
+file, and for non-Rust workspaces that happen to be trusted.
+
+**Palette commands for lifecycle control:**
+
+| Command | Description |
+| --- | --- |
+| Language Server: Start | Start rust-analyzer for the current workspace (no-op if already starting or live). |
+| Language Server: Restart | Force-restart rust-analyzer, resetting the circuit-breaker restart budget. |
 
 **What is currently wired (read-side):**
 
@@ -82,11 +97,12 @@ It activates automatically when the workspace is opened with `WorkspaceTrustStat
 - **Go to definition** — available through the command palette (`GoToDefinition`). Use
   `NavigateToDefinition { index }` to open a specific result.
 - **Language health status** — the language status panel projects `Starting`, `Live`,
-  `Unavailable`, or `Failed` states from `lsp_server_health_record()`.
+  `BackingOff` (with countdown), `Unavailable`, or `Failed` states from
+  `lsp_session_status` in the `LanguageToolingProjection`.
 
 **What is deferred (write-side, P2.F1.T5):**
-Rename, format, code actions, and organize imports remain deferred.
-They will be routed through the proposal pipeline in a future release.
+Rename, format, code actions, and organize imports are proposal-mediated (generated but not
+yet applied). Apply activation lands with kanban task P3.F1.T2 in a future release.
 See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Support and release surfaces

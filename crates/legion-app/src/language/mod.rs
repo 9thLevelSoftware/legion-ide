@@ -20,7 +20,13 @@ mod proposal;
 pub use proposal::workspace_edit_to_proposal_input;
 
 mod redaction;
-pub use redaction::{StderrSummary, redact_lsp_stderr};
+pub use redaction::{StderrSummary, redact_lsp_stderr, redact_lsp_stderr_line};
+
+mod translate;
+pub use translate::{
+    DocumentResolver, ResolvedDocument, TranslationError, lsp_position_to_byte_offset,
+    translate_workspace_edit, uri_to_canonical_path,
+};
 
 mod app_lsp;
 pub use app_lsp::{LspReadKind, LspRequestTag, LspSessionHandle, LspWorkerResult};

@@ -16189,6 +16189,62 @@ pub struct LanguageOutlineSymbolProjection {
     pub schema_version: u16,
 }
 
+/// Lifecycle stage of the LSP session, as projected to the UI (PKT-LSP-C T3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LspSessionLifecycleKind {
+    /// No startup attempted yet.
+    Idle,
+    /// Background startup thread is running.
+    Starting,
+    /// Session worker is live and accepting requests.
+    Live,
+    /// Auto-restart is waiting for a backoff timer to expire.
+    BackingOff,
+    /// Startup was refused (untrusted workspace, no binary, policy denial).
+    Refused,
+    /// All automatic restart attempts were exhausted; requires explicit restart.
+    Failed,
+}
+
+/// Projection-only status of the LSP session lifecycle.
+///
+/// Populated by `LspSessionHandle::session_status_projection()` and included
+/// in `LanguageToolingProjection::lsp_session_status`.  The desktop health
+/// row reads this to render the restart countdown and breaker status.
+///
+/// PKT-LSP-C T3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspSessionStatusProjection {
+    /// Current lifecycle stage.
+    pub lifecycle: LspSessionLifecycleKind,
+    /// Number of automatic restart attempts so far in this session.
+    pub restart_count: u32,
+    /// Maximum automatic restart attempts before the breaker holds.
+    pub max_auto_restarts: u32,
+    /// Milliseconds until the next automatic retry.  `Some` only when
+    /// `lifecycle == BackingOff` and the timer has not yet fired.
+    pub backoff_remaining_ms: Option<u64>,
+    /// Metadata-only failure reason, bounded to 256 characters.  `None` when
+    /// the session is `Idle`, `Starting`, or `Live`.
+    pub failure_reason: Option<String>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-safe projection of the LSP server stderr ring buffer (PKT-LSP-C T4).
+///
+/// Lines are redacted before storage via `redact_lsp_stderr_line`: absolute
+/// file paths are replaced with `[REDACTED]`, preserving the surrounding
+/// diagnostic context (log levels, error messages, module names).  The ring
+/// is capped at a fixed capacity so projections are always bounded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspSessionLogProjection {
+    /// Redacted stderr lines, oldest-first, capped to the ring capacity.
+    pub lines: Vec<String>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
 /// Projection-only language tooling panel state for the active editor buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageToolingProjection {
@@ -16244,6 +16300,19 @@ pub struct LanguageToolingProjection {
     /// language tooling status section.
     #[serde(default)]
     pub lsp_health_records: Vec<LspServerHealthRecord>,
+    /// LSP session lifecycle status including backoff countdown (PKT-LSP-C T3).
+    ///
+    /// `Some` once a session has been attempted (Starting/Live/BackingOff/
+    /// Refused/Failed); `None` when the session is `Idle` (no startup yet).
+    #[serde(default)]
+    pub lsp_session_status: Option<LspSessionStatusProjection>,
+    /// Redacted ring-buffer projection of the LSP server stderr (PKT-LSP-C T4).
+    ///
+    /// `Some` only when the session is `Live` and the ring contains at least
+    /// one line.  `None` when the session is `Idle`, `Starting`, or failed,
+    /// or when no stderr output has been received yet.
+    #[serde(default)]
+    pub lsp_session_log: Option<LspSessionLogProjection>,
 }
 
 impl LanguageToolingProjection {
@@ -16273,6 +16342,8 @@ impl LanguageToolingProjection {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
             lsp_health_records: Vec::new(),
+            lsp_session_status: None,
+            lsp_session_log: None,
         }
     }
 }

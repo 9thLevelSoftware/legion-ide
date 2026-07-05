@@ -3060,6 +3060,18 @@ pub enum CommandDispatchIntent {
         /// Participant identifier selected from projection data or user input.
         participant_id: CollaborationParticipantId,
     },
+    /// Start the language server session for the active workspace (PKT-LSP-C T1).
+    ///
+    /// Triggers lazy session startup without opening a buffer.  Safe to call if
+    /// the session is already Starting or Live (becomes a no-op via
+    /// `LspSessionHandle::start_for_workspace`).
+    LspStartSession,
+    /// Restart the language server session, resetting the circuit breaker
+    /// so recovery is attempted even after repeated crashes (PKT-LSP-C T1/T3).
+    ///
+    /// Routes through the same start path as `LspStartSession` after clearing
+    /// any prior Refused/Failed/BackingOff state.
+    LspRestartSession,
 }
 
 /// Maximum visible foreground toast notifications.

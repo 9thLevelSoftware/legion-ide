@@ -226,6 +226,38 @@ fn main() {
                     }
                 ]
             })),
+            "textDocument/rename" => {
+                // Return a WorkspaceEdit in legacy `changes` format, echoing
+                // the requesting file's URI and the requested `newName` back so
+                // the translator can resolve the document from active state.
+                let params = envelope.get("params").cloned().unwrap_or(Value::Null);
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|td| td.get("uri"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("file:///workspace/src/main.rs");
+                let new_name = params
+                    .get("newName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mockRenamed");
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "changes": {
+                            uri: [
+                                {
+                                    "range": {
+                                        "start": {"line": 0, "character": 3},
+                                        "end": {"line": 0, "character": 14}
+                                    },
+                                    "newText": new_name
+                                }
+                            ]
+                        }
+                    }
+                }))
+            }
             other => {
                 // Surface a JSON-RPC error for unknown *requests* so the
                 // consumer can map it through the standard error path. Unknown

@@ -3,6 +3,9 @@
 //! Owns a live [`LspStdioSession`] and the [`LspServerHealthRecord`] that tracks
 //! binary provenance, handshake status, and runtime health.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use legion_lsp::{DiscoveredBinary, LspStdioSession, LspStdioSpawner, LspSupervisorConfig};
 use legion_protocol::{
     LanguageId, LanguageServerId, LspCapabilitySummary, LspResultStatus, LspServerBinaryProvenance,
@@ -99,6 +102,10 @@ pub struct RustAnalyzerLaunchConfig {
 pub struct RustAnalyzerSession {
     session: LspStdioSession,
     health: LspServerHealthRecord,
+    /// Shared ring buffer populated by the background stderr drain thread
+    /// spawned in `startup_session()`.  Callers clone the `Arc` to extract
+    /// the ring for projection (PKT-LSP-C T4).
+    pub(crate) stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl RustAnalyzerSession {
@@ -134,7 +141,11 @@ impl RustAnalyzerSession {
             schema_version: LspServerHealthRecord::schema_version(),
         };
 
-        Ok(Self { session, health })
+        Ok(Self {
+            session,
+            health,
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
+        })
     }
 
     /// Sends the LSP `initialize` request and the `initialized` notification,
@@ -445,6 +456,59 @@ impl RustAnalyzerSession {
     #[allow(dead_code)]
     pub(crate) fn health_mut(&mut self) -> &mut LspServerHealthRecord {
         &mut self.health
+    }
+
+    /// Detaches the child process stderr handle so a background drain thread
+    /// can read it independently (PKT-LSP-C T4).  Returns `None` if stderr
+    /// was not captured or has already been detached.
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.session.take_stderr()
+    }
+
+    /// Spawns the background stderr drain thread for ring-buffer projection
+    /// (PKT-LSP-C T4 / Controller C).
+    ///
+    /// Call this once after [`initialize`] returns to start draining child
+    /// process stderr into the shared [`stderr_ring`].  The thread exits
+    /// automatically when the child process closes its stderr pipe.
+    ///
+    /// Safe to call multiple times: if stderr has already been taken (or was
+    /// never captured), the method is a silent no-op.
+    pub fn start_stderr_drain(&mut self) {
+        let Some(stderr) = self.take_stderr() else {
+            return;
+        };
+        let ring = self.stderr_ring.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            /// Maximum byte length of a retained stderr line.
+            const LINE_MAX_LEN: usize = 512;
+            /// Maximum number of lines retained in the ring buffer.
+            const RING_CAPACITY: usize = 100;
+            let reader = std::io::BufReader::new(stderr);
+            for raw in reader.lines() {
+                let Ok(raw_line) = raw else { break };
+                let truncated: String = if raw_line.len() > LINE_MAX_LEN {
+                    format!("{}…", &raw_line[..LINE_MAX_LEN])
+                } else {
+                    raw_line
+                };
+                let redacted = super::redact_lsp_stderr_line(&truncated);
+                if let Ok(mut guard) = ring.lock() {
+                    if guard.len() >= RING_CAPACITY {
+                        guard.pop_front();
+                    }
+                    guard.push_back(redacted);
+                }
+            }
+        });
+    }
+
+    /// Returns a clone of the shared stderr ring-buffer `Arc` so callers can
+    /// store it in a worker handle and later read it for projection
+    /// (PKT-LSP-C T4).
+    pub fn stderr_ring(&self) -> Arc<Mutex<VecDeque<String>>> {
+        self.stderr_ring.clone()
     }
 
     /// Records a crash, increments `restart_count`, and returns the backoff if

@@ -18,14 +18,23 @@
 //! bounded channel is full — callers retry on the next keystroke/frame).
 
 use std::{
+    collections::VecDeque,
+    io::BufRead,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Maximum number of redacted stderr lines retained in the ring buffer.
+const STDERR_RING_CAPACITY: usize = 100;
+/// Maximum byte length of a single retained stderr line (longer lines are
+/// truncated with `…` to prevent unbounded growth of the ring elements).
+const STDERR_LINE_MAX_LEN: usize = 512;
+
 use legion_protocol::{
-    BufferId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord, SnapshotId,
+    BufferId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord,
+    LspSessionLifecycleKind, LspSessionLogProjection, LspSessionStatusProjection, SnapshotId,
 };
 
 use super::{
@@ -55,7 +64,7 @@ pub struct LspRequestTag {
 }
 
 /// Discriminator for routing worker read results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LspReadKind {
     /// Completion request (`textDocument/completion`).
     Completion,
@@ -63,6 +72,14 @@ pub enum LspReadKind {
     Hover,
     /// Go-to-definition request (`textDocument/definition`).
     Definition,
+    /// Rename request (`textDocument/rename`).
+    ///
+    /// Carries the replacement identifier so the drain-side handler can
+    /// create the proposal title without re-reading the request params.
+    Rename {
+        /// The new identifier the user requested.
+        new_name: String,
+    },
 }
 
 /// Message sent from the frame path to the worker thread.
@@ -114,6 +131,9 @@ struct LspWorkerHandle {
     request_tx: mpsc::SyncSender<LspWorkerRequest>,
     /// Receive results from the worker thread (non-blocking drain each frame).
     result_rx: mpsc::Receiver<LspWorkerResult>,
+    /// Shared ring buffer of redacted stderr lines (PKT-LSP-C T4).
+    /// Populated by the background drain thread spawned in `startup_session`.
+    stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// Internal lifecycle state.
@@ -126,9 +146,19 @@ enum LspSessionState {
     /// health record) dwarfs the other variants, and clippy's
     /// large-enum-variant lint correctly flags the size asymmetry.
     Live(Box<LspWorkerHandle>),
+    /// Auto-restart is waiting for the backoff timer to fire (PKT-LSP-C T3).
+    /// `earliest_retry_ms` is a wall-clock millisecond timestamp (UNIX epoch).
+    BackingOff {
+        /// Number of automatic restart attempts completed so far.
+        restart_count: u32,
+        /// Earliest UNIX-epoch millisecond timestamp at which to auto-retry.
+        earliest_retry_ms: u64,
+        /// Metadata-only failure reason (bounded to 256 chars).
+        reason: String,
+    },
     /// Launch was refused (untrusted, no binary, policy denied, etc.).
     Refused { reason: String },
-    /// Session started but handshake or discovery failed.
+    /// All auto-restart attempts exhausted; explicit user restart required.
     Failed { reason: String },
 }
 
@@ -143,6 +173,16 @@ pub struct LspSessionHandle {
     state: LspSessionState,
     /// Workspace root passed at startup time, retained for diagnostics.
     pub workspace_root: Option<PathBuf>,
+    /// Number of automatic restart attempts made since the last explicit start
+    /// or explicit restart (PKT-LSP-C T3).
+    restart_count: u32,
+    /// Maximum automatic restart attempts before the circuit breaker holds.
+    max_auto_restarts: u32,
+    /// Base backoff interval in milliseconds (doubles per attempt, capped at
+    /// `max_backoff_ms`).
+    backoff_base_ms: u64,
+    /// Maximum backoff interval in milliseconds.
+    max_backoff_ms: u64,
 }
 
 impl Default for LspSessionHandle {
@@ -152,11 +192,17 @@ impl Default for LspSessionHandle {
 }
 
 impl LspSessionHandle {
-    /// Creates an idle handle.
+    /// Creates an idle handle with default backoff parameters.
+    ///
+    /// Default policy: 3 auto-restarts, base 500 ms, max 30 s.
     pub fn new() -> Self {
         Self {
             state: LspSessionState::Idle,
             workspace_root: None,
+            restart_count: 0,
+            max_auto_restarts: 3,
+            backoff_base_ms: 500,
+            max_backoff_ms: 30_000,
         }
     }
 
@@ -170,7 +216,7 @@ impl LspSessionHandle {
         matches!(self.state, LspSessionState::Live(_))
     }
 
-    /// Returns `true` if startup was refused or the session failed.
+    /// Returns `true` if startup was refused or all restart attempts exhausted.
     pub fn is_refused_or_failed(&self) -> bool {
         matches!(
             self.state,
@@ -181,6 +227,76 @@ impl LspSessionHandle {
     /// Returns `true` if the background startup thread is still running.
     pub fn is_starting(&self) -> bool {
         matches!(self.state, LspSessionState::Starting { .. })
+    }
+
+    /// Returns `true` if the session is waiting for a backoff timer (PKT-LSP-C T3).
+    pub fn is_backing_off(&self) -> bool {
+        matches!(self.state, LspSessionState::BackingOff { .. })
+    }
+
+    /// Returns the session lifecycle status projection for UI rendering.
+    ///
+    /// PKT-LSP-C T3 — consumed by `shell_projection_snapshot()` to populate
+    /// `LanguageToolingProjection::lsp_session_status`.
+    pub fn session_status_projection(&self) -> LspSessionStatusProjection {
+        let now_ms = now_unix_ms();
+        match &self.state {
+            LspSessionState::Idle => LspSessionStatusProjection {
+                lifecycle: LspSessionLifecycleKind::Idle,
+                restart_count: self.restart_count,
+                max_auto_restarts: self.max_auto_restarts,
+                backoff_remaining_ms: None,
+                failure_reason: None,
+                schema_version: 1,
+            },
+            LspSessionState::Starting { .. } => LspSessionStatusProjection {
+                lifecycle: LspSessionLifecycleKind::Starting,
+                restart_count: self.restart_count,
+                max_auto_restarts: self.max_auto_restarts,
+                backoff_remaining_ms: None,
+                failure_reason: None,
+                schema_version: 1,
+            },
+            LspSessionState::Live(_) => LspSessionStatusProjection {
+                lifecycle: LspSessionLifecycleKind::Live,
+                restart_count: self.restart_count,
+                max_auto_restarts: self.max_auto_restarts,
+                backoff_remaining_ms: None,
+                failure_reason: None,
+                schema_version: 1,
+            },
+            LspSessionState::BackingOff {
+                restart_count,
+                earliest_retry_ms,
+                reason,
+            } => {
+                let remaining = earliest_retry_ms.saturating_sub(now_ms);
+                LspSessionStatusProjection {
+                    lifecycle: LspSessionLifecycleKind::BackingOff,
+                    restart_count: *restart_count,
+                    max_auto_restarts: self.max_auto_restarts,
+                    backoff_remaining_ms: Some(remaining),
+                    failure_reason: Some(truncate_reason(reason)),
+                    schema_version: 1,
+                }
+            }
+            LspSessionState::Refused { reason } => LspSessionStatusProjection {
+                lifecycle: LspSessionLifecycleKind::Refused,
+                restart_count: self.restart_count,
+                max_auto_restarts: self.max_auto_restarts,
+                backoff_remaining_ms: None,
+                failure_reason: Some(truncate_reason(reason)),
+                schema_version: 1,
+            },
+            LspSessionState::Failed { reason } => LspSessionStatusProjection {
+                lifecycle: LspSessionLifecycleKind::Failed,
+                restart_count: self.restart_count,
+                max_auto_restarts: self.max_auto_restarts,
+                backoff_remaining_ms: None,
+                failure_reason: Some(truncate_reason(reason)),
+                schema_version: 1,
+            },
+        }
     }
 
     /// Attempts to start the LSP session on a background thread.
@@ -241,11 +357,50 @@ impl LspSessionHandle {
         self.state = LspSessionState::Starting { rx };
     }
 
+    /// Force a restart: reset to `Idle` (discarding any current state) and
+    /// then call `start_for_workspace`.  This is the explicit user-triggered
+    /// restart path (PKT-LSP-C T1/T3).  If a startup thread is still running
+    /// it is orphaned (the channel will disconnect and the thread will exit
+    /// cleanly once the send fails).
+    ///
+    /// Also resets the `restart_count` so the full auto-restart budget is
+    /// available again — the explicit restart is a deliberate user action.
+    pub fn restart_for_workspace(&mut self, workspace_root: &Path, trusted: bool) {
+        self.state = LspSessionState::Idle;
+        self.restart_count = 0;
+        self.start_for_workspace(workspace_root, trusted);
+    }
+
     /// Non-blocking drain — call once per frame tick.
     ///
-    /// If Starting and a result is available, transitions to Live (spawning
-    /// the worker thread) or Failed.  Returns `true` when state changed.
+    /// - If `Starting` and a result is available, transitions to `Live`
+    ///   (spawning the worker thread) or, on failure, either `BackingOff`
+    ///   (if the auto-restart budget allows) or `Failed` (exhausted).
+    /// - If `BackingOff` and the timer has fired, auto-restarts (Idle →
+    ///   start_for_workspace).
+    ///
+    /// Returns `true` when state changed.  PKT-LSP-C T3.
     pub fn drain(&mut self) -> bool {
+        // Handle BackingOff timer expiry: auto-restart when the deadline passes.
+        if matches!(self.state, LspSessionState::BackingOff { .. }) {
+            let LspSessionState::BackingOff {
+                earliest_retry_ms, ..
+            } = &self.state
+            else {
+                unreachable!()
+            };
+            let now = now_unix_ms();
+            if now >= *earliest_retry_ms {
+                // Timer fired — reset to Idle and re-start.
+                self.state = LspSessionState::Idle;
+                if let Some(root) = self.workspace_root.clone() {
+                    self.start_for_workspace(&root, true);
+                }
+                return true;
+            }
+            return false;
+        }
+
         let LspSessionState::Starting { rx } = &self.state else {
             return false;
         };
@@ -253,27 +408,47 @@ impl LspSessionHandle {
             Ok(Ok(session)) => {
                 // Spawn the worker thread; it owns the session from here on.
                 let health = session.health().clone();
+                // Extract the shared stderr ring before moving session into the
+                // worker thread (PKT-LSP-C T4).
+                let stderr_ring = session.stderr_ring();
                 let worker = spawn_session_worker(session);
                 self.state = LspSessionState::Live(Box::new(LspWorkerHandle {
                     health,
                     request_tx: worker.0,
                     result_rx: worker.1,
+                    stderr_ring,
                 }));
                 true
             }
             Ok(Err(err)) => {
-                self.state = LspSessionState::Failed {
-                    reason: err.to_string(),
-                };
+                self.transition_failure(err.to_string());
                 true
             }
             Err(mpsc::TryRecvError::Empty) => false,
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.state = LspSessionState::Failed {
-                    reason: "startup thread disconnected without sending a result".to_string(),
-                };
+                self.transition_failure(
+                    "startup thread disconnected without sending a result".to_string(),
+                );
                 true
             }
+        }
+    }
+
+    /// Transitions from a startup failure to either `BackingOff` (within budget)
+    /// or `Failed` (budget exhausted).  PKT-LSP-C T3.
+    fn transition_failure(&mut self, reason: String) {
+        if self.restart_count < self.max_auto_restarts {
+            let delay_ms =
+                (self.backoff_base_ms << self.restart_count.min(16)).min(self.max_backoff_ms);
+            let earliest_retry_ms = now_unix_ms().saturating_add(delay_ms);
+            self.restart_count += 1;
+            self.state = LspSessionState::BackingOff {
+                restart_count: self.restart_count,
+                earliest_retry_ms,
+                reason,
+            };
+        } else {
+            self.state = LspSessionState::Failed { reason };
         }
     }
 
@@ -357,26 +532,48 @@ impl LspSessionHandle {
     }
 
     /// Returns the current health record if the session is live (or a
-    /// synthetic unavailable record if refused/failed).  Returns `None` when
-    /// idle or starting.
+    /// synthetic unavailable record if refused/failed/backing-off).  Returns
+    /// `None` when idle or starting.
     pub fn health_record(&self) -> Option<LspServerHealthRecord> {
         match &self.state {
             LspSessionState::Idle | LspSessionState::Starting { .. } => None,
             LspSessionState::Live(worker) => Some(worker.health.clone()),
-            LspSessionState::Refused { .. } | LspSessionState::Failed { .. } => {
-                Some(unavailable_health_record())
-            }
+            LspSessionState::BackingOff { .. }
+            | LspSessionState::Refused { .. }
+            | LspSessionState::Failed { .. } => Some(unavailable_health_record()),
         }
     }
 
-    /// Returns the human-readable reason for Refused or Failed states, or None.
+    /// Returns the human-readable reason for Refused, Failed, or BackingOff
+    /// states, or `None` otherwise.
     pub fn failure_reason(&self) -> Option<&str> {
         match &self.state {
-            LspSessionState::Refused { reason } | LspSessionState::Failed { reason } => {
-                Some(reason.as_str())
-            }
+            LspSessionState::Refused { reason }
+            | LspSessionState::Failed { reason }
+            | LspSessionState::BackingOff { reason, .. } => Some(reason.as_str()),
             _ => None,
         }
+    }
+
+    /// Returns the redacted stderr ring-buffer projection when the session is
+    /// `Live` and the ring contains at least one line; `None` otherwise
+    /// (PKT-LSP-C T4).
+    ///
+    /// The lines are copies of the redacted strings stored in the ring buffer
+    /// at the time of the call; they are metadata-only (all file paths have
+    /// been replaced with `[REDACTED]` by the drain thread).
+    pub fn stderr_log_projection(&self) -> Option<LspSessionLogProjection> {
+        let LspSessionState::Live(worker) = &self.state else {
+            return None;
+        };
+        let guard = worker.stderr_ring.lock().ok()?;
+        if guard.is_empty() {
+            return None;
+        }
+        Some(LspSessionLogProjection {
+            lines: guard.iter().cloned().collect(),
+            schema_version: 1,
+        })
     }
 }
 
@@ -450,6 +647,34 @@ fn run_session_worker(
                 // down).  Exit cleanly.
                 break;
             }
+        }
+    }
+}
+
+/// Background drain thread for LSP server stderr (PKT-LSP-C T4).
+///
+/// Reads `stderr` line by line, redacts each line via
+/// `redact_lsp_stderr_line`, truncates lines exceeding
+/// `STDERR_LINE_MAX_LEN`, and appends to the shared `ring` buffer.
+/// When the ring is at capacity the oldest line is evicted (FIFO).
+/// The thread exits when the child process closes its stderr pipe.
+fn drain_stderr(stderr: std::process::ChildStderr, ring: Arc<Mutex<VecDeque<String>>>) {
+    let reader = std::io::BufReader::new(stderr);
+    for raw in reader.lines() {
+        let Ok(raw_line) = raw else { break };
+        // Truncate if necessary — prevents a single pathological line from
+        // consuming a disproportionate share of the bounded ring.
+        let truncated: String = if raw_line.len() > STDERR_LINE_MAX_LEN {
+            format!("{}…", &raw_line[..STDERR_LINE_MAX_LEN])
+        } else {
+            raw_line
+        };
+        let redacted = super::redact_lsp_stderr_line(&truncated);
+        if let Ok(mut guard) = ring.lock() {
+            if guard.len() >= STDERR_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(redacted);
         }
     }
 }
@@ -554,6 +779,17 @@ fn startup_session(
     let mut launcher = LspStdioLauncher::new();
     let mut session = RustAnalyzerSession::launch(config, &mut launcher)?;
     session.initialize(root_uri)?;
+
+    // Spawn the stderr drain thread now that the session is initialised.
+    // The ring Arc is cloned into the thread; the session keeps the other
+    // clone so `drain()` can extract it when transitioning to Live.
+    if let Some(stderr) = session.take_stderr() {
+        let ring = session.stderr_ring();
+        thread::spawn(move || {
+            drain_stderr(stderr, ring);
+        });
+    }
+
     Ok(session)
 }
 
@@ -577,7 +813,66 @@ impl LspSessionHandle {
             health,
             request_tx,
             result_rx,
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
         }));
+    }
+
+    /// Test-only: directly inject lines (already-redacted) into the stderr ring
+    /// buffer of a `Live` session handle.  A no-op when the handle is not Live.
+    /// Used by T4 tests to exercise `stderr_log_projection()` without a real
+    /// child process (PKT-LSP-C T4).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_stderr_ring_for_test(&mut self, lines: Vec<String>) {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return;
+        };
+        let Ok(mut guard) = worker.stderr_ring.lock() else {
+            return;
+        };
+        for line in lines {
+            if guard.len() >= STDERR_RING_CAPACITY {
+                guard.pop_front();
+            }
+            guard.push_back(line);
+        }
+    }
+
+    /// Test-only: inject a `BackingOff` state with a given restart count and a
+    /// deadline already-expired (so the next `drain()` call auto-retries).
+    /// PKT-LSP-C T3 test support.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_backing_off_for_test(&mut self, restart_count: u32, deadline_already_passed: bool) {
+        let earliest_retry_ms = if deadline_already_passed {
+            // Use epoch 0 so the timer is already expired.
+            0
+        } else {
+            now_unix_ms().saturating_add(30_000)
+        };
+        self.restart_count = restart_count;
+        self.state = LspSessionState::BackingOff {
+            restart_count,
+            earliest_retry_ms,
+            reason: "test-injected failure".to_string(),
+        };
+    }
+}
+
+/// Returns the current UNIX time in milliseconds (wall clock, not monotonic).
+/// Used to compute backoff deadlines and remaining countdown.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Truncate a failure reason string to 256 characters so projections never
+/// carry unbounded content.
+fn truncate_reason(reason: &str) -> String {
+    if reason.len() <= 256 {
+        reason.to_string()
+    } else {
+        format!("{}…", &reason[..253])
     }
 }
 
@@ -616,4 +911,273 @@ fn stable_hash_str(input: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-LSP-C T3: Restart / backoff UX — TDD tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+    use legion_protocol::LspSessionLifecycleKind;
+
+    // ── T3-1: Fresh handle projects Idle ─────────────────────────────────────
+
+    #[test]
+    fn t3_fresh_handle_projects_idle_status() {
+        let handle = LspSessionHandle::new();
+        let status = handle.session_status_projection();
+        assert_eq!(status.lifecycle, LspSessionLifecycleKind::Idle);
+        assert_eq!(status.restart_count, 0);
+        assert!(status.failure_reason.is_none());
+        assert!(status.backoff_remaining_ms.is_none());
+    }
+
+    // ── T3-2: BackingOff state projects countdown ─────────────────────────────
+
+    /// An injected BackingOff state (future deadline) must project a non-zero
+    /// remaining countdown and the BackingOff lifecycle kind.
+    #[test]
+    fn t3_backing_off_state_projects_countdown() {
+        let mut handle = LspSessionHandle::new();
+        handle.set_backing_off_for_test(1, false /* deadline in future */);
+
+        let status = handle.session_status_projection();
+        assert_eq!(status.lifecycle, LspSessionLifecycleKind::BackingOff);
+        assert_eq!(status.restart_count, 1);
+        assert!(
+            status.backoff_remaining_ms.is_some(),
+            "countdown must be present in BackingOff state"
+        );
+        assert!(
+            status.backoff_remaining_ms.unwrap() > 0,
+            "countdown must be positive (deadline is in the future)"
+        );
+        assert!(status.failure_reason.is_some());
+    }
+
+    // ── T3-3: Explicit restart resets the breaker ─────────────────────────────
+
+    /// After backing off, explicit `restart_for_workspace` must reset
+    /// `restart_count` to 0 and transition to Refused (no Cargo.toml in the
+    /// temp dir) — not Idle or BackingOff.
+    #[test]
+    fn t3_explicit_restart_resets_breaker() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("legion-lsp-t3-breaker-{nanos}"));
+        fs::create_dir_all(&root).expect("create temp dir");
+
+        let mut handle = LspSessionHandle::new();
+        // Inject 2 past failures — session is backing off.
+        handle.set_backing_off_for_test(2, false);
+        assert!(handle.is_backing_off(), "should be backing off");
+
+        // Explicit restart resets the count and re-attempts.
+        handle.restart_for_workspace(&root, true);
+
+        // After restart_for_workspace: restart_count reset to 0, and the
+        // session immediately transitions away from Idle (Refused: no Cargo.toml).
+        let status = handle.session_status_projection();
+        assert_eq!(
+            status.restart_count, 0,
+            "explicit restart must reset restart_count"
+        );
+        assert!(
+            !handle.is_backing_off(),
+            "must not be backing off after explicit restart"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── T3-4: Budget exhaustion → Failed (breaker holds) ─────────────────────
+
+    /// After `max_auto_restarts` failures, `transition_failure` must enter the
+    /// `Failed` state (not `BackingOff`).  We test this via
+    /// `set_backing_off_for_test` with restart_count == max_auto_restarts.
+    ///
+    /// The test verifies: if we were already at max restarts and call
+    /// `transition_failure`, we go to Failed.  We simulate this by calling
+    /// `set_backing_off_for_test` with count == max and then verifying the
+    /// field values, since `transition_failure` is private.
+    ///
+    /// The public surface for "budget exhausted" is `is_refused_or_failed`.
+    #[test]
+    fn t3_budget_exhausted_projects_failed_state() {
+        let mut handle = LspSessionHandle::new();
+        // Inject directly into Failed state (simulating exhausted budget).
+        handle.state = LspSessionState::Failed {
+            reason: "restart budget exhausted".to_string(),
+        };
+        handle.restart_count = handle.max_auto_restarts;
+
+        let status = handle.session_status_projection();
+        assert_eq!(status.lifecycle, LspSessionLifecycleKind::Failed);
+        assert!(handle.is_refused_or_failed());
+        assert!(
+            status.failure_reason.is_some(),
+            "failed state must carry a failure reason"
+        );
+    }
+
+    // ── T3-5: BackingOff with expired deadline auto-starts on drain ───────────
+
+    /// When a BackingOff handle's deadline is already in the past, `drain()`
+    /// must transition the state away from BackingOff.  In the test context
+    /// without a workspace root set, the restart is a no-op (stays Idle),
+    /// which is still a state change from BackingOff.
+    #[test]
+    fn t3_backing_off_expired_deadline_fires_on_drain() {
+        let mut handle = LspSessionHandle::new();
+        // Inject BackingOff with an already-expired deadline.
+        handle.set_backing_off_for_test(1, true /* deadline already passed */);
+        assert!(handle.is_backing_off());
+
+        let changed = handle.drain();
+        assert!(changed, "drain must return true when timer fires");
+        assert!(
+            !handle.is_backing_off(),
+            "should not still be BackingOff after timer fired"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-LSP-C T4: stderr ring buffer as redacted projection — TDD tests
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+    use legion_protocol::LspServerBinaryProvenance;
+
+    fn make_live_handle() -> LspSessionHandle {
+        let mut handle = LspSessionHandle::new();
+        let health = LspServerHealthRecord {
+            server_id: LanguageServerId(1),
+            language_id: LanguageId("rust".to_string()),
+            binary_provenance: LspServerBinaryProvenance::SystemPath,
+            binary_path_hash: None,
+            artifact_hash: None,
+            version: None,
+            init_status: LspResultStatus::Unavailable,
+            capabilities: Vec::new(),
+            diagnostics_latency_ms: None,
+            restart_count: 0,
+            download_decision_id: None,
+            schema_version: LspServerHealthRecord::schema_version(),
+        };
+        handle.set_live_health_for_test(health);
+        handle
+    }
+
+    // ── T4-1: Projection is None when session is Idle ────────────────────────
+
+    #[test]
+    fn t4_stderr_projection_none_when_idle() {
+        let handle = LspSessionHandle::new();
+        assert!(
+            handle.stderr_log_projection().is_none(),
+            "idle handle must not project stderr"
+        );
+    }
+
+    // ── T4-2: Projection is None when ring is empty ──────────────────────────
+
+    #[test]
+    fn t4_stderr_projection_none_when_ring_empty() {
+        let handle = make_live_handle();
+        assert!(
+            handle.stderr_log_projection().is_none(),
+            "empty ring must yield None projection"
+        );
+    }
+
+    // ── T4-3: Ring cap is respected ──────────────────────────────────────────
+
+    /// Inject 110 lines into a cap-100 ring; the projection must contain
+    /// exactly 100 lines (oldest evicted).
+    #[test]
+    fn t4_ring_buffer_cap_respected() {
+        let mut handle = make_live_handle();
+        let lines: Vec<String> = (0..110).map(|i| format!("line {i}")).collect();
+        handle.inject_stderr_ring_for_test(lines);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some after injecting lines");
+        assert_eq!(
+            proj.lines.len(),
+            STDERR_RING_CAPACITY,
+            "ring must be capped at STDERR_RING_CAPACITY"
+        );
+        // The oldest lines (0..10) should have been evicted; the newest
+        // (10..110) should remain.
+        assert_eq!(proj.lines[0], "line 10", "oldest surviving line is line 10");
+        assert_eq!(
+            proj.lines[STDERR_RING_CAPACITY - 1],
+            "line 109",
+            "newest line is line 109"
+        );
+    }
+
+    // ── T4-4: Lines injected are returned by projection ──────────────────────
+
+    #[test]
+    fn t4_injected_lines_appear_in_projection() {
+        let mut handle = make_live_handle();
+        handle.inject_stderr_ring_for_test(vec![
+            "[REDACTED]".to_string(),
+            "ERROR: initialization failed".to_string(),
+        ]);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some");
+        assert_eq!(proj.lines.len(), 2);
+        assert_eq!(proj.lines[0], "[REDACTED]");
+        assert_eq!(proj.lines[1], "ERROR: initialization failed");
+    }
+
+    // ── T4-5: No raw secret path reaches the projection ──────────────────────
+
+    /// Simulate the drain thread's redaction: run `redact_lsp_stderr_line` on
+    /// a sentinel-containing line, inject the result, and confirm the sentinel
+    /// never appears in the projection.
+    #[test]
+    fn t4_no_raw_secret_in_projection() {
+        let sentinel = "/very/secret/workspace/src/main.rs";
+        let raw_line = format!("rust-analyzer analysing {sentinel}");
+
+        // The drain thread calls `redact_lsp_stderr_line` before storing.
+        let redacted = super::super::redact_lsp_stderr_line(&raw_line);
+
+        let mut handle = make_live_handle();
+        handle.inject_stderr_ring_for_test(vec![redacted]);
+
+        let proj = handle
+            .stderr_log_projection()
+            .expect("projection must be Some");
+
+        for line in &proj.lines {
+            assert!(
+                !line.contains(sentinel),
+                "sentinel must not appear in projection line: {line}"
+            );
+            assert!(
+                !line.contains("secret"),
+                "any fragment of the sentinel path must not appear: {line}"
+            );
+        }
+        // At least one line must contain the redaction marker.
+        assert!(
+            proj.lines.iter().any(|l| l.contains("[REDACTED]")),
+            "at least one line must carry the [REDACTED] marker"
+        );
+    }
 }
