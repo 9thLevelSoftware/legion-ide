@@ -128,7 +128,10 @@ impl std::fmt::Display for TranslationError {
                 write!(f, "URI could not be resolved to a workspace file: {uri}")
             }
             TranslationError::DocumentNotLoaded { path } => {
-                write!(f, "document text not available for byte-offset conversion: {path}")
+                write!(
+                    f,
+                    "document text not available for byte-offset conversion: {path}"
+                )
             }
             TranslationError::PositionOutOfBounds {
                 uri,
@@ -187,11 +190,12 @@ pub fn translate_workspace_edit(
 
     if let Some(document_changes) = obj.get("documentChanges") {
         // Modern format: array of TextDocumentEdit | resource operations.
-        let changes = document_changes
-            .as_array()
-            .ok_or_else(|| TranslationError::MalformedEdit {
-                reason: "documentChanges must be an array".to_string(),
-            })?;
+        let changes =
+            document_changes
+                .as_array()
+                .ok_or_else(|| TranslationError::MalformedEdit {
+                    reason: "documentChanges must be an array".to_string(),
+                })?;
 
         for change in changes {
             if let Some(kind) = change.get("kind").and_then(Value::as_str) {
@@ -256,12 +260,11 @@ fn translate_text_document_edit(
             reason: "TextDocumentEdit missing textDocument".to_string(),
         })?;
 
-    let uri = text_doc
-        .get("uri")
-        .and_then(Value::as_str)
-        .ok_or_else(|| TranslationError::MalformedEdit {
+    let uri = text_doc.get("uri").and_then(Value::as_str).ok_or_else(|| {
+        TranslationError::MalformedEdit {
             reason: "textDocument.uri missing or not a string".to_string(),
-        })?;
+        }
+    })?;
 
     // Reject annotated edits (with `annotationId`) — unsupported shape.
     if let Some(edits_array) = change.get("edits").and_then(Value::as_array) {
@@ -301,9 +304,12 @@ fn translate_text_document_edit(
         }
     }
 
-    let text = doc.text.as_deref().ok_or_else(|| TranslationError::DocumentNotLoaded {
-        path: doc.file.canonical_path.0.clone(),
-    })?;
+    let text = doc
+        .text
+        .as_deref()
+        .ok_or_else(|| TranslationError::DocumentNotLoaded {
+            path: doc.file.canonical_path.0.clone(),
+        })?;
 
     let edits_json = change
         .get("edits")
@@ -340,9 +346,12 @@ fn translate_legacy_changes_entry(
             uri: uri.to_string(),
         })?;
 
-    let text = doc.text.as_deref().ok_or_else(|| TranslationError::DocumentNotLoaded {
-        path: doc.file.canonical_path.0.clone(),
-    })?;
+    let text = doc
+        .text
+        .as_deref()
+        .ok_or_else(|| TranslationError::DocumentNotLoaded {
+            path: doc.file.canonical_path.0.clone(),
+        })?;
 
     let edits_array = edits_json
         .as_array()
@@ -418,11 +427,13 @@ fn translate_text_edit(
             character: start_char,
         })?;
 
-    let end_byte = lsp_position_to_byte_offset(document_text, end_line, end_char)
-        .ok_or_else(|| TranslationError::PositionOutOfBounds {
-            uri: uri.to_string(),
-            line: end_line,
-            character: end_char,
+    let end_byte =
+        lsp_position_to_byte_offset(document_text, end_line, end_char).ok_or_else(|| {
+            TranslationError::PositionOutOfBounds {
+                uri: uri.to_string(),
+                line: end_line,
+                character: end_char,
+            }
         })?;
 
     Ok(TextEdit {
@@ -442,12 +453,11 @@ fn translate_resource_operation(
 ) -> Result<WorkspaceFileOperation, TranslationError> {
     match kind {
         "create" => {
-            let uri = change
-                .get("uri")
-                .and_then(Value::as_str)
-                .ok_or_else(|| TranslationError::MalformedEdit {
+            let uri = change.get("uri").and_then(Value::as_str).ok_or_else(|| {
+                TranslationError::MalformedEdit {
                     reason: "create operation missing uri".to_string(),
-                })?;
+                }
+            })?;
             let path = uri_to_canonical_path(uri);
             Ok(WorkspaceFileOperation::Create {
                 path: CanonicalPath(path),
@@ -455,12 +465,11 @@ fn translate_resource_operation(
             })
         }
         "delete" => {
-            let uri = change
-                .get("uri")
-                .and_then(Value::as_str)
-                .ok_or_else(|| TranslationError::MalformedEdit {
+            let uri = change.get("uri").and_then(Value::as_str).ok_or_else(|| {
+                TranslationError::MalformedEdit {
                     reason: "delete operation missing uri".to_string(),
-                })?;
+                }
+            })?;
             let doc = resolver
                 .resolve(uri)
                 .ok_or_else(|| TranslationError::UnresolvableUri {
@@ -481,11 +490,12 @@ fn translate_resource_operation(
                 .ok_or_else(|| TranslationError::MalformedEdit {
                     reason: "rename operation missing newUri".to_string(),
                 })?;
-            let doc = resolver
-                .resolve(old_uri)
-                .ok_or_else(|| TranslationError::UnresolvableUri {
-                    uri: old_uri.to_string(),
-                })?;
+            let doc =
+                resolver
+                    .resolve(old_uri)
+                    .ok_or_else(|| TranslationError::UnresolvableUri {
+                        uri: old_uri.to_string(),
+                    })?;
             let dest_path = uri_to_canonical_path(new_uri);
             Ok(WorkspaceFileOperation::Rename {
                 file: doc.file,
@@ -866,7 +876,10 @@ mod tests {
         .expect("version mismatch must not fail translation");
 
         assert!(
-            payload.diagnostics.iter().any(|d| d.code == "lsp.workspace_edit.version_mismatch"),
+            payload
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "lsp.workspace_edit.version_mismatch"),
             "version mismatch diagnostic must be present; got {:?}",
             payload.diagnostics
         );

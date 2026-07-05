@@ -88,9 +88,7 @@ fn redact_paths(input: &str) -> String {
             && (chars[i + 2] == '\\' || chars[i + 2] == '/');
 
         // Unix absolute path: slash not followed by another slash.
-        let is_unix_path = chars[i] == '/'
-            && i + 1 < chars.len()
-            && chars[i + 1] != '/';
+        let is_unix_path = chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] != '/';
 
         if is_windows_path || is_unix_path {
             // Consume the entire non-whitespace token (the path).
@@ -128,10 +126,19 @@ mod t4_redaction_tests {
             !out.contains("main.rs"),
             "raw filename must not appear: {out}"
         );
-        assert!(out.contains("[REDACTED]"), "redaction marker must appear: {out}");
+        assert!(
+            out.contains("[REDACTED]"),
+            "redaction marker must appear: {out}"
+        );
         // Non-path text must be preserved.
-        assert!(out.contains("error in"), "non-path prefix must be preserved: {out}");
-        assert!(out.contains("syntax error"), "non-path suffix must be preserved: {out}");
+        assert!(
+            out.contains("error in"),
+            "non-path prefix must be preserved: {out}"
+        );
+        assert!(
+            out.contains("syntax error"),
+            "non-path suffix must be preserved: {out}"
+        );
     }
 
     // ── T4-R2: Unix path stripped ─────────────────────────────────────────────
@@ -148,7 +155,10 @@ mod t4_redaction_tests {
             !out.contains("main.rs"),
             "raw filename must not appear: {out}"
         );
-        assert!(out.contains("[REDACTED]"), "redaction marker must appear: {out}");
+        assert!(
+            out.contains("[REDACTED]"),
+            "redaction marker must appear: {out}"
+        );
         assert!(
             out.contains("thread panicked at"),
             "non-path prefix must be preserved: {out}"
@@ -179,6 +189,9 @@ mod t4_redaction_tests {
             !out.contains("secret"),
             "any fragment of the sentinel must not appear: {out}"
         );
-        assert!(out.contains("[REDACTED]"), "redaction marker must appear: {out}");
+        assert!(
+            out.contains("[REDACTED]"),
+            "redaction marker must appear: {out}"
+        );
     }
 }

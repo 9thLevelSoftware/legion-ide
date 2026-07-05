@@ -22452,7 +22452,10 @@ impl AppComposition {
                     p.lsp_health_records.push(record);
                 }
                 let status = self.lsp_session.session_status_projection();
-                if !matches!(status.lifecycle, legion_protocol::LspSessionLifecycleKind::Idle) {
+                if !matches!(
+                    status.lifecycle,
+                    legion_protocol::LspSessionLifecycleKind::Idle
+                ) {
                     p.lsp_session_status = Some(status);
                 }
                 // PKT-LSP-C T4: inject redacted stderr ring-buffer projection.
@@ -27551,8 +27554,7 @@ mod lsp_lazy_start_tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("legion-lsp-t1-{prefix}-{nanos}"));
+        let path = std::env::temp_dir().join(format!("legion-lsp-t1-{prefix}-{nanos}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }

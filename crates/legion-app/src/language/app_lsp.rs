@@ -375,7 +375,10 @@ impl LspSessionHandle {
     pub fn drain(&mut self) -> bool {
         // Handle BackingOff timer expiry: auto-restart when the deadline passes.
         if matches!(self.state, LspSessionState::BackingOff { .. }) {
-            let LspSessionState::BackingOff { earliest_retry_ms, .. } = &self.state else {
+            let LspSessionState::BackingOff {
+                earliest_retry_ms, ..
+            } = &self.state
+            else {
                 unreachable!()
             };
             let now = now_unix_ms();
@@ -647,10 +650,7 @@ fn run_session_worker(
 /// `STDERR_LINE_MAX_LEN`, and appends to the shared `ring` buffer.
 /// When the ring is at capacity the oldest line is evicted (FIFO).
 /// The thread exits when the child process closes its stderr pipe.
-fn drain_stderr(
-    stderr: std::process::ChildStderr,
-    ring: Arc<Mutex<VecDeque<String>>>,
-) {
+fn drain_stderr(stderr: std::process::ChildStderr, ring: Arc<Mutex<VecDeque<String>>>) {
     let reader = std::io::BufReader::new(stderr);
     for raw in reader.lines() {
         let Ok(raw_line) = raw else { break };
@@ -962,8 +962,7 @@ mod backoff_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("legion-lsp-t3-breaker-{nanos}"));
+        let root = std::env::temp_dir().join(format!("legion-lsp-t3-breaker-{nanos}"));
         fs::create_dir_all(&root).expect("create temp dir");
 
         let mut handle = LspSessionHandle::new();
@@ -981,7 +980,10 @@ mod backoff_tests {
             status.restart_count, 0,
             "explicit restart must reset restart_count"
         );
-        assert!(!handle.is_backing_off(), "must not be backing off after explicit restart");
+        assert!(
+            !handle.is_backing_off(),
+            "must not be backing off after explicit restart"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
