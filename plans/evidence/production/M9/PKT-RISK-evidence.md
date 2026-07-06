@@ -148,6 +148,15 @@ already used by `ProposalApplyGate.classifier_recommendation`.
 - Never alters `findings`, `aggregate_risk_label`, or any approval gate
 - `evaluate_with_advisory()` runs the deterministic engine then attaches the label
 
+**Production call-site note for PKT-GP2 integrators:**
+`evaluate_with_advisory` takes `advisory_label: Option<ProposalRiskLabel>` (a
+`legion-protocol` type), **not** `classifier: Option<&AdvisoryRiskClassifier>` as
+originally sketched in the brief. The same dep-cycle rationale applies:
+`AdvisoryRiskClassifier` lives in `legion-ai`, which already depends on
+`legion-security`; reversing that edge would create a cycle.  The production call
+site must pre-compute the advisory label before calling this function and pass the
+resulting `Option<ProposalRiskLabel>` directly.
+
 **Files changed:**
 - `crates/legion-protocol/src/risk.rs` — `advisory_recommendation` field added to
   `RiskAssessment`

@@ -43,11 +43,7 @@ pub fn risk_strip_view_model(
         .findings
         .iter()
         .filter(|f| f.outcome.is_deny())
-        .flat_map(|f| {
-            f.evidence
-                .iter()
-                .map(move |e| format!("{}: {}", f.rule_id.stable_id(), e))
-        })
+        .map(|f| format!("{}: {}", f.rule_id.stable_id(), f.evidence.join("; ")))
         .collect();
 
     DesktopProposalRiskStripViewModel {

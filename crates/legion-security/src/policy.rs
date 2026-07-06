@@ -172,10 +172,10 @@ pub fn derive_approval_level(
     use legion_protocol::risk::{ApprovalLevel, RiskRuleId};
 
     // Critical violation: workspace-scope escape is unconditionally denied.
-    if let Some(finding) = assessment.finding(RiskRuleId::PathScope) {
-        if finding.outcome.is_deny() {
-            return ApprovalLevel::Deny;
-        }
+    if let Some(finding) = assessment.finding(RiskRuleId::PathScope)
+        && finding.outcome.is_deny()
+    {
+        return ApprovalLevel::Deny;
     }
 
     // Any non-critical rule deny → pause and require explicit approval.

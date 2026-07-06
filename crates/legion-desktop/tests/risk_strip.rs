@@ -113,7 +113,7 @@ fn low_risk_auto_shows_no_pause() {
 }
 
 #[test]
-fn medium_risk_require_explicit_pauses() {
+fn high_risk_require_explicit_pauses() {
     let assessment = file_count_deny_assessment();
     assert_eq!(assessment.aggregate_risk_label, ProposalRiskLabel::High);
     assert!(!assessment.is_allow());

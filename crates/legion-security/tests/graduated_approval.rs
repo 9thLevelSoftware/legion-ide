@@ -4,7 +4,8 @@ use legion_protocol::ProposalRiskLabel;
 use legion_protocol::risk::{ApprovalLevel, RiskRuleId, RiskRuleInput};
 use legion_security::risk::{DeterministicRiskRuleEngine, RiskRuleThresholds};
 use legion_security::{
-    ProposalAutoApprovalPolicy, approval_level_audit_metadata, derive_approval_level,
+    ProposalApplyGate, ProposalAutoApprovalPolicy, SecurityDecision, approval_level_audit_metadata,
+    derive_approval_level,
 };
 
 fn all_allow_input() -> RiskRuleInput {
@@ -177,4 +178,45 @@ fn approval_level_appears_in_audit_metadata() {
             "level {level:?} should map to {expected}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// I1: ProposalApplyGate enforcement — high-risk proposals cannot reach apply
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_gate_blocks_when_human_approval_required_but_not_recorded() {
+    // Gate constructed with new() defaults to require_human_approval=true and
+    // human_approval_recorded=false.  Even with an Allow policy decision the gate
+    // must refuse apply until a human records approval.
+    let gate = ProposalApplyGate::new(SecurityDecision::Allow).with_human_approval_recorded(false);
+    assert!(
+        gate.require_human_approval,
+        "new() must default to require_human_approval = true"
+    );
+    assert!(
+        !gate.can_apply(),
+        "gate must block apply when human approval is required but not yet recorded"
+    );
+}
+
+#[test]
+fn apply_gate_allows_when_human_approval_recorded() {
+    // Converse: once a human records approval against an Allow policy the gate opens.
+    let gate = ProposalApplyGate::new(SecurityDecision::Allow).with_human_approval_recorded(true);
+    assert!(
+        gate.can_apply(),
+        "gate must allow apply when policy allows and human approval is recorded"
+    );
+}
+
+#[test]
+fn apply_gate_default_deny_blocks_even_with_approval_recorded() {
+    // The default gate uses SecurityDecision::Deny, so recording human approval
+    // is not sufficient — the policy decision itself must be Allow.
+    let gate = ProposalApplyGate::default().with_human_approval_recorded(true);
+    assert!(
+        !gate.can_apply(),
+        "default-deny gate must block apply regardless of human approval state"
+    );
 }
