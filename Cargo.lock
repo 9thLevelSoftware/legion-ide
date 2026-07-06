@@ -3747,9 +3747,11 @@ name = "legion-agent"
 version = "0.1.0"
 dependencies = [
  "legion-ai",
+ "legion-debug",
  "legion-platform",
  "legion-protocol",
  "legion-tracker",
+ "sha2",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -3845,6 +3847,7 @@ name = "legion-debug"
 version = "0.1.0"
 dependencies = [
  "legion-protocol",
+ "sha2",
  "thiserror 2.0.18",
  "uuid",
 ]
