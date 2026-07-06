@@ -26,6 +26,7 @@ pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 
 /// Structured context manifest assembly helpers.
 pub mod capability;
+/// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
 pub mod risk;
