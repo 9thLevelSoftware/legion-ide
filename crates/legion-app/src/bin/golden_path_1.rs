@@ -560,9 +560,10 @@ fn run_s3(
     // handles the initial clearing ack by skipping it and waiting for a
     // notification with error_count > 0.
     let mut doc_version: i64 = 2;
-    session
-        .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
-        .map_err(|e| format!("did_change (error): {e}"))?;
+    if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT) {
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "error-write");
+        return Err(format!("did_change (error): {e}"));
+    }
 
     // Pump until rust-analyzer reports an error diagnostic for the erroneous
     // content.  rust-analyzer often emits a "clear" notification (error_count=0)
@@ -571,20 +572,20 @@ fn run_s3(
     // first notification that has error_count > 0.
     //
     // The pump runs in bounded slices with a version-bumped re-send between
-    // slices. Evidence (campaign ledger 2026-07-05; 4 occurrences across
-    // Windows local + ubuntu CI run 28747873556): rust-analyzer occasionally
-    // goes COMPLETELY silent after a didChange that lands while its initial
-    // prime-caches pass is still running — the didOpen publish arrives
-    // (~1s), then zero notifications for ANY uri for 120s+ (post-mortem:
-    // buffered_notifications=0, health Fresh, restart_count=0, send
-    // succeeded, reader thread live). The stall is inside RA's analysis
-    // queue, not our transport. Editors unstick it the way a user does —
-    // another keystroke ⇒ another didChange with a bumped version.
-    // Re-sending the SAME content still publishes: RA's dedup compares
-    // against the last PUBLISHED set (the clean v1 set), not the last
-    // analysed text. A genuinely dead server still fails the overall
-    // deadline. Root-cause confirmation via RA stderr lands with the LSP-C
-    // stderr ring buffer.
+    // slices. Evidence (campaign ledger 2026-07-05; multiple occurrences on
+    // Windows local + ubuntu CI runs 28747873556/28752070723/28759076132):
+    // rust-analyzer occasionally goes COMPLETELY silent after a didChange —
+    // the didOpen publish arrives (~1-2s), then zero notifications for ANY
+    // uri for 120s+ (post-mortem: buffered_notifications=0, health Fresh,
+    // restart_count=0, stderr ring empty). The nudges have NOT been observed
+    // to unstick a wedged run (all three were ignored on both wedged CI
+    // runs); they are retained as cheap keystroke-equivalent hardening while
+    // root-causing continues. A local round-3 capture (target/s3-repro
+    // run-06) showed a nudge write failing with a broken pipe — the RA
+    // process had DIED, so at least one wedge mode is process death, not a
+    // stalled analysis queue. Whether a given wedge is RA death, two-RA
+    // interference (see the open_file note above), or our own reader thread
+    // is exactly what dump_s3_post_mortem discriminates — PKT-S3-WEDGE-R3.
     eprintln!("[s3] pumping for error diagnostic (up to 120s, nudge every 30s) ...");
     let mut got_error = false;
     for slice in 0..4u32 {
@@ -594,9 +595,15 @@ fn run_s3(
                 "[s3] no diagnostics after {}s; nudging rust-analyzer with did_change v{doc_version} (silent-stall workaround)",
                 slice * 30
             );
-            session
-                .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
-                .map_err(|e| format!("did_change (error nudge): {e}"))?;
+            if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
+            {
+                // A failed nudge write (e.g. broken pipe) means the server
+                // process or transport is gone — exactly the evidence the
+                // post-mortem exists for. Dump before failing (round-06
+                // local capture returned early here and lost the evidence).
+                dump_s3_post_mortem(app, session, &scratchpad_uri, "error-nudge-write");
+                return Err(format!("did_change (error nudge): {e}"));
+            }
         }
         if session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(30)) {
             got_error = true;
@@ -664,9 +671,10 @@ fn run_s3(
     // skips the publishDiagnostics, so the clear pump sees nothing and
     // times out.
     doc_version += 1;
-    session
-        .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
-        .map_err(|e| format!("did_change (fix): {e}"))?;
+    if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT) {
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "fix-write");
+        return Err(format!("did_change (fix): {e}"));
+    }
 
     // Pump until errors are clear (bounded 60s), with the same sliced
     // nudge as the error phase — the silent-stall race applies to any
@@ -679,9 +687,11 @@ fn run_s3(
             eprintln!(
                 "[s3] errors not cleared after 30s; nudging rust-analyzer with did_change v{doc_version} (silent-stall workaround)"
             );
-            session
-                .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
-                .map_err(|e| format!("did_change (fix nudge): {e}"))?;
+            if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
+            {
+                dump_s3_post_mortem(app, session, &scratchpad_uri, "fix-nudge-write");
+                return Err(format!("did_change (fix nudge): {e}"));
+            }
         }
         if session.pump_until_diagnostics_clear(&scratchpad_uri, Duration::from_secs(30)) {
             cleared = true;
