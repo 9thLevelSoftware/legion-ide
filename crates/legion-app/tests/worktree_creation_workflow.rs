@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use legion_app::{AppCommandOutcome, AppComposition};
+use legion_app::{AppCommandOutcome, AppComposition, AppCompositionError};
 use legion_ui::CommandDispatchIntent;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -437,5 +437,101 @@ fn git_new_worktree_palette_command_exists() {
             .any(|r| r.title.contains("Worktree") || r.id.contains("worktree")),
         "palette should have a 'Git: New Worktree' command; results: {:?}",
         palette.results.iter().map(|r| &r.title).collect::<Vec<_>>()
+    );
+}
+
+// ─── Trust gate tests (PKT-0) ─────────────────────────────────────────────────
+
+/// Untrusted workspace must not be allowed to create worktrees.
+/// An untrusted workspace cannot reach the git layer even if git is available.
+#[test]
+fn create_git_worktree_denied_for_untrusted_workspace() {
+    // We only need a valid workspace path — the trust gate fires before any git
+    // command so we don't need an actual git repo here.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let fake_root = std::env::temp_dir().join(format!(
+        "legion_wt_untrusted_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    let _ = fs::create_dir_all(&fake_root);
+
+    struct DirGuard(PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = DirGuard(fake_root.clone());
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &fake_root,
+        legion_protocol::WorkspaceTrustState::Untrusted,
+        legion_protocol::PrincipalId("untrusted-wt-test".to_string()),
+    )
+    .expect("workspace open");
+
+    let worktree_path = fake_root.join("wt-out");
+    let result = app.dispatch_ui_intent(CommandDispatchIntent::CreateGitWorktree {
+        branch: "feature/denied".to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+    });
+
+    assert!(
+        matches!(result, Err(AppCompositionError::WorkspaceNotTrusted(_))),
+        "CreateGitWorktree on untrusted workspace must return WorkspaceNotTrusted; got {result:?}",
+    );
+}
+
+/// Trusted workspace + CreateGitWorktree succeeds at the trust gate.
+/// This test verifies the trust check is not over-broad: a trusted workspace
+/// can proceed past the trust gate (the git command itself may still fail if
+/// git is unavailable or the branch doesn't exist, but the denial must not be
+/// a WorkspaceNotTrusted error).
+#[test]
+fn create_git_worktree_trusted_workspace_passes_trust_gate() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let fake_root = std::env::temp_dir().join(format!(
+        "legion_wt_trusted_gate_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    let _ = fs::create_dir_all(&fake_root);
+
+    struct DirGuard(PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = DirGuard(fake_root.clone());
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &fake_root,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("trusted-gate-test".to_string()),
+    )
+    .expect("workspace open");
+
+    let worktree_path = fake_root.join("wt-trusted-out");
+    let result = app.dispatch_ui_intent(CommandDispatchIntent::CreateGitWorktree {
+        branch: "feature/trusted-gate".to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+    });
+
+    // A trusted workspace must NOT receive WorkspaceNotTrusted — the trust
+    // gate passed. The git command may fail (no real repo) but the error
+    // must not be a trust denial.
+    assert!(
+        !matches!(result, Err(AppCompositionError::WorkspaceNotTrusted(_))),
+        "CreateGitWorktree on trusted workspace must not return WorkspaceNotTrusted; got {result:?}",
     );
 }

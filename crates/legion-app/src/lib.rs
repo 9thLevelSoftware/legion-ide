@@ -445,6 +445,9 @@ pub enum AppCompositionError {
     /// Durable checkpoint operation failed.
     #[error("checkpoint operation failed: {0}")]
     Checkpoint(String),
+    /// Operation denied because the workspace is untrusted.
+    #[error("workspace not trusted: {0}")]
+    WorkspaceNotTrusted(String),
 }
 
 /// Product-mode authority for app-owned AI dispatch.
@@ -16403,6 +16406,15 @@ impl AppComposition {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
+                // Trust gate: untrusted workspaces cannot create worktrees.
+                // Follows the terminal.launch pattern (lines 5512-5534).
+                if self.active_documents.active_workspace_trust
+                    != Some(WorkspaceTrustState::Trusted)
+                {
+                    return Err(AppCompositionError::WorkspaceNotTrusted(
+                        "worktree creation denied: workspace is untrusted".to_string(),
+                    ));
+                }
                 legion_project::create_git_worktree(
                     Path::new(root_path),
                     &branch,

@@ -6,6 +6,10 @@
 pub mod comm;
 /// Approved-plan DAG helpers for Legion workflow coordination.
 pub mod dag;
+/// Evidence record construction and worker artifact bridging.
+pub mod evidence;
+/// External workspace proposal constructors for delegated agent output.
+pub mod external;
 /// Merge-readiness reports with verification-evidence citations.
 pub mod merge_readiness;
 /// Editable plan construction helpers for agent workflows.
@@ -1175,14 +1179,19 @@ impl LegionWorkflowCoordinator {
     }
 
     /// Returns evidence records for a specific worker.
+    ///
+    /// Matches on the worker-id prefix so both single-artifact records
+    /// (`"legion-evidence:<worker-id>:<artifact-id>"`) and the proposal-output
+    /// record (`"legion-evidence:<worker-id>"`) are included.
     pub fn evidence_records_for_worker(
         &self,
         worker_id: &LegionWorkflowWorkerId,
     ) -> Vec<&LegionEvidenceRecord> {
-        let expected_id = format!("legion-evidence:{}", worker_id.0);
+        let prefix = format!("legion-evidence:{}", worker_id.0);
+        let colon_prefix = format!("{prefix}:");
         self.evidence_records
             .iter()
-            .filter(|e| e.evidence_id == expected_id)
+            .filter(|e| e.evidence_id == prefix || e.evidence_id.starts_with(&colon_prefix))
             .collect()
     }
 

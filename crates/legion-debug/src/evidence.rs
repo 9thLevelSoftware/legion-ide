@@ -4,10 +4,15 @@ use legion_protocol::{
 };
 use thiserror::Error;
 
+/// Error returned when an evidence projection contains raw diagnostic data that must be redacted.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum EvidenceProjectionError {
+    /// The field contained raw stack-trace markers, which are not permitted in metadata-only evidence.
     #[error("metadata-only evidence rejected raw stack-trace markers in {field}")]
-    RawStackTrace { field: &'static str },
+    RawStackTrace {
+        /// Name of the field that contained the stack-trace markers.
+        field: &'static str,
+    },
 }
 
 fn fingerprint(value: impl Into<String>) -> FileFingerprint {
@@ -31,6 +36,10 @@ fn ensure_redacted(field: &'static str, value: &str) -> Result<(), EvidenceProje
     Ok(())
 }
 
+/// Returns a single-line metadata summary string for a [`DebugAdapterAuditRecord`].
+///
+/// Returns [`EvidenceProjectionError::RawStackTrace`] if `metadata_summary` contains
+/// raw stack-trace markers.
 pub fn debug_adapter_audit_summary(
     audit: &DebugAdapterAuditRecord,
 ) -> Result<String, EvidenceProjectionError> {
@@ -49,6 +58,7 @@ pub fn debug_adapter_audit_summary(
     ))
 }
 
+/// Returns a single-line metadata summary string for a [`TestRunSummary`].
 pub fn test_run_summary_text(summary: &TestRunSummary) -> Result<String, EvidenceProjectionError> {
     Ok(format!(
         "test run={} controller={} state={:?} passed={} failed={} skipped={} errored={} duration_ms={}",
@@ -78,6 +88,10 @@ fn test_run_passed(summary: &TestRunSummary) -> bool {
     summary.state == TestRunState::Passed && summary.failed == 0 && summary.errored == 0
 }
 
+/// Produces a metadata-only [`EvidenceArtifact`] from a [`DebugAdapterAuditRecord`].
+///
+/// No raw log payloads or stack traces are retained. Returns
+/// [`EvidenceProjectionError::RawStackTrace`] if the record contains redacted content.
 pub fn debug_adapter_audit_evidence(
     audit: &DebugAdapterAuditRecord,
     generated_at: TimestampMillis,
@@ -105,6 +119,9 @@ pub fn debug_adapter_audit_evidence(
     })
 }
 
+/// Produces a metadata-only [`EvidenceArtifact`] from a [`TestRunSummary`].
+///
+/// No raw log payloads are retained. Pass and fail counts are embedded in hashes only.
 pub fn test_run_summary_evidence(
     summary: &TestRunSummary,
     generated_at: TimestampMillis,

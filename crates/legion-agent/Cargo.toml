@@ -10,7 +10,9 @@ legion-protocol = { workspace = true }
 legion-ai = { workspace = true }
 legion-platform = { workspace = true }
 legion-tracker = { workspace = true }
+legion-debug = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]

@@ -72,7 +72,7 @@ pub(crate) fn rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 }
 
 fn host_profile_summary() -> SandboxProfileSummary {
-    let scope = SandboxScope::workspace_only("/workspace/project");
+    let scope = SandboxScope::workspace_only("(no active sandbox — descriptor only)");
 
     #[cfg(target_os = "macos")]
     {
@@ -143,8 +143,10 @@ fn sandbox_backend_label(backend: &SandboxBackend) -> String {
 
 fn sandbox_strength_label(backend: &SandboxBackend) -> &'static str {
     match backend {
-        SandboxBackend::DocumentedFallback { .. } => "weaker",
-        _ => "strong",
+        SandboxBackend::DocumentedFallback { .. } => "fallback",
+        // All other backends are descriptor-only until real OS enforcement lands (PKT-SANDBOX).
+        // Claiming "strong" without enforcement violates the honesty constraint.
+        _ => "descriptor-only",
     }
 }
 
@@ -160,5 +162,60 @@ fn runtime_activation_label(activation: DelegatedTaskRuntimeActivationState) -> 
         DelegatedTaskRuntimeActivationState::Completed => "completed",
         DelegatedTaskRuntimeActivationState::Cancelled => "cancelled",
         DelegatedTaskRuntimeActivationState::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use legion_protocol::DelegatedTaskRuntimeActivationState;
+    use legion_ui::Shell;
+
+    fn snapshot_with_activation(
+        activation: DelegatedTaskRuntimeActivationState,
+    ) -> legion_ui::ShellProjectionSnapshot {
+        let mut snapshot = Shell::empty("test").projection_snapshot();
+        snapshot.delegated_task_projection.runtime_activation = activation;
+        snapshot
+    }
+
+    /// Verify that `sandbox_strength_label` never returns "strong" for any
+    /// `SandboxBackend` variant. The "strong" label is dishonest because no
+    /// backend currently performs real OS enforcement (PKT-SANDBOX is pending).
+    #[test]
+    fn sandbox_strength_label_never_returns_strong() {
+        let backends = [
+            SandboxBackend::Seatbelt,
+            SandboxBackend::BubblewrapLandlock,
+            SandboxBackend::RestrictedToken,
+            SandboxBackend::AppContainer,
+            SandboxBackend::DocumentedFallback {
+                reason: "test fallback".to_string(),
+            },
+        ];
+        for backend in &backends {
+            let label = sandbox_strength_label(backend);
+            assert_ne!(
+                label, "strong",
+                "sandbox_strength_label returned 'strong' for {backend:?} — this is dishonest until PKT-SANDBOX lands real enforcement",
+            );
+        }
+    }
+
+    /// Verify that `rows()` output contains "descriptor-only" and not "strong"
+    /// for all activation states.
+    #[test]
+    fn rows_output_contains_descriptor_only_not_strong() {
+        let snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::NotEncoded);
+        let rows = rows(&snapshot);
+        let all_output = rows.join("\n");
+        assert!(
+            all_output.contains("descriptor-only") || all_output.contains("fallback"),
+            "rows() output should contain 'descriptor-only' or 'fallback', got: {all_output}",
+        );
+        assert!(
+            !all_output.contains("strong"),
+            "rows() output must not contain 'strong' — dishonest label, got: {all_output}",
+        );
     }
 }

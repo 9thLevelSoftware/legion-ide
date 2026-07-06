@@ -706,7 +706,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
 [[epics]]
 id = "P3"
 title = "Proposal apply, checkpoints, and trust review"
-milestone = "M2"
+milestone = "M9"
 readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
 
   [[epics.features]]
@@ -723,6 +723,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-security"]
     acceptance = ["Every mutation route is documented with its current activation state."]
     stop_condition = "Stop if any known route is missing from the inventory."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F1.T2"
@@ -734,6 +736,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app --test apply_activation"]
     acceptance = ["Trusted local proposals can apply safely."]
     stop_condition = "Test must fail for the intended reason (audit not wired) before implementation."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F1.T3"
@@ -745,6 +749,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-security", "cargo test -p legion-app"]
     acceptance = ["Denied future surfaces remain visibly denied."]
     stop_condition = "Stop if a denied surface becomes enabled without an explicit ADR + tests."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F1.T4"
@@ -756,6 +762,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app --test apply_activation", "cargo test -p legion-security"]
     acceptance = ["Flags are removed/narrowed only with a paired test that proves the new behavior."]
     stop_condition = "Stop if a flag is removed without replacing it with a more specific policy."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P3.F2"
@@ -771,6 +779,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-protocol", "cargo test -p legion-app", "cargo test -p legion-editor"]
     acceptance = ["A 5-file AI/agent proposal can be reviewed, partially accepted, applied, and undone."]
     stop_condition = "Stop if the diff surface duplicates a separate buffer model outside the proposal DTOs."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F2.T2"
@@ -782,6 +792,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-desktop"]
     acceptance = ["Each hunk can be accepted, rejected, or edited in place within the review surface."]
     stop_condition = "Stop if a per-hunk decision cannot be undone."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F2.T3"
@@ -793,6 +805,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-agent"]
     acceptance = ["Evidence panel shows structured fields, not freeform text dumps."]
     stop_condition = "Stop if the evidence panel is allowed to render raw provider output."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F2.T4"
@@ -804,6 +818,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-desktop --test keyboard_nav"]
     acceptance = ["Every review action is reachable from the keyboard."]
     stop_condition = "Stop if any review action is mouse-only."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P3.F3"
@@ -819,6 +835,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-storage"]
     acceptance = ["Every apply/batch leaves a checkpoint that can be restored."]
     stop_condition = "Stop if a checkpoint is created but not surfaced to the user."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F3.T2"
@@ -830,6 +848,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-desktop"]
     acceptance = ["Restore is a product feature, not just a hidden batch rollback primitive."]
     stop_condition = "Stop if the timeline hides checkpoints that exist."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F3.T3"
@@ -841,6 +861,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-app --test checkpoint_restore"]
     acceptance = ["Restore does not stomp manual edits that did not conflict with the apply."]
     stop_condition = "Stop if the test cannot enumerate what was preserved."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F3.T4"
@@ -852,6 +874,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-storage", "cargo test -p legion-app"]
     acceptance = ["Every checkpoint and restore is queryable from the audit ledger."]
     stop_condition = "Stop if a checkpoint cannot be correlated back to its triggering apply."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P3.F4"
@@ -867,6 +891,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-security --test risk_rules"]
     acceptance = ["Each rule has a stable id and an enumerated test case."]
     stop_condition = "Stop if a rule has no unit test for at least one deny and one allow case."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F4.T2"
@@ -878,6 +904,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-security", "cargo test -p legion-app"]
     acceptance = ["Auto-approval is opt-in and cites deterministic rule IDs."]
     stop_condition = "Stop if auto-approval can fire without a matching rule id in the audit row."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F4.T3"
@@ -889,6 +917,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
     acceptance = ["Medium/high-risk proposals pause and explain why."]
     stop_condition = "Stop if a high-risk proposal can apply silently."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P3.F4.T4"
@@ -900,6 +930,8 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-security"]
     acceptance = ["Classifier output is advisory; policy + human still gate the apply."]
     stop_condition = "Stop if a classifier output can change a deterministic rule outcome."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
 # ---------------------------------------------------------------------------
 # EPIC P4 — Assist mode product loop
@@ -908,7 +940,7 @@ readiness_rows = ["PR-AI-002", "PR-LANG-001", "PR-LANG-002", "PR-ENT-002"]
 [[epics]]
 id = "P4"
 title = "Assist mode product loop"
-milestone = "M2"
+milestone = "M9"
 readiness_rows = ["PR-AI-001", "PR-AI-002"]
 
   [[epics.features]]
@@ -925,6 +957,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai-providers", "cargo test -p legion-desktop"]
     acceptance = ["Hosted provider call is impossible without explicit workspace consent."]
     stop_condition = "Stop if a hosted provider is enabled by a single default toggle."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F1.T2"
@@ -936,6 +970,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-storage", "cargo test -p legion-ai-providers"]
     acceptance = ["Provider keys are never written to a tracked config file."]
     stop_condition = "Stop if any test path leaves a key on disk."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F1.T3"
@@ -947,6 +983,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai-providers", "cargo test -p legion-protocol"]
     acceptance = ["Capabilities are queryable per provider and gated at activation time."]
     stop_condition = "Stop if a capability is assumed without an explicit provider declaration."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F1.T4"
@@ -958,6 +996,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai-providers --test smoke", "cargo run -p xtask -- legion-bench --mode recorded"]
     acceptance = ["Recorded smoke tests run in offline CI; live smoke tests are gated by credential availability."]
     stop_condition = "Stop if a smoke test silently skips on the default path."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P4.F2"
@@ -973,6 +1013,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-protocol"]
     acceptance = ["Manifest is a structured DTO, not a freeform prompt."]
     stop_condition = "Stop if manifest items are added that bypass redaction."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F2.T2"
@@ -984,6 +1026,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ai"]
     acceptance = ["User can answer 'what left my machine?' before each AI run."]
     stop_condition = "Stop if any item is sent before the user can exclude it."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F2.T3"
@@ -995,6 +1039,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai --test egress_equality"]
     acceptance = ["The bytes sent equal the manifest minus redacted items, with no other delta."]
     stop_condition = "Stop if the test cannot be made deterministic across providers."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F2.T4"
@@ -1006,6 +1052,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-retention"]
     acceptance = ["User can answer 'what left my machine?' after each AI run."]
     stop_condition = "Stop if deletion does not actually remove the stored payload."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P4.F3"
@@ -1021,6 +1069,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-editor"]
     acceptance = ["Assist mode is useful without granting direct mutation authority."]
     stop_condition = "Stop if ghost text can be auto-applied without an explicit accept."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F3.T2"
@@ -1032,6 +1082,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-desktop"]
     acceptance = ["Each rail command is a tracked capability with a test."]
     stop_condition = "Stop if a rail command can mutate without a proposal."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F3.T3"
@@ -1043,6 +1095,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ai"]
     acceptance = ["Each streamed code block is rendered as an apply-as-proposal affordance."]
     stop_condition = "Stop if apply bypasses the proposal pipeline."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F3.T4"
@@ -1054,6 +1108,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-observability", "cargo test -p legion-ai"]
     acceptance = ["Telemetry is metadata-only by default and is opt-in for richer fields."]
     stop_condition = "Stop if telemetry is enabled before the consent gate is in place."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
   [[epics.features]]
   id = "P4.F4"
@@ -1069,6 +1125,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-editor"]
     acceptance = ["GP-2 works on a real repo: explain -> refactor -> review manifest -> apply -> undo."]
     stop_condition = "Stop if the overlay ever desyncs from the buffer anchors."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F4.T2"
@@ -1080,6 +1138,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-ai", "cargo test -p legion-app"]
     acceptance = ["Each inline hunk is applied through the same proposal pipeline as multi-file proposals."]
     stop_condition = "Stop if inline hunk apply has a separate audit row from the proposal ledger."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
     [[epics.features.tasks]]
     id = "P4.F4.T3"
@@ -1091,6 +1151,8 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-editor"]
     acceptance = ["Undo restores the prior buffer state and a checkpoint entry exists for the apply."]
     stop_condition = "Stop if undo is silently skipped when the apply came from inline."
+    status = "done"
+    evidence = "plans/evidence/production/M9/"
 
 # ---------------------------------------------------------------------------
 # EPIC P5 — Delegate mode agent harness
@@ -1099,7 +1161,7 @@ readiness_rows = ["PR-AI-001", "PR-AI-002"]
 [[epics]]
 id = "P5"
 title = "Delegate mode agent harness"
-milestone = "M3"
+milestone = "M10"
 readiness_rows = ["PR-AI-002", "PR-ENT-002"]
 
   [[epics.features]]
