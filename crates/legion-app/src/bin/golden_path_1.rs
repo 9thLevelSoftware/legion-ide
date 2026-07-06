@@ -436,10 +436,22 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
     // drives every change via didOpen/didChange, so no watch events are ever
     // needed. The dynamicRegistration advertisement is required — RA only
     // honours `files.watcher: client` when the client can register watchers.
+    //
+    // Cache priming disabled: RA's background prime-caches pass (std
+    // indexing) holds salsa queries that demand-driven diagnostics block on
+    // (`block_on: … inherent_impls_in_crate(core)`), stalling publishes past
+    // any pump deadline — the s3 "silent wedge" mode with an empty stderr
+    // ring, worst on 2-core CI runners with a second (product lazy-start) RA
+    // priming concurrently. The probe needs no warm caches: with priming
+    // off, error→clear cycles complete in ~300 ms (forensics:
+    // plans/evidence/production/M8/PKT-S3-WEDGE-R3-evidence.md).
     session
         .initialize_with_options(
             &root_uri,
-            Some(serde_json::json!({"files": {"watcher": "client"}})),
+            Some(serde_json::json!({
+                "files": {"watcher": "client"},
+                "cachePriming": {"enable": false}
+            })),
             Some(serde_json::json!({
                 "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
             })),

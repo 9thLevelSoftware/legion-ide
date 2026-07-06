@@ -28,3 +28,4 @@ __pycache__/
 .almanac/index.db-wal
 .almanac/index.db-shm
 .almanac/runs/
+/target-load/

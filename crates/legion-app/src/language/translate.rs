@@ -595,22 +595,42 @@ fn build_target_coverage(
 ///
 /// Handles:
 /// - `file:///C:/...` → `C:/...` (Windows with drive letter — detected by
-///   alpha + colon at positions 0..1 of the post-`file:///` remainder)
+///   alpha + colon at positions 0..1 of the post-`file:///` remainder).
+///   The drive designator is normalized to the canonical UPPERCASE form
+///   with a literal colon: LSP servers echo URIs in their own form
+///   (rust-analyzer lowercases the drive; lsp-types' `Url` can emit a
+///   percent-encoded `C%3A` colon), and a case-mismatched drive letter in
+///   a proposal path would never match the editor's canonical paths at
+///   apply time (PKT-S3-WEDGE-R3 root cause #1).
 /// - `file:///home/dev/main.rs` → `/home/dev/main.rs` (Unix absolute path —
 ///   the leading `/` is restored; stripping `file:///` would otherwise yield
 ///   a relative path like `home/dev/main.rs`)
 /// - `file://localhost/...` → `/...`
+///
+/// The output keeps the URI's forward slashes; Windows consumers that need
+/// backslash form must convert (the editor's canonical paths use `\`).
 pub fn uri_to_canonical_path(uri: &str) -> String {
     let stripped = if let Some(rest) = uri.strip_prefix("file:///") {
+        // Percent-decode a drive colon (`C%3A` → `C:`, either hex case)
+        // BEFORE the drive check — decoding after it misclassified the
+        // `C%3A` form as a Unix path and prepended a bogus leading `/`.
+        let rest = if rest.len() >= 4
+            && rest.as_bytes()[0].is_ascii_alphabetic()
+            && rest[1..4].eq_ignore_ascii_case("%3a")
+        {
+            format!("{}:{}", &rest[..1], &rest[4..])
+        } else {
+            rest.to_string()
+        };
         // Distinguish Windows (drive letter + colon) from Unix absolute path.
-        // Windows example: `file:///C:/Users/dev/main.rs` → rest = `C:/Users/...`
-        //   rest[0] is alphabetic, rest[1] is `:`  → keep as-is.
-        // Unix example: `file:///home/dev/main.rs` → rest = `home/dev/...`
-        //   Prepend `/` to restore the absolute path root.
         let rest_bytes = rest.as_bytes();
         if rest_bytes.len() >= 2 && rest_bytes[0].is_ascii_alphabetic() && rest_bytes[1] == b':' {
-            // Windows drive-letter path: `C:/...`
-            rest.to_string()
+            // Windows drive-letter path: canonical uppercase drive.
+            format!(
+                "{}{}",
+                (rest_bytes[0] as char).to_ascii_uppercase(),
+                &rest[1..]
+            )
         } else {
             // Unix absolute path: prepend the leading `/` that was consumed.
             format!("/{rest}")
@@ -1047,7 +1067,7 @@ mod tests {
 
     #[test]
     fn t2_uri_to_canonical_path_handles_windows_and_unix() {
-        // Windows: drive-letter path is kept as-is.
+        // Windows: drive-letter path is kept as-is (canonical uppercase drive).
         assert_eq!(
             uri_to_canonical_path("file:///C:/Users/dev/main.rs"),
             "C:/Users/dev/main.rs"
@@ -1061,6 +1081,35 @@ mod tests {
         assert_eq!(
             uri_to_canonical_path("file://localhost/home/dev/main.rs"),
             "/home/dev/main.rs"
+        );
+    }
+
+    // ── T2-7b: server-echoed drive-designator forms (PKT-S3-WEDGE-R3) ─────────
+    //
+    // rust-analyzer echoes URIs with a lowercase drive letter, and lsp-types'
+    // `Url` can percent-encode the drive colon. A case-mismatched or
+    // slash-prefixed drive path in a proposal would never match the editor's
+    // canonical paths at apply time.
+
+    #[test]
+    fn t2_uri_to_canonical_path_normalizes_server_echoed_drive_forms() {
+        for uri in [
+            "file:///c:/Users/dev/main.rs",
+            "file:///C%3A/Users/dev/main.rs",
+            "file:///c%3A/Users/dev/main.rs",
+            "file:///c%3a/Users/dev/main.rs",
+        ] {
+            assert_eq!(
+                uri_to_canonical_path(uri),
+                "C:/Users/dev/main.rs",
+                "server-echoed form {uri} must normalize to the canonical drive"
+            );
+        }
+        // A Unix path whose first segment merely looks alphabetic must not be
+        // treated as a drive.
+        assert_eq!(
+            uri_to_canonical_path("file:///c/Users/dev/main.rs"),
+            "/c/Users/dev/main.rs"
         );
     }
 
