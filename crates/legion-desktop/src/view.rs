@@ -8,6 +8,8 @@ pub mod ghost_text;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Inline edit diff overlay view model and per-hunk accept/reject helpers (PKT-INLINE).
+pub mod inline_edit;
 /// Pre-invocation context manifest panel with per-item exclusion toggles.
 pub mod manifest_panel;
 /// Editable plan editor projection.
@@ -31,6 +33,13 @@ pub use assistant_rail::{
 };
 #[cfg(feature = "ai")]
 pub use ghost_text::{GhostTextOverlayViewModel, GhostTextState, ghost_text_from_prediction};
+pub use inline_edit::{
+    InlineEditApplyResult, InlineEditError, InlineEditOverlayState, InlineEditOverlayViewModel,
+    accumulate_inline_edit_chunks, apply_inline_edit_with_undo_group,
+    build_inline_edit_audit_record, check_inline_edit_anchor_freshness,
+    inline_edit_from_instruction, inline_edit_to_workspace_proposal,
+    set_inline_edit_hunk_disposition,
+};
 pub use manifest_panel::{
     DesktopManifestItemToggleViewModel, manifest_item_toggle_view_models, preview_rows,
     toggle_manifest_item_inclusion,

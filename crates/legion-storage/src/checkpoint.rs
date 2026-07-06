@@ -11,7 +11,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use legion_protocol::{
-    CanonicalPath, CheckpointAuditRecord, PrincipalId, ProposalId, TimestampMillis,
+    CanonicalPath, CheckpointAuditEvent, CheckpointAuditRecord, PrincipalId, ProposalId,
+    TimestampMillis,
 };
 use serde::{Deserialize, Serialize};
 
@@ -240,7 +241,15 @@ impl CheckpointStore {
             fs::create_dir_all(&audit_dir).map_err(|err| StorageError::Failed {
                 message: format!("create audit directory failed: {err}"),
             })?;
-            let filename = format!("ckpt-{}-{}.json", record.checkpoint_id, record.timestamp.0);
+            let event_tag = match record.event {
+                CheckpointAuditEvent::Created => "created",
+                CheckpointAuditEvent::Restored => "restored",
+                CheckpointAuditEvent::Deleted => "deleted",
+            };
+            let filename = format!(
+                "ckpt-{}-{}-{}.json",
+                record.checkpoint_id, record.timestamp.0, event_tag
+            );
             let path = audit_dir.join(filename);
             let body =
                 serde_json::to_string_pretty(&record).map_err(|err| StorageError::Failed {
