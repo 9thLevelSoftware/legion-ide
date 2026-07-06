@@ -8,7 +8,12 @@ publish.workspace = true
 [features]
 default = ["ai"]
 ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers"]
-offline = []
+# offline: no hosted provider calls at runtime.  We still compile legion-ai
+# (pure Rust, no network deps) so that the deterministic-local inline
+# prediction provider is available.  The policy layer prevents actual remote
+# invocations; reqwest is NOT pulled in because legion-ai-providers is
+# excluded.
+offline = ["dep:legion-ai"]
 # Exposes `*_for_test` seams (e.g. `set_lsp_health_for_test`) to integration
 # test binaries in `tests/`.  Integration tests are compiled as separate crates
 # and cannot see `#[cfg(test)]`-gated items from the library crate, so we use
