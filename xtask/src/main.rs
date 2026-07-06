@@ -626,6 +626,42 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// Run the scripted GP-2 golden-path smoke against a throwaway fixture workspace.
+    ///
+    /// Drives the AI-enabled legion-app product APIs (AppComposition, inline
+    /// prediction, provider routing, context manifest, undo/redo) against a
+    /// copy of `fixtures/gp1-rust` in a temp directory.  Writes
+    /// `target/golden-path/gp2_report.toml`.
+    ///
+    /// Compiled with **default features** (which include `ai`).  Unlike GP-1
+    /// which uses `--no-default-features`, GP-2 exercises the AI-enabled path.
+    ///
+    /// Steps:
+    ///   s1 copy-fixture + open workspace (Trusted)
+    ///   s2 set_product_mode(Assist) + open src/main.rs
+    ///   s3 request inline prediction + accept + assert buffer changed
+    ///   s4 provider router: local-loopback → Completed; remote → Refused
+    ///   s5 context manifest: assemble from file sources; assert entries
+    ///   s6 undo/redo cycle: undo accepted prediction; redo
+    ///   s7 write evidence TOML
+    ///
+    /// Failures are non-blocking for PRs (runs in the separate legion-smoke
+    /// workflow); pass `--record-evidence <dir>` to also copy the report into
+    /// the plans/evidence tree.
+    #[command(name = "golden-path-2")]
+    GoldenPath2 {
+        /// Path to the fixture directory relative to workspace root.
+        #[arg(long, default_value = "fixtures/gp1-rust")]
+        fixture_dir: String,
+        /// Output directory for the evidence TOML.
+        #[arg(long, default_value = "target/golden-path")]
+        out_dir: String,
+        /// If provided, copy the evidence TOML to this directory after the
+        /// smoke completes (typically `plans/evidence/production/M9/`).
+        /// Omit for routine runs to avoid churning the evidence tree.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
 }
 
 fn main() {
@@ -681,6 +717,11 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_1_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::GoldenPath2 {
+            fixture_dir,
+            out_dir,
+            record_evidence,
+        } => run_golden_path_2_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
     };
 
     process::exit(code);
@@ -1471,6 +1512,44 @@ fn run_golden_path_1_command(
             workspace_root
                 .join(out_dir)
                 .join("gp1_report.toml")
+                .display()
+        );
+    }
+    code
+}
+
+fn run_golden_path_2_command(
+    fixture_dir: &str,
+    out_dir: &str,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("golden-path-2 failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::golden_path_2::GoldenPath2Options {
+        fixture_dir: fixture_dir.to_string(),
+        out_dir: out_dir.to_string(),
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    let code = xtask::golden_path_2::run_golden_path_2(&workspace_root, &opts);
+    if code == 0 {
+        println!(
+            "golden-path-2: smoke passed; report written to {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp2_report.toml")
+                .display()
+        );
+    } else {
+        eprintln!(
+            "golden-path-2: smoke exited with code {code}; check {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp2_report.toml")
                 .display()
         );
     }
