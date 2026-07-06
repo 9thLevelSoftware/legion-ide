@@ -9,7 +9,13 @@ pub mod manifest;
 pub mod redaction;
 pub mod streaming;
 
-pub use manifest::assemble_context_manifest;
+pub use manifest::{
+    ManifestFileSource, ManifestMemoryRecordSource, ManifestMetadata, ManifestRuleRecordSource,
+    ManifestSelectionSource, ManifestSymbolSource, ManifestTerminalExcerpt,
+    assemble_context_manifest, assemble_context_manifest_from_sources, collect_diagnostic_context,
+    collect_file_context, collect_memory_context, collect_rules_context, collect_selection_context,
+    collect_symbol_context, collect_terminal_context,
+};
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
