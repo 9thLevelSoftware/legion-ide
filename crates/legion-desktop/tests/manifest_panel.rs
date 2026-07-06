@@ -46,14 +46,22 @@ fn manifest_item(
 fn mandatory_item(item_id: &str) -> ContextManifestItem {
     ContextManifestItem {
         labels: vec!["mandatory".to_string()],
-        ..manifest_item(item_id, ContextManifestItemKind::Rule, ContextManifestInclusionState::Included)
+        ..manifest_item(
+            item_id,
+            ContextManifestItemKind::Rule,
+            ContextManifestInclusionState::Included,
+        )
     }
 }
 
 fn egress_item(item_id: &str) -> ContextManifestItem {
     ContextManifestItem {
         egress: ContextManifestEgressStatus::ExternalEgressMetadata,
-        ..manifest_item(item_id, ContextManifestItemKind::File, ContextManifestInclusionState::Included)
+        ..manifest_item(
+            item_id,
+            ContextManifestItemKind::File,
+            ContextManifestInclusionState::Included,
+        )
     }
 }
 
@@ -68,8 +76,16 @@ fn test_manifest() -> ContextManifestRecord {
         risk_label: ProposalRiskLabel::Low,
         egress: ContextManifestEgressStatus::LocalOnly,
         items: vec![
-            manifest_item("item-a", ContextManifestItemKind::File, ContextManifestInclusionState::Included),
-            manifest_item("item-b", ContextManifestItemKind::UserSelection, ContextManifestInclusionState::Included),
+            manifest_item(
+                "item-a",
+                ContextManifestItemKind::File,
+                ContextManifestInclusionState::Included,
+            ),
+            manifest_item(
+                "item-b",
+                ContextManifestItemKind::UserSelection,
+                ContextManifestInclusionState::Included,
+            ),
         ],
         permissions: Vec::new(),
         omitted_item_count: 0,
@@ -212,10 +228,7 @@ fn mandatory_items_cannot_be_excluded() {
 
     // Attempt to exclude the mandatory item.
     let result = toggle_manifest_item_inclusion(&mut manifest, "mandatory-rule");
-    assert!(
-        !result,
-        "toggle must return false for mandatory items"
-    );
+    assert!(!result, "toggle must return false for mandatory items");
     assert_eq!(
         manifest
             .items

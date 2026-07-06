@@ -412,10 +412,7 @@ impl RetentionFixtureVault {
     }
 
     /// Return a reference to a retained bundle descriptor by id, or `None` if not found.
-    pub fn lookup_bundle(
-        &self,
-        bundle_id: &str,
-    ) -> Option<&RawSourceRetentionBundleDescriptor> {
+    pub fn lookup_bundle(&self, bundle_id: &str) -> Option<&RawSourceRetentionBundleDescriptor> {
         self.bundles.get(bundle_id)
     }
 

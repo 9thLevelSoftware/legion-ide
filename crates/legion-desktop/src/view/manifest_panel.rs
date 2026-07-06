@@ -47,10 +47,7 @@ pub fn manifest_item_toggle_view_models(
 ///
 /// After a successful toggle, `manifest.omitted_item_count` is recomputed to
 /// reflect the new state.
-pub fn toggle_manifest_item_inclusion(
-    manifest: &mut ContextManifestRecord,
-    item_id: &str,
-) -> bool {
+pub fn toggle_manifest_item_inclusion(manifest: &mut ContextManifestRecord, item_id: &str) -> bool {
     let Some(item) = manifest.items.iter_mut().find(|i| i.item_id == item_id) else {
         return false;
     };

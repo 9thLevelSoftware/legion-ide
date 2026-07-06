@@ -1,6 +1,6 @@
 use legion_ai::{
-    assemble_context_manifest, assemble_context_manifest_from_sources, collect_file_context,
-    ManifestMetadata,
+    ManifestMetadata, assemble_context_manifest, assemble_context_manifest_from_sources,
+    collect_file_context,
 };
 use legion_protocol::*;
 
