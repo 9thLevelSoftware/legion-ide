@@ -1,6 +1,6 @@
 # Mutation Route Inventory
 
-Date: 2026-06-14
+Date: 2026-07-05 (updated PKT-APPLY)
 
 This inventory records every known mutation route currently surfaced in the codebase and the current activation state of each route family. The goal is to make the authority boundary clear without overstating product readiness.
 
@@ -18,11 +18,22 @@ This inventory records every known mutation route currently surfaced in the code
 | Plugin | Policy-gated / not productized as a write authority | Plugin host-call policy exists, namespace and capability checks exist, network and ambient host authority are denied by default, and plugin-produced workspace edits remain denied until activation gates exist | `crates/legion-security/src/lib.rs` (`PluginCapabilityPolicy` defaults, `plugin_network_process_filesystem_and_untrusted_workspace_are_denied`), `crates/legion-app/src/lib.rs` (`proposal.plugin_source_denied`), `docs/USER_GUIDE.md` |
 | Remote | Policy-gated / not productized as a write authority | Remote sessions, filesystem, execution, LSP, semantic query, audit export, agent-package activation, and offline resume are disabled by default | `crates/legion-security/src/lib.rs` (`RemoteDevelopmentPolicy` defaults, `remote_capabilities_are_disabled_by_default_and_require_trust`, `remote_policy_allows_filesystem_without_execution`, `phase8_remote_egress_requires_runtime_session`), `docs/USER_GUIDE.md` |
 | Collaboration | Policy-gated / not productized as a write authority | Collaboration sessions and mutation paths are disabled by default; presence can be enabled separately without enabling runtime mutation | `crates/legion-security/src/lib.rs` (`CollaborationCapabilityPolicy` defaults, `collaboration_capabilities_are_disabled_by_default_and_require_trust`, `collaboration_policy_allows_presence_without_runtime_mutation`), `docs/USER_GUIDE.md` |
+| Terminal command | **Apply-path denied** | `ProposalPayload::TerminalCommand` exists as a proposal variant but is rejected at validate (Unsupported — unknown terminal target) and unconditionally denied in the apply payload match (`proposal.terminal_command_apply_denied`); the terminal workflow API is the intended surface | `crates/legion-protocol/src/lib.rs` (`ProposalPayload::TerminalCommand`, `TerminalCommandProposal`), `crates/legion-app/src/lib.rs` (`apply_workspace_proposal` payload match), `crates/legion-app/tests/apply_activation.rs` (`terminal_command_proposal_apply_is_denied_with_audit`) |
+
+## M9 PKT-APPLY activation state (2026-07-05)
+
+The following changes were made in PKT-APPLY (M9 milestone):
+
+- `ProposalApplyGate` is now wired into `apply_workspace_proposal`. Proposals with `fs.*` capability in untrusted workspaces, and all proposals with `plugin.*`, `remote.*`, `collaboration.*`, `terminal.*` capability namespaces are denied before the payload dispatch.
+- `BatchRuntimeApplyPolicy` now controls `commit_blocked`/`finalize_blocked` on `BatchExecutionContract`. The default policy is fail-closed (`enabled: false`), preserving backward compatibility. Trusted workspaces with an explicitly-enabled policy can unblock batch commit/finalize.
+- `approve_and_apply_rename_proposal` provides the Previewed→Approved→Applied end-to-end path for LSP rename proposals.
+- `uri_to_native_path` converts URI-derived paths to OS-native separators on Windows, fixing apply-time path matching.
 
 ## Summary
 
 - The mutation routes that currently operate as product paths are manual save, text edit, closed-file mutation, workspace edit, LSP action lowering, AI proposal generation, and batch apply planning.
-- Plugin, remote, and collaboration are present as policy-encoded surfaces but remain disabled or non-productized by default; they are not treated as open write authorities.
+- Plugin, remote, and collaboration are present as policy-encoded surfaces but remain **visibly denied** at the apply gate (with audit rows); they are not treated as open write authorities.
+- Terminal command proposals are denied at both validate (Unsupported) and apply (PolicyDenied payload match); the terminal workflow API is the intended path.
 - No known mutation route in the current backlog list is missing from this inventory.
 
 ## Verification commands

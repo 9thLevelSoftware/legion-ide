@@ -95,3 +95,39 @@ Raw diffs, model outputs, command logs, and validation outputs may enter trainin
 Cloud is an opt-in worker capacity extension, not an authority extension.
 
 Cloud lanes may return status, events, proposals, and evidence. Local app/workspace authorities still own review, validation, and application.
+
+---
+
+## M9 apply-gate activation state (PKT-APPLY, 2026-07-05)
+
+The following apply-path policy gates are now wired and enforced:
+
+### ProposalApplyGate (apply_workspace_proposal)
+
+Every call to `apply_workspace_proposal` passes through a `ProposalApplyGate` check before the payload dispatch:
+
+| Capability namespace | Gate behaviour |
+| --- | --- |
+| `fs.*` | Allow in Trusted workspaces; Deny in Untrusted/Unknown |
+| `plugin.*` | `DenyByDefaultBroker` evaluation — denied by default |
+| `remote.*` | `DenyByDefaultBroker` evaluation — denied by default |
+| `collaboration.*` | `DenyByDefaultBroker` evaluation — denied by default |
+| `terminal.*` | `DenyByDefaultBroker` evaluation — denied by default |
+| Everything else (e.g. `editor.write`) | Allowed (lifecycle and workspace checks are sufficient) |
+
+Denial at the gate records a `ProposalLifecycleState::Denied` transition with audit code `proposal.apply_gate_denied` and calls `observe_proposal_response` (persists an audit row).
+
+### TerminalCommand payload denial
+
+`ProposalPayload::TerminalCommand` is unconditionally denied at the apply payload match (`proposal.terminal_command_apply_denied`) as a defense-in-depth measure. The primary enforcement is at validate (Unsupported / unknown terminal target).
+
+### BatchRuntimeApplyPolicy (commit_blocked / finalize_blocked)
+
+`BatchExecutionContract::commit_blocked` and `finalize_blocked` are now derived from `BatchRuntimeApplyPolicy`:
+- Default policy: `enabled: false` → `commit_blocked = true`, `finalize_blocked = true` (fail-closed, backward-compatible)
+- Trusted workspace + `enabled: true` policy → `commit_blocked = false`, `finalize_blocked = false`
+- Untrusted workspace + any policy → always blocked
+
+### LSP rename end-to-end path
+
+`approve_and_apply_rename_proposal(proposal_id)` provides a Previewed→Approved→Applied path for LSP rename proposals. The apply gate and workspace trust checks still apply.

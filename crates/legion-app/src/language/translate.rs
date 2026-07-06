@@ -458,7 +458,9 @@ fn translate_resource_operation(
                     reason: "create operation missing uri".to_string(),
                 }
             })?;
-            let path = uri_to_canonical_path(uri);
+            // Use uri_to_native_path so the CanonicalPath matches the editor's
+            // OS-native separator form at apply time (PKT-APPLY Task 2d).
+            let path = uri_to_native_path(uri);
             Ok(WorkspaceFileOperation::Create {
                 path: CanonicalPath(path),
                 initial_content_hash: None,
@@ -496,7 +498,9 @@ fn translate_resource_operation(
                     .ok_or_else(|| TranslationError::UnresolvableUri {
                         uri: old_uri.to_string(),
                     })?;
-            let dest_path = uri_to_canonical_path(new_uri);
+            // Use uri_to_native_path so the destination CanonicalPath matches the
+            // editor's OS-native separator form at apply time (PKT-APPLY Task 2d).
+            let dest_path = uri_to_native_path(new_uri);
             Ok(WorkspaceFileOperation::Rename {
                 file: doc.file,
                 destination: CanonicalPath(dest_path),
@@ -645,6 +649,29 @@ pub fn uri_to_canonical_path(uri: &str) -> String {
 
     // Percent-decode common sequences.
     stripped.replace("%20", " ").replace("%3A", ":")
+}
+
+/// Like [`uri_to_canonical_path`] but converts to the OS-native path-separator
+/// form at apply time.
+///
+/// On Windows, `uri_to_canonical_path` keeps forward slashes (`C:/Users/…`),
+/// but the editor's canonical paths use backslashes (`C:\Users\…`).  Apply-time
+/// path comparisons against open-buffer metadata must use the same form; use
+/// this function wherever a URI-derived path will be matched against or stored
+/// as a `CanonicalPath` during proposal application.
+///
+/// On non-Windows platforms the function is identical to
+/// [`uri_to_canonical_path`].
+pub fn uri_to_native_path(uri: &str) -> String {
+    let canonical = uri_to_canonical_path(uri);
+    #[cfg(windows)]
+    {
+        canonical.replace('/', "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        canonical
+    }
 }
 
 /// Convert an LSP `{line, character}` position to a UTF-8 byte offset within
@@ -1246,5 +1273,36 @@ mod tests {
             2,
             "translation must yield two file edits"
         );
+    }
+
+    // ── T2-10: uri_to_native_path Windows separator form (PKT-APPLY Task 2d) ────
+    //
+    // On Windows, canonical paths use backslashes. uri_to_canonical_path keeps
+    // forward slashes from the URI; uri_to_native_path must convert them so that
+    // apply-time comparisons against the editor's CanonicalPath values work.
+
+    #[test]
+    fn t2_uri_to_native_path_windows_separator_form() {
+        // On Windows the result must use backslashes; on other platforms it must
+        // be identical to uri_to_canonical_path.
+        let canonical = uri_to_canonical_path("file:///C:/Users/dev/main.rs");
+        let native = uri_to_native_path("file:///C:/Users/dev/main.rs");
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                native, r"C:\Users\dev\main.rs",
+                "Windows: uri_to_native_path must use backslashes"
+            );
+            // canonical still uses forward slashes
+            assert_eq!(canonical, "C:/Users/dev/main.rs");
+            // native != canonical on Windows
+            assert_ne!(native, canonical);
+        }
+        #[cfg(not(windows))]
+        {
+            // On non-Windows platforms the two functions must agree.
+            assert_eq!(native, canonical);
+        }
     }
 }

@@ -168,8 +168,8 @@ use legion_remote::{
     default_remote_capabilities, plan_devcontainer_session_from_json, plan_ssh_session,
 };
 use legion_security::{
-    CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy, SecurityPolicy,
-    mcp_tool_permission_request,
+    BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy,
+    ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState, mcp_tool_permission_request,
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
@@ -13591,6 +13591,10 @@ pub struct AppComposition {
     /// Defaults to `InMemoryPaletteUsageRepository` (no persistence); swap
     /// via `set_palette_usage_repository` to enable disk persistence.
     palette_usage: Box<dyn PaletteUsageRepository>,
+    /// Policy controlling when batch runtime apply is enabled.
+    /// Default is fail-closed (disabled). Set to an enabled policy for trusted
+    /// workspaces to unblock commit and finalize in the execution contract.
+    batch_apply_policy: BatchRuntimeApplyPolicy,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13810,6 +13814,7 @@ impl AppComposition {
             lsp_ui_hover_debounce: None,
             lsp_ui_last_hover_id: None,
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
+            batch_apply_policy: BatchRuntimeApplyPolicy::default(),
         }
     }
 
@@ -13820,6 +13825,34 @@ impl AppComposition {
     /// tests continue to use the in-memory default (or inject their own).
     pub fn set_palette_usage_repository(&mut self, repo: Box<dyn PaletteUsageRepository>) {
         self.palette_usage = repo;
+    }
+
+    /// Override the batch runtime apply policy.
+    ///
+    /// Test-only helper that allows tests to configure an enabled policy for a
+    /// trusted workspace so the execution contract's `commit_blocked` and
+    /// `finalize_blocked` fields reflect the real runtime state.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_batch_apply_policy_for_test(&mut self, policy: BatchRuntimeApplyPolicy) {
+        self.batch_apply_policy = policy;
+    }
+
+    /// Directly force a proposal's lifecycle state, bypassing the lifecycle state
+    /// machine.
+    ///
+    /// Test-only: enables testing defense-in-depth branches that are unreachable
+    /// via the normal validation → preview pathway (e.g. the `TerminalCommand` deny
+    /// arm in `apply_workspace_proposal`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_proposal_lifecycle_state_for_test(
+        &self,
+        proposal_id: ProposalId,
+        state: ProposalLifecycleState,
+    ) {
+        self.proposal_coordinator
+            .proposal_states
+            .borrow_mut()
+            .insert(proposal_id, state);
     }
 
     /// Wires disk-backed palette usage persistence for a workspace. Usage
@@ -14042,6 +14075,12 @@ impl AppComposition {
         // lazy trigger and `try_start_lsp_session_for_current_workspace` for
         // the palette command path.)
 
+        // PKT-APPLY: Enable batch runtime apply for Trusted workspaces so that
+        // `plan_batch_execution_contract` unblocks commit and finalize without
+        // requiring callers to manually enable the policy.  Untrusted workspaces
+        // (and any switch back to untrusted) remain fail-closed.
+        self.batch_apply_policy.enabled = trust == WorkspaceTrustState::Trusted;
+
         Ok(opened)
     }
 
@@ -14132,8 +14171,9 @@ impl AppComposition {
     /// state.  On success, creates and registers a proposal through the
     /// coordinator and records it in the language-tooling projection.
     ///
-    /// Generation only: the resulting proposal is NOT applied.  Application is
-    /// P3.F1.T2/M9 scope.
+    /// The resulting proposal enters the `Previewed` state. Call
+    /// [`approve_and_apply_rename_proposal`] to transition it through
+    /// `Approved` → `Applied` (PKT-APPLY Task 2c).
     fn ingest_lsp_rename_result(
         &mut self,
         buffer_id: BufferId,
@@ -14320,6 +14360,68 @@ impl AppComposition {
         );
     }
 
+    /// Approve and apply a rename proposal that is in the `Previewed` or
+    /// `Approved` state (PKT-APPLY Task 2c).
+    ///
+    /// This is the user-triggered Approve→Apply path for LSP rename proposals.
+    /// It transitions the proposal to `Approved` (recording explicit human
+    /// approval), then dispatches it to `apply_workspace_proposal`.
+    ///
+    /// Returns `Err` if the proposal is not found or is not in a state that
+    /// accepts approval, or if the apply fails at the composition level.
+    pub fn approve_and_apply_rename_proposal(
+        &mut self,
+        proposal_id: ProposalId,
+    ) -> Result<ProposalResponse, AppCompositionError> {
+        let proposal = self
+            .proposal_coordinator
+            .proposal(proposal_id)
+            .ok_or_else(|| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal.not_found".to_string(),
+                    message: format!("rename proposal {proposal_id:?} not found in coordinator"),
+                })
+            })?;
+
+        // Only approve if currently in Previewed state; if already Approved, skip.
+        if matches!(
+            self.proposal_coordinator
+                .current_lifecycle_state(proposal_id),
+            Some(ProposalLifecycleState::Previewed)
+        ) {
+            let approve_command = ProposalLifecycleCommand {
+                proposal_id,
+                action: ProposalLifecycleAction::Approve,
+                principal: proposal.principal.clone(),
+                capability: proposal.capability.clone(),
+                correlation_id: proposal.correlation_id,
+                causality_id: CausalityId(uuid::Uuid::now_v7()),
+                reason: None,
+                diagnostics: vec![],
+                requested_at: TimestampMillis(0),
+                schema_version: 1,
+            };
+            let approved =
+                self.handle_lifecycle_command_request(ProposalRequest::Approve(approve_command))?;
+            if !matches!(approved, ProposalResponse::Approved(_)) {
+                return Ok(approved);
+            }
+        }
+
+        // Re-fetch after approval state change.
+        let proposal = self
+            .proposal_coordinator
+            .proposal(proposal_id)
+            .ok_or_else(|| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal.not_found_after_approve".to_string(),
+                    message: format!("rename proposal {proposal_id:?} not found after approval"),
+                })
+            })?;
+
+        self.apply_workspace_proposal(proposal)
+    }
+
     /// Ingests a raw `publishDiagnostics` notification batch from the worker.
     fn ingest_lsp_diagnostic_batch(&mut self, raw_params: serde_json::Value) {
         // Extract URI from params to look up the buffer.
@@ -14479,8 +14581,9 @@ impl AppComposition {
     /// Returns `false` if the session is not Live, or if the server did not
     /// advertise `renameProvider` in the initialize response (silent skip).
     ///
-    /// Generation only: the resulting proposal is NOT applied.  Application is
-    /// P3.F1.T2/M9 scope.
+    /// The resulting proposal enters the `Previewed` state. Call
+    /// [`approve_and_apply_rename_proposal`] to transition it through
+    /// `Approved` → `Applied` (PKT-APPLY Task 2c).
     pub fn issue_lsp_rename_request(
         &mut self,
         buffer_id: BufferId,
@@ -23230,11 +23333,23 @@ impl AppComposition {
             ProposalPayload::Batch(batch) => Some(batch),
             _ => None,
         };
+
+        // Commit and finalize are unblocked only when the workspace is Trusted AND
+        // the BatchRuntimeApplyPolicy is explicitly enabled.  The default policy
+        // is fail-closed (disabled), so unless the caller has wired an enabled
+        // policy these remain true — preserving backward-compatible behaviour.
+        let trust = self.active_documents.active_workspace_trust.clone();
+        let runtime_blocks_disabled = !self.batch_apply_policy.runtime_apply_disabled(trust);
+        let commit_blocked = !runtime_blocks_disabled;
+        let finalize_blocked = !runtime_blocks_disabled;
+
         let mut diagnostics = preflight.diagnostics.clone();
-        diagnostics.push(AppProposalCoordinator::diagnostic(
-            "proposal.batch_contract_runtime_apply_disabled",
-            "Stage 1E batch execution contract is preflight-only; runtime batch mutation remains disabled",
-        ));
+        if preflight.runtime_apply_disabled {
+            diagnostics.push(AppProposalCoordinator::diagnostic(
+                "proposal.batch_contract_runtime_apply_disabled",
+                "Stage 1E batch execution contract is preflight-only; runtime batch mutation remains disabled",
+            ));
+        }
         diagnostics.push(AppProposalCoordinator::diagnostic(
             "proposal.batch_contract_audit_before_success_required",
             "future batch success requires audit proof before finalize or success response",
@@ -23277,8 +23392,8 @@ impl AppComposition {
             batch_id: preflight.batch_id,
             stages: Self::batch_execution_stages(preflight.preflight_ok),
             runtime_apply_disabled: preflight.runtime_apply_disabled,
-            commit_blocked: true,
-            finalize_blocked: true,
+            commit_blocked,
+            finalize_blocked,
             audit_before_success_required: true,
             planning_semantics: preflight.planning_semantics,
             rollback_contract: preflight.rollback_contract.clone(),
@@ -23667,6 +23782,75 @@ impl AppComposition {
             }
         };
 
+        // ── ProposalApplyGate ────────────────────────────────────────────────────
+        // Check workspace trust against the proposal's capability namespace before
+        // dispatching to any payload handler.  Proposals with restricted capability
+        // namespaces (plugin, remote, collaboration, terminal) are evaluated through
+        // the full DenyByDefaultBroker policy.  Standard filesystem capabilities
+        // (fs.*) are gated by workspace trust.  Editor-internal capabilities
+        // (editor.write and similar) are allowed unconditionally here — the
+        // lifecycle transition above already validates state.
+        {
+            let trust_state = self
+                .active_documents
+                .active_workspace_trust
+                .clone()
+                .map(TrustState::from)
+                .unwrap_or(TrustState::Unknown);
+
+            let cap = proposal.capability.0.as_str();
+            let policy_decision: SecurityDecision = if cap.starts_with("plugin.")
+                || cap.starts_with("remote.")
+                || cap.starts_with("collaboration.")
+                || cap.starts_with("terminal.")
+            {
+                // Full broker evaluation for restricted namespaces.
+                DenyByDefaultBroker::default().decide(
+                    trust_state,
+                    proposal.principal.clone(),
+                    proposal.capability.clone(),
+                    None,
+                )
+            } else if cap.starts_with("fs.") {
+                // Filesystem writes require a trusted workspace.
+                if trust_state == TrustState::Trusted {
+                    SecurityDecision::Allow
+                } else {
+                    SecurityDecision::Deny("file write denied for untrusted workspace".to_string())
+                }
+            } else {
+                // Editor-internal and other capabilities pass through the gate;
+                // higher-level lifecycle and workspace checks handle them.
+                SecurityDecision::Allow
+            };
+
+            // require_human_approval is intentionally suppressed here: the gate's
+            // role in this path is CAPABILITY POLICY, not approval recording.
+            // Approval state is tracked by the proposal lifecycle (Approved vs
+            // Previewed) which has already been validated above.
+            let gate = ProposalApplyGate::new(policy_decision).with_human_approval_recorded(true);
+
+            if !gate.can_apply() {
+                let denial_reason = match gate.policy_decision() {
+                    SecurityDecision::Deny(reason) => reason.clone(),
+                    _ => "apply gate denied".to_string(),
+                };
+                let response = self.denied_apply_response(
+                    &proposal,
+                    "proposal.apply_gate_denied",
+                    denial_reason,
+                );
+                let _ = SaveWorkflowService::observe_proposal_response(
+                    &mut self.proposal_coordinator,
+                    &self.storage,
+                    &proposal,
+                    &response,
+                    None,
+                );
+                return Ok(response);
+            }
+        }
+
         let rollback = match self.rollback_snapshot_for_proposal(&proposal) {
             Ok(rollback) => rollback,
             Err(response) => {
@@ -23709,9 +23893,12 @@ impl AppComposition {
                 "proposal.format_requires_lowered_workspace_edit",
                 "format-file apply requires a lowered TextEdit or WorkspaceEdit proposal payload",
             ),
-            _ => self
-                .proposal_coordinator
-                .unsupported_response(&proposal, "apply"),
+            ProposalPayload::TerminalCommand(_) => self.denied_apply_response(
+                &proposal,
+                "proposal.terminal_command_apply_denied",
+                "terminal-command proposals are not accepted at the apply path; \
+                 use the terminal workflow API to run commands",
+            ),
         };
 
         if let Err(mut failure) = SaveWorkflowService::observe_proposal_response(
