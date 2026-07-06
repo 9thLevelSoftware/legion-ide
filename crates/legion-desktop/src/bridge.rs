@@ -746,6 +746,21 @@ pub enum DesktopAction {
         /// Stable checkpoint identifier selected from projected checkpoint timeline data.
         checkpoint_id: String,
     },
+    /// Store a BYOK API key in the OS keyring for a provider (PKT-PROV).
+    ///
+    /// The key value is stored immediately to the OS keyring and never persisted
+    /// to any config file. The key is consumed (zeroized) after the store call.
+    SetProviderApiKey {
+        /// Provider identifier (e.g. "anthropic", "openai").
+        provider_id: String,
+        /// The API key value; consumed immediately after storage.
+        api_key: String,
+    },
+    /// Delete a stored BYOK API key from the OS keyring (PKT-PROV).
+    DeleteProviderApiKey {
+        /// Provider identifier whose key should be removed.
+        provider_id: String,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -1932,6 +1947,10 @@ impl DesktopCommandBridge {
             // PKT-CKPT: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; this arm satisfies exhaustiveness but is never evaluated in production.
             DesktopAction::RestoreCheckpoint { .. } => DesktopBridgeOutput::Noop,
+            // PKT-PROV: handled in DesktopWorkflowRuntime::handle_action before reaching the
+            // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
+            DesktopAction::SetProviderApiKey { .. }
+            | DesktopAction::DeleteProviderApiKey { .. } => DesktopBridgeOutput::Noop,
         }
     }
 

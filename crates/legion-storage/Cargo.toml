@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+keyring = { workspace = true }
 legion-protocol = { workspace = true }
 legion-observability = { workspace = true }
 legion-security = { workspace = true }
