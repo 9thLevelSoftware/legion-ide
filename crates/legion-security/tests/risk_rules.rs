@@ -35,6 +35,17 @@ fn risk_rule_ids_are_stable_and_enumerated() {
     );
 }
 
+// PKT-RISK T1 coverage matrix — verified 2026-07-06.
+// Every rule in `RiskRuleId::all()` has at least one explicit allow case and one
+// explicit deny case enumerated below.  Rule / allow / deny mapping:
+//   1. PathScope          — contained path (allow) | escaping path (deny)
+//   2. FileCount          — 2 files < 4 limit (allow) | 5 files > 4 limit (deny)
+//   3. DeletionRatio      — 1/4 = 25% < 49% (allow) | 3/4 = 75% > 49% (deny)
+//   4. DependencyOrLockfileTouch — src/lib.rs (allow) | Cargo.lock (deny)
+//   5. Migration          — src/lib.rs (allow) | db/migrations/… (deny)
+//   6. SecretsProximity   — src/lib.rs (allow) | secrets/api_keys.toml (deny)
+//   7. BinaryOrGeneratedFileChange — src/lib.rs (allow) | target/generated/… (deny)
+// No gaps found; no test cases added.
 #[test]
 fn deterministic_risk_rules_cover_allow_and_deny_edges() {
     let engine = DeterministicRiskRuleEngine::new(RiskRuleThresholds {
