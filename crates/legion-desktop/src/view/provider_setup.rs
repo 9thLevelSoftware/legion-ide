@@ -1,5 +1,5 @@
-use legion_ai_providers::provider_setup_rows as ai_provider_setup_rows;
-use legion_protocol::AssistedAiProviderClass;
+use legion_ai_providers::{provider_setup_rows as ai_provider_setup_rows, provider_tier};
+use legion_protocol::{AssistedAiProviderAvailabilityState, AssistedAiProviderClass, AssistedAiProviderTier};
 use legion_ui::ShellProjectionSnapshot;
 
 pub(crate) fn setup_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
@@ -31,6 +31,35 @@ pub(crate) fn setup_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         "provider setup: hosted provider calls require explicit workspace consent; air-gap keeps hosted providers unavailable"
             .to_string(),
     );
+
+    // Project per-provider tier, consent state, credential presence, and activation eligibility.
+    for provider in assisted.providers.iter().take(8) {
+        let tier = provider_tier(provider.provider_class, &provider.provider_id);
+        let tier_label = match tier {
+            AssistedAiProviderTier::LocalDefault => "LocalDefault",
+            AssistedAiProviderTier::LocalLoopbackOptIn => "LocalLoopbackOptIn",
+            AssistedAiProviderTier::ByokConsentRequired => "ByokConsentRequired",
+            AssistedAiProviderTier::HostedDenied => "HostedDenied",
+        };
+        let consent_state = match tier {
+            AssistedAiProviderTier::LocalDefault
+            | AssistedAiProviderTier::LocalLoopbackOptIn => "NotRequired",
+            AssistedAiProviderTier::ByokConsentRequired => "Required",
+            AssistedAiProviderTier::HostedDenied => "N/A",
+        };
+        // Credential presence is derived from availability metadata — never the credential value.
+        let credential_present = provider.availability == AssistedAiProviderAvailabilityState::Available;
+        let credential_label = if credential_present { "Present" } else { "Absent" };
+        let eligible = matches!(
+            tier,
+            AssistedAiProviderTier::LocalDefault | AssistedAiProviderTier::LocalLoopbackOptIn
+        ) || (tier == AssistedAiProviderTier::ByokConsentRequired && credential_present);
+        let eligible_label = if eligible { "Eligible" } else { "NotEligible" };
+        rows.push(format!(
+            "provider {}: tier={} consent={} credential={} activation={}",
+            provider.provider_id, tier_label, consent_state, credential_label, eligible_label
+        ));
+    }
     rows
 }
 

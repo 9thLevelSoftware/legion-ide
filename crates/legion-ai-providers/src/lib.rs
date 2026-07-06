@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+pub mod capabilities;
+
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -18,7 +20,8 @@ use legion_ai::{
 };
 use legion_protocol::{
     AssistedAiOperationClass, AssistedAiProviderAvailabilityState, AssistedAiProviderCapability,
-    AssistedAiProviderClass, AssistedAiRefusalMetadata, AssistedAiSupportLabel, CapabilityId,
+    AssistedAiProviderClass, AssistedAiProviderTier, AssistedAiRefusalMetadata,
+    AssistedAiSupportLabel, AssistedAiWorkspaceConsent, CapabilityId,
     DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest, FileFingerprint,
     LEGACY_PRODUCT_ENV_PREFIX, McpJsonRpcEnvelope, McpListChangedKind, McpPromptDescriptor,
     McpPromptName, McpRegistrySnapshot, McpResourceDescriptor, McpResourceUri, McpServerId,
@@ -138,6 +141,92 @@ pub fn inline_prediction_provider_capabilities() -> Vec<AssistedAiProviderCapabi
             AssistedAiProviderAvailabilityState::Unavailable,
         ),
     ]
+}
+
+/// Reasons a provider activation was denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistedAiProviderActivationDenial {
+    /// Explicit workspace consent is required but has not been granted.
+    ConsentRequired,
+    /// A BYOK credential is required but has not been provided.
+    CredentialRequired,
+    /// Provider tier is always denied (Copilot NES, Mercury, or future hosted).
+    HostedDenied,
+    /// Workspace is air-gapped; all remote providers are denied.
+    AirGapDenied,
+}
+
+/// Map a provider's class and id to its activation policy tier.
+pub fn provider_tier(class: AssistedAiProviderClass, _provider_id: &str) -> AssistedAiProviderTier {
+    match class {
+        AssistedAiProviderClass::Local => AssistedAiProviderTier::LocalDefault,
+        AssistedAiProviderClass::LocalLoopback => AssistedAiProviderTier::LocalLoopbackOptIn,
+        AssistedAiProviderClass::ByokRemote => AssistedAiProviderTier::ByokConsentRequired,
+        AssistedAiProviderClass::HostedRemote
+        | AssistedAiProviderClass::Gateway
+        | AssistedAiProviderClass::Unknown => AssistedAiProviderTier::HostedDenied,
+    }
+}
+
+/// Evaluate whether a provider may be activated given its tier, workspace consent, and credential.
+///
+/// Returns `Ok(())` when all preconditions are met. Returns an error describing
+/// the first unmet precondition otherwise.
+pub fn can_activate_provider(
+    tier: AssistedAiProviderTier,
+    consent: &AssistedAiWorkspaceConsent,
+    has_credential: bool,
+) -> Result<(), AssistedAiProviderActivationDenial> {
+    match tier {
+        AssistedAiProviderTier::LocalDefault => Ok(()),
+        AssistedAiProviderTier::LocalLoopbackOptIn => Ok(()),
+        AssistedAiProviderTier::ByokConsentRequired => match consent {
+            AssistedAiWorkspaceConsent::Denied => {
+                Err(AssistedAiProviderActivationDenial::AirGapDenied)
+            }
+            AssistedAiWorkspaceConsent::NotRequired | AssistedAiWorkspaceConsent::Pending => {
+                Err(AssistedAiProviderActivationDenial::ConsentRequired)
+            }
+            AssistedAiWorkspaceConsent::Granted { .. } => {
+                if has_credential {
+                    Ok(())
+                } else {
+                    Err(AssistedAiProviderActivationDenial::CredentialRequired)
+                }
+            }
+        },
+        AssistedAiProviderTier::HostedDenied => {
+            Err(AssistedAiProviderActivationDenial::HostedDenied)
+        }
+    }
+}
+
+/// Static metadata rows for the provider setup UI.
+///
+/// Returns one row per known provider showing tier, consent requirements,
+/// and credential requirements as display-safe labels.
+pub fn provider_setup_rows() -> Vec<String> {
+    inline_prediction_provider_capabilities()
+        .into_iter()
+        .map(|cap| {
+            let tier = provider_tier(cap.provider_class, &cap.provider_id);
+            let tier_label = match tier {
+                AssistedAiProviderTier::LocalDefault => {
+                    "tier=LocalDefault consent=NotRequired credential=NotRequired activation=AlwaysActive"
+                }
+                AssistedAiProviderTier::LocalLoopbackOptIn => {
+                    "tier=LocalLoopbackOptIn consent=NotRequired credential=NotRequired activation=RuntimeDetected"
+                }
+                AssistedAiProviderTier::ByokConsentRequired => {
+                    "tier=ByokConsentRequired consent=Required credential=Required activation=ConsentAndCredential"
+                }
+                AssistedAiProviderTier::HostedDenied => {
+                    "tier=HostedDenied consent=N/A credential=N/A activation=AlwaysDenied"
+                }
+            };
+            format!("{}: {}", cap.provider_id, tier_label)
+        })
+        .collect()
 }
 
 /// Deterministic local provider for policy/router tests without cloud credentials.
