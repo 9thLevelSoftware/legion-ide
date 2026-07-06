@@ -1188,9 +1188,10 @@ impl LegionWorkflowCoordinator {
         worker_id: &LegionWorkflowWorkerId,
     ) -> Vec<&LegionEvidenceRecord> {
         let prefix = format!("legion-evidence:{}", worker_id.0);
+        let colon_prefix = format!("{prefix}:");
         self.evidence_records
             .iter()
-            .filter(|e| e.evidence_id == prefix || e.evidence_id.starts_with(&format!("{prefix}:")))
+            .filter(|e| e.evidence_id == prefix || e.evidence_id.starts_with(&colon_prefix))
             .collect()
     }
 

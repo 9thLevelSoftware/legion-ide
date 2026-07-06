@@ -53,7 +53,7 @@ Kept:
 - P4 epic: milestone `"M2"` → `"M9"`
 - P5 epic: milestone `"M3"` → `"M10"`
 - All P3 tasks (F1.T1–T4, F2.T1–T4, F3.T1–T4, F4.T1–T4): `status = "done"`, `evidence = "plans/evidence/production/M9/"`
-- All P4 tasks (F1.T1–T4, F2.T1–T4, F3.T1–T4, F4.T1–T4): `status = "done"`, `evidence = "plans/evidence/production/M9/"`
+- All P4 tasks (F1.T1–T4, F2.T1–T4, F3.T1–T4, F4.T1–T3): `status = "done"`, `evidence = "plans/evidence/production/M9/"`
 
 ### D7 — Stale notice prepended
 
