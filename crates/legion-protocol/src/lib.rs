@@ -8410,6 +8410,98 @@ impl ProposalDiffSurfaceProjection {
     }
 }
 
+// ─── Evidence panel DTOs ─────────────────────────────────────────────────────
+
+/// Test-run summary record for the structured evidence panel.
+///
+/// Contains only metadata counts — never raw test output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestResultsSummary {
+    /// Total tests in the run.
+    pub total_count: u32,
+    /// Passed test count.
+    pub passed_count: u32,
+    /// Failed test count.
+    pub failed_count: u32,
+    /// Skipped test count.
+    pub skipped_count: u32,
+    /// Stable run identifier.
+    pub run_id: String,
+}
+
+/// Metadata-only summary for one command executed as proposal evidence.
+///
+/// Never exposes the raw command text to prevent sensitive data disclosure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSummary {
+    /// Display-safe command class label (e.g. `"cargo-test"`).
+    pub command_class: String,
+    /// Process exit code when available.
+    pub exit_code: Option<i32>,
+    /// True when the full command text was redacted for policy reasons.
+    pub redacted: bool,
+}
+
+/// One risk rule that was evaluated as part of proposal evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskRuleEvidence {
+    /// Stable rule identifier (e.g. `"rule.no_credentials"`).
+    pub rule_id: String,
+    /// Whether the rule was triggered.
+    pub triggered: bool,
+    /// Display-safe rationale label (never raw provider output).
+    pub rationale_label: String,
+}
+
+/// Provenance metadata attached to a proposal evidence panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalProvenance {
+    /// Proposal creation timestamp.
+    pub created_at: TimestampMillis,
+    /// Most recent proposal update timestamp.
+    pub updated_at: TimestampMillis,
+    /// Proposal identifier.
+    pub proposal_id: ProposalId,
+    /// Overall privacy label.
+    pub privacy_label: ProposalPrivacyLabel,
+    /// Overall risk label.
+    pub risk_label: ProposalRiskLabel,
+}
+
+/// Structured evidence panel for proposal review surfaces.
+///
+/// Aggregates metadata-only evidence fields from multiple sources.  Raw
+/// provider output is never exposed — all fields are structured.
+///
+/// Most fields are `None`/empty until real evidence sources are wired in via
+/// PKT-CTX; the structure and rendering path must exist now for PKT-INLINE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalEvidencePanel {
+    /// Optional test run summary for this proposal.
+    pub test_results: Option<TestResultsSummary>,
+    /// Bounded command summaries recorded during proposal execution.
+    pub command_summaries: Vec<CommandSummary>,
+    /// Context manifest snapshot when available.
+    pub context_manifest: Option<ContextManifestRecord>,
+    /// Risk rule evaluations that informed the proposal risk label.
+    pub risk_rules: Vec<RiskRuleEvidence>,
+    /// Provenance metadata for the panel.
+    pub provenance: ProposalProvenance,
+}
+
+impl ProposalEvidencePanel {
+    /// Construct a minimal panel from provenance alone (all optional fields empty).
+    pub fn from_provenance(provenance: ProposalProvenance) -> Self {
+        Self {
+            test_results: None,
+            command_summaries: Vec::new(),
+            context_manifest: None,
+            risk_rules: Vec::new(),
+            provenance,
+        }
+    }
+}
+
 /// Metadata-only Delegate proposal review queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegatedTaskProposalReview {
