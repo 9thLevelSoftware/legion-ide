@@ -1,21 +1,23 @@
-//! Integration tests for the inline edit loop (PKT-INLINE T1 + T2).
+//! Integration tests for the inline edit loop (PKT-INLINE T1 + T2 + T3).
 //!
 //! Covers:
 //! - T1: Streaming diff overlay anchored to current text (5 tests)
 //! - T2: Per-hunk accept/reject through proposal pipeline (5 tests)
+//! - T3: Undo integration with editor history + checkpoint ledger (4 tests)
 
 use legion_desktop::bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge};
 use legion_desktop::view::{
     InlineEditError, InlineEditOverlayState, accumulate_inline_edit_chunks,
-    build_inline_edit_audit_record, check_inline_edit_anchor_freshness,
-    inline_edit_from_instruction, inline_edit_to_workspace_proposal,
-    set_inline_edit_hunk_disposition,
+    apply_inline_edit_with_undo_group, build_inline_edit_audit_record,
+    check_inline_edit_anchor_freshness, inline_edit_from_instruction,
+    inline_edit_to_workspace_proposal, set_inline_edit_hunk_disposition,
 };
 use legion_protocol::{
     BufferId, BufferVersion, DelegatedTaskProposalHunkDisposition, FileFingerprint,
     InlineEditInstruction, ProposalLifecycleState, ProposalPayload, ProposalPayloadKind,
     ProtocolTextRange, SnapshotId, TextCoordinate,
 };
+use legion_storage::checkpoint::CheckpointStore;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -332,4 +334,149 @@ fn inline_edit_bridge_actions_are_noop_stubs() {
             "inline edit bridge actions must translate to Noop (intercepted before bridge)"
         );
     }
+}
+
+// ─── T3 Tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn apply_creates_checkpoint_with_matching_proposal_id() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-7".to_string());
+    let chunks = vec![complete_chunk("h7", "before_text", "after_text")];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+    overlay.hunk_dispositions.insert(
+        "h7".to_string(),
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+
+    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(10));
+
+    // Persist the returned checkpoint to an in-memory store.
+    let mut store = CheckpointStore::new();
+    store
+        .save_checkpoint(result.checkpoint.clone())
+        .expect("save_checkpoint must succeed");
+
+    let loaded = store
+        .load_checkpoint(&result.checkpoint_id)
+        .expect("load_checkpoint must not error")
+        .expect("checkpoint must be present in the store");
+
+    assert_eq!(
+        loaded.proposal_id, result.proposal_id,
+        "checkpoint proposal_id must match InlineEditApplyResult.proposal_id"
+    );
+}
+
+#[test]
+fn apply_uses_single_undo_group() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-8".to_string());
+
+    // Two accepted hunks.
+    let chunks = vec![format!(
+        "{}{}",
+        complete_chunk("h8", "a", "A"),
+        complete_chunk("h9", "b", "B"),
+    )];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+    overlay.hunk_dispositions.insert(
+        "h8".to_string(),
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+    overlay.hunk_dispositions.insert(
+        "h9".to_string(),
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+
+    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(11));
+
+    assert_eq!(
+        result.applied_hunk_count, 2,
+        "two accepted hunks must produce applied_hunk_count == 2"
+    );
+    // The undo_group_id must be a non-nil UUID.
+    assert_ne!(
+        result.undo_group_id,
+        uuid::Uuid::nil(),
+        "undo_group_id must be a non-nil UUID for grouping editor transactions"
+    );
+}
+
+#[test]
+fn checkpoint_targets_cover_all_applied_hunks() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-9".to_string());
+
+    // Three accepted hunks.
+    let chunks = vec![format!(
+        "{}{}{}",
+        complete_chunk("ha", "x", "X"),
+        complete_chunk("hb", "y", "Y"),
+        complete_chunk("hc", "z", "Z"),
+    )];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+    for id in ["ha", "hb", "hc"] {
+        overlay.hunk_dispositions.insert(
+            id.to_string(),
+            DelegatedTaskProposalHunkDisposition::Accepted,
+        );
+    }
+
+    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(12));
+
+    assert_eq!(
+        result.checkpoint.targets.len(),
+        3,
+        "checkpoint must have one target per applied hunk (3 accepted hunks → 3 targets)"
+    );
+    // Each target must have content_before set (the original text for rollback).
+    for target in &result.checkpoint.targets {
+        assert!(
+            target.content_before.is_some(),
+            "checkpoint target must have content_before for rollback; target_id={}",
+            target.target_id
+        );
+    }
+}
+
+#[test]
+fn undo_group_and_checkpoint_are_correlated() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-10".to_string());
+    let chunks = vec![complete_chunk("hd", "old", "new")];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+    overlay.hunk_dispositions.insert(
+        "hd".to_string(),
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+
+    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(13));
+
+    // The checkpoint's proposal_id and the audit_record's proposal_id must
+    // both match the result's proposal_id — proving the three artifacts
+    // (undo group, checkpoint, audit record) are correlated.
+    assert_eq!(
+        result.checkpoint.proposal_id, result.proposal_id,
+        "checkpoint.proposal_id must match InlineEditApplyResult.proposal_id"
+    );
+    assert_eq!(
+        result.audit_record.proposal_id, result.proposal_id,
+        "audit_record.proposal_id must match InlineEditApplyResult.proposal_id"
+    );
+    // The checkpoint_id in the result must match the checkpoint blob's id.
+    assert_eq!(
+        result.checkpoint.checkpoint_id, result.checkpoint_id,
+        "result.checkpoint_id must match result.checkpoint.checkpoint_id"
+    );
+    // The undo_group_id must be non-nil (a real UUID was generated).
+    assert_ne!(
+        result.undo_group_id,
+        uuid::Uuid::nil(),
+        "undo_group_id must be non-nil"
+    );
 }

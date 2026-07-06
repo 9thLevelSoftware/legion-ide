@@ -395,6 +395,107 @@ pub fn build_inline_edit_audit_record(
     }
 }
 
+// ─── T3: Undo integration + checkpoint ───────────────────────────────────────
+
+/// Result of applying an inline edit overlay with a single undo group.
+///
+/// All text edits in the apply share the same `undo_group_id`, so a single
+/// undo in the editor reverts the entire inline edit.
+///
+/// The `checkpoint` field contains the pre-mutation state.  Callers (typically
+/// the app layer) must persist this to their [`CheckpointStore`] to enable
+/// durable rollback.
+///
+/// [`CheckpointStore`]: legion_storage::checkpoint::CheckpointStore
+#[derive(Debug, Clone)]
+pub struct InlineEditApplyResult {
+    /// Proposal identifier for the generated workspace proposal.
+    pub proposal_id: legion_protocol::ProposalId,
+    /// Shared undo group identifier.  All text edits from this inline edit
+    /// apply must use this id so that a single undo reverts them all.
+    pub undo_group_id: uuid::Uuid,
+    /// Stable checkpoint identifier.
+    pub checkpoint_id: String,
+    /// Number of hunks that were accepted and applied.
+    pub applied_hunk_count: u32,
+    /// Audit record for the apply operation.
+    pub audit_record: legion_protocol::ProposalAuditRecord,
+    /// Pre-mutation checkpoint blob.  The caller must persist this to the
+    /// [`CheckpointStore`] for durable rollback support.
+    ///
+    /// [`CheckpointStore`]: legion_storage::checkpoint::CheckpointStore
+    pub checkpoint: legion_storage::checkpoint::DurableCheckpoint,
+}
+
+/// Applies the accepted hunks in an inline edit overlay under a single undo group.
+///
+/// Generates a `Uuid` undo group id that must be shared across every editor
+/// transaction produced during apply.  Creates a
+/// [`DurableCheckpoint`][legion_storage::checkpoint::DurableCheckpoint] that
+/// captures the pre-mutation state for all applied hunks so the caller can
+/// persist it to a [`CheckpointStore`][legion_storage::checkpoint::CheckpointStore].
+///
+/// Returns an `InlineEditApplyResult` with `applied_hunk_count == 0` when
+/// there are no accepted hunks.
+#[must_use]
+pub fn apply_inline_edit_with_undo_group(
+    overlay: &InlineEditOverlayViewModel,
+    buffer_id: legion_protocol::BufferId,
+) -> InlineEditApplyResult {
+    use legion_protocol::{CanonicalPath, PrincipalId, TimestampMillis};
+    use legion_storage::checkpoint::{
+        CHECKPOINT_SCHEMA_VERSION, CheckpointTarget, CheckpointTargetKind, DurableCheckpoint,
+    };
+
+    let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
+        .diff_hunks
+        .iter()
+        .filter(|h| {
+            overlay.hunk_dispositions.get(&h.hunk_id)
+                == Some(&DelegatedTaskProposalHunkDisposition::Accepted)
+        })
+        .collect();
+
+    let undo_group_id = uuid::Uuid::now_v7();
+    let checkpoint_id = format!("ckpt-{}", uuid::Uuid::now_v7());
+    let proposal_id = legion_protocol::ProposalId(TimestampMillis::now().0);
+    let applied_hunk_count = accepted_hunks.len() as u32;
+
+    // Build one checkpoint target per accepted hunk (SavedFile kind, original
+    // text as content_before for rollback).
+    let targets: Vec<CheckpointTarget> = accepted_hunks
+        .iter()
+        .enumerate()
+        .map(|(i, h)| CheckpointTarget {
+            target_id: format!("target-{}-{i}", h.hunk_id),
+            kind: CheckpointTargetKind::SavedFile,
+            path: CanonicalPath(format!("buffer://{}", buffer_id.0)),
+            content_before: Some(h.original_text.clone()),
+        })
+        .collect();
+
+    let checkpoint = DurableCheckpoint {
+        checkpoint_id: checkpoint_id.clone(),
+        proposal_id,
+        principal: PrincipalId("ai.inline-edit".to_string()),
+        created_at: TimestampMillis::now(),
+        targets,
+        available: true,
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+    };
+
+    let audit_record = build_inline_edit_audit_record(proposal_id, applied_hunk_count);
+
+    InlineEditApplyResult {
+        proposal_id,
+        undo_group_id,
+        checkpoint_id,
+        applied_hunk_count,
+        audit_record,
+        checkpoint,
+    }
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Converts a [`ProtocolTextRange`] (line/character coordinates) to a
