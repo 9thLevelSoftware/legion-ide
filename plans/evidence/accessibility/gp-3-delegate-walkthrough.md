@@ -1,3 +1,5 @@
+> **STALE — M10 notice (2026-07-06):** This walkthrough was recorded against the GP-3 delegate prototype. The delegate harness has since changed (PKT-DELEGATE, PKT-WORKER, M10 campaign). Re-run accessibility testing against the M10 delegate surface before citing this document as current evidence. See `plans/evidence/production/M10/` for up-to-date artifacts.
+
 # GP-3 Delegate Screen-Reader Walkthrough
 
 ## Status
