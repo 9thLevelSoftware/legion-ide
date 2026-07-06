@@ -21513,7 +21513,9 @@ impl AppComposition {
         &self,
         metadata: InlinePredictionRequestMetadata,
     ) -> Result<InlinePredictionResult, AppCompositionError> {
-        use legion_ai::{DeterministicInlinePredictionProvider, InlinePredictionRequest, ModelProvider};
+        use legion_ai::{
+            DeterministicInlinePredictionProvider, InlinePredictionRequest, ModelProvider,
+        };
         const DETERMINISTIC_ID: &str = "deterministic-local";
         let provider = DeterministicInlinePredictionProvider::new(DETERMINISTIC_ID);
         let request = InlinePredictionRequest {

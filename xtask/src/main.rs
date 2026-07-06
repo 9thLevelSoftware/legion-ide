@@ -1135,8 +1135,7 @@ fn append_manual_renderer_measurement(
                                 truncate_report_message(&output_text)
                             ),
                         )
-                    } else if !output.status.success()
-                        && manual_renderer_build_failed(&output_text)
+                    } else if !output.status.success() && manual_renderer_build_failed(&output_text)
                     {
                         manual_renderer_placeholder_measurement(
                             xtask::perf_harness::SkeletonStatus::Skipped,
@@ -4935,7 +4934,9 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     fn manual_renderer_build_failed_detects_cargo_build_errors() {
         // "could not compile" — standard Cargo build-failure trailer
         assert!(
-            manual_renderer_build_failed("error[E0599]: no method `foo`\ncould not compile `legion-desktop`"),
+            manual_renderer_build_failed(
+                "error[E0599]: no method `foo`\ncould not compile `legion-desktop`"
+            ),
             "must detect 'could not compile'"
         );
         // "error[e" — lowercase form of a Rust compiler diagnostic code
