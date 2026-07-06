@@ -16,8 +16,8 @@
 //!                        → assert Completed; route unauthorized remote → assert Refused.
 //! s5 context-manifest:   assemble_context_manifest_from_sources; assert file entries
 //!                        and valid manifest_id; assert permissions non-empty.
-//! s6 undo-cycle:         undo accepted prediction from s3; assert buffer restored;
-//!                        redo; assert buffer matches post-accept text.
+//! s6 checkpoint-apply:   undo s3; build CreateFile proposal; apply via lifecycle pipeline;
+//!                        verify checkpoint created; restore; verify file removed + buffer at original.
 //! s7 evidence:           write `target/golden-path/gp2_report.toml`.
 //!
 //! # Constraints
@@ -46,10 +46,12 @@ use legion_protocol::{
     AssistedAiTrustProjectionReference, BufferId, CancellationTokenId, CanonicalPath,
     CapabilityDecisionId, CapabilityId, CausalityId, ContextManifestEgressStatus,
     ContextManifestPermissionKind, ContextManifestPermissionSummary, ContextManifestPurpose,
-    ContextManifestSources, CorrelationId, EventSequence, FileFingerprint, NetworkTarget,
-    PrincipalId, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-    ProposalTargetCoverage, ProposalTargetCoverageKind, RedactionHint, SemanticPrivacyScope,
-    TextCoordinate, TimestampMillis, WorkspaceId, WorkspaceTrustState,
+    ContextManifestSources, CorrelationId, CreateFileProposal, EventSequence, FileFingerprint,
+    FileId, NetworkTarget, PreviewSummary, PrincipalId, ProposalId, ProposalPayload,
+    ProposalPayloadKind, ProposalPrivacyLabel, ProposalRequest, ProposalResponse,
+    ProposalRiskLabel, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProposalVersionPreconditions, RedactionHint, SemanticPrivacyScope, TextCoordinate,
+    TimestampMillis, WorkspaceGeneration, WorkspaceId, WorkspaceProposal, WorkspaceTrustState,
 };
 use legion_security::DenyByDefaultBroker;
 use legion_ui::CommandDispatchIntent;
@@ -284,6 +286,8 @@ fn trust_reference(
 struct S1Result {
     temp_dir: PathBuf,
     app: AppComposition,
+    workspace_id: WorkspaceId,
+    generation: WorkspaceGeneration,
 }
 
 fn run_s1(fixture_dir: &Path) -> Result<S1Result, String> {
@@ -309,14 +313,20 @@ fn run_s1(fixture_dir: &Path) -> Result<S1Result, String> {
     )?;
 
     let mut app = AppComposition::new();
-    app.open_workspace(
-        &temp_dir,
-        WorkspaceTrustState::Trusted,
-        PrincipalId("gp2-smoke".to_string()),
-    )
-    .map_err(|e| format!("open_workspace failed: {e:?}"))?;
+    let opened = app
+        .open_workspace(
+            &temp_dir,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("gp2-smoke".to_string()),
+        )
+        .map_err(|e| format!("open_workspace failed: {e:?}"))?;
 
-    Ok(S1Result { temp_dir, app })
+    Ok(S1Result {
+        temp_dir,
+        app,
+        workspace_id: opened.workspace_id,
+        generation: opened.generation,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +335,7 @@ fn run_s1(fixture_dir: &Path) -> Result<S1Result, String> {
 
 struct S2Result {
     buffer_id: BufferId,
+    file_id: FileId,
 }
 
 fn run_s2(temp_dir: &Path, app: &mut AppComposition) -> Result<S2Result, String> {
@@ -335,15 +346,16 @@ fn run_s2(temp_dir: &Path, app: &mut AppComposition) -> Result<S2Result, String>
     // Open src/main.rs and get the active buffer id.
     let main_rs = temp_dir.join("src").join("main.rs");
     let main_rs_str = main_rs.to_string_lossy().into_owned();
-    app.open_file(&main_rs_str)
+    let file_id = app
+        .open_file(&main_rs_str)
         .map_err(|e| format!("open_file(src/main.rs) failed: {e:?}"))?;
 
     let buffer_id = app
         .active_buffer_id()
         .ok_or("s2: no active buffer after open_file(src/main.rs)")?;
 
-    eprintln!("[s2] src/main.rs opened; buffer_id={buffer_id:?}");
-    Ok(S2Result { buffer_id })
+    eprintln!("[s2] src/main.rs opened; buffer_id={buffer_id:?} file_id={file_id:?}");
+    Ok(S2Result { buffer_id, file_id })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -352,6 +364,8 @@ fn run_s2(temp_dir: &Path, app: &mut AppComposition) -> Result<S2Result, String>
 
 struct S3Result {
     original_text: String,
+    // Captured for evidence; s6 now exercises the checkpoint pipeline rather than redo.
+    #[allow(dead_code)]
     accepted_text: String,
 }
 
@@ -720,80 +734,194 @@ fn run_s5(temp_dir: &Path) -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step s6: undo cycle — undo accepted prediction, assert restored, redo, assert
+// Step s6: checkpoint-apply — undo s3, apply CreateFile proposal through the
+// full lifecycle pipeline, verify checkpoint, restore, verify file removed.
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_s6(app: &mut AppComposition, buffer_id: BufferId, s3: &S3Result) -> Result<(), String> {
-    // Undo the accepted prediction from s3.
+fn run_s6(
+    app: &mut AppComposition,
+    temp_dir: &Path,
+    buffer_id: BufferId,
+    workspace_id: WorkspaceId,
+    generation: WorkspaceGeneration,
+    s3: &S3Result,
+) -> Result<(), String> {
+    // ── 1. Undo the s3 accepted prediction so buffer matches disk ─────────────
     let undo_outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::Undo { buffer_id })
         .map_err(|e| format!("s6: undo dispatch failed: {e:?}"))?;
-
     match undo_outcome {
         AppCommandOutcome::Edited(_) => {}
         other => {
-            return Err(format!(
-                "s6: expected Edited outcome from Undo, got {other:?}"
-            ));
+            return Err(format!("s6: expected Edited from Undo, got {other:?}"));
         }
     }
-
-    // Assert buffer text returned to original.
-    let post_undo_text = app
+    let post_undo_text: String = app
         .editor()
         .text(buffer_id)
-        .map_err(|e| format!("s6: read post-undo text: {e:?}"))?;
-
+        .map_err(|e| format!("s6: read post-undo text: {e:?}"))?
+        .to_owned();
     if post_undo_text != s3.original_text {
         return Err(format!(
-            "s6: post-undo text does not match original.\n  expected (len={}):\n  {:?}\n  got (len={}):\n  {:?}",
-            s3.original_text.len(),
-            &s3.original_text[..s3.original_text.len().min(80)],
+            "s6: post-undo text != original_text (lens: {} vs {})",
             post_undo_text.len(),
-            &post_undo_text[..post_undo_text.len().min(80)],
+            s3.original_text.len()
         ));
     }
     eprintln!("[s6] undo verified: buffer restored to original text");
 
-    // Assert redo is available.
-    let redo_len = app
-        .editor()
-        .redo_len(buffer_id)
-        .map_err(|e| format!("s6: redo_len: {e:?}"))?;
-    if redo_len == 0 {
-        return Err("s6: redo_len == 0 after undo; expected >= 1".to_string());
-    }
+    // ── 2. Refresh workspace generation (idempotent re-open) ─────────────────
+    let current_gen = app
+        .open_workspace(
+            temp_dir,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("gp2-smoke".to_string()),
+        )
+        .map_err(|e| format!("s6: open_workspace (generation refresh) failed: {e:?}"))?
+        .generation;
+    let _ = workspace_id; // carried for context; generation refresh is sufficient
+    let _ = generation;
+    eprintln!("[s6] workspace generation refreshed: {current_gen:?}");
 
-    // Redo to restore the accepted prediction state.
-    let redo_outcome = app
-        .dispatch_ui_intent(CommandDispatchIntent::Redo { buffer_id })
-        .map_err(|e| format!("s6: redo dispatch failed: {e:?}"))?;
+    // ── 3. Build a CreateFile proposal ───────────────────────────────────────
+    // CreateFile is the canonical proposal kind that produces durable checkpoints:
+    // TextEdit applies only to the editor buffer and produces no file-level
+    // rollback material, so list_checkpoints() would return empty after apply.
+    let smoke_file_path = temp_dir.join("gp2-s6-smoke.txt");
+    let smoke_canonical = CanonicalPath(smoke_file_path.to_string_lossy().into_owned());
 
-    match redo_outcome {
-        AppCommandOutcome::Edited(_) => {}
+    let proposal = WorkspaceProposal {
+        proposal_id: ProposalId(700),
+        principal: PrincipalId("gp2-smoke".to_string()),
+        capability: CapabilityId("fs.write".to_string()),
+        correlation_id: CorrelationId(700),
+        payload: ProposalPayload::CreateFile(CreateFileProposal {
+            path: smoke_canonical.clone(),
+            initial_content: Some("gp2 s6 checkpoint smoke\n".to_string()),
+        }),
+        preconditions: ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: None,
+            snapshot_id: None,
+            generation: None,
+            file_content_version: None,
+            workspace_generation: Some(current_gen),
+            expected_fingerprint: None,
+            expected_file_length: None,
+            expected_modified_at: None,
+        },
+        preview: PreviewSummary {
+            summary: "gp2 smoke s6 checkpoint".to_string(),
+            details: Vec::new(),
+        },
+        expires_at: None,
+        created_at: TimestampMillis(1),
+    };
+
+    // ── 4. Register → Validate → Preview → Apply ─────────────────────────────
+    let register_resp = app
+        .register_proposal_lifecycle(&proposal)
+        .map_err(|e| format!("s6: register_proposal_lifecycle failed: {e:?}"))?;
+    match register_resp {
+        ProposalResponse::Created(_) => eprintln!("[s6] proposal registered (Created)"),
         other => {
             return Err(format!(
-                "s6: expected Edited outcome from Redo, got {other:?}"
+                "s6: expected Created from register_proposal_lifecycle, got {other:?}"
             ));
         }
     }
 
-    // Assert buffer text matches post-accept state.
-    let post_redo_text = app
-        .editor()
-        .text(buffer_id)
-        .map_err(|e| format!("s6: read post-redo text: {e:?}"))?;
+    let validate_resp = app
+        .handle_proposal_request(ProposalRequest::Validate(proposal.clone()))
+        .map_err(|e| format!("s6: Validate failed: {e:?}"))?;
+    match validate_resp {
+        ProposalResponse::Validated(_) => eprintln!("[s6] proposal Validated"),
+        other => {
+            return Err(format!(
+                "s6: expected Validated from Validate, got {other:?}"
+            ));
+        }
+    }
 
-    if post_redo_text != s3.accepted_text {
+    let preview_resp = app
+        .handle_proposal_request(ProposalRequest::Preview(proposal.clone()))
+        .map_err(|e| format!("s6: Preview failed: {e:?}"))?;
+    match preview_resp {
+        ProposalResponse::Previewed { .. } => eprintln!("[s6] proposal Previewed"),
+        other => {
+            return Err(format!(
+                "s6: expected Previewed from Preview, got {other:?}"
+            ));
+        }
+    }
+
+    let apply_resp = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal.clone()))
+        .map_err(|e| format!("s6: Apply failed: {e:?}"))?;
+    match apply_resp {
+        ProposalResponse::Applied(_) => eprintln!("[s6] proposal Applied"),
+        other => {
+            return Err(format!("s6: expected Applied from Apply, got {other:?}"));
+        }
+    }
+
+    // Assert the file was created on disk.
+    if !smoke_file_path.exists() {
         return Err(format!(
-            "s6: post-redo text does not match accepted text.\n  expected (len={}):\n  {:?}\n  got (len={}):\n  {:?}",
-            s3.accepted_text.len(),
-            &s3.accepted_text[..s3.accepted_text.len().min(80)],
-            post_redo_text.len(),
-            &post_redo_text[..post_redo_text.len().min(80)],
+            "s6: smoke file not created on disk: {}",
+            smoke_file_path.display()
         ));
     }
-    eprintln!("[s6] redo verified: buffer matches post-accept text");
+    eprintln!("[s6] smoke file created: {}", smoke_file_path.display());
+
+    // ── 5. Verify checkpoint was auto-created ─────────────────────────────────
+    let checkpoints = app.list_checkpoints();
+    if checkpoints.is_empty() {
+        return Err(
+            "s6: list_checkpoints() is empty after apply — expected >= 1 durable checkpoint"
+                .to_string(),
+        );
+    }
+    if checkpoints[0].proposal_id != ProposalId(700) {
+        return Err(format!(
+            "s6: checkpoint[0].proposal_id = {:?}; expected ProposalId(700)",
+            checkpoints[0].proposal_id
+        ));
+    }
+    let checkpoint_id = checkpoints[0].checkpoint_id.clone();
+    eprintln!(
+        "[s6] checkpoint verified: proposal_id={:?} checkpoint_id={checkpoint_id}",
+        checkpoints[0].proposal_id
+    );
+
+    // ── 6. Restore the checkpoint ─────────────────────────────────────────────
+    app.restore_checkpoint(&checkpoint_id)
+        .map_err(|e| format!("s6: restore_checkpoint failed: {e:?}"))?;
+    eprintln!("[s6] checkpoint restored");
+
+    // ── 7. Verify file was removed (pre-apply state = did not exist) ──────────
+    if smoke_file_path.exists() {
+        return Err(format!(
+            "s6: smoke file still exists after checkpoint restore: {}",
+            smoke_file_path.display()
+        ));
+    }
+    eprintln!("[s6] smoke file removed by restore (pre-apply state verified)");
+
+    // ── 8. Verify main.rs buffer is still at original text ────────────────────
+    let post_restore_text: String = app
+        .editor()
+        .text(buffer_id)
+        .map_err(|e| format!("s6: read post-restore buffer text: {e:?}"))?
+        .to_owned();
+    if post_restore_text != s3.original_text {
+        return Err(format!(
+            "s6: post-restore buffer text != original_text (lens: {} vs {})",
+            post_restore_text.len(),
+            s3.original_text.len()
+        ));
+    }
+    eprintln!("[s6] buffer verified: still at original text after checkpoint restore");
 
     Ok(())
 }
@@ -904,7 +1032,7 @@ fn main() {
     let s1_start = utc_now();
     let (s1_result, s1_ms) = run_timer(|| run_s1(&args.fixture_dir));
     let s1_end = utc_now();
-    let (temp_dir, mut app) = match s1_result {
+    let (temp_dir, mut app, workspace_id, generation) = match s1_result {
         Ok(r) => {
             eprintln!(
                 "[s1] passed ({}ms); temp_dir={}",
@@ -919,7 +1047,7 @@ fn main() {
                 s1_start,
                 s1_end
             );
-            (r.temp_dir, r.app)
+            (r.temp_dir, r.app, r.workspace_id, r.generation)
         }
         Err(e) => {
             eprintln!("[s1] FAILED: {e}");
@@ -942,13 +1070,16 @@ fn main() {
     let s2_end = utc_now();
     let s2_buffer_id: Option<BufferId> = match s2_result {
         Ok(r) => {
-            eprintln!("[s2] passed ({}ms); buffer_id={:?}", s2_ms, r.buffer_id);
+            eprintln!(
+                "[s2] passed ({}ms); buffer_id={:?} file_id={:?}",
+                s2_ms, r.buffer_id, r.file_id
+            );
             record_step!(
                 "s2",
                 StepStatus::Passed,
                 format!(
-                    "Assist mode enabled; src/main.rs opened; buffer_id={:?} ({}ms)",
-                    r.buffer_id, s2_ms
+                    "Assist mode enabled; src/main.rs opened; buffer_id={:?} file_id={:?} ({}ms)",
+                    r.buffer_id, r.file_id, s2_ms
                 ),
                 s2_ms,
                 s2_start,
@@ -1057,7 +1188,8 @@ fn main() {
     // ── s6 ──────────────────────────────────────────────────────────────────
     let s6_start = utc_now();
     if let (Some(buffer_id), Some(s3)) = (s2_buffer_id, &s3_outcome) {
-        let (s6_result, s6_ms) = run_timer(|| run_s6(&mut app, buffer_id, s3));
+        let (s6_result, s6_ms) =
+            run_timer(|| run_s6(&mut app, &temp_dir, buffer_id, workspace_id, generation, s3));
         let s6_end = utc_now();
         match s6_result {
             Ok(()) => {
@@ -1066,7 +1198,7 @@ fn main() {
                     "s6",
                     StepStatus::Passed,
                     format!(
-                        "undo restored original; redo re-applied accepted text ({}ms)",
+                        "undo s3; CreateFile proposal applied; checkpoint verified; restore OK; buffer at original text ({}ms)",
                         s6_ms
                     ),
                     s6_ms,
@@ -1085,7 +1217,7 @@ fn main() {
         record_step!(
             "s6",
             StepStatus::Skipped,
-            "skipped: s2 or s3 did not pass (undo cycle depends on accepted prediction)"
+            "skipped: s2 or s3 did not pass (checkpoint pipeline depends on accepted prediction)"
                 .to_string(),
             0,
             s6_start,
