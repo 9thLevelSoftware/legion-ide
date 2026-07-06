@@ -27271,3 +27271,42 @@ mod tests {
         });
     }
 }
+
+// ─── PKT-INLINE: Inline edit instruction and diff hunks (P4.F4.T1) ───────────
+
+/// Instruction for an inline edit operation anchored to a buffer position.
+///
+/// Captures the user's selection/cursor instruction along with the freshness
+/// metadata needed to detect whether the buffer has changed since the
+/// instruction was issued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineEditInstruction {
+    /// The user's selection/cursor instruction text (e.g., "rename this variable to `count`").
+    pub instruction_text: String,
+    /// The text range the instruction applies to.
+    pub anchor_range: ProtocolTextRange,
+    /// Snapshot identifier at the time the instruction was issued (for stale detection).
+    pub anchor_snapshot_id: SnapshotId,
+    /// Buffer version at the time the instruction was issued.
+    pub anchor_buffer_version: BufferVersion,
+    /// Optional content fingerprint for additional staleness detection.
+    pub anchor_content_fingerprint: Option<FileFingerprint>,
+}
+
+/// Structured diff hunk produced by an inline edit streaming response.
+///
+/// `complete` is `false` while the hunk's content is still being streamed.
+/// Only hunks with `complete: true` are eligible for accept/reject disposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineEditDiffHunk {
+    /// Stable identifier for this hunk.
+    pub hunk_id: String,
+    /// The range in the original text being replaced.
+    pub range: ProtocolTextRange,
+    /// Text being replaced (from the original buffer).
+    pub original_text: String,
+    /// Proposed replacement text.
+    pub replacement_text: String,
+    /// False while streaming; true once the hunk boundary is fully known.
+    pub complete: bool,
+}
