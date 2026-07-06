@@ -1011,6 +1011,24 @@ fn stdio_lsp_session_reader_records_clean_eof_when_server_exits() {
         Some(legion_lsp::LspReaderTerminal::Eof),
         "server exit must be recorded as a clean-EOF terminal reader event"
     );
+
+    // Once the child has terminated, its exit status must be collectable as
+    // post-mortem evidence (poll briefly: EOF can be observed marginally
+    // before the process exits).
+    let started = std::time::Instant::now();
+    let mut exit_status = None;
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        exit_status = session.exit_status_string();
+        if exit_status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let exit_status = exit_status.expect("exit status must be collectable after clean exit");
+    assert!(
+        exit_status.contains('0'),
+        "mock server exits cleanly; status should render code 0, got: {exit_status}"
+    );
 }
 
 #[test]

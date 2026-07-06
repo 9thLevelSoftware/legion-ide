@@ -237,6 +237,13 @@ impl RustAnalyzerSession {
         self.session.is_running()
     }
 
+    /// The child's exit status as a string once it has terminated (`None`
+    /// while running).  Post-mortem evidence: a panic (101), a signal, and a
+    /// clean exit (0) point at different death modes (PKT-S3-WEDGE-R3).
+    pub fn exit_status_string(&mut self) -> Option<String> {
+        self.session.exit_status_string()
+    }
+
     /// Snapshot of the buffered diagnostic-notification metadata.
     ///
     /// Read-only post-mortem introspection for smokes and tests (same class

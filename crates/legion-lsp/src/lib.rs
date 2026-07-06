@@ -2255,6 +2255,20 @@ impl LspStdioProcess {
         self.reader_stats.snapshot()
     }
 
+    /// Returns the child's exit status rendered as a string once it has
+    /// terminated (`None` while it is still running or when the status
+    /// cannot be collected). Post-mortem evidence: a panic (101), a signal,
+    /// and a clean exit (0) point at different death modes
+    /// (PKT-S3-WEDGE-R3).
+    pub fn exit_status_string(&mut self) -> Option<String> {
+        self.child
+            .as_mut()
+            .and_then(|child| match child.try_wait() {
+                Ok(Some(status)) => Some(status.to_string()),
+                _ => None,
+            })
+    }
+
     /// Writes a single Content-Length framed envelope to the child's stdin.
     pub fn write_envelope(&mut self, envelope: &JsonRpcEnvelope) -> LspRuntimeResult<()> {
         let frame = LspFramer::encode(envelope)?;
@@ -2696,6 +2710,12 @@ impl LspStdioSession {
     /// alive) — the GP-1 s3 wedge discriminator (PKT-S3-WEDGE-R3).
     pub fn reader_stats(&self) -> LspReaderStatsSnapshot {
         self.process.reader_stats()
+    }
+
+    /// Returns the child's exit status as a string once it has terminated
+    /// (`None` while running). See [`LspStdioProcess::exit_status_string`].
+    pub fn exit_status_string(&mut self) -> Option<String> {
+        self.process.exit_status_string()
     }
 
     /// Detaches the child process stderr handle so a supervisor/drain thread

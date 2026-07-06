@@ -782,11 +782,12 @@ fn dump_s3_post_mortem(
     // reader died" (see the table above).
     let stats = session.reader_stats();
     eprintln!(
-        "[s3] reader stats: frames_forwarded={} payload_bytes={} terminal={:?} child_running={}",
+        "[s3] reader stats: frames_forwarded={} payload_bytes={} terminal={:?} child_running={} exit_status={:?}",
         stats.frames_forwarded,
         stats.payload_bytes,
         stats.terminal,
-        session.is_running()
+        session.is_running(),
+        session.exit_status_string()
     );
     // Dump redacted stderr ring from the background drain thread
     // (PKT-LSP-C T4 / Controller C).  If RA logged the stall cause
