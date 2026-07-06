@@ -273,3 +273,142 @@ pub fn set_inline_edit_hunk_disposition(
         .insert(hunk_id.to_string(), disposition);
     Ok(())
 }
+
+// ─── T2: Proposal pipeline integration ───────────────────────────────────────
+
+/// Converts the accepted hunks in an inline edit overlay into a
+/// [`WorkspaceProposal`] that the existing proposal-apply pipeline can execute.
+///
+/// Returns `None` when there are no accepted hunks (nothing to apply).
+///
+/// The proposal's preconditions encode the anchor snapshot and buffer version
+/// so the apply pipeline can detect staleness before mutating the buffer.
+///
+/// Uses `FileId(buffer_id.0)` as the target file identity because the desktop
+/// layer only has a `BufferId`.  The app layer maps `FileId` back to the open
+/// buffer when executing the proposal.
+#[must_use]
+pub fn inline_edit_to_workspace_proposal(
+    overlay: &InlineEditOverlayViewModel,
+    buffer_id: legion_protocol::BufferId,
+) -> Option<legion_protocol::WorkspaceProposal> {
+    use legion_protocol::{
+        CapabilityId, CorrelationId, EditBatch, FileId, PreviewSummary, PrincipalId,
+        ProposalPayload, ProposalVersionPreconditions, TextEdit, TextEditProposal, TimestampMillis,
+        WorkspaceProposal,
+    };
+
+    let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
+        .diff_hunks
+        .iter()
+        .filter(|h| {
+            overlay.hunk_dispositions.get(&h.hunk_id)
+                == Some(&DelegatedTaskProposalHunkDisposition::Accepted)
+        })
+        .collect();
+
+    if accepted_hunks.is_empty() {
+        return None;
+    }
+
+    let edits = EditBatch {
+        edits: accepted_hunks
+            .iter()
+            .map(|h| TextEdit {
+                range: protocol_range_to_text_range(h.range),
+                replacement: h.replacement_text.clone(),
+            })
+            .collect(),
+    };
+
+    let proposal_id = legion_protocol::ProposalId(TimestampMillis::now().0);
+
+    Some(WorkspaceProposal {
+        proposal_id,
+        principal: PrincipalId("ai.inline-edit".to_string()),
+        capability: CapabilityId("capability.inline-edit".to_string()),
+        correlation_id: CorrelationId(0),
+        payload: ProposalPayload::TextEdit(TextEditProposal {
+            file_id: FileId(buffer_id.0),
+            edits,
+        }),
+        preconditions: ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: Some(overlay.instruction.anchor_buffer_version),
+            snapshot_id: Some(overlay.instruction.anchor_snapshot_id),
+            generation: None,
+            file_content_version: None,
+            workspace_generation: None,
+            expected_fingerprint: overlay.instruction.anchor_content_fingerprint.clone(),
+            expected_file_length: None,
+            expected_modified_at: None,
+        },
+        preview: PreviewSummary {
+            summary: format!("Inline edit: {} accepted hunk(s)", accepted_hunks.len()),
+            details: accepted_hunks
+                .iter()
+                .map(|h| format!("hunk {}", h.hunk_id))
+                .collect(),
+        },
+        expires_at: None,
+        created_at: TimestampMillis::now(),
+    })
+}
+
+/// Builds a [`ProposalAuditRecord`] for an inline edit apply operation.
+///
+/// The audit record is created with:
+/// - `lifecycle_state` = [`ProposalLifecycleState::Applied`]
+/// - `payload_summary.kind` = [`ProposalPayloadKind::TextEdit`]
+///
+/// This is the same audit record structure used by multi-file proposal apply.
+#[must_use]
+pub fn build_inline_edit_audit_record(
+    proposal_id: legion_protocol::ProposalId,
+    applied_hunk_count: u32,
+) -> legion_protocol::ProposalAuditRecord {
+    use legion_protocol::{
+        CapabilityId, CausalityId, CorrelationId, PrincipalId, ProposalAuditRecord,
+        ProposalLifecycleState, ProposalPayloadKind, ProposalPayloadSummary, TimestampMillis,
+    };
+    use uuid::Uuid;
+
+    ProposalAuditRecord {
+        proposal_id,
+        lifecycle_state: ProposalLifecycleState::Applied,
+        timestamp: TimestampMillis::now(),
+        principal: PrincipalId("ai.inline-edit".to_string()),
+        capability: CapabilityId("capability.inline-edit".to_string()),
+        correlation_id: CorrelationId(0),
+        causality_id: CausalityId(Uuid::nil()),
+        payload_summary: ProposalPayloadSummary {
+            kind: ProposalPayloadKind::TextEdit,
+            affected_files: Vec::new(),
+            title: Some(format!("Inline edit ({applied_hunk_count} hunk(s))")),
+            byte_count: None,
+        },
+        checkpoint_rollback_projection: None,
+        risk_rule_ids: Vec::new(),
+        diagnostics: Vec::new(),
+        redaction_hints: Vec::new(),
+        schema_version: 1,
+    }
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Converts a [`ProtocolTextRange`] (line/character coordinates) to a
+/// [`TextRange`] (byte offsets) for use in a proposal payload.
+///
+/// Uses the `byte_offset` field of each [`TextCoordinate`] when available;
+/// falls back to the character value interpreted as a byte offset otherwise.
+fn protocol_range_to_text_range(
+    range: legion_protocol::ProtocolTextRange,
+) -> legion_protocol::TextRange {
+    let start = range
+        .start
+        .byte_offset
+        .unwrap_or(range.start.character as u64);
+    let end = range.end.byte_offset.unwrap_or(range.end.character as u64);
+    legion_protocol::TextRange::byte(start, end)
+}

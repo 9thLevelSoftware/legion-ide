@@ -1,15 +1,19 @@
-//! Integration tests for the inline edit loop (PKT-INLINE T1).
+//! Integration tests for the inline edit loop (PKT-INLINE T1 + T2).
 //!
 //! Covers:
 //! - T1: Streaming diff overlay anchored to current text (5 tests)
+//! - T2: Per-hunk accept/reject through proposal pipeline (5 tests)
 
+use legion_desktop::bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge};
 use legion_desktop::view::{
     InlineEditError, InlineEditOverlayState, accumulate_inline_edit_chunks,
-    check_inline_edit_anchor_freshness, inline_edit_from_instruction,
+    build_inline_edit_audit_record, check_inline_edit_anchor_freshness,
+    inline_edit_from_instruction, inline_edit_to_workspace_proposal,
     set_inline_edit_hunk_disposition,
 };
 use legion_protocol::{
-    BufferVersion, DelegatedTaskProposalHunkDisposition, FileFingerprint, InlineEditInstruction,
+    BufferId, BufferVersion, DelegatedTaskProposalHunkDisposition, FileFingerprint,
+    InlineEditInstruction, ProposalLifecycleState, ProposalPayload, ProposalPayloadKind,
     ProtocolTextRange, SnapshotId, TextCoordinate,
 };
 
@@ -161,4 +165,171 @@ fn fresh_anchor_allows_application() {
         is_fresh,
         "unchanged snapshot/version must report fresh — can apply"
     );
+}
+
+// ─── T2 Tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn accept_hunk_sets_disposition() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-3".to_string());
+    let chunks = vec![complete_chunk("h2", "old_value", "new_value")];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+
+    set_inline_edit_hunk_disposition(
+        &mut overlay,
+        "h2",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    )
+    .expect("accept on complete hunk must succeed");
+
+    assert_eq!(
+        overlay.hunk_dispositions.get("h2"),
+        Some(&DelegatedTaskProposalHunkDisposition::Accepted),
+        "hunk disposition must be Accepted after accept call"
+    );
+}
+
+#[test]
+fn reject_hunk_sets_disposition() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-4".to_string());
+    let chunks = vec![complete_chunk("h3", "before", "after")];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+
+    set_inline_edit_hunk_disposition(
+        &mut overlay,
+        "h3",
+        DelegatedTaskProposalHunkDisposition::Rejected,
+    )
+    .expect("reject on complete hunk must succeed");
+
+    assert_eq!(
+        overlay.hunk_dispositions.get("h3"),
+        Some(&DelegatedTaskProposalHunkDisposition::Rejected),
+        "hunk disposition must be Rejected after reject call"
+    );
+}
+
+#[test]
+fn streaming_hunk_rejects_disposition_change() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-5".to_string());
+    let chunks = vec![incomplete_chunk("h4", "original", "replacement")];
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&chunks, &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+
+    let result = set_inline_edit_hunk_disposition(
+        &mut overlay,
+        "h4",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+
+    assert!(
+        matches!(result, Err(InlineEditError::HunkNotComplete { ref hunk_id }) if hunk_id == "h4"),
+        "set disposition on streaming hunk must return HunkNotComplete error"
+    );
+}
+
+#[test]
+fn inline_edit_to_proposal_includes_only_accepted_hunks() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-6".to_string());
+
+    // Two complete hunks: one accepted, one rejected.
+    let two_hunks = format!(
+        "{}{}",
+        complete_chunk("h5", "alpha", "ALPHA"),
+        complete_chunk("h6", "beta", "BETA"),
+    );
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&[two_hunks], &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+
+    set_inline_edit_hunk_disposition(
+        &mut overlay,
+        "h5",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    )
+    .unwrap();
+    set_inline_edit_hunk_disposition(
+        &mut overlay,
+        "h6",
+        DelegatedTaskProposalHunkDisposition::Rejected,
+    )
+    .unwrap();
+
+    let proposal =
+        inline_edit_to_workspace_proposal(&overlay, BufferId(1)).expect("proposal must be Some");
+
+    // The proposal must contain only the accepted hunk's edit (h5 → ALPHA).
+    match &proposal.payload {
+        ProposalPayload::TextEdit(p) => {
+            assert_eq!(
+                p.edits.edits.len(),
+                1,
+                "proposal must contain exactly 1 edit for 1 accepted hunk"
+            );
+            assert_eq!(
+                p.edits.edits[0].replacement, "ALPHA",
+                "edit replacement must match the accepted hunk's replacement_text"
+            );
+        }
+        other => panic!("expected TextEdit payload, got: {other:?}"),
+    }
+}
+
+#[test]
+fn inline_edit_apply_produces_audit_record() {
+    let proposal_id = legion_protocol::ProposalId(9999);
+    let audit_record = build_inline_edit_audit_record(proposal_id, 2);
+
+    assert_eq!(
+        audit_record.payload_summary.kind,
+        ProposalPayloadKind::TextEdit,
+        "audit record operation class must be TextEdit for inline edits"
+    );
+    assert_eq!(
+        audit_record.lifecycle_state,
+        ProposalLifecycleState::Applied,
+        "audit record lifecycle state must be Applied"
+    );
+    assert_eq!(
+        audit_record.proposal_id, proposal_id,
+        "audit record proposal_id must match the supplied proposal_id"
+    );
+}
+
+// ─── Bridge: inline edit actions translate to Noop ───────────────────────────
+
+#[test]
+fn inline_edit_bridge_actions_are_noop_stubs() {
+    let bridge = DesktopCommandBridge::new();
+    let snapshot = legion_ui::Shell::empty("InlineEditBridge").projection_snapshot();
+
+    let actions = vec![
+        DesktopAction::AcceptInlineEditHunk {
+            instruction_id: "i1".to_string(),
+            hunk_id: "h1".to_string(),
+        },
+        DesktopAction::RejectInlineEditHunk {
+            instruction_id: "i1".to_string(),
+            hunk_id: "h1".to_string(),
+        },
+        DesktopAction::ApplyInlineEdit {
+            instruction_id: "i1".to_string(),
+        },
+        DesktopAction::DismissInlineEdit {
+            instruction_id: "i1".to_string(),
+        },
+    ];
+
+    for action in actions {
+        let output = bridge.translate(action, &snapshot);
+        assert!(
+            matches!(output, DesktopBridgeOutput::Noop),
+            "inline edit bridge actions must translate to Noop (intercepted before bridge)"
+        );
+    }
 }

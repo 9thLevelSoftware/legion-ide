@@ -35,8 +35,9 @@ pub use assistant_rail::{
 pub use ghost_text::{GhostTextOverlayViewModel, GhostTextState, ghost_text_from_prediction};
 pub use inline_edit::{
     InlineEditError, InlineEditOverlayState, InlineEditOverlayViewModel,
-    accumulate_inline_edit_chunks, check_inline_edit_anchor_freshness,
-    inline_edit_from_instruction, set_inline_edit_hunk_disposition,
+    accumulate_inline_edit_chunks, build_inline_edit_audit_record,
+    check_inline_edit_anchor_freshness, inline_edit_from_instruction,
+    inline_edit_to_workspace_proposal, set_inline_edit_hunk_disposition,
 };
 pub use manifest_panel::{
     DesktopManifestItemToggleViewModel, manifest_item_toggle_view_models, preview_rows,

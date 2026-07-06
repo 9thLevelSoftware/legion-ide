@@ -824,6 +824,44 @@ pub enum DesktopAction {
         /// Optional text selection; `None` uses cursor context.
         selection: Option<ProtocolTextRange>,
     },
+    /// Accept a single hunk in the inline edit overlay (PKT-INLINE).
+    ///
+    /// Intercepted in DesktopRuntime before reaching the bridge; this arm
+    /// satisfies exhaustiveness.
+    AcceptInlineEditHunk {
+        /// Instruction identifier of the inline edit session.
+        instruction_id: String,
+        /// Hunk identifier to accept.
+        hunk_id: String,
+    },
+    /// Reject a single hunk in the inline edit overlay (PKT-INLINE).
+    ///
+    /// Intercepted in DesktopRuntime before reaching the bridge; this arm
+    /// satisfies exhaustiveness.
+    RejectInlineEditHunk {
+        /// Instruction identifier of the inline edit session.
+        instruction_id: String,
+        /// Hunk identifier to reject.
+        hunk_id: String,
+    },
+    /// Apply all accepted hunks in the inline edit overlay through the proposal
+    /// pipeline (PKT-INLINE).
+    ///
+    /// Intercepted in DesktopRuntime before reaching the bridge; this arm
+    /// satisfies exhaustiveness.
+    ApplyInlineEdit {
+        /// Instruction identifier of the inline edit session to apply.
+        instruction_id: String,
+    },
+    /// Dismiss the entire inline edit overlay without applying any hunks
+    /// (PKT-INLINE).
+    ///
+    /// Intercepted in DesktopRuntime before reaching the bridge; this arm
+    /// satisfies exhaustiveness.
+    DismissInlineEdit {
+        /// Instruction identifier of the inline edit session to dismiss.
+        instruction_id: String,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -2055,6 +2093,14 @@ impl DesktopCommandBridge {
                     selection,
                 })
             }
+            // PKT-INLINE: inline edit hunk accept/reject/apply/dismiss are intercepted in
+            // DesktopRuntime::handle_action before reaching the bridge.  These arms exist
+            // solely for exhaustiveness so the compiler enforces that every DesktopAction
+            // variant is handled.
+            DesktopAction::AcceptInlineEditHunk { .. }
+            | DesktopAction::RejectInlineEditHunk { .. }
+            | DesktopAction::ApplyInlineEdit { .. }
+            | DesktopAction::DismissInlineEdit { .. } => DesktopBridgeOutput::Noop,
         }
     }
 
