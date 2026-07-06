@@ -14525,6 +14525,24 @@ impl AppComposition {
         self.lsp_session.health_record()
     }
 
+    /// Returns the product LSP session's lifecycle status projection
+    /// (Idle/Starting/Live/BackingOff/Refused/Failed + restart bookkeeping).
+    ///
+    /// Read-only projection (PKT-LSP-C T3); used by the GP-1 s3 post-mortem
+    /// to prove the two-RA topology at wedge time (PKT-S3-WEDGE-R3).
+    pub fn lsp_session_status_projection(&self) -> legion_protocol::LspSessionStatusProjection {
+        self.lsp_session.session_status_projection()
+    }
+
+    /// Returns the redacted stderr log projection of the product LSP session
+    /// when it is Live (PKT-LSP-C T4); `None` otherwise.
+    ///
+    /// Read-only, metadata-only projection; used by the GP-1 s3 post-mortem
+    /// to inspect the product-session rust-analyzer's stderr at wedge time.
+    pub fn lsp_session_log_projection(&self) -> Option<legion_protocol::LspSessionLogProjection> {
+        self.lsp_session.stderr_log_projection()
+    }
+
     // ── LSP UI debounce authority (I1) ──────────────────────────────────────
     // Timing and armed-state decisions live here; the desktop only forwards
     // typed intents and renders (brief hard rule).
