@@ -1,7 +1,46 @@
 # PKT-S3-WEDGE-R3 — GP-1 s3 rust-analyzer wedge, round 3
 
-Status: investigation in progress (this file is updated as evidence lands).
-Branch: `m8/s3-wedge-round-3`.
+Status: **both root causes identified, fixed, and reproduced red→green**
+(validation runs recorded below). Branch: `m8/s3-wedge-round-3`.
+
+## Verdict (read this first)
+
+The "s3 silent wedge" was two stacked defects, isolated with a dedicated
+reproduction harness (`crates/legion-app/tests/two_ra_stress.rs`) after
+brute-force GP-1 looping proved too slow (1 wedge in 38 local runs):
+
+1. **URI drive-designator mismatch — our bug, Windows.** rust-analyzer
+   echoes document URIs in its own canonical form: a document opened as
+   `file:///C:/…` comes back in `publishDiagnostics` as `file:///c:/…`
+   (lowercase drive; lsp-types' `Url` can also percent-encode the colon).
+   Three matching sites hashed/compared the RAW string, so the echoed form
+   never matched and published diagnostics were dropped as if the server
+   were silent: the fingerprint filter every pump uses, the product
+   worker-drain ingest (`buffer_id_for_path` lookup — which ALSO dropped
+   the leading `/` of Unix absolute paths, breaking that ingest path on
+   every platform), and the rename-translation document resolver (every
+   Windows rename died with `UnresolvableUri`). Whether a given GP-1 run
+   matched depended on a startup race in RA's VFS (which URI form the file
+   was known under first) — hence the intermittency.
+2. **Cache-priming starvation — RA behavior, all platforms, worst on
+   2-core CI.** RA's background prime-caches pass (std indexing) holds
+   salsa queries that demand-driven diagnostics block on (`RA_LOG` capture:
+   `block_on: … inherent_impls_in_crate(core)` from the
+   `fetch_native_diagnostics` thread). Publishes stall for as long as the
+   priming pass takes — minutes on 2-core runners, doubled when the product
+   lazy-start spawns a second RA that primes the same workspace
+   concurrently. Signature: v1 publish arrives, then total silence,
+   `buffered_notifications=0`, empty stderr ring, nudges useless — exactly
+   CI runs 28752070723 / 28759076132. The GP-1 probe now disables priming
+   (`cachePriming.enable: false`): a probe needs no warm caches, and
+   demand-driven analysis of the fixture is ~300 ms per error→clear cycle.
+
+A third, rarer mode — the probe RA process dying outright (capture 1,
+broken-pipe nudge write) — remains unexplained but is now fully observable:
+reader terminal event, child-alive bit, exit status, and both stderr rings
+are dumped on every s3 failure path, and the product session detects
+transport death and routes it through the restart circuit breaker instead
+of projecting Live forever.
 
 ## Problem statement
 
@@ -98,14 +137,55 @@ measured before this packet). The post-mortem did not run on this capture
 | CI dispatch 28759864236 | 3-OS | e513ffb | green |
 | CI dispatch 28759998401 | 3-OS | 89f5f53 | green |
 | CI dispatch 28760091635 | 3-OS | 04d50c3 | in flight |
-| Loop 3 (12 runs, concurrent release build load) | local Windows | 04d50c3 | in flight |
+| Loop 3 (12 runs, concurrent release build) | local Windows | 89f5f53 | 12/12 green |
+| Loop 4 (12 runs, sustained build load) | local Windows | 04d50c3 | 12/12 green |
+| CI dispatches 28760091635 / 28760188624 | 3-OS | 04d50c3 | green |
 
-## Open questions the next capture answers
+## Harness-driven isolation (how the causes were found)
 
-1. Reader terminal event: `Eof` (RA died/closed stdout) vs `Error(..)`
-   (our framing/parse bug) vs `None` (RA alive, truly silent).
-2. `child_running` / `exit_status`: RA death mode (panic 101, signal,
-   clean 0).
-3. Product-session state + stderr at wedge time: does the second RA hit the
-   notify error (it has no watcher=client), and does its activity correlate
-   with the probe RA's failure (shared `target/` contention)?
+| Experiment | Result | Conclusion |
+| --- | --- | --- |
+| Dual-session harness, 30 s deadline | wedge at cycle 1, deterministic | reproducible at will (vs 1/38 GP-1 runs) |
+| Solo control (`STRESS_SOLO=1`) | wedge at cycle 1 | two-RA topology NOT required |
+| Direct exe run (no cargo wrapper) | identical wedge, byte-identical frames | env/lock inheritance ruled out |
+| git-init parity | still wedges | git state ruled out |
+| `cachePriming.enable=false` (pre-URI-fix) | still wedges | priming not the (only) cause |
+| 300 s deadline (pre-URI-fix) | still "no diagnostics" | not mere slowness → looked deeper |
+| Buffered-notification dump | **error diagnostic WAS buffered** under `uri_hash=ca1e1187…` | server not silent — matching broken |
+| Candidate-hash forensics | RA's hash = lowercase-drive form of our URI | **root cause #1 confirmed** |
+| Fingerprint fix, priming on | cycle 1 ok, wedge at cycle 2, `buffered=0`, reader+child alive, stderr empty | the true silence mode isolated (ubuntu CI signature) |
+| `RA_LOG=info` capture | `fetch_native_diagnostics … block_on … inherent_impls_in_crate(core)` while priming churns | **root cause #2 confirmed** |
+| Fingerprint fix + priming off | **10/10 cycles in 3.4 s** | both fixes verified red→green |
+
+## Fixes landed (all TDD, red→green)
+
+| Commit | Fix |
+| --- | --- |
+| 13fe8df | `normalize_file_uri_drive` + fingerprint normalization (legion-lsp, 4 tests); ingest `uri_to_canonical_path` drive/`%3A`/leading-slash fixes (3 tests); `AppDocumentResolver` key+lookup normalization (2 tests); translate.rs drive normalization with `%3A`-before-drive-check ordering fix (1 test); GP-1 probe `cachePriming.enable=false`; reproduction harness committed as `#[ignore]` test |
+
+## Validation
+
+- Local loop 5 (12 GP-1 runs at 13fe8df, all fixes): **12/12 green**;
+  s3 initial publish matched at 762 ms on run 1.
+- CI `legion-smoke.yml` on the branch at 13fe8df: recorded in the PR
+  (3-OS matrix on the PR itself is the enforcement point).
+- Note: `pump_until` already returns `PumpOutcome::Closed` the moment the
+  reader records a terminal event, so a dead transport fails pumps fast;
+  the remaining nudge iterations against a dead pipe fail in milliseconds
+  and the write-failure path dumps the post-mortem.
+
+## Residual risks / follow-ups
+
+1. **Capture-1 process death** (Windows local, once): unexplained; now
+   fully observable on recurrence (exit status + both stderr channels).
+   Watch-list item.
+2. **Product session on real workspaces (M9)**: initializes WITHOUT
+   `files.watcher: client` and WITH cache priming. Priming is the right
+   default for interactive use, but the M9 planning pass must weigh the
+   notify-watcher wedge exposure (round 2) and first-diagnostic latency on
+   cold starts; the product session's diagnostics UX should not assume
+   publishes within seconds of didOpen on large workspaces.
+3. **translate.rs path form**: output keeps URI forward slashes (documented
+   in the fn); Windows consumers converting to editor canonical form must
+   handle `/`→`\` at apply time — M9 apply-activation (P3.F1.T2) checklist
+   item.
