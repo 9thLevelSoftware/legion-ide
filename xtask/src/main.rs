@@ -629,7 +629,7 @@ enum Commands {
     /// Run the scripted GP-2 golden-path smoke against a throwaway fixture workspace.
     ///
     /// Drives the AI-enabled legion-app product APIs (AppComposition, inline
-    /// prediction, provider routing, context manifest, undo/redo) against a
+    /// prediction, provider routing, context manifest, checkpoint pipeline) against a
     /// copy of `fixtures/gp1-rust` in a temp directory.  Writes
     /// `target/golden-path/gp2_report.toml`.
     ///
@@ -642,7 +642,7 @@ enum Commands {
     ///   s3 request inline prediction + accept + assert buffer changed
     ///   s4 provider router: local-loopback → Completed; remote → Refused
     ///   s5 context manifest: assemble from file sources; assert entries
-    ///   s6 undo/redo cycle: undo accepted prediction; redo
+    ///   s6 checkpoint-apply: proposal lifecycle + checkpoint verify + restore
     ///   s7 write evidence TOML
     ///
     /// Failures are non-blocking for PRs (runs in the separate legion-smoke
