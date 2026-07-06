@@ -13838,6 +13838,24 @@ impl AppComposition {
         self.batch_apply_policy = policy;
     }
 
+    /// Directly force a proposal's lifecycle state, bypassing the lifecycle state
+    /// machine.
+    ///
+    /// Test-only: enables testing defense-in-depth branches that are unreachable
+    /// via the normal validation → preview pathway (e.g. the `TerminalCommand` deny
+    /// arm in `apply_workspace_proposal`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn force_proposal_lifecycle_state_for_test(
+        &self,
+        proposal_id: ProposalId,
+        state: ProposalLifecycleState,
+    ) {
+        self.proposal_coordinator
+            .proposal_states
+            .borrow_mut()
+            .insert(proposal_id, state);
+    }
+
     /// Wires disk-backed palette usage persistence for a workspace. Usage
     /// counts (item keys only — never raw query text) live under the
     /// workspace-local `.legion/` state directory so ranking history survives
@@ -14057,6 +14075,12 @@ impl AppComposition {
         // (The eager start was removed here; see `bind_opened_file` for the
         // lazy trigger and `try_start_lsp_session_for_current_workspace` for
         // the palette command path.)
+
+        // PKT-APPLY: Enable batch runtime apply for Trusted workspaces so that
+        // `plan_batch_execution_contract` unblocks commit and finalize without
+        // requiring callers to manually enable the policy.  Untrusted workspaces
+        // (and any switch back to untrusted) remain fail-closed.
+        self.batch_apply_policy.enabled = trust == WorkspaceTrustState::Trusted;
 
         Ok(opened)
     }

@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use legion_app::AppComposition;
 use legion_protocol::{
     BatchProposalPayload, CanonicalPath, CapabilityId, CorrelationId, CreateFileProposal,
-    PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity,
+    FileTreeNode, PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity,
     ProposalBatchItem, ProposalBatchRollbackPolicy, ProposalDenialReason, ProposalId,
     ProposalLifecycleState, ProposalPayload, ProposalRequest,
     ProposalResponse, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, StorageRepositoryRequest, StorageRepositoryResponse,
-    TerminalCommandProposal, TimestampMillis, WorkspaceGeneration, WorkspaceOpened,
-    WorkspaceProposal, WorkspaceTrustState,
+    ProposalVersionPreconditions, RenameFileProposal, StorageRepositoryRequest,
+    StorageRepositoryResponse, TerminalCommandProposal, TimestampMillis, WorkspaceGeneration,
+    WorkspaceId, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use legion_security::BatchRuntimeApplyPolicy;
 use uuid::Uuid;
@@ -202,6 +203,53 @@ fn register_validate_preview(app: &mut AppComposition, proposal: &WorkspacePropo
         ),
         "proposal should be previewed"
     );
+}
+
+/// Read the workspace tree for a workspace.
+fn workspace_tree(app: &AppComposition, workspace_id: WorkspaceId) -> Vec<FileTreeNode> {
+    match app
+        .workspace()
+        .handle(WorkspaceRequest::ReadTree(workspace_id))
+        .expect("read workspace tree")
+    {
+        WorkspaceResponse::Tree(tree) => tree,
+        other => panic!("expected workspace tree, got {other:?}"),
+    }
+}
+
+/// Find a node in the workspace tree by filename.
+fn workspace_node_by_name(
+    app: &AppComposition,
+    workspace_id: WorkspaceId,
+    name: &str,
+) -> FileTreeNode {
+    workspace_tree(app, workspace_id)
+        .into_iter()
+        .find(|node| node.name == name)
+        .unwrap_or_else(|| panic!("workspace node '{name}' not found"))
+}
+
+/// Build a `ProposalVersionPreconditions` from a workspace tree node.
+fn file_preconditions(
+    node: &FileTreeNode,
+    workspace_generation: WorkspaceGeneration,
+) -> ProposalVersionPreconditions {
+    let fingerprint = node
+        .metadata
+        .as_ref()
+        .and_then(|m| m.fingerprint.clone())
+        .expect("file node fingerprint");
+    ProposalVersionPreconditions {
+        file_version: Some(node.identity.content_version),
+        buffer_version: None,
+        snapshot_id: None,
+        generation: Some(workspace_generation),
+        file_content_version: Some(node.identity.content_version),
+        workspace_generation: Some(workspace_generation),
+        expected_fingerprint: Some(fingerprint),
+        expected_file_length: node.metadata.as_ref().and_then(|m| m.size_bytes),
+        expected_modified_at: None,
+    }
 }
 
 /// Read the audit lifecycle state for a proposal via the storage port.
@@ -601,6 +649,187 @@ fn terminal_command_proposal_apply_is_denied_with_audit() {
         audit_state,
         Some(ProposalLifecycleState::Applied),
         "terminal-command proposal audit must not show Applied"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── Finding 1: approve_and_apply_rename_proposal end-to-end test ─────────────
+
+/// Full lifecycle for `approve_and_apply_rename_proposal`:
+/// open workspace → create proposal in Previewed state → call the method →
+/// assert Applied → verify the file was physically renamed on disk.
+#[test]
+fn approve_and_apply_rename_proposal_applies_and_renames_file() {
+    let root = create_root();
+    let source_path = root.join("rename-source.txt");
+    let dest_path = root.join("rename-dest.txt");
+    std::fs::write(&source_path, "rename-me").expect("seed source file");
+
+    let (mut app, opened) = open_trusted_workspace(&root);
+
+    // Get the workspace tree node for the source file so we have its identity.
+    let node = workspace_node_by_name(&app, opened.workspace_id, "rename-source.txt");
+
+    // Build a RenameFile proposal using the scanned file identity.
+    let proposal = WorkspaceProposal {
+        proposal_id: ProposalId(900),
+        principal: PrincipalId("test-principal".to_string()),
+        capability: CapabilityId("fs.write".to_string()),
+        correlation_id: CorrelationId(900),
+        payload: ProposalPayload::RenameFile(RenameFileProposal {
+            file: node.identity.clone(),
+            destination: CanonicalPath(dest_path.to_string_lossy().into_owned()),
+        }),
+        preconditions: file_preconditions(&node, opened.generation),
+        preview: PreviewSummary {
+            summary: "rename source to dest".to_string(),
+            details: vec![],
+        },
+        expires_at: None,
+        created_at: TimestampMillis(900),
+    };
+
+    // Bring the proposal to Previewed state via the normal lifecycle path.
+    register_validate_preview(&mut app, &proposal);
+
+    // Call the method under test.
+    let response = app
+        .approve_and_apply_rename_proposal(proposal.proposal_id)
+        .expect("approve_and_apply_rename_proposal must not error");
+
+    assert!(
+        matches!(response, ProposalResponse::Applied(_)),
+        "approve_and_apply_rename_proposal should return Applied; got {response:?}"
+    );
+
+    // Verify the rename actually happened on disk.
+    assert!(
+        !source_path.exists(),
+        "source file must no longer exist after rename"
+    );
+    assert!(
+        dest_path.exists(),
+        "destination file must exist after rename"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&dest_path).expect("read dest"),
+        "rename-me",
+        "file content must be preserved after rename"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── Finding 2: BatchRuntimeApplyPolicy production activation path test ────────
+
+/// Opening a Trusted workspace must automatically enable the batch runtime apply
+/// policy so that `plan_batch_execution_contract` returns `commit_blocked: false`
+/// and `finalize_blocked: false` without requiring a separate test-only
+/// `set_batch_apply_policy_for_test` call.
+#[test]
+fn open_trusted_workspace_enables_batch_policy_for_production() {
+    let root = create_root();
+    let (app, opened) = open_trusted_workspace(&root);
+    let proposal = batch_create_proposal(&root, opened.workspace_id, opened.generation);
+
+    let contract = app.plan_batch_execution_contract(&proposal);
+
+    assert!(
+        !contract.commit_blocked,
+        "trusted workspace open must unblock commit without manual policy override; \
+         contract: {contract:?}"
+    );
+    assert!(
+        !contract.finalize_blocked,
+        "trusted workspace open must unblock finalize without manual policy override; \
+         contract: {contract:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── Finding 3: TerminalCommand defense-in-depth arm test ─────────────────────
+
+/// The `TerminalCommand` arm in `apply_workspace_proposal` is defense-in-depth:
+/// validate normally rejects it before the proposal can reach `Previewed`.
+/// This test bypasses validate by force-setting the lifecycle state and confirms
+/// the payload-level deny arm fires correctly.
+#[test]
+fn terminal_command_defense_in_depth_arm_denied_from_previewed_state() {
+    let root = create_root();
+    let (mut app, _opened) = open_trusted_workspace(&root);
+
+    // Use `editor.write` so the ProposalApplyGate passes (doesn't start with
+    // "terminal." / "plugin." / "remote." / "collaboration." or "fs.").
+    let proposal = WorkspaceProposal {
+        proposal_id: ProposalId(701),
+        principal: PrincipalId("test-principal".to_string()),
+        capability: CapabilityId("editor.write".to_string()),
+        correlation_id: CorrelationId(701),
+        payload: ProposalPayload::TerminalCommand(TerminalCommandProposal {
+            session_id: None,
+            command: "echo hello".to_string(),
+            cwd: None,
+            env: Default::default(),
+        }),
+        preconditions: ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: None,
+            snapshot_id: None,
+            generation: None,
+            file_content_version: None,
+            workspace_generation: None,
+            expected_fingerprint: None,
+            expected_file_length: None,
+            expected_modified_at: None,
+        },
+        preview: PreviewSummary {
+            summary: "defense-in-depth terminal test".to_string(),
+            details: vec![],
+        },
+        expires_at: None,
+        created_at: TimestampMillis(701),
+    };
+
+    // Register lifecycle context and set Created state.
+    assert!(
+        matches!(
+            app.register_proposal_lifecycle(&proposal).expect("register"),
+            ProposalResponse::Created(_)
+        ),
+        "proposal must be created"
+    );
+
+    // Bypass validate (which would reject TerminalCommand) by forcing the
+    // lifecycle state directly to Previewed.
+    app.force_proposal_lifecycle_state_for_test(
+        proposal.proposal_id,
+        ProposalLifecycleState::Previewed,
+    );
+
+    // Now apply — must hit the defense-in-depth deny arm, not Applied.
+    let response = app
+        .handle_proposal_request(ProposalRequest::Apply(proposal.clone()))
+        .expect("apply should not error");
+
+    assert!(
+        matches!(
+            response,
+            ProposalResponse::Denied {
+                reason: ProposalDenialReason::PolicyDenied,
+                ..
+            }
+        ),
+        "TerminalCommand bypassing validate must be denied at payload level; got {response:?}"
+    );
+
+    // Audit record must reflect denial, not apply.
+    let audit_state = audit_lifecycle_state(&app, proposal.proposal_id);
+    assert_eq!(
+        audit_state,
+        Some(ProposalLifecycleState::Denied),
+        "defense-in-depth terminal denial must produce Denied audit record"
     );
 
     let _ = std::fs::remove_dir_all(&root);
