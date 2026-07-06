@@ -8,6 +8,8 @@ mod code_canvas_painter;
 pub mod agent_comm;
 /// Editable plan editor projection.
 pub mod plan_editor;
+/// Proposal review and checkpoint timeline view models.
+pub mod proposal_review;
 /// Sandbox panel projection.
 pub mod sandbox_panel;
 /// Renderer-backed scope picker for delegated tasks.
