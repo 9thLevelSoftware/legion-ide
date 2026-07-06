@@ -312,11 +312,12 @@ pub fn inline_edit_to_workspace_proposal(
         WorkspaceProposal,
     };
 
-    // Guard: all complete hunks must have an explicit disposition before a
-    // proposal can be created (no silent partial-apply of undecided hunks).
     for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
-        if !overlay.hunk_dispositions.contains_key(&hunk.hunk_id) {
-            return Err(InlineEditError::UndecidedHunksRemaining);
+        match overlay.hunk_dispositions.get(&hunk.hunk_id) {
+            None | Some(&DelegatedTaskProposalHunkDisposition::Pending) => {
+                return Err(InlineEditError::UndecidedHunksRemaining);
+            }
+            _ => {}
         }
     }
 
@@ -484,11 +485,12 @@ pub fn apply_inline_edit_with_undo_group(
         CHECKPOINT_SCHEMA_VERSION, CheckpointTarget, CheckpointTargetKind, DurableCheckpoint,
     };
 
-    // Guard: all complete hunks must have an explicit disposition before apply
-    // (no silent partial-apply of undecided hunks).
     for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
-        if !overlay.hunk_dispositions.contains_key(&hunk.hunk_id) {
-            return Err(InlineEditError::UndecidedHunksRemaining);
+        match overlay.hunk_dispositions.get(&hunk.hunk_id) {
+            None | Some(&DelegatedTaskProposalHunkDisposition::Pending) => {
+                return Err(InlineEditError::UndecidedHunksRemaining);
+            }
+            _ => {}
         }
     }
 

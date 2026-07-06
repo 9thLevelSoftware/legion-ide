@@ -584,3 +584,44 @@ fn undecided_hunks_prevent_apply() {
         "inline_edit_to_workspace_proposal must also return UndecidedHunksRemaining"
     );
 }
+
+#[test]
+fn explicit_pending_disposition_prevents_apply() {
+    let instruction = sample_instruction();
+    let mut overlay = inline_edit_from_instruction(instruction.clone(), "inst-13".to_string());
+
+    let two_hunks = format!(
+        "{}{}",
+        complete_chunk("hp", "orig_p", "repl_p"),
+        complete_chunk("hq", "orig_q", "repl_q"),
+    );
+    overlay.diff_hunks = accumulate_inline_edit_chunks(&[two_hunks], &instruction);
+    overlay.state = InlineEditOverlayState::Complete;
+
+    // hp is accepted, hq is explicitly set to Pending — must still be rejected
+    overlay.hunk_dispositions.insert(
+        "hp".to_string(),
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+    overlay.hunk_dispositions.insert(
+        "hq".to_string(),
+        DelegatedTaskProposalHunkDisposition::Pending,
+    );
+
+    let mut store = CheckpointStore::new();
+    let apply_result =
+        apply_inline_edit_with_undo_group(&overlay, BufferId(22), ProposalId(2222), &mut store);
+    assert!(
+        matches!(apply_result, Err(InlineEditError::UndecidedHunksRemaining)),
+        "explicit Pending disposition must be treated as undecided"
+    );
+
+    let proposal_result = inline_edit_to_workspace_proposal(&overlay, BufferId(22));
+    assert!(
+        matches!(
+            proposal_result,
+            Err(InlineEditError::UndecidedHunksRemaining)
+        ),
+        "explicit Pending disposition must also block proposal creation"
+    );
+}
