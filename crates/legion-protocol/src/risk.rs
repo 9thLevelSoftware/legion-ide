@@ -118,6 +118,12 @@ pub struct RiskAssessment {
     pub findings: Vec<RiskRuleFinding>,
     /// Aggregate label derived from the findings.
     pub aggregate_risk_label: ProposalRiskLabel,
+    /// Optional advisory classifier recommendation.
+    ///
+    /// This is metadata for display only — it never changes deterministic rule
+    /// outcomes or the aggregate label.  The classifier is always `advisory_only`.
+    #[serde(default)]
+    pub advisory_recommendation: Option<ProposalRiskLabel>,
 }
 
 impl RiskAssessment {

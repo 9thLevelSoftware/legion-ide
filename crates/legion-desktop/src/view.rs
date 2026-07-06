@@ -25,9 +25,7 @@ pub use assistant_rail::{
     assistant_rail_rows, render_streaming_assistant_rows,
 };
 pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
-pub use risk_strip::{
-    DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model,
-};
+pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
 use std::collections::{BTreeSet, HashMap, HashSet};

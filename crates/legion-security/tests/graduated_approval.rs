@@ -3,7 +3,9 @@
 use legion_protocol::ProposalRiskLabel;
 use legion_protocol::risk::{ApprovalLevel, RiskRuleId, RiskRuleInput};
 use legion_security::risk::{DeterministicRiskRuleEngine, RiskRuleThresholds};
-use legion_security::{ProposalAutoApprovalPolicy, approval_level_audit_metadata, derive_approval_level};
+use legion_security::{
+    ProposalAutoApprovalPolicy, approval_level_audit_metadata, derive_approval_level,
+};
 
 fn all_allow_input() -> RiskRuleInput {
     RiskRuleInput {
@@ -99,10 +101,7 @@ fn all_allow_without_policy_is_ask() {
 fn any_deny_is_require_explicit() {
     let engine = engine_with_low_threshold();
     let assessment = engine.evaluate(&file_count_deny_input());
-    assert!(
-        !assessment.is_allow(),
-        "file count rule should deny"
-    );
+    assert!(!assessment.is_allow(), "file count rule should deny");
     // PathScope should still allow for this input
     let path_finding = assessment.finding(RiskRuleId::PathScope).unwrap();
     assert!(path_finding.outcome.is_allow(), "path scope should allow");
@@ -134,7 +133,10 @@ fn empty_rule_ids_never_auto() {
     let engine = engine_with_low_threshold();
     let mut assessment = engine.evaluate(&all_allow_input());
     assessment.findings.clear();
-    assert!(assessment.is_allow(), "vacuous assessment allows (empty findings)");
+    assert!(
+        assessment.is_allow(),
+        "vacuous assessment allows (empty findings)"
+    );
 
     let level = derive_approval_level(&assessment, &full_policy());
     // empty findings → empty rule_ids → allows_rule_ids returns false → Ask
@@ -170,6 +172,9 @@ fn approval_level_appears_in_audit_metadata() {
         (ApprovalLevel::Deny, "Deny"),
     ] {
         let meta = approval_level_audit_metadata(level);
-        assert_eq!(meta["approval_level"], expected, "level {level:?} should map to {expected}");
+        assert_eq!(
+            meta["approval_level"], expected,
+            "level {level:?} should map to {expected}"
+        );
     }
 }

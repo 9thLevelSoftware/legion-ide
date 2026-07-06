@@ -6,11 +6,11 @@
 // is sufficient to exercise the view layer.  The gate-level integration is
 // covered in crates/legion-security/tests/graduated_approval.rs.
 
+use legion_desktop::view::{risk_strip_rows, risk_strip_view_model};
 use legion_protocol::ProposalRiskLabel;
 use legion_protocol::risk::{
     ApprovalLevel, RiskAssessment, RiskRuleFinding, RiskRuleId, RiskRuleOutcome,
 };
-use legion_desktop::view::{risk_strip_rows, risk_strip_view_model};
 
 // ---------------------------------------------------------------------------
 // Assessment builders
@@ -31,6 +31,7 @@ fn low_risk_assessment() -> RiskAssessment {
     RiskAssessment {
         findings,
         aggregate_risk_label: ProposalRiskLabel::Low,
+        advisory_recommendation: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn file_count_deny_assessment() -> RiskAssessment {
     RiskAssessment {
         findings,
         aggregate_risk_label: ProposalRiskLabel::High,
+        advisory_recommendation: None,
     }
 }
 
@@ -70,6 +72,7 @@ fn path_escape_assessment() -> RiskAssessment {
     RiskAssessment {
         findings,
         aggregate_risk_label: ProposalRiskLabel::High,
+        advisory_recommendation: None,
     }
 }
 
@@ -95,7 +98,10 @@ fn low_risk_auto_shows_no_pause() {
     assert!(vm.findings_summary.is_empty(), "No deny findings expected");
 
     let rows = risk_strip_rows(&assessment, ApprovalLevel::Auto);
-    assert!(rows.iter().any(|r| r.contains("Low")), "rows must show Low risk");
+    assert!(
+        rows.iter().any(|r| r.contains("Low")),
+        "rows must show Low risk"
+    );
     assert!(
         rows.iter().any(|r| r.contains("Auto")),
         "rows must show Auto approval"
@@ -188,10 +194,7 @@ fn high_risk_never_applies_silently() {
             vm.requires_human_approval,
             "level {level:?} must always require human approval in view model"
         );
-        assert!(
-            vm.paused,
-            "level {level:?} must always pause the proposal"
-        );
+        assert!(vm.paused, "level {level:?} must always pause the proposal");
     }
 
     // Auto and Ask do NOT require human approval at the view model level
