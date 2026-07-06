@@ -24210,27 +24210,25 @@ impl AppComposition {
             // Auto-create a durable checkpoint when a file-mutation proposal applies
             // successfully.  This captures the pre-mutation state so the apply can be
             // undone later via `restore_checkpoint`.
-            if let ProposalResponse::Applied(_) = &response {
-                if let Some(checkpoint) =
+            if let ProposalResponse::Applied(_) = &response
+                && let Some(checkpoint) =
                     Self::proposal_rollback_to_durable_checkpoint(&rollback, &proposal)
-                {
-                    let _ = self.checkpoint_store.save_checkpoint(checkpoint.clone());
-                    // Write a Created audit record.
-                    let target_paths = checkpoint
-                        .targets
-                        .iter()
-                        .map(|t| t.path.clone())
-                        .collect::<Vec<_>>();
-                    let audit = CheckpointAuditRecord {
-                        checkpoint_id: checkpoint.checkpoint_id.clone(),
-                        event: CheckpointAuditEvent::Created,
-                        proposal_id: checkpoint.proposal_id,
-                        target_paths,
-                        timestamp: TimestampMillis::now(),
-                        schema_version: 1,
-                    };
-                    let _ = self.checkpoint_store.save_audit_record(audit);
-                }
+            {
+                let _ = self.checkpoint_store.save_checkpoint(checkpoint.clone());
+                let target_paths = checkpoint
+                    .targets
+                    .iter()
+                    .map(|t| t.path.clone())
+                    .collect::<Vec<_>>();
+                let audit = CheckpointAuditRecord {
+                    checkpoint_id: checkpoint.checkpoint_id.clone(),
+                    event: CheckpointAuditEvent::Created,
+                    proposal_id: checkpoint.proposal_id,
+                    target_paths,
+                    timestamp: TimestampMillis::now(),
+                    schema_version: 1,
+                };
+                let _ = self.checkpoint_store.save_audit_record(audit);
             }
             if let ProposalResponse::Applied(_) = &response
                 && let Some(session_id) = shared_session_id

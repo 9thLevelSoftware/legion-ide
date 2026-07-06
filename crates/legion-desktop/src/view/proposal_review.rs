@@ -279,7 +279,7 @@ impl From<ProposalEvidencePanel> for DesktopEvidencePanelDtoViewModel {
     }
 }
 
-/// Groups a Delegate proposal review into per-file rows plus per-hunk rows.
+#[allow(dead_code)]
 pub(crate) fn proposal_review_file_groups(
     review: &DelegatedTaskProposalReview,
 ) -> Vec<DesktopProposalReviewFileViewModel> {
@@ -332,6 +332,7 @@ pub(crate) fn proposal_review_file_groups(
     files.into_values().collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn proposal_evidence_panel(
     snapshot: &ShellProjectionSnapshot,
 ) -> DesktopProposalEvidencePanelViewModel {
@@ -375,6 +376,7 @@ pub(crate) fn proposal_evidence_panel(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_proposal_evidence_panel(
     ui: &mut egui::Ui,
     panel: &DesktopProposalEvidencePanelViewModel,
@@ -524,6 +526,7 @@ pub(crate) fn render_proposal_evidence_panel(
     });
 }
 
+#[allow(dead_code)]
 fn proposal_evidence_row(
     row: &ProposalLedgerRow,
     verification_summary_count: usize,
@@ -573,6 +576,7 @@ fn proposal_evidence_row(
     }
 }
 
+#[allow(dead_code)]
 fn verification_evidence_row(row: &VerificationRunRow) -> DesktopVerificationRunEvidenceRow {
     DesktopVerificationRunEvidenceRow {
         run_id: row.run_id.clone(),

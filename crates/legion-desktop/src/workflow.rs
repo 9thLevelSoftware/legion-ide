@@ -3226,17 +3226,18 @@ impl DesktopEframeApp {
             // checkpoint is selected here from the durable store.
             {
                 let alt = input.modifiers.alt && !command;
-                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::Z) {
-                    if let Some(ckpt) = self
+                if alt
+                    && !input.modifiers.shift
+                    && input.key_pressed(egui::Key::Z)
+                    && let Some(ckpt) = self
                         .runtime
                         .list_checkpoints()
                         .into_iter()
                         .find(|c| c.available)
-                    {
-                        actions.push(DesktopAction::RestoreCheckpoint {
-                            checkpoint_id: ckpt.checkpoint_id.clone(),
-                        });
-                    }
+                {
+                    actions.push(DesktopAction::RestoreCheckpoint {
+                        checkpoint_id: ckpt.checkpoint_id.clone(),
+                    });
                 }
             }
 

@@ -218,10 +218,10 @@ impl CheckpointStore {
         {
             cp.available = false;
             // Persist the update.
-            if let Some(ref p) = path {
-                if let Ok(body) = serde_json::to_string_pretty(cp) {
-                    let _ = write_atomically(p, body.as_bytes());
-                }
+            if let Some(ref p) = path
+                && let Ok(body) = serde_json::to_string_pretty(cp)
+            {
+                let _ = write_atomically(p, body.as_bytes());
             }
         }
     }
@@ -296,28 +296,27 @@ impl CheckpointStore {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(bytes) = fs::read(&path) {
-                if let Ok(cp) = serde_json::from_slice::<DurableCheckpoint>(&bytes) {
-                    self.checkpoints.push(cp);
-                }
+            if let Ok(bytes) = fs::read(&path)
+                && let Ok(cp) = serde_json::from_slice::<DurableCheckpoint>(&bytes)
+            {
+                self.checkpoints.push(cp);
             }
         }
         self.checkpoints.sort_by_key(|c| c.created_at.0);
 
         // Load audit records similarly.
-        if let Some(audit_dir) = self.base_dir.as_ref().map(|d| d.join("audit")) {
-            if let Ok(entries) = fs::read_dir(&audit_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                        continue;
-                    }
-                    if let Ok(bytes) = fs::read(&path) {
-                        if let Ok(record) = serde_json::from_slice::<CheckpointAuditRecord>(&bytes)
-                        {
-                            self.audits.push(record);
-                        }
-                    }
+        if let Some(audit_dir) = self.base_dir.as_ref().map(|d| d.join("audit"))
+            && let Ok(entries) = fs::read_dir(&audit_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(bytes) = fs::read(&path)
+                    && let Ok(record) = serde_json::from_slice::<CheckpointAuditRecord>(&bytes)
+                {
+                    self.audits.push(record);
                 }
             }
         }
