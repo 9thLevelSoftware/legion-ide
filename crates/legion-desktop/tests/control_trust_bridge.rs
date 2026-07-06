@@ -184,6 +184,7 @@ fn assisted_ai_actions_translate_to_command_intents() {
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "propose edit".to_string(),
+            selection: None,
         })
     );
     assert_eq!(

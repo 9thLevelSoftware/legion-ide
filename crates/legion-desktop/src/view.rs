@@ -3,6 +3,8 @@
 #[cfg(feature = "ai")]
 mod assistant_rail;
 mod code_canvas_painter;
+#[cfg(feature = "ai")]
+pub mod ghost_text;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
@@ -23,9 +25,12 @@ pub mod terminal_panel;
 
 #[cfg(feature = "ai")]
 pub use assistant_rail::{
-    AssistantRailCodeBlockViewModel, AssistantRailRowViewModel, AssistantRailSegmentViewModel,
-    assistant_rail_rows, render_streaming_assistant_rows,
+    AssistantRailCodeBlockViewModel, AssistantRailCommandViewModel, AssistantRailRowViewModel,
+    AssistantRailSegmentViewModel, assistant_rail_rows, bind_proposals_to_blocks,
+    rail_command_view_models, render_streaming_assistant_rows, streaming_rail_rows,
 };
+#[cfg(feature = "ai")]
+pub use ghost_text::{GhostTextOverlayViewModel, GhostTextState, ghost_text_from_prediction};
 pub use manifest_panel::{
     DesktopManifestItemToggleViewModel, manifest_item_toggle_view_models, preview_rows,
     toggle_manifest_item_inclusion,

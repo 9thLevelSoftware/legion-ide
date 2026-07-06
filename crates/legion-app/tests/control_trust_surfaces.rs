@@ -909,6 +909,7 @@ fn assisted_ai_propose_is_proposal_only() {
     let outcome = ai_outcome(
         app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "add guard".to_string(),
+            selection: None,
         })
         .expect("assisted proposal starts"),
     );

@@ -9286,9 +9286,9 @@ impl CommandDispatcher {
             CommandDispatchIntent::StartAiExplain { instruction_label } => {
                 Ok(AppCommandRequest::StartAiExplain { instruction_label })
             }
-            CommandDispatchIntent::StartAiProposal { instruction_label } => {
-                Ok(AppCommandRequest::StartAiProposal { instruction_label })
-            }
+            CommandDispatchIntent::StartAiProposal {
+                instruction_label, ..
+            } => Ok(AppCommandRequest::StartAiProposal { instruction_label }),
             CommandDispatchIntent::SendDelegateChat { prompt_label } => {
                 Ok(AppCommandRequest::SendDelegateChat { prompt_label })
             }

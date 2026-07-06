@@ -34,6 +34,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod telemetry;
+
 /// Observability validation and redaction errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ObservabilityError {

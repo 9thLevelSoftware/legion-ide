@@ -2997,6 +2997,8 @@ pub enum CommandDispatchIntent {
     StartAiProposal {
         /// Display-safe instruction label.
         instruction_label: String,
+        /// Optional text selection range to scope the proposal to.
+        selection: Option<ProtocolTextRange>,
     },
     /// Send a Delegate chat turn with codebase-context retrieval.
     SendDelegateChat {
@@ -4673,6 +4675,7 @@ impl Shell {
                     } else {
                         instruction_label.to_string()
                     },
+                    selection: None,
                 },
             )));
         }
@@ -6640,6 +6643,7 @@ mod tests {
                 ":ai-propose add guard",
                 CommandDispatchIntent::StartAiProposal {
                     instruction_label: "add guard".to_string(),
+                    selection: None,
                 },
             ),
             (

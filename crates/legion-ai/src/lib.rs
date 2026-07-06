@@ -8,6 +8,8 @@ pub mod classifier;
 pub mod manifest;
 pub mod redaction;
 pub mod streaming;
+/// AI-side telemetry helpers for suggestion latency and acceptance.
+pub mod telemetry;
 
 pub use manifest::{
     ManifestFileSource, ManifestMemoryRecordSource, ManifestMetadata, ManifestRuleRecordSource,
@@ -16,6 +18,7 @@ pub use manifest::{
     collect_file_context, collect_memory_context, collect_rules_context, collect_selection_context,
     collect_symbol_context, collect_terminal_context,
 };
+pub use telemetry::{suggestion_telemetry_recorded_event, suggestion_telemetry_spool_record};
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};

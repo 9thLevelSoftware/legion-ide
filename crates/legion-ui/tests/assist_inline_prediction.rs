@@ -132,6 +132,7 @@ fn shell_carries_assist_inline_prediction_projection_and_routes_commands_without
             .expect("existing propose command should still parse"),
         Some(CommandDispatchIntent::StartAiProposal {
             instruction_label: "add guard".to_string(),
+            selection: None,
         })
     );
     assert_eq!(shell.projection_snapshot(), before_commands);

@@ -6645,6 +6645,56 @@ pub struct InlinePredictionLifecycleCommand {
     pub schema_version: u16,
 }
 
+/// Assistant rail command for invoking AI-assisted actions on selected code (PKT-RAIL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AssistantRailCommand {
+    /// Explain selected code.
+    Explain,
+    /// Fix selected code.
+    Fix,
+    /// Generate tests for selected code.
+    Test,
+    /// Generate documentation for selected code.
+    Doc,
+    /// Refactor selected code.
+    Refactor,
+}
+
+/// Tracks an assistant rail command as a capability with a stable string identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RailCommandCapability {
+    /// Rail command this capability represents.
+    pub command: AssistantRailCommand,
+    /// Stable capability identifier for policy-gating and telemetry.
+    pub capability_id: String,
+}
+
+/// Returns the full set of rail command capabilities with stable capability IDs.
+pub fn rail_command_capabilities() -> Vec<RailCommandCapability> {
+    vec![
+        RailCommandCapability {
+            command: AssistantRailCommand::Explain,
+            capability_id: "ai.rail.explain".to_string(),
+        },
+        RailCommandCapability {
+            command: AssistantRailCommand::Fix,
+            capability_id: "ai.rail.fix".to_string(),
+        },
+        RailCommandCapability {
+            command: AssistantRailCommand::Test,
+            capability_id: "ai.rail.test".to_string(),
+        },
+        RailCommandCapability {
+            command: AssistantRailCommand::Doc,
+            capability_id: "ai.rail.doc".to_string(),
+        },
+        RailCommandCapability {
+            command: AssistantRailCommand::Refactor,
+            capability_id: "ai.rail.refactor".to_string(),
+        },
+    ]
+}
+
 /// Stable agent run identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
