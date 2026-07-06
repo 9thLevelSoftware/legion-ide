@@ -6,8 +6,8 @@ use legion_protocol::{
     BatchProposalPayload, CanonicalPath, CapabilityId, CorrelationId, CreateFileProposal,
     FileTreeNode, PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity,
     ProposalBatchItem, ProposalBatchRollbackPolicy, ProposalDenialReason, ProposalId,
-    ProposalLifecycleState, ProposalPayload, ProposalRequest,
-    ProposalResponse, ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
+    ProposalLifecycleState, ProposalPayload, ProposalRequest, ProposalResponse,
+    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
     ProposalVersionPreconditions, RenameFileProposal, StorageRepositoryRequest,
     StorageRepositoryResponse, TerminalCommandProposal, TimestampMillis, WorkspaceGeneration,
     WorkspaceId, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
@@ -795,7 +795,8 @@ fn terminal_command_defense_in_depth_arm_denied_from_previewed_state() {
     // Register lifecycle context and set Created state.
     assert!(
         matches!(
-            app.register_proposal_lifecycle(&proposal).expect("register"),
+            app.register_proposal_lifecycle(&proposal)
+                .expect("register"),
             ProposalResponse::Created(_)
         ),
         "proposal must be created"

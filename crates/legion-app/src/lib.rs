@@ -169,8 +169,7 @@ use legion_remote::{
 };
 use legion_security::{
     BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy,
-    ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState,
-    mcp_tool_permission_request,
+    ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState, mcp_tool_permission_request,
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
@@ -14377,14 +14376,17 @@ impl AppComposition {
         let proposal = self
             .proposal_coordinator
             .proposal(proposal_id)
-            .ok_or_else(|| AppCompositionError::Protocol(ProtocolError {
-                code: "proposal.not_found".to_string(),
-                message: format!("rename proposal {proposal_id:?} not found in coordinator"),
-            }))?;
+            .ok_or_else(|| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal.not_found".to_string(),
+                    message: format!("rename proposal {proposal_id:?} not found in coordinator"),
+                })
+            })?;
 
         // Only approve if currently in Previewed state; if already Approved, skip.
         if matches!(
-            self.proposal_coordinator.current_lifecycle_state(proposal_id),
+            self.proposal_coordinator
+                .current_lifecycle_state(proposal_id),
             Some(ProposalLifecycleState::Previewed)
         ) {
             let approve_command = ProposalLifecycleCommand {
@@ -14410,12 +14412,12 @@ impl AppComposition {
         let proposal = self
             .proposal_coordinator
             .proposal(proposal_id)
-            .ok_or_else(|| AppCompositionError::Protocol(ProtocolError {
-                code: "proposal.not_found_after_approve".to_string(),
-                message: format!(
-                    "rename proposal {proposal_id:?} not found after approval"
-                ),
-            }))?;
+            .ok_or_else(|| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal.not_found_after_approve".to_string(),
+                    message: format!("rename proposal {proposal_id:?} not found after approval"),
+                })
+            })?;
 
         self.apply_workspace_proposal(proposal)
     }
@@ -23814,9 +23816,7 @@ impl AppComposition {
                 if trust_state == TrustState::Trusted {
                     SecurityDecision::Allow
                 } else {
-                    SecurityDecision::Deny(
-                        "file write denied for untrusted workspace".to_string(),
-                    )
+                    SecurityDecision::Deny("file write denied for untrusted workspace".to_string())
                 }
             } else {
                 // Editor-internal and other capabilities pass through the gate;
@@ -23828,8 +23828,7 @@ impl AppComposition {
             // role in this path is CAPABILITY POLICY, not approval recording.
             // Approval state is tracked by the proposal lifecycle (Approved vs
             // Previewed) which has already been validated above.
-            let gate = ProposalApplyGate::new(policy_decision)
-                .with_human_approval_recorded(true);
+            let gate = ProposalApplyGate::new(policy_decision).with_human_approval_recorded(true);
 
             if !gate.can_apply() {
                 let denial_reason = match gate.policy_decision() {

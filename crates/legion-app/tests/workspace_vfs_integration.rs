@@ -3614,8 +3614,14 @@ fn workspace_vfs_integration_batch_execution_contract_reports_audit_and_commit_b
     assert!(contract.audit_before_success_required);
     // PKT-APPLY: open_workspace(Trusted) now enables batch_apply_policy, so
     // commit and finalize are unblocked for trusted workspaces.
-    assert!(!contract.commit_blocked, "trusted workspace enables policy on open; contract: {contract:?}");
-    assert!(!contract.finalize_blocked, "trusted workspace enables policy on open; contract: {contract:?}");
+    assert!(
+        !contract.commit_blocked,
+        "trusted workspace enables policy on open; contract: {contract:?}"
+    );
+    assert!(
+        !contract.finalize_blocked,
+        "trusted workspace enables policy on open; contract: {contract:?}"
+    );
     assert_eq!(contract.proposal_id, ProposalId(736));
     assert_eq!(
         contract.batch_id,

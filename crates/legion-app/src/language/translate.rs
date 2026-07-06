@@ -1291,8 +1291,7 @@ mod tests {
         #[cfg(windows)]
         {
             assert_eq!(
-                native,
-                r"C:\Users\dev\main.rs",
+                native, r"C:\Users\dev\main.rs",
                 "Windows: uri_to_native_path must use backslashes"
             );
             // canonical still uses forward slashes
