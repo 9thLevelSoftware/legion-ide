@@ -4,11 +4,12 @@ use legion_ai_providers::{
     ANTHROPIC_PROVIDER_ID, AssistedAiProviderActivationDenial, CODESTRAL_PROVIDER_ID,
     COPILOT_NES_PROVIDER_ID, DETERMINISTIC_LOCAL_PROVIDER_ID, LLAMA_CPP_PROVIDER_ID,
     MERCURY_PROVIDER_ID, OLLAMA_PROVIDER_ID, OPENAI_COMPATIBLE_PROVIDER_ID, OPENAI_PROVIDER_ID,
-    can_activate_provider, provider_setup_rows, provider_tier,
+    can_activate_provider, capabilities::gate_provider_capabilities,
+    capabilities::provider_capability_matrix, provider_setup_rows, provider_tier,
 };
 use legion_protocol::{
-    AssistedAiProviderClass, AssistedAiProviderTier, AssistedAiWorkspaceConsent, PrincipalId,
-    TimestampMillis,
+    AssistedAiProviderAvailabilityState, AssistedAiProviderClass, AssistedAiProviderTier,
+    AssistedAiWorkspaceConsent, PrincipalId, TimestampMillis,
 };
 
 // ---------------------------------------------------------------------------
@@ -205,5 +206,109 @@ fn provider_setup_rows_show_tier_and_consent() {
     assert!(
         copilot_row.unwrap().contains("tier=HostedDenied"),
         "copilot-nes row must declare HostedDenied tier"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T3: Capability matrix gating
+// ---------------------------------------------------------------------------
+
+fn sample_byok_matrix() -> legion_protocol::AssistedAiCapabilityMatrix {
+    provider_capability_matrix(
+        ANTHROPIC_PROVIDER_ID,
+        "Anthropic Messages",
+        AssistedAiProviderClass::ByokRemote,
+        true,
+        true,
+        vec!["strict_tools".to_string()],
+        vec!["json_schema".to_string()],
+        vec![],
+        "provider-configured",
+        Some(200_000),
+        vec!["thinking.budget_tokens".to_string()],
+        "usage-reported",
+        AssistedAiProviderAvailabilityState::Available,
+    )
+}
+
+#[test]
+fn gated_matrix_preserves_capabilities_when_activated() {
+    let matrix = sample_byok_matrix();
+    let tier = AssistedAiProviderTier::ByokConsentRequired;
+    let consent = AssistedAiWorkspaceConsent::Granted {
+        granted_at: TimestampMillis(1_000_000),
+        principal: PrincipalId("test-principal".to_string()),
+    };
+
+    let gated = gate_provider_capabilities(&matrix, tier, &consent, true);
+
+    assert!(gated.supports_streaming, "streaming must be preserved on activation");
+    assert!(gated.supports_structured_output, "structured output must be preserved on activation");
+    assert_eq!(gated.tool_labels, vec!["strict_tools".to_string()]);
+    assert_eq!(
+        gated.availability,
+        AssistedAiProviderAvailabilityState::Available
+    );
+}
+
+#[test]
+fn gated_matrix_zeros_capabilities_when_denied() {
+    let matrix = sample_byok_matrix();
+    let tier = AssistedAiProviderTier::ByokConsentRequired;
+    // Consent pending — no credential
+    let consent = AssistedAiWorkspaceConsent::Pending;
+
+    let gated = gate_provider_capabilities(&matrix, tier, &consent, false);
+
+    assert!(!gated.supports_streaming, "streaming must be zeroed when denied");
+    assert!(!gated.supports_structured_output, "structured output must be zeroed when denied");
+    assert!(gated.tool_labels.is_empty(), "tool labels must be empty when denied");
+    assert!(gated.thinking_mode_labels.is_empty(), "thinking labels must be empty when denied");
+    assert_eq!(
+        gated.availability,
+        AssistedAiProviderAvailabilityState::Unavailable,
+        "availability must be Unavailable when denied"
+    );
+    // Structural fields preserved
+    assert_eq!(gated.provider_id, ANTHROPIC_PROVIDER_ID);
+    assert_eq!(gated.context_length_tokens, Some(200_000));
+}
+
+#[test]
+fn gated_matrix_never_adds_capabilities() {
+    // Start with a matrix that has no capabilities
+    let empty_matrix = provider_capability_matrix(
+        DETERMINISTIC_LOCAL_PROVIDER_ID,
+        "Deterministic Local",
+        AssistedAiProviderClass::Local,
+        false,
+        false,
+        vec![],
+        vec![],
+        vec![],
+        "N/A",
+        None,
+        vec![],
+        "none",
+        AssistedAiProviderAvailabilityState::Available,
+    );
+    let tier = AssistedAiProviderTier::LocalDefault;
+    let consent = AssistedAiWorkspaceConsent::NotRequired;
+
+    let gated = gate_provider_capabilities(&empty_matrix, tier, &consent, false);
+
+    // LocalDefault activates, but still cannot add capabilities not present in the original
+    assert!(!gated.supports_streaming, "gate must not add streaming that wasn't there");
+    assert!(!gated.supports_structured_output, "gate must not add SO that wasn't there");
+    assert!(gated.tool_labels.is_empty(), "gate must not add tool labels that weren't there");
+}
+
+#[test]
+fn capability_matrix_requires_provider_declaration() {
+    // has_explicit_declaration returns true only when schema_version >= 1
+    let matrix = sample_byok_matrix();
+    assert!(
+        matrix.has_explicit_declaration(),
+        "provider_capability_matrix must produce a matrix with explicit declaration (schema_version=1)"
     );
 }
