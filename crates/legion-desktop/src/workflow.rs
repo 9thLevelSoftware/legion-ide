@@ -28,6 +28,7 @@ use legion_protocol::{
     WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
+use legion_storage::{OsKeyringSecretStore, SecretStore, provider_secret_reference};
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
     SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
@@ -951,6 +952,57 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
+            }
+            // PKT-PROV: store a BYOK API key in the OS keyring.
+            DesktopAction::SetProviderApiKey {
+                provider_id,
+                api_key,
+            } => {
+                let reference = provider_secret_reference(&provider_id, "api_key");
+                match OsKeyringSecretStore.store(&reference, &api_key) {
+                    Ok(()) => {
+                        // SensitiveString::drop() zeroizes the key bytes before deallocation.
+                        drop(api_key);
+                        self.set_status(
+                            StatusSeverity::Info,
+                            format!("API key stored for provider: {provider_id}"),
+                        );
+                        self.refresh_projection()?;
+                        self.last_outcome = DesktopWorkflowOutcome::Noop;
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Noop)
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
+            // PKT-PROV: delete a BYOK API key from the OS keyring.
+            DesktopAction::DeleteProviderApiKey { provider_id } => {
+                let reference = provider_secret_reference(&provider_id, "api_key");
+                match OsKeyringSecretStore.delete(&reference) {
+                    Ok(()) => {
+                        self.set_status(
+                            StatusSeverity::Info,
+                            format!("API key deleted for provider: {provider_id}"),
+                        );
+                        self.refresh_projection()?;
+                        self.last_outcome = DesktopWorkflowOutcome::Noop;
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Noop)
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
             }
             // PKT-CKPT: restore a durable checkpoint through app authority.
             DesktopAction::RestoreCheckpoint { checkpoint_id } => {

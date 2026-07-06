@@ -25,12 +25,15 @@ pub const PRODUCT_ENV_PREFIX: &str = "LEGION";
 pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 
 /// Structured context manifest assembly helpers.
+pub mod capability;
+/// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
 pub mod risk;
 pub mod scope;
 pub mod tools;
 
+pub use capability::AssistedAiCapabilityMatrix;
 pub use manifest::{ContextManifestAssembly, ContextManifestSources};
 pub use plan::{
     EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
@@ -6164,6 +6167,39 @@ pub enum AssistedAiProviderAvailabilityState {
     Refused,
     /// Provider is unavailable without fallback to unsafe routes.
     Unavailable,
+}
+
+/// Activation policy tier for an assisted-AI provider.
+///
+/// Determines what preconditions must be met before a provider may be activated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssistedAiProviderTier {
+    /// Always active; no consent or credential required (deterministic-local).
+    LocalDefault,
+    /// Active when runtime is detected; no consent required (Ollama, llama.cpp).
+    LocalLoopbackOptIn,
+    /// Requires explicit workspace consent and BYOK credential (Anthropic, OpenAI, Codestral, etc.).
+    ByokConsentRequired,
+    /// Always denied; never activatable without a future policy change (Copilot NES, Mercury).
+    HostedDenied,
+}
+
+/// Workspace consent state for BYOK provider activation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssistedAiWorkspaceConsent {
+    /// Consent is not required for this provider tier.
+    NotRequired,
+    /// BYOK provider registered; consent not yet given.
+    Pending,
+    /// Consent was explicitly granted by the workspace principal.
+    Granted {
+        /// When consent was granted.
+        granted_at: TimestampMillis,
+        /// Principal that granted consent.
+        principal: PrincipalId,
+    },
+    /// Consent was explicitly denied or the workspace is air-gapped.
+    Denied,
 }
 
 /// Consent posture for an assisted-AI boundary evaluation.

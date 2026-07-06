@@ -1,5 +1,6 @@
 //! Desktop event to app-command bridge.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use legion_project::git_pull_request_url;
@@ -18,6 +19,40 @@ use legion_ui::{
     ToastVerbosityProjection,
 };
 use thiserror::Error;
+
+/// A string wrapper that redacts its value in `Debug` output and zeroizes on drop.
+///
+/// Use this type for fields that carry secrets (API keys, tokens) so they are
+/// never accidentally printed to logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SensitiveString(pub String);
+
+impl fmt::Debug for SensitiveString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SensitiveString(\"<redacted>\")")
+    }
+}
+
+impl From<String> for SensitiveString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::ops::Deref for SensitiveString {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for SensitiveString {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,6 +780,22 @@ pub enum DesktopAction {
     RestoreCheckpoint {
         /// Stable checkpoint identifier selected from projected checkpoint timeline data.
         checkpoint_id: String,
+    },
+    /// Store a BYOK API key in the OS keyring for a provider (PKT-PROV).
+    ///
+    /// The key value is stored immediately to the OS keyring and never persisted
+    /// to any config file. The key is consumed (zeroized) after the store call.
+    SetProviderApiKey {
+        /// Provider identifier (e.g. "anthropic", "openai").
+        provider_id: String,
+        /// The API key value; consumed and zeroized immediately after storage.
+        /// Wrapped in `SensitiveString` so the value is never printed in debug output.
+        api_key: SensitiveString,
+    },
+    /// Delete a stored BYOK API key from the OS keyring (PKT-PROV).
+    DeleteProviderApiKey {
+        /// Provider identifier whose key should be removed.
+        provider_id: String,
     },
 }
 
@@ -1932,6 +1983,10 @@ impl DesktopCommandBridge {
             // PKT-CKPT: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; this arm satisfies exhaustiveness but is never evaluated in production.
             DesktopAction::RestoreCheckpoint { .. } => DesktopBridgeOutput::Noop,
+            // PKT-PROV: handled in DesktopWorkflowRuntime::handle_action before reaching the
+            // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
+            DesktopAction::SetProviderApiKey { .. }
+            | DesktopAction::DeleteProviderApiKey { .. } => DesktopBridgeOutput::Noop,
         }
     }
 

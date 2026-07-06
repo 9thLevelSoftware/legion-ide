@@ -8,6 +8,14 @@ pub mod plan;
 /// Local file history metadata store.
 pub mod local_history;
 
+/// OS keyring-backed and in-memory secret stores for BYOK provider credentials.
+pub mod secrets;
+
+pub use secrets::{
+    InMemorySecretStore, OsKeyringSecretStore, PROVIDER_SECRET_SERVICE, SecretReference,
+    SecretStore, SecretStoreError, provider_secret_reference,
+};
+
 /// Durable checkpoint store for workspace-level file-mutation rollback.
 pub mod checkpoint;
 

@@ -89,11 +89,13 @@ Every current workspace crate must have an explicit internal dependency policy e
 - `legion-desktop` may depend on:
   - `legion-agent`
   - `legion-ai` (optional, feature-gated behind `ai`)
+  - `legion-ai-providers` (provider tier/gating for setup UX, M9 PKT-PROV)
   - `legion-app`
   - `legion-project`
   - `legion-protocol`
   - `legion-remote`
   - `legion-sandbox`
+  - `legion-storage` (OS keyring secret store for BYOK key entry, M9 PKT-PROV)
   - `legion-terminal`
   - `legion-ui`
 

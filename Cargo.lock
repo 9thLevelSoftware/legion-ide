@@ -3857,17 +3857,20 @@ dependencies = [
  "egui",
  "legion-agent",
  "legion-ai",
+ "legion-ai-providers",
  "legion-app",
  "legion-project",
  "legion-protocol",
  "legion-remote",
  "legion-sandbox",
+ "legion-storage",
  "legion-terminal",
  "legion-ui",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4046,6 +4049,7 @@ dependencies = [
 name = "legion-storage"
 version = "0.1.0"
 dependencies = [
+ "keyring",
  "legion-observability",
  "legion-protocol",
  "legion-security",

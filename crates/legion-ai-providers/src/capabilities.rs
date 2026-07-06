@@ -2,8 +2,10 @@
 
 use legion_protocol::{
     AssistedAiCapabilityMatrix, AssistedAiProviderAvailabilityState, AssistedAiProviderClass,
-    RedactionHint,
+    AssistedAiProviderTier, AssistedAiWorkspaceConsent, RedactionHint,
 };
+
+use crate::can_activate_provider;
 
 /// Builds a metadata-only capability matrix with explicit labels.
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +40,41 @@ pub fn provider_capability_matrix(
         availability,
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
+    }
+}
+
+/// Returns a zeroed capability matrix when the provider cannot be activated,
+/// or the original matrix when activation succeeds.
+///
+/// Structural fields (provider_id, provider_label, provider_class, context lengths,
+/// cost label, redaction hints, schema_version) are always preserved so callers
+/// can still display provider metadata even for denied providers.
+pub fn gate_provider_capabilities(
+    matrix: &AssistedAiCapabilityMatrix,
+    tier: AssistedAiProviderTier,
+    consent: &AssistedAiWorkspaceConsent,
+    has_credential: bool,
+) -> AssistedAiCapabilityMatrix {
+    if can_activate_provider(tier, consent, has_credential).is_ok() {
+        matrix.clone()
+    } else {
+        AssistedAiCapabilityMatrix {
+            provider_id: matrix.provider_id.clone(),
+            provider_label: matrix.provider_label.clone(),
+            provider_class: matrix.provider_class,
+            supports_streaming: false,
+            supports_structured_output: false,
+            tool_labels: vec![],
+            structured_output_labels: vec![],
+            vision_labels: vec![],
+            context_length_label: matrix.context_length_label.clone(),
+            context_length_tokens: matrix.context_length_tokens,
+            thinking_mode_labels: vec![],
+            cost_usage_label: matrix.cost_usage_label.clone(),
+            availability: AssistedAiProviderAvailabilityState::Unavailable,
+            redaction_hints: matrix.redaction_hints.clone(),
+            schema_version: matrix.schema_version,
+        }
     }
 }
 
