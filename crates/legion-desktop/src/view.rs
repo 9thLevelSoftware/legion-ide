@@ -75,6 +75,8 @@ pub struct DesktopProjectionViewState {
     pub hover_tooltip_visible: bool,
     /// Keyboard-focused row index in the Problems panel (T4).
     pub problems_selected_index: usize,
+    /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
+    pub review_hunk_selected_index: usize,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -89,6 +91,7 @@ impl Default for DesktopProjectionViewState {
             completion_selected_index: 0,
             hover_tooltip_visible: false,
             problems_selected_index: 0,
+            review_hunk_selected_index: 0,
         }
     }
 }

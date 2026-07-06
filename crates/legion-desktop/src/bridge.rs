@@ -671,6 +671,26 @@ pub enum DesktopAction {
     ProblemPrev,
     /// Activate (navigate to) the currently focused problem in the Problems panel (T4).
     ProblemActivate,
+    /// Move keyboard focus to the next hunk in the proposal review surface (PKT-DIFF).
+    ReviewHunkNext,
+    /// Move keyboard focus to the previous hunk in the proposal review surface (PKT-DIFF).
+    ReviewHunkPrev,
+    /// Accept the currently focused hunk in the proposal review surface (PKT-DIFF).
+    ReviewHunkAccept,
+    /// Reject the currently focused hunk in the proposal review surface (PKT-DIFF).
+    ReviewHunkReject,
+    /// Accept all hunks in the proposal review surface (PKT-DIFF).
+    ReviewAcceptAll,
+    /// Reject all hunks in the proposal review surface (PKT-DIFF).
+    ReviewRejectAll,
+    /// Apply the filtered proposal built from accepted-hunk dispositions (PKT-DIFF).
+    ///
+    /// Binds to Alt+Enter; intercepted in DesktopRuntime::handle_action.
+    ReviewApply,
+    /// Dismiss the proposal review surface, clearing all dispositions (PKT-DIFF).
+    ///
+    /// Binds to Alt+Escape; intercepted in DesktopRuntime::handle_action.
+    ReviewDismiss,
     /// Move selection down in the LSP completion popup (T6).
     CompletionNext,
     /// Move selection up in the LSP completion popup (T6).
@@ -1843,6 +1863,16 @@ impl DesktopCommandBridge {
             DesktopAction::ProblemNext
             | DesktopAction::ProblemPrev
             | DesktopAction::ProblemActivate => DesktopBridgeOutput::Noop,
+            // PKT-DIFF: proposal review hunk navigation + disposition + apply/dismiss are
+            // all intercepted in DesktopRuntime::handle_action before reaching the bridge.
+            DesktopAction::ReviewHunkNext
+            | DesktopAction::ReviewHunkPrev
+            | DesktopAction::ReviewHunkAccept
+            | DesktopAction::ReviewHunkReject
+            | DesktopAction::ReviewAcceptAll
+            | DesktopAction::ReviewRejectAll
+            | DesktopAction::ReviewApply
+            | DesktopAction::ReviewDismiss => DesktopBridgeOutput::Noop,
             // T6: completion popup actions are intercepted in DesktopRuntime::handle_action
             // before reaching the bridge.  These arms exist solely for exhaustiveness.
             DesktopAction::CompletionNext

@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+pub mod diff;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 

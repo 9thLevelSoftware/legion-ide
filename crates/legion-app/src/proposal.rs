@@ -1,6 +1,10 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
+use legion_editor::diff::{compute_line_diff, diff_hunks_to_section_projection};
 use legion_protocol::{
+    DelegatedTaskProposalHunkDisposition, ProposalDiffSurfaceProjection, ProposalId,
     ProposalPayload, ProposalTargetCoverage, ProposalTargetCoverageKind, WorkspaceProposal,
 };
 use legion_security::ProposalAutoApprovalPolicy;
@@ -150,6 +154,184 @@ pub fn filtered_batch_proposal_for_accepted_targets(
     let mut filtered_proposal = proposal.clone();
     filtered_proposal.payload = ProposalPayload::Batch(filtered_batch);
     Some(filtered_proposal)
+}
+
+/// Compute a [`ProposalDiffSurfaceProjection`] from a batch proposal and
+/// before/after text pairs.
+///
+/// `file_contents` maps each `target_id` from the proposal's target coverage
+/// to a `(old_text, new_text)` pair.  Targets whose `target_id` is absent from
+/// the map are silently skipped so callers can provide a subset of pairs for
+/// targeted diffing.
+pub fn compute_proposal_diff_surface(
+    proposal: &WorkspaceProposal,
+    file_contents: &HashMap<String, (String, String)>,
+) -> ProposalDiffSurfaceProjection {
+    let targets = match &proposal.payload {
+        ProposalPayload::Batch(batch) => batch.target_coverage.targets.clone(),
+        _ => Vec::new(),
+    };
+
+    let mut sections = Vec::new();
+    for (section_index, target) in targets.iter().enumerate() {
+        let (old_text, new_text) = match file_contents.get(&target.target_id) {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let hunks = compute_line_diff(old_text, new_text);
+        let section = diff_hunks_to_section_projection(
+            &hunks,
+            proposal.proposal_id,
+            section_index,
+            target.file_id,
+            target.path.clone(),
+            Some(target.target_id.clone()),
+        );
+        sections.push(section);
+    }
+
+    ProposalDiffSurfaceProjection {
+        active_section_id: sections.first().map(|s| s.section_id.clone()),
+        sections,
+        schema_version: 1,
+    }
+}
+
+/// Returns a filtered batch proposal keeping only targets whose diff-surface
+/// hunks were accepted.
+///
+/// `accepted_hunk_ids` is the set of [`ProposalDiffChunkDescriptor::chunk_id`]
+/// values that carry `Accept` dispositions.  Each accepted chunk is mapped back
+/// to its owning section's `target_id` via the supplied `diff_surface`, and the
+/// resulting set of accepted target IDs is forwarded to
+/// [`filtered_batch_proposal_for_accepted_targets`].
+pub fn filtered_batch_proposal_for_accepted_hunks(
+    proposal: &WorkspaceProposal,
+    diff_surface: &ProposalDiffSurfaceProjection,
+    accepted_hunk_ids: &HashSet<String>,
+) -> Option<WorkspaceProposal> {
+    if accepted_hunk_ids.is_empty() {
+        return None;
+    }
+
+    // Conservative target-level filtering: a section's target is included only when
+    // ALL of its chunks are in the accepted set AND the section has at least one chunk.
+    //
+    // Per-hunk intra-file filtering operates at target granularity because
+    // proposal items are atomic per-target; true intra-item filtering requires the
+    // apply engine to support partial operations (deferred to PKT-APPLY).  This
+    // conservative default prevents partially-reviewed targets from being silently
+    // applied with unreviewed hunks.
+    let accepted_target_ids: HashSet<String> = diff_surface
+        .sections
+        .iter()
+        .filter(|section| {
+            !section.chunks.is_empty()
+                && section
+                    .chunks
+                    .iter()
+                    .all(|chunk| accepted_hunk_ids.contains(&chunk.chunk_id))
+        })
+        .filter_map(|section| section.target_id.clone())
+        .collect();
+
+    filtered_batch_proposal_for_accepted_targets(proposal, &accepted_target_ids)
+}
+
+// ─── Per-hunk disposition state with undo support ────────────────────────────
+
+/// Undo stack entry for a single hunk disposition change.
+#[derive(Debug, Clone)]
+struct HunkDispositionUndoEntry {
+    proposal_id: ProposalId,
+    hunk_id: String,
+    previous: DelegatedTaskProposalHunkDisposition,
+}
+
+/// Undo-able per-hunk disposition state for the multi-file proposal review
+/// surface.
+///
+/// Dispositions default to [`DelegatedTaskProposalHunkDisposition::Pending`]
+/// when not explicitly set.
+#[derive(Debug, Default)]
+pub struct ProposalHunkDispositionState {
+    decisions: HashMap<(ProposalId, String), DelegatedTaskProposalHunkDisposition>,
+    undo_stack: VecDeque<HunkDispositionUndoEntry>,
+}
+
+impl ProposalHunkDispositionState {
+    /// Construct a new, empty disposition state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the disposition for a hunk, recording the previous value on the
+    /// undo stack so it can be restored.
+    pub fn set_hunk_disposition(
+        &mut self,
+        proposal_id: ProposalId,
+        hunk_id: impl Into<String>,
+        disposition: DelegatedTaskProposalHunkDisposition,
+    ) {
+        let hunk_id = hunk_id.into();
+        let previous = self
+            .decisions
+            .get(&(proposal_id, hunk_id.clone()))
+            .copied()
+            .unwrap_or(DelegatedTaskProposalHunkDisposition::Pending);
+        self.undo_stack.push_back(HunkDispositionUndoEntry {
+            proposal_id,
+            hunk_id: hunk_id.clone(),
+            previous,
+        });
+        self.decisions.insert((proposal_id, hunk_id), disposition);
+    }
+
+    /// Undo the most recent disposition change, restoring the previous value.
+    ///
+    /// Returns `true` when a change was undone, `false` when the undo stack was
+    /// empty.
+    pub fn undo_last_disposition_change(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop_back() else {
+            return false;
+        };
+        if entry.previous == DelegatedTaskProposalHunkDisposition::Pending {
+            self.decisions.remove(&(entry.proposal_id, entry.hunk_id));
+        } else {
+            self.decisions
+                .insert((entry.proposal_id, entry.hunk_id), entry.previous);
+        }
+        true
+    }
+
+    /// Current disposition for a hunk.  Defaults to `Pending`.
+    pub fn disposition(
+        &self,
+        proposal_id: ProposalId,
+        hunk_id: &str,
+    ) -> DelegatedTaskProposalHunkDisposition {
+        self.decisions
+            .get(&(proposal_id, hunk_id.to_string()))
+            .copied()
+            .unwrap_or(DelegatedTaskProposalHunkDisposition::Pending)
+    }
+
+    /// Collect all chunk IDs that carry an `Accept` disposition for the given
+    /// proposal.
+    pub fn accepted_hunk_ids(&self, proposal_id: ProposalId) -> HashSet<String> {
+        self.decisions
+            .iter()
+            .filter(|((pid, _), disp)| {
+                *pid == proposal_id && **disp == DelegatedTaskProposalHunkDisposition::Accepted
+            })
+            .map(|((_, hunk_id), _)| hunk_id.clone())
+            .collect()
+    }
+
+    /// Number of pending undo entries.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
 }
 
 fn proposal_risk_rule_ids_from_complete_coverage() -> Vec<String> {

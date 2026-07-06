@@ -14,16 +14,18 @@ use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
     AppSaveOutcome, AppSessionRestoreOutcome, LspDebounceKind,
+    proposal::{ProposalHunkDispositionState, filtered_batch_proposal_for_accepted_targets},
 };
 use legion_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationOperationId, CollaborationParticipantId,
     CollaborationSessionId, CollaborationSharedProposalApproval, CollaborationTransportEnvelope,
-    DelegatedTaskPlanContract, DelegatedTaskPlanId, LegionWorkflowMergeReadinessState,
-    LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason, PluginHostCallResponse, PluginId,
-    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalResponse, ProtocolTextRange, RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor,
-    RemoteWorkspaceSessionId, SessionDockLayout, SessionDockSideLayout, SessionPanelState,
-    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
+    DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
+    LegionWorkflowMergeReadinessState, LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason,
+    PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
+    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, ViewportScroll,
+    WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_ui::{
@@ -557,6 +559,13 @@ pub struct DesktopRuntime {
     last_definition_count: usize,
     /// Keyboard-focused row index in the Problems panel (T4).
     problems_selected_index: usize,
+    /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
+    review_hunk_selected_index: usize,
+    /// Per-hunk accept/reject disposition state for the multi-file proposal review
+    /// surface (PKT-DIFF).  Keyed by (ProposalId, hunk_id) as projected by the
+    /// delegated-task review hunks.  Lives in the desktop runtime because it is
+    /// ephemeral UI state — proposals may be re-reviewed across sessions.
+    hunk_dispositions: ProposalHunkDispositionState,
     // NOTE: completion_debounce, last_completion_count, hover_debounce, last_hover_id
     // have moved to AppComposition (I1 boundary fix: timing state is app authority).
 }
@@ -645,6 +654,8 @@ impl DesktopRuntime {
             definition_navigation_queued: false,
             last_definition_count: 0,
             problems_selected_index: 0,
+            review_hunk_selected_index: 0,
+            hunk_dispositions: ProposalHunkDispositionState::new(),
         };
         runtime.persist_diagnostics_if_configured();
         Ok(runtime)
@@ -707,6 +718,155 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
+            }
+            // PKT-DIFF: proposal review hunk keyboard navigation.
+            //
+            // The flat hunk count is derived from all proposal reviews in the
+            // delegated-task projection.  When no reviews are present the
+            // actions are no-ops so the runtime never panics on an empty list.
+            DesktopAction::ReviewHunkNext => {
+                self.refresh_projection()?;
+                let count: usize = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .map(|r| r.hunks.len())
+                    .sum();
+                if count > 0 {
+                    self.review_hunk_selected_index = (self.review_hunk_selected_index + 1) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewHunkPrev => {
+                self.refresh_projection()?;
+                let count: usize = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .map(|r| r.hunks.len())
+                    .sum();
+                if count > 0 {
+                    self.review_hunk_selected_index =
+                        (self.review_hunk_selected_index + count.saturating_sub(1)) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            // PKT-DIFF: Accept/Reject wired to ProposalHunkDispositionState.
+            //
+            // The flat hunk list is derived from the current projection snapshot.
+            // Each hunk carries proposal_id + hunk_id so we can record a disposition
+            // without re-reading from the app.  An empty projection is a no-op.
+            DesktopAction::ReviewHunkAccept => {
+                self.refresh_projection()?;
+                let flat_hunks: Vec<(ProposalId, String)> = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .flat_map(|r| r.hunks.iter().map(|h| (h.proposal_id, h.hunk_id.clone())))
+                    .collect();
+                if let Some((proposal_id, hunk_id)) =
+                    flat_hunks.get(self.review_hunk_selected_index)
+                {
+                    self.hunk_dispositions.set_hunk_disposition(
+                        *proposal_id,
+                        hunk_id.clone(),
+                        DelegatedTaskProposalHunkDisposition::Accepted,
+                    );
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewHunkReject => {
+                self.refresh_projection()?;
+                let flat_hunks: Vec<(ProposalId, String)> = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .flat_map(|r| r.hunks.iter().map(|h| (h.proposal_id, h.hunk_id.clone())))
+                    .collect();
+                if let Some((proposal_id, hunk_id)) =
+                    flat_hunks.get(self.review_hunk_selected_index)
+                {
+                    self.hunk_dispositions.set_hunk_disposition(
+                        *proposal_id,
+                        hunk_id.clone(),
+                        DelegatedTaskProposalHunkDisposition::Rejected,
+                    );
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewAcceptAll => {
+                self.refresh_projection()?;
+                let flat_hunks: Vec<(ProposalId, String)> = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .flat_map(|r| r.hunks.iter().map(|h| (h.proposal_id, h.hunk_id.clone())))
+                    .collect();
+                for (proposal_id, hunk_id) in flat_hunks {
+                    self.hunk_dispositions.set_hunk_disposition(
+                        proposal_id,
+                        hunk_id,
+                        DelegatedTaskProposalHunkDisposition::Accepted,
+                    );
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewRejectAll => {
+                self.refresh_projection()?;
+                let flat_hunks: Vec<(ProposalId, String)> = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .flat_map(|r| r.hunks.iter().map(|h| (h.proposal_id, h.hunk_id.clone())))
+                    .collect();
+                for (proposal_id, hunk_id) in flat_hunks {
+                    self.hunk_dispositions.set_hunk_disposition(
+                        proposal_id,
+                        hunk_id,
+                        DelegatedTaskProposalHunkDisposition::Rejected,
+                    );
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewApply => {
+                self.refresh_projection()?;
+                let outcome = self.apply_accepted_review_hunks()?;
+                self.last_outcome = outcome.clone();
+                self.persist_diagnostics_if_configured();
+                Ok(outcome)
+            }
+            DesktopAction::ReviewDismiss => {
+                // Reset disposition state and navigation index.
+                self.hunk_dispositions = ProposalHunkDispositionState::new();
+                self.review_hunk_selected_index = 0;
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
             }
             // T6: completion popup navigation — handled before the bridge.
             DesktopAction::CompletionNext => {
@@ -1161,6 +1321,7 @@ impl DesktopRuntime {
             completion_selected_index: self.completion_selected_index,
             hover_tooltip_visible: self.hover_tooltip_visible,
             problems_selected_index: self.problems_selected_index,
+            review_hunk_selected_index: self.review_hunk_selected_index,
         }
     }
 
@@ -1236,6 +1397,65 @@ impl DesktopRuntime {
     ///
     /// Returns `Noop` when there are no problems or no path/range on the
     /// selected problem; returns `Edited`-equivalent on successful navigation.
+    /// Apply the filtered proposal built from currently-accepted review hunks.
+    ///
+    /// Each proposal_review in the current projection is checked for accepted
+    /// hunk dispositions.  For each proposal that has at least one accepted
+    /// target, a filtered proposal is registered and applied through the
+    /// standard `ApplyProposal` path.  If no hunks are accepted, returns Noop.
+    ///
+    /// Note: hunk-level filtering operates at target granularity because batch
+    /// proposal items are atomic per-target.  A target is included in the
+    /// filtered result only if its accepted-hunk delegate IDs are present in
+    /// the dispositions.  True intra-target partial-apply requires apply-engine
+    /// support for partial operations (deferred to PKT-APPLY).
+    fn apply_accepted_review_hunks(&mut self) -> Result<DesktopWorkflowOutcome> {
+        use std::collections::HashSet;
+
+        let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
+        let reviews = &snapshot.delegated_task_projection.proposal_reviews;
+
+        for review in reviews {
+            let proposal_id = review.proposal_id;
+            let accepted_hunk_ids = self.hunk_dispositions.accepted_hunk_ids(proposal_id);
+            if accepted_hunk_ids.is_empty() {
+                continue;
+            }
+
+            let accepted_target_ids: HashSet<String> = review
+                .hunks
+                .iter()
+                .filter(|h| accepted_hunk_ids.contains(&h.hunk_id))
+                .filter_map(|h| h.target_id.clone())
+                .collect();
+
+            if accepted_target_ids.is_empty() {
+                continue;
+            }
+
+            let Some(proposal) = self.app.workspace_proposal_for_id(proposal_id) else {
+                continue;
+            };
+
+            let Some(filtered) =
+                filtered_batch_proposal_for_accepted_targets(&proposal, &accepted_target_ids)
+            else {
+                continue;
+            };
+
+            let _ = self.app.register_proposal_lifecycle(&filtered);
+            let outcome = self.dispatch_intent(CommandDispatchIntent::ApplyProposal {
+                proposal_id: filtered.proposal_id,
+            })?;
+
+            if outcome != DesktopWorkflowOutcome::Noop {
+                return Ok(outcome);
+            }
+        }
+
+        Ok(DesktopWorkflowOutcome::Noop)
+    }
+
     fn activate_selected_problem(&mut self) -> Result<DesktopWorkflowOutcome> {
         let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
         let problems = &snapshot.language_tooling_projection.problems;
@@ -1271,6 +1491,16 @@ impl DesktopRuntime {
     /// Expose problems selected index for assertion in tests.
     pub fn problems_selected_index_for_test(&self) -> usize {
         self.problems_selected_index
+    }
+
+    /// Expose review hunk selected index for assertion in tests (PKT-DIFF).
+    pub fn review_hunk_selected_index_for_test(&self) -> usize {
+        self.review_hunk_selected_index
+    }
+
+    /// Read-only access to the hunk disposition state for tests (PKT-DIFF).
+    pub fn hunk_dispositions(&self) -> &ProposalHunkDispositionState {
+        &self.hunk_dispositions
     }
 
     /// Test-only setter for completion popup visibility.
@@ -2712,6 +2942,14 @@ impl DesktopEframeApp {
         self.runtime.problems_selected_index_for_test()
     }
 
+    /// Return the zero-based index of the currently focused review hunk (PKT-DIFF).
+    ///
+    /// Test-only delegate that forwards to the runtime so tests can assert
+    /// keyboard navigation state without reaching inside the runtime directly.
+    pub fn review_hunk_selected_index_for_test(&self) -> usize {
+        self.runtime.review_hunk_selected_index_for_test()
+    }
+
     /// Render one full application frame: keyboard handling, the projection
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
@@ -2874,6 +3112,45 @@ impl DesktopEframeApp {
                     if input.key_pressed(egui::Key::Enter) {
                         actions.push(DesktopAction::ProblemActivate);
                     }
+                }
+            }
+
+            // PKT-DIFF: Proposal review hunk keyboard navigation.
+            //
+            // Alt+ArrowRight / Alt+ArrowLeft navigate forward/backward through
+            // the flat hunk list.  Alt+Y / Alt+X accept or reject the focused
+            // hunk; Alt+Shift+Y / Alt+Shift+X accept or reject all hunks.
+            // These bindings use Alt to avoid conflicting with the Problems
+            // panel's plain ArrowDown/Up bindings above.
+            {
+                let alt = input.modifiers.alt && !command;
+                if alt && input.key_pressed(egui::Key::ArrowRight) {
+                    actions.push(DesktopAction::ReviewHunkNext);
+                }
+                if alt && input.key_pressed(egui::Key::ArrowLeft) {
+                    actions.push(DesktopAction::ReviewHunkPrev);
+                }
+                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::Y) {
+                    actions.push(DesktopAction::ReviewHunkAccept);
+                }
+                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::X) {
+                    actions.push(DesktopAction::ReviewHunkReject);
+                }
+                if alt && input.modifiers.shift && input.key_pressed(egui::Key::Y) {
+                    actions.push(DesktopAction::ReviewAcceptAll);
+                }
+                if alt && input.modifiers.shift && input.key_pressed(egui::Key::X) {
+                    actions.push(DesktopAction::ReviewRejectAll);
+                }
+                // Alt+Enter applies the filtered proposal for accepted hunks.
+                // Alt+Escape dismisses the review surface and resets dispositions.
+                // Alt+Escape avoids conflict with the completion-popup Escape binding
+                // which operates without an Alt modifier.
+                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::Enter) {
+                    actions.push(DesktopAction::ReviewApply);
+                }
+                if alt && input.key_pressed(egui::Key::Escape) {
+                    actions.push(DesktopAction::ReviewDismiss);
                 }
             }
 

@@ -33,6 +33,9 @@ pub mod language;
 
 pub mod terminal_policy;
 
+/// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
+pub mod proposal;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
@@ -13853,6 +13856,41 @@ impl AppComposition {
             .proposal_states
             .borrow_mut()
             .insert(proposal_id, state);
+    }
+
+    /// Return the full [`WorkspaceProposal`] for a given id, if it is registered.
+    ///
+    /// Used by the desktop review apply path to retrieve the proposal payload
+    /// required for constructing a filtered batch proposal from accepted hunks.
+    pub fn workspace_proposal_for_id(&self, proposal_id: ProposalId) -> Option<WorkspaceProposal> {
+        self.proposal_coordinator.proposal_for_id(proposal_id)
+    }
+
+    /// Compute a [`legion_protocol::ProposalDiffSurfaceProjection`] for a
+    /// registered proposal using caller-supplied before/after file contents.
+    ///
+    /// `file_contents` maps each `target_id` from the proposal's target
+    /// coverage to an `(old_text, new_text)` pair.  Targets whose `target_id`
+    /// is absent from the map are silently skipped.
+    ///
+    /// # Lifecycle integration note (F4 DONE_WITH_CONCERNS)
+    ///
+    /// Auto-invocation on the `Previewed` lifecycle transition requires
+    /// navigating the 25 000-line `lib.rs` to find the transition point, read
+    /// current file contents from the workspace, and store the result.  That
+    /// surgery carries significant breakage risk and is deferred to PKT-CTX.
+    /// Callers (e.g. `legion-desktop`) can invoke this method manually when
+    /// the proposal enters the review surface.
+    pub fn compute_diff_surface_for_proposal(
+        &self,
+        proposal_id: ProposalId,
+        file_contents: &std::collections::HashMap<String, (String, String)>,
+    ) -> Option<legion_protocol::ProposalDiffSurfaceProjection> {
+        let proposal = self.proposal_coordinator.proposal_for_id(proposal_id)?;
+        Some(crate::proposal::compute_proposal_diff_surface(
+            &proposal,
+            file_contents,
+        ))
     }
 
     /// Wires disk-backed palette usage persistence for a workspace. Usage
