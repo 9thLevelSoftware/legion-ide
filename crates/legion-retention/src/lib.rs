@@ -30,6 +30,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+pub mod privacy;
+pub mod training;
+
 const VAULT_FILE_MAGIC: &[u8; 4] = b"DVLT";
 const VAULT_FILE_VERSION: u16 = 1;
 const CHACHA20_POLY1305_ALGORITHM_ID: u8 = 1;
@@ -408,6 +411,14 @@ impl RetentionFixtureVault {
         self.bundles.len()
     }
 
+    /// Return a reference to a retained bundle descriptor by id, or `None` if not found.
+    pub fn lookup_bundle(
+        &self,
+        bundle_id: &str,
+    ) -> Option<&RawSourceRetentionBundleDescriptor> {
+        self.bundles.get(bundle_id)
+    }
+
     /// Capture a descriptor-only deterministic bundle without storing raw source content.
     pub fn capture_descriptor(
         &mut self,
@@ -503,6 +514,71 @@ impl RetentionFixtureVault {
         self.tombstones
             .insert(tombstone.bundle_id.clone(), tombstone.clone());
         Ok(tombstone)
+    }
+}
+
+/// Unified deletion/read interface for privacy inspector wiring.
+///
+/// Both `RetentionFixtureVault` and `FileBackedRawSourceVault` implement this
+/// trait so callers can wire privacy-inspector deletion handles without
+/// depending on a concrete vault type.
+pub trait RawSourceVault {
+    /// Delete a retained bundle and record a metadata-only tombstone.
+    fn vault_delete_bundle(
+        &mut self,
+        tombstone: RawSourceRetentionTombstone,
+    ) -> Result<RawSourceRetentionTombstone, RawSourceVaultError>;
+
+    /// Read a retained bundle descriptor by id.
+    fn vault_read_bundle_descriptor(
+        &self,
+        bundle_id: &str,
+    ) -> Result<RawSourceRetentionBundleDescriptor, RawSourceVaultError>;
+}
+
+impl RawSourceVault for RetentionFixtureVault {
+    fn vault_delete_bundle(
+        &mut self,
+        tombstone: RawSourceRetentionTombstone,
+    ) -> Result<RawSourceRetentionTombstone, RawSourceVaultError> {
+        self.delete_bundle(tombstone).map_err(|err| match err {
+            RetentionFixtureError::Disabled => RawSourceVaultError::Disabled,
+            RetentionFixtureError::CaptureDenied { reason } => {
+                RawSourceVaultError::Denied { reason }
+            }
+            RetentionFixtureError::BundleMissing { bundle_id } => {
+                RawSourceVaultError::BundleMissing { bundle_id }
+            }
+        })
+    }
+
+    fn vault_read_bundle_descriptor(
+        &self,
+        bundle_id: &str,
+    ) -> Result<RawSourceRetentionBundleDescriptor, RawSourceVaultError> {
+        self.lookup_bundle(bundle_id)
+            .cloned()
+            .ok_or_else(|| RawSourceVaultError::BundleMissing {
+                bundle_id: bundle_id.to_string(),
+            })
+    }
+}
+
+impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> RawSourceVault
+    for FileBackedRawSourceVault<K, C>
+{
+    fn vault_delete_bundle(
+        &mut self,
+        tombstone: RawSourceRetentionTombstone,
+    ) -> Result<RawSourceRetentionTombstone, RawSourceVaultError> {
+        self.delete_bundle(tombstone)
+    }
+
+    fn vault_read_bundle_descriptor(
+        &self,
+        bundle_id: &str,
+    ) -> Result<RawSourceRetentionBundleDescriptor, RawSourceVaultError> {
+        self.read_bundle_descriptor(bundle_id)
     }
 }
 
