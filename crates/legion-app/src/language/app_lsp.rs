@@ -121,6 +121,18 @@ pub enum LspWorkerResult {
         /// immediately.
         raw_params: serde_json::Value,
     },
+    /// The session transport died: the stdout reader thread recorded a
+    /// terminal event (server closed stdout, or a framing/parse error killed
+    /// the reader while the server may still be alive).  Sent exactly once;
+    /// the worker thread exits after sending.  Intercepted by
+    /// [`LspSessionHandle::try_drain_results`], which routes it through the
+    /// restart circuit breaker — it never reaches the frame-path result
+    /// dispatch (PKT-S3-WEDGE-R3).
+    TransportDead {
+        /// Redacted, bounded, metadata-only description of the terminal
+        /// reader event.
+        reason: String,
+    },
 }
 
 /// Live-session handle: channels to the worker thread + cached health record.
@@ -459,18 +471,34 @@ impl LspSessionHandle {
             return Vec::new();
         };
         let mut results = Vec::new();
+        let mut transport_death: Option<String> = None;
+        let mut worker_disconnected = false;
         loop {
             match worker.result_rx.try_recv() {
+                // Intercepted here: the state transition is the handle's job,
+                // and the worker exits right after sending this, so the
+                // Disconnected arm below must not overwrite the specific
+                // reason with the generic one (PKT-S3-WEDGE-R3).
+                Ok(LspWorkerResult::TransportDead { reason }) => {
+                    transport_death = Some(reason);
+                }
                 Ok(result) => results.push(result),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker thread exited; treat as session failure.
-                    self.state = LspSessionState::Failed {
-                        reason: "LSP worker thread exited unexpectedly".to_string(),
-                    };
+                    worker_disconnected = true;
                     break;
                 }
             }
+        }
+        if let Some(reason) = transport_death {
+            // Route through the restart circuit breaker (PKT-LSP-C T3):
+            // BackingOff with auto-retry while budget remains, Failed after.
+            self.transition_failure(truncate_reason(&format!("LSP transport died: {reason}")));
+        } else if worker_disconnected {
+            // Worker thread exited without reporting; treat as session failure.
+            self.state = LspSessionState::Failed {
+                reason: "LSP worker thread exited unexpectedly".to_string(),
+            };
         }
         results
     }
@@ -640,6 +668,28 @@ fn run_session_worker(
                 // notifications that arrived since the last check.
                 for raw_params in session.try_drain_diagnostic_params() {
                     let _ = result_tx.try_send(LspWorkerResult::DiagnosticBatch { raw_params });
+                }
+                // Transport-death detection (PKT-S3-WEDGE-R3): once the
+                // stdout reader thread records a terminal event, this session
+                // can never surface another frame — before this check, a
+                // crashed or reader-killed server left the session projecting
+                // Live forever while draining nothing.  Report once and exit;
+                // the frame path routes the report through the restart
+                // circuit breaker.
+                if let Some(terminal) = session.reader_stats().terminal {
+                    let reason = match terminal {
+                        legion_lsp::LspReaderTerminal::Eof => {
+                            "server closed stdout (process exit or crash)".to_string()
+                        }
+                        legion_lsp::LspReaderTerminal::Error(message) => {
+                            format!(
+                                "stdout reader terminated: {}",
+                                super::redact_lsp_stderr_line(&message)
+                            )
+                        }
+                    };
+                    let _ = result_tx.try_send(LspWorkerResult::TransportDead { reason });
+                    break;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -835,6 +885,26 @@ impl LspSessionHandle {
             }
             guard.push_back(line);
         }
+    }
+
+    /// Test-only: like [`Self::set_live_health_for_test`] but returns the
+    /// result-channel sender so a test can inject `LspWorkerResult`s and
+    /// observe how the frame path routes them (PKT-S3-WEDGE-R3).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_live_with_result_sender_for_test(
+        &mut self,
+        health: LspServerHealthRecord,
+    ) -> mpsc::SyncSender<LspWorkerResult> {
+        let (request_tx, request_rx) = mpsc::sync_channel::<LspWorkerRequest>(64);
+        let (result_tx, result_rx) = mpsc::sync_channel::<LspWorkerResult>(16);
+        std::mem::forget(request_rx);
+        self.state = LspSessionState::Live(Box::new(LspWorkerHandle {
+            health,
+            request_tx,
+            result_rx,
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
+        }));
+        result_tx
     }
 
     /// Test-only: inject a `BackingOff` state with a given restart count and a
@@ -1178,6 +1248,158 @@ mod stderr_tests {
         assert!(
             proj.lines.iter().any(|l| l.contains("[REDACTED]")),
             "at least one line must carry the [REDACTED] marker"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-S3-WEDGE-R3: transport-death detection — TDD tests
+//
+// Before this packet, an RA process that crashed (stdout EOF) or whose one
+// bad frame killed the client reader thread was INVISIBLE to the product
+// session outside an in-flight request: the worker loop kept polling
+// `try_drain_diagnostic_params()` (empty forever) and the session projected
+// Live indefinitely — the product-facing twin of the GP-1 s3 wedge.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod transport_death_tests {
+    use super::*;
+    use legion_protocol::LspSessionLifecycleKind;
+
+    /// Builds a RustAnalyzerSession around a child that is NOT an LSP server
+    /// (`rustc --version`): it prints non-framed bytes and exits, so the
+    /// stdout reader thread deterministically records a terminal event.
+    fn session_on_non_lsp_child() -> RustAnalyzerSession {
+        let identity = LspConfiguredServerIdentity {
+            server_id: legion_protocol::LanguageServerId(1),
+            workspace_id: WorkspaceId(1),
+            root_id: Some(WorkspaceRootId(1)),
+            language_id: LanguageId("rust".to_string()),
+            display_name: "rustc-as-fake-ls".to_string(),
+            command_hash: FileFingerprint {
+                algorithm: "test".to_string(),
+                value: "cmd:rustc".to_string(),
+            },
+            args_hash: None,
+            env_hash: None,
+            cwd_hash: None,
+            settings_hash: None,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let posture = LspWorkspaceTrustPosture {
+            workspace_id: WorkspaceId(1),
+            workspace_trust_state: WorkspaceTrustState::Trusted,
+            privacy_scope: SemanticPrivacyScope::Workspace,
+            privacy_scope_allowed: true,
+            required_capability: CapabilityId("process.spawn".to_string()),
+            decision_id: Some(CapabilityDecisionId(1)),
+            diagnostics: Vec::new(),
+            schema_version: 1,
+        };
+        let launch_policy = LspLaunchPolicyDecision::evaluate(
+            identity,
+            posture,
+            true,
+            CorrelationId(1),
+            CausalityId(Uuid::from_u128(1)),
+            Vec::new(),
+            1,
+        );
+        let supervisor = LspSupervisorConfig {
+            launch_policy,
+            process: LspServerProcessConfig {
+                command: "rustc".to_string(),
+                args: vec!["--version".to_string()],
+                cwd: None,
+                env: Vec::new(),
+            },
+            initial_backoff_ms: 25,
+            max_backoff_ms: 100,
+            max_restart_attempts: 1,
+        };
+        let config = RustAnalyzerLaunchConfig {
+            discovery: RustAnalyzerDiscovery {
+                configured_path: Some(PathBuf::from("rustc")),
+                ..Default::default()
+            },
+            supervisor,
+            server_id: legion_protocol::LanguageServerId(1),
+            language_id: LanguageId("rust".to_string()),
+        };
+        let mut launcher = LspStdioLauncher::new();
+        RustAnalyzerSession::launch(config, &mut launcher).expect("launch rustc as fake LS")
+    }
+
+    /// The worker loop must detect a terminal reader event during its idle
+    /// poll, report it ONCE as `LspWorkerResult::TransportDead`, and exit.
+    #[test]
+    fn transport_death_worker_reports_and_exits() {
+        let mut session = session_on_non_lsp_child();
+        let (request_tx, request_rx) = mpsc::sync_channel::<LspWorkerRequest>(1);
+        let (result_tx, result_rx) = mpsc::sync_channel::<LspWorkerResult>(16);
+
+        let worker = thread::spawn(move || {
+            run_session_worker(&mut session, request_rx, result_tx);
+        });
+
+        // The worker must report transport death within a bounded window
+        // (rustc exits immediately; the idle poll runs every 50 ms).
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("worker must report transport death instead of polling forever");
+        match result {
+            LspWorkerResult::TransportDead { reason } => {
+                assert!(
+                    !reason.is_empty(),
+                    "transport-death reason must describe the terminal event"
+                );
+            }
+            LspWorkerResult::ReadResult { .. } => panic!("unexpected ReadResult"),
+            LspWorkerResult::DiagnosticBatch { .. } => panic!("unexpected DiagnosticBatch"),
+        }
+
+        // The worker thread must exit after reporting (no eternal idle loop).
+        worker
+            .join()
+            .expect("worker thread must exit after transport death");
+        // Keep the request channel alive until after the join so the exit is
+        // attributable to transport death, not channel disconnect.
+        drop(request_tx);
+    }
+
+    /// The frame path must route `TransportDead` through the restart circuit
+    /// breaker (BackingOff with a bounded reason), not leave the session Live
+    /// and not hard-Fail while restart budget remains.
+    #[test]
+    fn transport_death_routes_through_circuit_breaker() {
+        let mut handle = LspSessionHandle::new();
+        let result_tx = handle.set_live_with_result_sender_for_test(unavailable_health_record());
+        result_tx
+            .send(LspWorkerResult::TransportDead {
+                reason: "reader terminated: test-injected".to_string(),
+            })
+            .expect("inject transport death");
+
+        let results = handle.try_drain_results();
+        assert!(
+            results.is_empty(),
+            "TransportDead must be intercepted by the handle, not surfaced as a worker result"
+        );
+
+        let status = handle.session_status_projection();
+        assert_eq!(
+            status.lifecycle,
+            LspSessionLifecycleKind::BackingOff,
+            "transport death must enter the restart circuit breaker"
+        );
+        assert_eq!(status.restart_count, 1);
+        let reason = status
+            .failure_reason
+            .expect("breaker entry must carry the transport-death reason");
+        assert!(
+            reason.contains("test-injected"),
+            "reason must carry the terminal event description, got: {reason}"
         );
     }
 }

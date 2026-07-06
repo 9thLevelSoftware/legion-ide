@@ -145,6 +145,18 @@ fn main() {
             // goes silent after receiving a request. The client must bound the
             // wait with its own timeout rather than blocking forever.
             "mock.silent" => None,
+            // Emit a Content-Length framed body that is NOT valid JSON, then
+            // keep serving. Models a server whose one bad frame kills the
+            // client's stdout reader thread while the server process itself
+            // stays alive — the GP-1 s3 wedge-signature discriminator
+            // (PKT-S3-WEDGE-R3).
+            "mock.malformedFrame" => {
+                let body = b"this is not json";
+                let _ = write!(output, "Content-Length: {}\r\n\r\n", body.len());
+                let _ = output.write_all(body);
+                let _ = output.flush();
+                None
+            }
             "mock.echo" => {
                 let params = envelope.get("params").cloned().unwrap_or(Value::Null);
                 Some(json!({

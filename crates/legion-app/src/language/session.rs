@@ -221,6 +221,29 @@ impl RustAnalyzerSession {
         &self.health
     }
 
+    /// Snapshot of the stdout reader thread's counters (frames forwarded,
+    /// payload bytes, terminal event).  Discriminates "server truly silent"
+    /// from "our reader thread died" in wedge post-mortems and drives the
+    /// worker-loop transport-death detection (PKT-S3-WEDGE-R3).
+    pub fn reader_stats(&self) -> legion_lsp::LspReaderStatsSnapshot {
+        self.session.reader_stats()
+    }
+
+    /// Whether the language-server child process is still running.
+    ///
+    /// A dead reader with a live child means the transport died while the
+    /// server survived; a dead child explains a clean-EOF reader terminal.
+    pub fn is_running(&mut self) -> bool {
+        self.session.is_running()
+    }
+
+    /// The child's exit status as a string once it has terminated (`None`
+    /// while running).  Post-mortem evidence: a panic (101), a signal, and a
+    /// clean exit (0) point at different death modes (PKT-S3-WEDGE-R3).
+    pub fn exit_status_string(&mut self) -> Option<String> {
+        self.session.exit_status_string()
+    }
+
     /// Snapshot of the buffered diagnostic-notification metadata.
     ///
     /// Read-only post-mortem introspection for smokes and tests (same class

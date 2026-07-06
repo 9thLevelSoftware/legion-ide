@@ -6785,21 +6785,97 @@ impl DebugWorkflow {
 
 /// Converts a `file://` URI to a canonical path string (platform-aware).
 ///
-/// Strips `file:///` (Windows) or `file://` (Unix) and replaces `/` with `\`
-/// on Windows so comparisons against `meta.identity.canonical_path.0` work.
+/// The output must compare equal to `meta.identity.canonical_path.0` for an
+/// open buffer, so the URI the *server echoed* has to normalize to the form
+/// the *editor registered* (PKT-S3-WEDGE-R3 root cause #1):
+///
+/// - Windows drive designators are normalized to the canonical uppercase
+///   form with a literal colon — rust-analyzer echoes `file:///c:/…`
+///   (lowercase) for a document opened as `file:///C:/…`, and lsp-types'
+///   `Url` can percent-encode the colon (`C%3A`). Before this
+///   normalization, every echoed diagnostic for an open buffer was
+///   silently dropped by the `buffer_id_for_path` lookup on Windows.
+/// - Unix absolute paths keep their leading `/` — stripping `file:///`
+///   consumed it, so `/tmp/ws/main.rs` became `tmp/ws/main.rs` and the
+///   lookup silently dropped diagnostics on Unix through this path too.
+/// - `/` becomes `\` on Windows for consistency with the editor's paths.
 fn uri_to_canonical_path(uri: &str) -> String {
-    let stripped = uri
-        .strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri);
+    let path_part = if let Some(rest) = uri.strip_prefix("file:///") {
+        // Percent-decode a drive colon (`C%3A` → `C:`), either hex case.
+        let rest = if rest.len() >= 4
+            && rest.as_bytes()[0].is_ascii_alphabetic()
+            && rest[1..4].eq_ignore_ascii_case("%3a")
+        {
+            format!("{}:{}", &rest[..1], &rest[4..])
+        } else {
+            rest.to_string()
+        };
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            // Windows drive path: canonical uppercase drive letter.
+            format!("{}{}", (bytes[0] as char).to_ascii_uppercase(), &rest[1..])
+        } else {
+            // Unix absolute path: restore the leading `/` the strip consumed.
+            format!("/{rest}")
+        }
+    } else if let Some(rest) = uri.strip_prefix("file://") {
+        rest.to_string()
+    } else {
+        uri.to_string()
+    };
     // On Windows, restore backslashes for consistency with the editor's path.
     #[cfg(target_os = "windows")]
     {
-        stripped.replace('/', "\\")
+        path_part.replace('/', "\\")
     }
     #[cfg(not(target_os = "windows"))]
     {
-        stripped.to_string()
+        path_part
+    }
+}
+
+#[cfg(test)]
+mod uri_to_canonical_path_tests {
+    use super::uri_to_canonical_path;
+
+    // PKT-S3-WEDGE-R3: the server's echoed URI form must resolve to the
+    // editor's registered canonical path or diagnostics for open buffers
+    // are silently dropped by `ingest_lsp_diagnostic_batch`.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_designator_forms_normalize_to_canonical_uppercase() {
+        let canonical = "C:\\Temp\\ws\\src\\main.rs";
+        for uri in [
+            "file:///C:/Temp/ws/src/main.rs",
+            "file:///c:/Temp/ws/src/main.rs",
+            "file:///C%3A/Temp/ws/src/main.rs",
+            "file:///c%3A/Temp/ws/src/main.rs",
+        ] {
+            assert_eq!(
+                uri_to_canonical_path(uri),
+                canonical,
+                "uri form {uri} must normalize to the registered canonical path"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_absolute_paths_keep_their_leading_slash() {
+        assert_eq!(
+            uri_to_canonical_path("file:///tmp/ws/src/main.rs"),
+            "/tmp/ws/src/main.rs"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_path_component_case_is_preserved() {
+        assert_eq!(
+            uri_to_canonical_path("file:///tmp/WS/src/Main.rs"),
+            "/tmp/WS/src/Main.rs"
+        );
     }
 }
 
@@ -13540,11 +13616,28 @@ struct AppDocumentResolver {
 }
 
 impl AppDocumentResolver {
+    /// Registers an open document under its canonical-path-derived,
+    /// drive-designator-normalized URI key (PKT-S3-WEDGE-R3): the server
+    /// echoes URIs in its own canonical form (rust-analyzer lowercases the
+    /// Windows drive letter), so the stored key and the lookup in
+    /// [`crate::language::DocumentResolver::resolve`] normalize through the
+    /// same helper.
+    fn insert_canonical_path(
+        &mut self,
+        canonical_path: &str,
+        doc: crate::language::ResolvedDocument,
+    ) {
+        let uri = legion_lsp::normalize_file_uri_drive(&canonical_path_to_uri(canonical_path))
+            .into_owned();
+        self.by_uri.insert(uri, doc);
+    }
+
     /// Snapshot the current state of all open buffers into a URI-keyed map.
     fn build(active_documents: &ActiveDocumentController, editor: &EditorEngine) -> Self {
-        let mut by_uri = HashMap::new();
+        let mut resolver = Self {
+            by_uri: HashMap::new(),
+        };
         for (buffer_id, meta) in &active_documents.buffer_file_metadata {
-            let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
             let text = editor.text(*buffer_id).ok().map(|t| t.to_string());
             let snapshot = editor.current_snapshot(*buffer_id).ok();
             let buffer_version = snapshot.as_ref().map(|s| s.buffer_version);
@@ -13561,16 +13654,16 @@ impl AppDocumentResolver {
                 file_length: meta.file_length,
                 modified_at: meta.modified_at,
             };
-            by_uri.insert(uri, doc);
+            resolver.insert_canonical_path(&meta.identity.canonical_path.0, doc);
         }
-        Self { by_uri }
+        resolver
     }
 }
 
 impl crate::language::DocumentResolver for AppDocumentResolver {
     fn resolve(&self, uri: &str) -> Option<crate::language::ResolvedDocument> {
         self.by_uri
-            .get(uri)
+            .get(legion_lsp::normalize_file_uri_drive(uri).as_ref())
             .map(|doc| crate::language::ResolvedDocument {
                 file: doc.file.clone(),
                 buffer_id: doc.buffer_id,
@@ -13583,6 +13676,72 @@ impl crate::language::DocumentResolver for AppDocumentResolver {
                 file_length: doc.file_length,
                 modified_at: doc.modified_at,
             })
+    }
+}
+
+#[cfg(test)]
+mod app_document_resolver_uri_tests {
+    use super::*;
+
+    // PKT-S3-WEDGE-R3 root cause #1: rust-analyzer echoes document URIs in
+    // its own canonical form — lowercase Windows drive letter, sometimes
+    // with a percent-encoded colon. The resolver keys documents by the URI
+    // built from the editor's canonical path (uppercase drive). Without
+    // normalization every WorkspaceEdit URI missed the map and renames on
+    // Windows died with UnresolvableUri.
+
+    fn resolved_doc() -> crate::language::ResolvedDocument {
+        crate::language::ResolvedDocument {
+            file: legion_protocol::FileIdentity {
+                file_id: legion_protocol::FileId(1),
+                workspace_id: legion_protocol::WorkspaceId(1),
+                canonical_path: legion_protocol::CanonicalPath("C:\\ws\\src\\main.rs".to_string()),
+                content_version: legion_protocol::FileContentVersion(1),
+                content_hash: None,
+            },
+            buffer_id: Some(BufferId(1)),
+            text: Some("fn main() {}".to_string()),
+            file_content_version: legion_protocol::FileContentVersion(1),
+            buffer_version: Some(BufferVersion(1)),
+            workspace_generation: legion_protocol::WorkspaceGeneration(1),
+            snapshot_id: Some(legion_protocol::SnapshotId(1)),
+            fingerprint: None,
+            file_length: None,
+            modified_at: None,
+        }
+    }
+
+    #[test]
+    fn resolver_matches_server_echoed_drive_letter_forms() {
+        use crate::language::DocumentResolver as _;
+        let mut resolver = AppDocumentResolver {
+            by_uri: HashMap::new(),
+        };
+        // Registered through the same path `build()` uses, from the
+        // editor's canonical (uppercase-drive, backslash) path form.
+        resolver.insert_canonical_path("C:\\ws\\src\\main.rs", resolved_doc());
+
+        for uri in [
+            "file:///C:/ws/src/main.rs",
+            "file:///c:/ws/src/main.rs",
+            "file:///C%3A/ws/src/main.rs",
+            "file:///c%3A/ws/src/main.rs",
+        ] {
+            assert!(
+                resolver.resolve(uri).is_some(),
+                "server-echoed uri form {uri} must resolve to the open document"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_still_rejects_unknown_documents() {
+        use crate::language::DocumentResolver as _;
+        let mut resolver = AppDocumentResolver {
+            by_uri: HashMap::new(),
+        };
+        resolver.insert_canonical_path("C:\\ws\\src\\main.rs", resolved_doc());
+        assert!(resolver.resolve("file:///C:/ws/src/other.rs").is_none());
     }
 }
 
@@ -13910,6 +14069,11 @@ impl AppComposition {
                 }
                 LspWorkerResult::DiagnosticBatch { raw_params } => {
                     self.ingest_lsp_diagnostic_batch(raw_params);
+                }
+                LspWorkerResult::TransportDead { .. } => {
+                    // Intercepted inside `LspSessionHandle::try_drain_results`
+                    // (routed through the restart circuit breaker); it never
+                    // reaches this dispatch.  Arm kept for exhaustiveness.
                 }
             }
         }
@@ -14518,6 +14682,24 @@ impl AppComposition {
     /// PKT-LSP-B T1 / D2.
     pub fn lsp_server_health_record(&self) -> Option<legion_protocol::LspServerHealthRecord> {
         self.lsp_session.health_record()
+    }
+
+    /// Returns the product LSP session's lifecycle status projection
+    /// (Idle/Starting/Live/BackingOff/Refused/Failed + restart bookkeeping).
+    ///
+    /// Read-only projection (PKT-LSP-C T3); used by the GP-1 s3 post-mortem
+    /// to prove the two-RA topology at wedge time (PKT-S3-WEDGE-R3).
+    pub fn lsp_session_status_projection(&self) -> legion_protocol::LspSessionStatusProjection {
+        self.lsp_session.session_status_projection()
+    }
+
+    /// Returns the redacted stderr log projection of the product LSP session
+    /// when it is Live (PKT-LSP-C T4); `None` otherwise.
+    ///
+    /// Read-only, metadata-only projection; used by the GP-1 s3 post-mortem
+    /// to inspect the product-session rust-analyzer's stderr at wedge time.
+    pub fn lsp_session_log_projection(&self) -> Option<legion_protocol::LspSessionLogProjection> {
+        self.lsp_session.stderr_log_projection()
     }
 
     // ── LSP UI debounce authority (I1) ──────────────────────────────────────

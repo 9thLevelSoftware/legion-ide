@@ -436,10 +436,22 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
     // drives every change via didOpen/didChange, so no watch events are ever
     // needed. The dynamicRegistration advertisement is required — RA only
     // honours `files.watcher: client` when the client can register watchers.
+    //
+    // Cache priming disabled: RA's background prime-caches pass (std
+    // indexing) holds salsa queries that demand-driven diagnostics block on
+    // (`block_on: … inherent_impls_in_crate(core)`), stalling publishes past
+    // any pump deadline — the s3 "silent wedge" mode with an empty stderr
+    // ring, worst on 2-core CI runners with a second (product lazy-start) RA
+    // priming concurrently. The probe needs no warm caches: with priming
+    // off, error→clear cycles complete in ~300 ms (forensics:
+    // plans/evidence/production/M8/PKT-S3-WEDGE-R3-evidence.md).
     session
         .initialize_with_options(
             &root_uri,
-            Some(serde_json::json!({"files": {"watcher": "client"}})),
+            Some(serde_json::json!({
+                "files": {"watcher": "client"},
+                "cachePriming": {"enable": false}
+            })),
             Some(serde_json::json!({
                 "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
             })),
@@ -488,10 +500,22 @@ fn run_s3(
     let scratchpad_uri = path_to_file_uri(&scratchpad_path);
 
     // Open scratchpad.rs in the editor via app path.
+    //
+    // NOTE (PKT-S3-WEDGE-R3): this open fires the product lazy-start trigger
+    // (first `.rs` buffer in a trusted workspace), spawning a SECOND
+    // rust-analyzer against the same temp workspace — concurrent with the
+    // standalone probe session below. The topology line makes that second RA
+    // visible on every run so wedge and non-wedge runs can be correlated.
     let scratchpad_str = scratchpad_path.to_string_lossy().into_owned();
     let _ = app
         .open_file(&scratchpad_str)
         .map_err(|e| format!("open scratchpad.rs: {e:?}"))?;
+    let _ = app.drain_lsp_session();
+    let product_status = app.lsp_session_status_projection();
+    eprintln!(
+        "[s3] product LSP session after open_file: lifecycle={:?} restart_count={}",
+        product_status.lifecycle, product_status.restart_count
+    );
 
     // Capture the active buffer id — needed to project diagnostics through
     // AppComposition::ingest_lsp_publish_diagnostics_for_buffer (I-1).
@@ -548,9 +572,10 @@ fn run_s3(
     // handles the initial clearing ack by skipping it and waiting for a
     // notification with error_count > 0.
     let mut doc_version: i64 = 2;
-    session
-        .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
-        .map_err(|e| format!("did_change (error): {e}"))?;
+    if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT) {
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "error-write");
+        return Err(format!("did_change (error): {e}"));
+    }
 
     // Pump until rust-analyzer reports an error diagnostic for the erroneous
     // content.  rust-analyzer often emits a "clear" notification (error_count=0)
@@ -559,20 +584,20 @@ fn run_s3(
     // first notification that has error_count > 0.
     //
     // The pump runs in bounded slices with a version-bumped re-send between
-    // slices. Evidence (campaign ledger 2026-07-05; 4 occurrences across
-    // Windows local + ubuntu CI run 28747873556): rust-analyzer occasionally
-    // goes COMPLETELY silent after a didChange that lands while its initial
-    // prime-caches pass is still running — the didOpen publish arrives
-    // (~1s), then zero notifications for ANY uri for 120s+ (post-mortem:
-    // buffered_notifications=0, health Fresh, restart_count=0, send
-    // succeeded, reader thread live). The stall is inside RA's analysis
-    // queue, not our transport. Editors unstick it the way a user does —
-    // another keystroke ⇒ another didChange with a bumped version.
-    // Re-sending the SAME content still publishes: RA's dedup compares
-    // against the last PUBLISHED set (the clean v1 set), not the last
-    // analysed text. A genuinely dead server still fails the overall
-    // deadline. Root-cause confirmation via RA stderr lands with the LSP-C
-    // stderr ring buffer.
+    // slices. Evidence (campaign ledger 2026-07-05; multiple occurrences on
+    // Windows local + ubuntu CI runs 28747873556/28752070723/28759076132):
+    // rust-analyzer occasionally goes COMPLETELY silent after a didChange —
+    // the didOpen publish arrives (~1-2s), then zero notifications for ANY
+    // uri for 120s+ (post-mortem: buffered_notifications=0, health Fresh,
+    // restart_count=0, stderr ring empty). The nudges have NOT been observed
+    // to unstick a wedged run (all three were ignored on both wedged CI
+    // runs); they are retained as cheap keystroke-equivalent hardening while
+    // root-causing continues. A local round-3 capture (target/s3-repro
+    // run-06) showed a nudge write failing with a broken pipe — the RA
+    // process had DIED, so at least one wedge mode is process death, not a
+    // stalled analysis queue. Whether a given wedge is RA death, two-RA
+    // interference (see the open_file note above), or our own reader thread
+    // is exactly what dump_s3_post_mortem discriminates — PKT-S3-WEDGE-R3.
     eprintln!("[s3] pumping for error diagnostic (up to 120s, nudge every 30s) ...");
     let mut got_error = false;
     for slice in 0..4u32 {
@@ -582,9 +607,15 @@ fn run_s3(
                 "[s3] no diagnostics after {}s; nudging rust-analyzer with did_change v{doc_version} (silent-stall workaround)",
                 slice * 30
             );
-            session
-                .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
-                .map_err(|e| format!("did_change (error nudge): {e}"))?;
+            if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_ERROR_TEXT)
+            {
+                // A failed nudge write (e.g. broken pipe) means the server
+                // process or transport is gone — exactly the evidence the
+                // post-mortem exists for. Dump before failing (round-06
+                // local capture returned early here and lost the evidence).
+                dump_s3_post_mortem(app, session, &scratchpad_uri, "error-nudge-write");
+                return Err(format!("did_change (error nudge): {e}"));
+            }
         }
         if session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(30)) {
             got_error = true;
@@ -593,44 +624,7 @@ fn run_s3(
     }
     eprintln!("[s3] error diagnostic received: {got_error}");
     if !got_error {
-        // Post-mortem: distinguish "rust-analyzer silent for the whole
-        // wait" (starvation / stall) from "notifications arrived but never
-        // matched the error predicate" (product-side race or fingerprint
-        // mismatch). Flake observed locally under concurrent builds and on
-        // ubuntu CI (run 28747873556).
-        let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(&scratchpad_uri);
-        let buffered = session.buffered_diagnostic_notifications();
-        eprintln!(
-            "[s3] POST-MORTEM: expected uri_hash={expected_hash:?} buffered_notifications={}",
-            buffered.len()
-        );
-        for (i, n) in buffered.iter().enumerate() {
-            eprintln!(
-                "[s3] buffered[{i}] uri_hash={:?} match={} diagnostics={} errors={} warnings={}",
-                n.uri_hash,
-                n.uri_hash == expected_hash,
-                n.diagnostic_count,
-                n.error_count,
-                n.warning_count
-            );
-        }
-        eprintln!("[s3] health: {:?}", session.health());
-        // Dump redacted stderr ring from the background drain thread
-        // (PKT-LSP-C T4 / Controller C).  This is the primary post-mortem
-        // channel for RA silent-stall diagnosis: if RA logged the stall cause
-        // (e.g. "analysis is not ready") it will appear here.
-        {
-            let ring = session.stderr_ring();
-            if let Ok(guard) = ring.lock() {
-                eprintln!("[s3-stderr] ring buffer ({} lines):", guard.len());
-                for line in guard.iter() {
-                    eprintln!("[s3-stderr] {line}");
-                }
-                if guard.is_empty() {
-                    eprintln!("[s3-stderr] (empty — no stderr lines captured yet)");
-                }
-            }
-        }
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "error-pump");
         return Err(
             "s3: expected >=1 error diagnostic after introducing type mismatch; \
              none arrived within 120s deadline"
@@ -689,9 +683,10 @@ fn run_s3(
     // skips the publishDiagnostics, so the clear pump sees nothing and
     // times out.
     doc_version += 1;
-    session
-        .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
-        .map_err(|e| format!("did_change (fix): {e}"))?;
+    if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT) {
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "fix-write");
+        return Err(format!("did_change (fix): {e}"));
+    }
 
     // Pump until errors are clear (bounded 60s), with the same sliced
     // nudge as the error phase — the silent-stall race applies to any
@@ -704,9 +699,11 @@ fn run_s3(
             eprintln!(
                 "[s3] errors not cleared after 30s; nudging rust-analyzer with did_change v{doc_version} (silent-stall workaround)"
             );
-            session
-                .did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
-                .map_err(|e| format!("did_change (fix nudge): {e}"))?;
+            if let Err(e) = session.did_change(&scratchpad_uri, doc_version, SCRATCHPAD_FIXED_TEXT)
+            {
+                dump_s3_post_mortem(app, session, &scratchpad_uri, "fix-nudge-write");
+                return Err(format!("did_change (fix nudge): {e}"));
+            }
         }
         if session.pump_until_diagnostics_clear(&scratchpad_uri, Duration::from_secs(30)) {
             cleared = true;
@@ -725,6 +722,7 @@ fn run_s3(
         .map_err(|e| format!("write at-rest content to scratchpad: {e}"))?;
 
     if !cleared {
+        dump_s3_post_mortem(app, session, &scratchpad_uri, "clear-pump");
         return Err(
             "s3: error diagnostics did not clear after fix within 60s deadline".to_string(),
         );
@@ -754,6 +752,99 @@ fn run_s3(
         "[s3] diagnostics cycle complete (error introduced, projected, fixed, projection cleared)"
     );
     Ok(())
+}
+
+/// s3 wedge post-mortem: dump every discriminating channel (PKT-S3-WEDGE-R3).
+///
+/// Discrimination table for a pump timeout:
+///   - reader `terminal=Error(..)`            → our transport died; exact
+///     framing/parse error named (child may still be alive).
+///   - reader `terminal=Eof` + child dead     → rust-analyzer crashed/exited.
+///   - reader alive + zero frames since start → RA truly silent; correlate
+///     with the product-session dump below (two-RA interference lead: the
+///     lazy-start RA spawned when s3 opened scratchpad.rs shares the
+///     workspace and its target/ directory with the standalone probe).
+///   - buffered notifications present         → frames arrived but never
+///     matched the predicate (product-side race, fingerprint mismatch).
+fn dump_s3_post_mortem(
+    app: &mut AppComposition,
+    session: &mut RustAnalyzerSession,
+    scratchpad_uri: &str,
+    phase: &str,
+) {
+    let expected_hash = legion_lsp::lsp_diagnostic_uri_fingerprint(scratchpad_uri);
+    let buffered = session.buffered_diagnostic_notifications();
+    eprintln!(
+        "[s3] POST-MORTEM ({phase}): expected uri_hash={expected_hash:?} buffered_notifications={}",
+        buffered.len()
+    );
+    for (i, n) in buffered.iter().enumerate() {
+        eprintln!(
+            "[s3] buffered[{i}] uri_hash={:?} match={} diagnostics={} errors={} warnings={}",
+            n.uri_hash,
+            n.uri_hash == expected_hash,
+            n.diagnostic_count,
+            n.error_count,
+            n.warning_count
+        );
+    }
+    eprintln!("[s3] health: {:?}", session.health());
+    // Reader-thread stats + child liveness for the standalone probe session:
+    // the primary round-3 discriminator between "server silent" and "our
+    // reader died" (see the table above).
+    let stats = session.reader_stats();
+    eprintln!(
+        "[s3] reader stats: frames_forwarded={} payload_bytes={} terminal={:?} child_running={} exit_status={:?}",
+        stats.frames_forwarded,
+        stats.payload_bytes,
+        stats.terminal,
+        session.is_running(),
+        session.exit_status_string()
+    );
+    // Dump redacted stderr ring from the background drain thread
+    // (PKT-LSP-C T4 / Controller C).  If RA logged the stall cause
+    // (e.g. a notify watcher failure) it will appear here.
+    {
+        let ring = session.stderr_ring();
+        if let Ok(guard) = ring.lock() {
+            eprintln!("[s3-stderr] ring buffer ({} lines):", guard.len());
+            for line in guard.iter() {
+                eprintln!("[s3-stderr] {line}");
+            }
+            if guard.is_empty() {
+                eprintln!("[s3-stderr] (empty — no stderr lines captured yet)");
+            }
+        }
+    }
+    // Product-session dump: the lazy-start trigger spawned a second
+    // rust-analyzer when s3 opened scratchpad.rs. Its state and stderr at
+    // wedge time are the two-RA-interference evidence. Drain first so the
+    // projection reflects a startup that completed since the last frame.
+    let _ = app.drain_lsp_session();
+    eprintln!(
+        "[s3-product] status: {:?}",
+        app.lsp_session_status_projection()
+    );
+    if let Some(health) = app.lsp_server_health_record() {
+        eprintln!("[s3-product] health: {health:?}");
+    }
+    match app.lsp_session_log_projection() {
+        Some(log) => {
+            eprintln!(
+                "[s3-product-stderr] ring buffer ({} lines):",
+                log.lines.len()
+            );
+            for line in &log.lines {
+                eprintln!("[s3-product-stderr] {line}");
+            }
+            if log.lines.is_empty() {
+                eprintln!("[s3-product-stderr] (empty — no stderr lines captured yet)");
+            }
+        }
+        None => {
+            eprintln!("[s3-product-stderr] (no log projection — product session not Live)");
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
