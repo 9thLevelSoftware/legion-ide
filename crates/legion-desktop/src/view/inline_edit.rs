@@ -207,6 +207,12 @@ pub enum InlineEditError {
     /// Attempted to apply the overlay while one or more hunks still have a
     /// `Pending` disposition.
     UndecidedHunksRemaining,
+    /// A durable checkpoint could not be persisted to the
+    /// [`CheckpointStore`][legion_storage::checkpoint::CheckpointStore].
+    CheckpointSaveFailed {
+        /// Underlying storage error message.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for InlineEditError {
@@ -225,6 +231,9 @@ impl std::fmt::Display for InlineEditError {
             }
             Self::UndecidedHunksRemaining => {
                 write!(f, "all hunks must be accepted or rejected before applying")
+            }
+            Self::CheckpointSaveFailed { message } => {
+                write!(f, "checkpoint save failed: {message}")
             }
         }
     }
@@ -279,7 +288,13 @@ pub fn set_inline_edit_hunk_disposition(
 /// Converts the accepted hunks in an inline edit overlay into a
 /// [`WorkspaceProposal`] that the existing proposal-apply pipeline can execute.
 ///
-/// Returns `None` when there are no accepted hunks (nothing to apply).
+/// Returns `Ok(None)` when there are no accepted hunks (nothing to apply).
+///
+/// # Errors
+///
+/// Returns [`InlineEditError::UndecidedHunksRemaining`] when any complete hunk
+/// has not yet been assigned an accept/reject disposition.  All complete hunks
+/// must be decided before a proposal can be created (no silent partial-apply).
 ///
 /// The proposal's preconditions encode the anchor snapshot and buffer version
 /// so the apply pipeline can detect staleness before mutating the buffer.
@@ -287,16 +302,23 @@ pub fn set_inline_edit_hunk_disposition(
 /// Uses `FileId(buffer_id.0)` as the target file identity because the desktop
 /// layer only has a `BufferId`.  The app layer maps `FileId` back to the open
 /// buffer when executing the proposal.
-#[must_use]
 pub fn inline_edit_to_workspace_proposal(
     overlay: &InlineEditOverlayViewModel,
     buffer_id: legion_protocol::BufferId,
-) -> Option<legion_protocol::WorkspaceProposal> {
+) -> Result<Option<legion_protocol::WorkspaceProposal>, InlineEditError> {
     use legion_protocol::{
         CapabilityId, CorrelationId, EditBatch, FileId, PreviewSummary, PrincipalId,
         ProposalPayload, ProposalVersionPreconditions, TextEdit, TextEditProposal, TimestampMillis,
         WorkspaceProposal,
     };
+
+    // Guard: all complete hunks must have an explicit disposition before a
+    // proposal can be created (no silent partial-apply of undecided hunks).
+    for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
+        if !overlay.hunk_dispositions.contains_key(&hunk.hunk_id) {
+            return Err(InlineEditError::UndecidedHunksRemaining);
+        }
+    }
 
     let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
         .diff_hunks
@@ -308,7 +330,7 @@ pub fn inline_edit_to_workspace_proposal(
         .collect();
 
     if accepted_hunks.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let edits = EditBatch {
@@ -323,7 +345,7 @@ pub fn inline_edit_to_workspace_proposal(
 
     let proposal_id = legion_protocol::ProposalId(TimestampMillis::now().0);
 
-    Some(WorkspaceProposal {
+    Ok(Some(WorkspaceProposal {
         proposal_id,
         principal: PrincipalId("ai.inline-edit".to_string()),
         capability: CapabilityId("capability.inline-edit".to_string()),
@@ -352,7 +374,7 @@ pub fn inline_edit_to_workspace_proposal(
         },
         expires_at: None,
         created_at: TimestampMillis::now(),
-    })
+    }))
 }
 
 /// Builds a [`ProposalAuditRecord`] for an inline edit apply operation.
@@ -413,6 +435,11 @@ pub struct InlineEditApplyResult {
     pub proposal_id: legion_protocol::ProposalId,
     /// Shared undo group identifier.  All text edits from this inline edit
     /// apply must use this id so that a single undo reverts them all.
+    ///
+    /// **App-layer contract**: the app layer must pass this id to
+    /// `TransactionSource.undo_group_id` when applying the proposal edits, so
+    /// that a single undo in the editor reverses all changes introduced by the
+    /// inline edit.
     pub undo_group_id: uuid::Uuid,
     /// Stable checkpoint identifier.
     pub checkpoint_id: String,
@@ -432,20 +459,38 @@ pub struct InlineEditApplyResult {
 /// Generates a `Uuid` undo group id that must be shared across every editor
 /// transaction produced during apply.  Creates a
 /// [`DurableCheckpoint`][legion_storage::checkpoint::DurableCheckpoint] that
-/// captures the pre-mutation state for all applied hunks so the caller can
-/// persist it to a [`CheckpointStore`][legion_storage::checkpoint::CheckpointStore].
+/// captures the pre-mutation state for all applied hunks and persists it
+/// to the supplied [`CheckpointStore`][legion_storage::checkpoint::CheckpointStore].
 ///
-/// Returns an `InlineEditApplyResult` with `applied_hunk_count == 0` when
-/// there are no accepted hunks.
-#[must_use]
+/// The `proposal_id` must come from the [`WorkspaceProposal`] produced by
+/// [`inline_edit_to_workspace_proposal`] so that the proposal, checkpoint, and
+/// audit record all share a single stable identifier.
+///
+/// # Errors
+///
+/// Returns [`InlineEditError::UndecidedHunksRemaining`] when any complete hunk
+/// has not yet been assigned an accept/reject disposition.
+///
+/// Returns [`InlineEditError::CheckpointSaveFailed`] when the checkpoint store
+/// cannot persist the checkpoint blob.
 pub fn apply_inline_edit_with_undo_group(
     overlay: &InlineEditOverlayViewModel,
     buffer_id: legion_protocol::BufferId,
-) -> InlineEditApplyResult {
+    proposal_id: legion_protocol::ProposalId,
+    checkpoint_store: &mut legion_storage::checkpoint::CheckpointStore,
+) -> Result<InlineEditApplyResult, InlineEditError> {
     use legion_protocol::{CanonicalPath, PrincipalId, TimestampMillis};
     use legion_storage::checkpoint::{
         CHECKPOINT_SCHEMA_VERSION, CheckpointTarget, CheckpointTargetKind, DurableCheckpoint,
     };
+
+    // Guard: all complete hunks must have an explicit disposition before apply
+    // (no silent partial-apply of undecided hunks).
+    for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
+        if !overlay.hunk_dispositions.contains_key(&hunk.hunk_id) {
+            return Err(InlineEditError::UndecidedHunksRemaining);
+        }
+    }
 
     let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
         .diff_hunks
@@ -458,7 +503,6 @@ pub fn apply_inline_edit_with_undo_group(
 
     let undo_group_id = uuid::Uuid::now_v7();
     let checkpoint_id = format!("ckpt-{}", uuid::Uuid::now_v7());
-    let proposal_id = legion_protocol::ProposalId(TimestampMillis::now().0);
     let applied_hunk_count = accepted_hunks.len() as u32;
 
     // Build one checkpoint target per accepted hunk (SavedFile kind, original
@@ -484,16 +528,24 @@ pub fn apply_inline_edit_with_undo_group(
         schema_version: CHECKPOINT_SCHEMA_VERSION,
     };
 
+    // Persist the checkpoint before returning — callers rely on durability
+    // even in the in-memory case so tests can verify via load_checkpoint.
+    checkpoint_store
+        .save_checkpoint(checkpoint.clone())
+        .map_err(|e| InlineEditError::CheckpointSaveFailed {
+            message: format!("{e}"),
+        })?;
+
     let audit_record = build_inline_edit_audit_record(proposal_id, applied_hunk_count);
 
-    InlineEditApplyResult {
+    Ok(InlineEditApplyResult {
         proposal_id,
         undo_group_id,
         checkpoint_id,
         applied_hunk_count,
         audit_record,
         checkpoint,
-    }
+    })
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
