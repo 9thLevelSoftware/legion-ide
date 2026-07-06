@@ -213,6 +213,10 @@ pub enum InlineEditError {
         /// Underlying storage error message.
         message: String,
     },
+    /// A [`TextCoordinate`][legion_protocol::TextCoordinate] is missing its
+    /// `byte_offset` field, making safe range conversion impossible for
+    /// non-ASCII content.
+    MissingByteOffset,
 }
 
 impl std::fmt::Display for InlineEditError {
@@ -234,6 +238,9 @@ impl std::fmt::Display for InlineEditError {
             }
             Self::CheckpointSaveFailed { message } => {
                 write!(f, "checkpoint save failed: {message}")
+            }
+            Self::MissingByteOffset => {
+                write!(f, "byte_offset is required for safe range conversion")
             }
         }
     }
@@ -285,6 +292,21 @@ pub fn set_inline_edit_hunk_disposition(
 
 // ─── T2: Proposal pipeline integration ───────────────────────────────────────
 
+fn ensure_overlay_actionable(overlay: &InlineEditOverlayViewModel) -> Result<(), InlineEditError> {
+    if overlay.state != InlineEditOverlayState::Complete {
+        return Err(InlineEditError::OverlayNotReady);
+    }
+    for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
+        match overlay.hunk_dispositions.get(&hunk.hunk_id) {
+            None | Some(&DelegatedTaskProposalHunkDisposition::Pending) => {
+                return Err(InlineEditError::UndecidedHunksRemaining);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Converts the accepted hunks in an inline edit overlay into a
 /// [`WorkspaceProposal`] that the existing proposal-apply pipeline can execute.
 ///
@@ -292,9 +314,15 @@ pub fn set_inline_edit_hunk_disposition(
 ///
 /// # Errors
 ///
+/// Returns [`InlineEditError::OverlayNotReady`] when the overlay is not in
+/// [`InlineEditOverlayState::Complete`] state.
+///
 /// Returns [`InlineEditError::UndecidedHunksRemaining`] when any complete hunk
 /// has not yet been assigned an accept/reject disposition.  All complete hunks
 /// must be decided before a proposal can be created (no silent partial-apply).
+///
+/// Returns [`InlineEditError::MissingByteOffset`] when any accepted hunk's
+/// range is missing byte offset information.
 ///
 /// The proposal's preconditions encode the anchor snapshot and buffer version
 /// so the apply pipeline can detect staleness before mutating the buffer.
@@ -312,14 +340,7 @@ pub fn inline_edit_to_workspace_proposal(
         WorkspaceProposal,
     };
 
-    for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
-        match overlay.hunk_dispositions.get(&hunk.hunk_id) {
-            None | Some(&DelegatedTaskProposalHunkDisposition::Pending) => {
-                return Err(InlineEditError::UndecidedHunksRemaining);
-            }
-            _ => {}
-        }
-    }
+    ensure_overlay_actionable(overlay)?;
 
     let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
         .diff_hunks
@@ -334,15 +355,14 @@ pub fn inline_edit_to_workspace_proposal(
         return Ok(None);
     }
 
-    let edits = EditBatch {
-        edits: accepted_hunks
-            .iter()
-            .map(|h| TextEdit {
-                range: protocol_range_to_text_range(h.range),
-                replacement: h.replacement_text.clone(),
-            })
-            .collect(),
-    };
+    let mut edits_vec = Vec::with_capacity(accepted_hunks.len());
+    for h in &accepted_hunks {
+        edits_vec.push(TextEdit {
+            range: protocol_range_to_text_range(h.range)?,
+            replacement: h.replacement_text.clone(),
+        });
+    }
+    let edits = EditBatch { edits: edits_vec };
 
     let proposal_id = legion_protocol::ProposalId(TimestampMillis::now().0);
 
@@ -389,12 +409,13 @@ pub fn inline_edit_to_workspace_proposal(
 pub fn build_inline_edit_audit_record(
     proposal_id: legion_protocol::ProposalId,
     applied_hunk_count: u32,
+    correlation_id: legion_protocol::CorrelationId,
+    causality_id: legion_protocol::CausalityId,
 ) -> legion_protocol::ProposalAuditRecord {
     use legion_protocol::{
-        CapabilityId, CausalityId, CorrelationId, PrincipalId, ProposalAuditRecord,
-        ProposalLifecycleState, ProposalPayloadKind, ProposalPayloadSummary, TimestampMillis,
+        CapabilityId, PrincipalId, ProposalAuditRecord, ProposalLifecycleState,
+        ProposalPayloadKind, ProposalPayloadSummary, TimestampMillis,
     };
-    use uuid::Uuid;
 
     ProposalAuditRecord {
         proposal_id,
@@ -402,8 +423,8 @@ pub fn build_inline_edit_audit_record(
         timestamp: TimestampMillis::now(),
         principal: PrincipalId("ai.inline-edit".to_string()),
         capability: CapabilityId("capability.inline-edit".to_string()),
-        correlation_id: CorrelationId(0),
-        causality_id: CausalityId(Uuid::nil()),
+        correlation_id,
+        causality_id,
         payload_summary: ProposalPayloadSummary {
             kind: ProposalPayloadKind::TextEdit,
             affected_files: Vec::new(),
@@ -469,6 +490,9 @@ pub struct InlineEditApplyResult {
 ///
 /// # Errors
 ///
+/// Returns [`InlineEditError::OverlayNotReady`] when the overlay is not in
+/// [`InlineEditOverlayState::Complete`] state.
+///
 /// Returns [`InlineEditError::UndecidedHunksRemaining`] when any complete hunk
 /// has not yet been assigned an accept/reject disposition.
 ///
@@ -478,6 +502,8 @@ pub fn apply_inline_edit_with_undo_group(
     overlay: &InlineEditOverlayViewModel,
     buffer_id: legion_protocol::BufferId,
     proposal_id: legion_protocol::ProposalId,
+    correlation_id: legion_protocol::CorrelationId,
+    causality_id: legion_protocol::CausalityId,
     checkpoint_store: &mut legion_storage::checkpoint::CheckpointStore,
 ) -> Result<InlineEditApplyResult, InlineEditError> {
     use legion_protocol::{CanonicalPath, PrincipalId, TimestampMillis};
@@ -485,14 +511,7 @@ pub fn apply_inline_edit_with_undo_group(
         CHECKPOINT_SCHEMA_VERSION, CheckpointTarget, CheckpointTargetKind, DurableCheckpoint,
     };
 
-    for hunk in overlay.diff_hunks.iter().filter(|h| h.complete) {
-        match overlay.hunk_dispositions.get(&hunk.hunk_id) {
-            None | Some(&DelegatedTaskProposalHunkDisposition::Pending) => {
-                return Err(InlineEditError::UndecidedHunksRemaining);
-            }
-            _ => {}
-        }
-    }
+    ensure_overlay_actionable(overlay)?;
 
     let accepted_hunks: Vec<&InlineEditDiffHunk> = overlay
         .diff_hunks
@@ -504,7 +523,7 @@ pub fn apply_inline_edit_with_undo_group(
         .collect();
 
     let undo_group_id = uuid::Uuid::now_v7();
-    let checkpoint_id = format!("ckpt-{}", uuid::Uuid::now_v7());
+    let checkpoint_id = format!("ckpt-{undo_group_id}");
     let applied_hunk_count = accepted_hunks.len() as u32;
 
     // Build one checkpoint target per accepted hunk (SavedFile kind, original
@@ -538,7 +557,12 @@ pub fn apply_inline_edit_with_undo_group(
             message: format!("{e}"),
         })?;
 
-    let audit_record = build_inline_edit_audit_record(proposal_id, applied_hunk_count);
+    let audit_record = build_inline_edit_audit_record(
+        proposal_id,
+        applied_hunk_count,
+        correlation_id,
+        causality_id,
+    );
 
     Ok(InlineEditApplyResult {
         proposal_id,
@@ -555,15 +579,21 @@ pub fn apply_inline_edit_with_undo_group(
 /// Converts a [`ProtocolTextRange`] (line/character coordinates) to a
 /// [`TextRange`] (byte offsets) for use in a proposal payload.
 ///
-/// Uses the `byte_offset` field of each [`TextCoordinate`] when available;
-/// falls back to the character value interpreted as a byte offset otherwise.
+/// # Errors
+///
+/// Returns [`InlineEditError::MissingByteOffset`] when either the start or end
+/// coordinate is missing its `byte_offset` field.  Falling back to the column
+/// index would silently corrupt non-ASCII edits.
 fn protocol_range_to_text_range(
     range: legion_protocol::ProtocolTextRange,
-) -> legion_protocol::TextRange {
+) -> Result<legion_protocol::TextRange, InlineEditError> {
     let start = range
         .start
         .byte_offset
-        .unwrap_or(range.start.character as u64);
-    let end = range.end.byte_offset.unwrap_or(range.end.character as u64);
-    legion_protocol::TextRange::byte(start, end)
+        .ok_or(InlineEditError::MissingByteOffset)?;
+    let end = range
+        .end
+        .byte_offset
+        .ok_or(InlineEditError::MissingByteOffset)?;
+    Ok(legion_protocol::TextRange::byte(start, end))
 }

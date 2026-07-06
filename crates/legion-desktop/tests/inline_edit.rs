@@ -13,8 +13,8 @@ use legion_desktop::view::{
     inline_edit_to_workspace_proposal, set_inline_edit_hunk_disposition,
 };
 use legion_protocol::{
-    BufferId, BufferVersion, DelegatedTaskProposalHunkDisposition, FileFingerprint,
-    InlineEditInstruction, ProposalId, ProposalLifecycleState, ProposalPayload,
+    BufferId, BufferVersion, CausalityId, CorrelationId, DelegatedTaskProposalHunkDisposition,
+    FileFingerprint, InlineEditInstruction, ProposalId, ProposalLifecycleState, ProposalPayload,
     ProposalPayloadKind, ProtocolTextRange, SnapshotId, TextCoordinate,
 };
 use legion_storage::checkpoint::CheckpointStore;
@@ -48,6 +48,14 @@ fn sample_instruction() -> InlineEditInstruction {
             value: "abc123".to_string(),
         }),
     }
+}
+
+fn test_correlation_id() -> CorrelationId {
+    CorrelationId(42)
+}
+
+fn test_causality_id() -> CausalityId {
+    CausalityId(uuid::Uuid::now_v7())
 }
 
 /// Builds a complete single-hunk chunk string in the expected format.
@@ -286,7 +294,9 @@ fn inline_edit_to_proposal_includes_only_accepted_hunks() {
 #[test]
 fn inline_edit_apply_produces_audit_record() {
     let proposal_id = legion_protocol::ProposalId(9999);
-    let audit_record = build_inline_edit_audit_record(proposal_id, 2);
+    let corr = test_correlation_id();
+    let caus = test_causality_id();
+    let audit_record = build_inline_edit_audit_record(proposal_id, 2, corr, caus);
 
     assert_eq!(
         audit_record.payload_summary.kind,
@@ -301,6 +311,16 @@ fn inline_edit_apply_produces_audit_record() {
     assert_eq!(
         audit_record.proposal_id, proposal_id,
         "audit record proposal_id must match the supplied proposal_id"
+    );
+    assert_ne!(
+        audit_record.correlation_id,
+        CorrelationId(0),
+        "audit record must carry a non-zero CorrelationId"
+    );
+    assert_ne!(
+        audit_record.causality_id,
+        CausalityId(uuid::Uuid::nil()),
+        "audit record must carry a non-nil CausalityId"
     );
 }
 
@@ -353,8 +373,15 @@ fn apply_creates_checkpoint_with_matching_proposal_id() {
 
     let proposal_id = ProposalId(7777);
     let mut store = CheckpointStore::new();
-    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(10), proposal_id, &mut store)
-        .expect("no pending hunks — h7 has an explicit disposition");
+    let result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(10),
+        proposal_id,
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    )
+    .expect("no pending hunks — h7 has an explicit disposition");
 
     // The function persists the checkpoint internally; verify via load_checkpoint.
     let loaded = store
@@ -396,8 +423,15 @@ fn apply_uses_single_undo_group() {
 
     let proposal_id = ProposalId(8888);
     let mut store = CheckpointStore::new();
-    let result = apply_inline_edit_with_undo_group(&overlay, BufferId(11), proposal_id, &mut store)
-        .expect("no pending hunks — h8 and h9 both have explicit dispositions");
+    let result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(11),
+        proposal_id,
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    )
+    .expect("no pending hunks — h8 and h9 both have explicit dispositions");
 
     assert_eq!(
         result.applied_hunk_count, 2,
@@ -443,9 +477,15 @@ fn checkpoint_targets_cover_all_applied_hunks() {
     }
 
     let mut store = CheckpointStore::new();
-    let result =
-        apply_inline_edit_with_undo_group(&overlay, BufferId(12), ProposalId(1212), &mut store)
-            .expect("no pending hunks — ha, hb, hc all have explicit dispositions");
+    let result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(12),
+        ProposalId(1212),
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    )
+    .expect("no pending hunks — ha, hb, hc all have explicit dispositions");
 
     assert_eq!(
         result.checkpoint.targets.len(),
@@ -475,9 +515,15 @@ fn undo_group_and_checkpoint_are_correlated() {
     );
 
     let mut store = CheckpointStore::new();
-    let result =
-        apply_inline_edit_with_undo_group(&overlay, BufferId(13), ProposalId(1313), &mut store)
-            .expect("no pending hunks — hd has an explicit disposition");
+    let result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(13),
+        ProposalId(1313),
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    )
+    .expect("no pending hunks — hd has an explicit disposition");
 
     // The checkpoint's proposal_id and the audit_record's proposal_id must
     // both match the result's proposal_id — proving the three artifacts
@@ -527,9 +573,15 @@ fn proposal_id_correlates_across_proposal_and_checkpoint() {
         .expect("proposal must be Some — at least one accepted hunk");
 
     let mut store = CheckpointStore::new();
-    let result =
-        apply_inline_edit_with_undo_group(&overlay, BufferId(20), proposal.proposal_id, &mut store)
-            .expect("no pending hunks");
+    let result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(20),
+        proposal.proposal_id,
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    )
+    .expect("no pending hunks");
 
     // The same proposal_id must flow through to the checkpoint and apply result.
     assert_eq!(
@@ -567,8 +619,14 @@ fn undecided_hunks_prevent_apply() {
 
     // apply must refuse when any complete hunk lacks a disposition.
     let mut store = CheckpointStore::new();
-    let apply_result =
-        apply_inline_edit_with_undo_group(&overlay, BufferId(21), ProposalId(2121), &mut store);
+    let apply_result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(21),
+        ProposalId(2121),
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    );
     assert!(
         matches!(apply_result, Err(InlineEditError::UndecidedHunksRemaining)),
         "apply must return UndecidedHunksRemaining when a complete hunk has no disposition"
@@ -609,8 +667,14 @@ fn explicit_pending_disposition_prevents_apply() {
     );
 
     let mut store = CheckpointStore::new();
-    let apply_result =
-        apply_inline_edit_with_undo_group(&overlay, BufferId(22), ProposalId(2222), &mut store);
+    let apply_result = apply_inline_edit_with_undo_group(
+        &overlay,
+        BufferId(22),
+        ProposalId(2222),
+        test_correlation_id(),
+        test_causality_id(),
+        &mut store,
+    );
     assert!(
         matches!(apply_result, Err(InlineEditError::UndecidedHunksRemaining)),
         "explicit Pending disposition must be treated as undecided"
