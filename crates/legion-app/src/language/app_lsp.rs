@@ -828,7 +828,18 @@ fn startup_session(
 
     let mut launcher = LspStdioLauncher::new();
     let mut session = RustAnalyzerSession::launch(config, &mut launcher)?;
-    session.initialize(root_uri)?;
+    // Pass `files.watcher: "client"` so rust-analyzer does not start its own
+    // notify file-watcher on the workspace root.  The notify watcher fails on
+    // temp-path workspaces with a "Input watch path is neither a file nor a
+    // directory" error that wedges RA's analysis loop (M8 PKT-S3-WEDGE-R3).
+    // The product session already sends `didOpen`/`didChange`/`didClose`, so
+    // external file-change notifications are the only thing lost — an
+    // acceptable trade-off for private beta.
+    session.initialize_with_options(
+        root_uri,
+        Some(serde_json::json!({"files": {"watcher": "client"}})),
+        None,
+    )?;
 
     // Spawn the stderr drain thread now that the session is initialised.
     // The ring Arc is cloned into the thread; the session keeps the other

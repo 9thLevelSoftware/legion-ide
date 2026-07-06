@@ -131,3 +131,48 @@ fn initialize_populates_capability_summaries() {
         "capabilities must be non-empty after a successful initialize"
     );
 }
+
+/// The product session now initializes with `{"files": {"watcher": "client"}}` to
+/// prevent the notify file-watcher wedge on non-existent paths (M8 PKT-S3-WEDGE-R3).
+/// This test verifies that `initialize_with_options` with the watcher option
+/// succeeds and produces a healthy session — the same path taken by `startup_session`
+/// after PKT-0 Task 1.
+#[test]
+fn initialize_with_watcher_client_option_succeeds() {
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
+
+    let config = RustAnalyzerLaunchConfig {
+        discovery: RustAnalyzerDiscovery {
+            configured_path: Some(mock_path),
+            ..Default::default()
+        },
+        supervisor: lsp_mock::mock_supervisor_config(),
+        server_id: LanguageServerId(8),
+        language_id: LanguageId("rust".to_string()),
+    };
+
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session =
+        RustAnalyzerSession::launch(config, &mut launcher).expect("launch should succeed");
+
+    session
+        .initialize_with_options(
+            "file:///workspace",
+            Some(serde_json::json!({"files": {"watcher": "client"}})),
+            None,
+        )
+        .expect("initialize_with_options with watcher=client should succeed");
+
+    let health = session.health();
+    assert_eq!(
+        health.init_status,
+        LspResultStatus::Fresh,
+        "init_status must be Fresh after initialize_with_options with watcher=client"
+    );
+    assert_eq!(
+        health.binary_provenance,
+        LspServerBinaryProvenance::Configured,
+    );
+}

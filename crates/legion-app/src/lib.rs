@@ -21504,7 +21504,34 @@ impl AppComposition {
         Ok(response.result)
     }
 
-    #[cfg(not(feature = "ai"))]
+    /// Offline variant: `ai` feature is absent but `offline` includes `legion-ai`
+    /// (pure Rust, no network deps).  We instantiate the deterministic-local
+    /// provider directly without going through a hosted-capable registry, so
+    /// reqwest is never pulled in.
+    #[cfg(all(not(feature = "ai"), feature = "offline"))]
+    fn invoke_inline_prediction_provider(
+        &self,
+        metadata: InlinePredictionRequestMetadata,
+    ) -> Result<InlinePredictionResult, AppCompositionError> {
+        use legion_ai::{
+            DeterministicInlinePredictionProvider, InlinePredictionRequest, ModelProvider,
+        };
+        const DETERMINISTIC_ID: &str = "deterministic-local";
+        let provider = DeterministicInlinePredictionProvider::new(DETERMINISTIC_ID);
+        let request = InlinePredictionRequest {
+            provider: DETERMINISTIC_ID.to_string(),
+            model: "zeta2-style-deterministic".to_string(),
+            metadata,
+        };
+        let response = provider
+            .predict_inline(request)
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        Ok(response.result)
+    }
+
+    /// Pure-offline variant: neither `ai` nor `offline` feature is active;
+    /// inline prediction is genuinely unavailable.
+    #[cfg(not(any(feature = "ai", feature = "offline")))]
     fn invoke_inline_prediction_provider(
         &self,
         _metadata: InlinePredictionRequestMetadata,

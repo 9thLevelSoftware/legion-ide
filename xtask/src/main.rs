@@ -1135,6 +1135,15 @@ fn append_manual_renderer_measurement(
                                 truncate_report_message(&output_text)
                             ),
                         )
+                    } else if !output.status.success() && manual_renderer_build_failed(&output_text)
+                    {
+                        manual_renderer_placeholder_measurement(
+                            xtask::perf_harness::SkeletonStatus::Skipped,
+                            format!(
+                                "renderer-backed Manual measurement skipped: desktop build failed{}",
+                                command_output_suffix(&output_text)
+                            ),
+                        )
                     } else {
                         manual_renderer_placeholder_measurement(
                             xtask::perf_harness::SkeletonStatus::Failed,
@@ -1202,6 +1211,17 @@ fn truncate_report_message(message: &str) -> String {
     } else {
         format!("{}...", trimmed.chars().take(LIMIT).collect::<String>())
     }
+}
+
+/// Returns `true` when `output_text` contains patterns that are characteristic
+/// of a Rust/Cargo build failure.  A build failure means the renderer binary
+/// could not be compiled at all — the measurement pre-condition was not met —
+/// and should be classified as `Skipped` rather than `Failed`.
+fn manual_renderer_build_failed(output_text: &str) -> bool {
+    let lower = output_text.to_ascii_lowercase();
+    lower.contains("could not compile")
+        || lower.contains("error[e")
+        || lower.contains("aborting due to")
 }
 
 fn manual_renderer_environment_blocked(output_text: &str) -> bool {
@@ -4906,5 +4926,37 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
         ] {
             assert_phase4_runtime_surface_preserves_boundaries(path);
         }
+    }
+
+    // ── PKT-0 Task 2: perf-harness build-failure heuristic ───────────────────
+
+    #[test]
+    fn manual_renderer_build_failed_detects_cargo_build_errors() {
+        // "could not compile" — standard Cargo build-failure trailer
+        assert!(
+            manual_renderer_build_failed(
+                "error[E0599]: no method `foo`\ncould not compile `legion-desktop`"
+            ),
+            "must detect 'could not compile'"
+        );
+        // "error[E" — standard Rust compiler diagnostic code prefix
+        assert!(
+            manual_renderer_build_failed("error[E0308]: mismatched types"),
+            "must detect 'error[E'"
+        );
+        // "aborting due to" — Rust compiler summary line
+        assert!(
+            manual_renderer_build_failed("aborting due to 3 previous errors"),
+            "must detect 'aborting due to'"
+        );
+        // none of the above — should NOT be classified as a build failure
+        assert!(
+            !manual_renderer_build_failed("Display not found: no display server available"),
+            "must not misclassify renderer-blocked output as a build failure"
+        );
+        assert!(
+            !manual_renderer_build_failed(""),
+            "must not classify empty output as a build failure"
+        );
     }
 }
