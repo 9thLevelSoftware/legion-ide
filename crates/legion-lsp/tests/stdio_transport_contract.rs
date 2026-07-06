@@ -933,3 +933,124 @@ mod tests {
         "semantic tokens should be produced for the non-trivial fixture",
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PKT-S3-WEDGE-R3: reader-thread observability.
+//
+// The stdout reader thread terminates on the first EOF or framing/parse
+// error. Before these stats existed, a dead reader was indistinguishable
+// from a silent server: `try_recv_envelope` maps `Disconnected` and `Eof`
+// to `None`, so the session reported "no diagnostics" forever with an empty
+// stderr ring — the exact GP-1 s3 wedge signature. These tests pin the
+// observability contract used by the s3 post-mortem to discriminate.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn wait_for_reader_terminal(
+    session: &LspStdioSession,
+    budget: std::time::Duration,
+) -> Option<legion_lsp::LspReaderTerminal> {
+    let started = std::time::Instant::now();
+    while started.elapsed() < budget {
+        if let Some(terminal) = session.reader_stats().terminal {
+            return Some(terminal);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    None
+}
+
+#[test]
+fn stdio_lsp_session_reader_stats_count_frames_and_bytes() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(2, 5000),
+        )
+        .unwrap();
+    let echoed = session
+        .request("mock.echo", json!({"value": 1}), operation_context(3, 5000))
+        .unwrap();
+    assert_eq!(echoed.status, LspResultStatus::Fresh);
+
+    let stats = session.reader_stats();
+    assert!(
+        stats.frames_forwarded >= 2,
+        "initialize + echo responses must both be counted, got {}",
+        stats.frames_forwarded
+    );
+    assert!(
+        stats.payload_bytes > 0,
+        "forwarded frames must accumulate payload bytes"
+    );
+    assert!(
+        stats.terminal.is_none(),
+        "a healthy session must have no terminal reader event, got {:?}",
+        stats.terminal
+    );
+}
+
+#[test]
+fn stdio_lsp_session_reader_records_clean_eof_when_server_exits() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(2, 5000),
+        )
+        .unwrap();
+    session
+        .send_notification("exit", json!({}))
+        .expect("exit notification write");
+
+    let terminal = wait_for_reader_terminal(&session, std::time::Duration::from_secs(10));
+    assert_eq!(
+        terminal,
+        Some(legion_lsp::LspReaderTerminal::Eof),
+        "server exit must be recorded as a clean-EOF terminal reader event"
+    );
+}
+
+#[test]
+fn stdio_lsp_session_reader_records_malformed_frame_and_child_stays_alive() {
+    // `mock.malformedFrame` makes the server emit a Content-Length framed
+    // body that is not valid JSON, then KEEP SERVING. This is the GP-1 s3
+    // wedge-signature discriminator: child alive, reader dead.
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = LspStdioSession::start(mock_server_config(), &mut launcher).unwrap();
+    session
+        .initialize(
+            json!({"processId": null, "capabilities": {}}),
+            operation_context(2, 5000),
+        )
+        .unwrap();
+    let frames_before = session.reader_stats().frames_forwarded;
+    session
+        .send_notification("mock.malformedFrame", json!({}))
+        .expect("malformed-frame trigger write");
+
+    let terminal = wait_for_reader_terminal(&session, std::time::Duration::from_secs(10))
+        .expect("a malformed frame must record a terminal reader error");
+    match &terminal {
+        legion_lsp::LspReaderTerminal::Error(message) => {
+            assert!(
+                !message.is_empty(),
+                "terminal error must carry the parse/framing message"
+            );
+        }
+        other => panic!("expected Error terminal event, got {other:?}"),
+    }
+    let stats = session.reader_stats();
+    assert!(
+        stats.frames_forwarded >= frames_before,
+        "pre-death frames must remain counted after the reader terminates"
+    );
+    // Reader death is NOT process death: the wedge signature is a live child
+    // whose frames stopped surfacing.
+    assert!(
+        session.is_running(),
+        "mock server must still be alive after emitting a malformed frame"
+    );
+}

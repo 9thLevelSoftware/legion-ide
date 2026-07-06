@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -2139,6 +2141,58 @@ struct StdoutReader {
     handle: Option<JoinHandle<()>>,
 }
 
+/// How the stdout reader thread terminated (PKT-S3-WEDGE-R3).
+///
+/// The reader thread exits after forwarding its first terminal event. Before
+/// this was recorded, a dead reader was indistinguishable from a silent
+/// server: `try_recv_envelope` maps both `Disconnected` and `Eof` to `None`,
+/// so a session whose reader died reported "no frames" forever — the GP-1 s3
+/// wedge signature (total silence, empty stderr ring, writes still succeed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspReaderTerminal {
+    /// The peer closed stdout cleanly (EOF between frames).
+    Eof,
+    /// A framing or JSON parse error terminated the reader. Carries the
+    /// error's display message — error metadata only, never raw payload
+    /// bytes.
+    Error(String),
+}
+
+/// Point-in-time snapshot of the stdout reader thread's counters.
+///
+/// Written by the reader thread, read by post-mortem diagnostics (GP-1 s3)
+/// to discriminate "server truly silent" (reader alive, zero frames) from
+/// "our reader died" (terminal event recorded, child possibly still alive).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspReaderStatsSnapshot {
+    /// Frames successfully parsed and forwarded to the session channel.
+    pub frames_forwarded: u64,
+    /// Total payload bytes across forwarded frames (headers excluded).
+    pub payload_bytes: u64,
+    /// Terminal event that ended the reader thread, if it has ended.
+    pub terminal: Option<LspReaderTerminal>,
+}
+
+/// Shared counters written by the reader thread and snapshot by the session.
+/// Lives on [`LspStdioProcess`] (not [`StdoutReader`]) so the snapshot
+/// survives `kill()` taking the reader down.
+#[derive(Debug, Default)]
+struct ReaderStatsShared {
+    frames_forwarded: AtomicU64,
+    payload_bytes: AtomicU64,
+    terminal: Mutex<Option<LspReaderTerminal>>,
+}
+
+impl ReaderStatsShared {
+    fn snapshot(&self) -> LspReaderStatsSnapshot {
+        LspReaderStatsSnapshot {
+            frames_forwarded: self.frames_forwarded.load(Ordering::Acquire),
+            payload_bytes: self.payload_bytes.load(Ordering::Acquire),
+            terminal: self.terminal.lock().map_or(None, |slot| slot.clone()),
+        }
+    }
+}
+
 /// Outcome of a deadline-bounded read on [`LspStdioProcess::read_envelope_until`].
 pub enum LspReadOutcome {
     /// A framed envelope was read before the deadline.
@@ -2168,6 +2222,7 @@ pub struct LspStdioProcess {
     stdin: Option<ChildStdin>,
     stderr: Option<ChildStderr>,
     reader: Option<StdoutReader>,
+    reader_stats: Arc<ReaderStatsShared>,
     killed: bool,
 }
 
@@ -2182,14 +2237,22 @@ impl LspStdioProcess {
             message: "child stdout unavailable".to_string(),
         })?;
         let stderr = child.stderr.take();
-        let reader = StdoutReader::spawn(stdout)?;
+        let reader_stats = Arc::new(ReaderStatsShared::default());
+        let reader = StdoutReader::spawn(stdout, Arc::clone(&reader_stats))?;
         Ok(Self {
             child: Some(child),
             stdin: Some(stdin),
             stderr,
             reader: Some(reader),
+            reader_stats,
             killed: false,
         })
+    }
+
+    /// Snapshot of the stdout reader thread's counters (frames forwarded,
+    /// payload bytes, terminal event). Valid even after `kill()`.
+    pub fn reader_stats(&self) -> LspReaderStatsSnapshot {
+        self.reader_stats.snapshot()
     }
 
     /// Writes a single Content-Length framed envelope to the child's stdin.
@@ -2318,8 +2381,10 @@ impl LspProcessHandle for LspStdioProcess {
 impl StdoutReader {
     /// Spawns a background thread that reads Content-Length framed JSON-RPC
     /// envelopes from `stdout` and forwards them over a channel until clean
-    /// EOF or a framing/parse error.
-    fn spawn(stdout: ChildStdout) -> LspRuntimeResult<Self> {
+    /// EOF or a framing/parse error. Counters and the terminal event are
+    /// recorded in `stats` so a dead reader is observable after the fact
+    /// (PKT-S3-WEDGE-R3).
+    fn spawn(stdout: ChildStdout, stats: Arc<ReaderStatsShared>) -> LspRuntimeResult<Self> {
         let (tx, rx) = mpsc::channel();
         let handle = std::thread::Builder::new()
             .name("legion-lsp-stdout-reader".to_string())
@@ -2328,13 +2393,34 @@ impl StdoutReader {
                 loop {
                     let event = match read_lsp_frame(&mut reader) {
                         Ok(Some(payload)) => match serde_json::from_slice(&payload) {
-                            Ok(envelope) => StdoutReaderEvent::Frame(Box::new(envelope)),
+                            Ok(envelope) => {
+                                stats.frames_forwarded.fetch_add(1, Ordering::AcqRel);
+                                stats
+                                    .payload_bytes
+                                    .fetch_add(payload.len() as u64, Ordering::AcqRel);
+                                StdoutReaderEvent::Frame(Box::new(envelope))
+                            }
                             Err(err) => StdoutReaderEvent::Err(Box::new(err.into())),
                         },
                         Ok(None) => StdoutReaderEvent::Eof,
                         Err(err) => StdoutReaderEvent::Err(Box::new(err)),
                     };
-                    let terminal = !matches!(event, StdoutReaderEvent::Frame(_));
+                    // Record the terminal event BEFORE forwarding it, so any
+                    // consumer that observes the channel event also observes
+                    // the stats.
+                    let terminal_event = match &event {
+                        StdoutReaderEvent::Frame(_) => None,
+                        StdoutReaderEvent::Eof => Some(LspReaderTerminal::Eof),
+                        StdoutReaderEvent::Err(err) => {
+                            Some(LspReaderTerminal::Error(err.to_string()))
+                        }
+                    };
+                    let terminal = terminal_event.is_some();
+                    if let Some(terminal_event) = terminal_event
+                        && let Ok(mut slot) = stats.terminal.lock()
+                    {
+                        *slot = Some(terminal_event);
+                    }
                     // If the receiver is gone the session no longer cares; stop.
                     if tx.send(event).is_err() || terminal {
                         return;
@@ -2601,6 +2687,15 @@ impl LspStdioSession {
     /// Returns whether the session is still alive.
     pub fn is_running(&mut self) -> bool {
         self.process.is_running()
+    }
+
+    /// Snapshot of the stdout reader thread's counters (frames forwarded,
+    /// payload bytes, terminal event). Post-mortem diagnostics use this to
+    /// distinguish a genuinely silent server (reader alive, zero frames)
+    /// from a dead reader (terminal event recorded, child possibly still
+    /// alive) — the GP-1 s3 wedge discriminator (PKT-S3-WEDGE-R3).
+    pub fn reader_stats(&self) -> LspReaderStatsSnapshot {
+        self.process.reader_stats()
     }
 
     /// Detaches the child process stderr handle so a supervisor/drain thread
