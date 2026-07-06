@@ -1,8 +1,8 @@
 use legion_app::proposal_risk_rule_ids_from_coverage;
 use legion_protocol::{
     ByteRange, DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalReview, ProposalId,
-    ProposalLedgerRow, ProposalRiskLabel, TimestampMillis, VerificationRunRow,
-    VerificationRunState,
+    ProposalEvidencePanel, ProposalLedgerRow, ProposalRiskLabel, TimestampMillis,
+    VerificationRunRow, VerificationRunState,
 };
 use legion_ui::ShellProjectionSnapshot;
 use std::collections::BTreeMap;
@@ -171,6 +171,107 @@ pub struct DesktopProposalReviewHunkViewModel {
     pub disposition: DelegatedTaskProposalHunkDisposition,
     /// Whether this hunk has a path that can be opened for in-place editing.
     pub edit_in_place_path: Option<String>,
+}
+
+// ─── ProposalEvidencePanel DTO view model (F6) ───────────────────────────────
+
+/// Structured view model for the `ProposalEvidencePanel` protocol DTO.
+///
+/// Maps the flat DTO fields into renderer-ready rows.  Populated via
+/// `From<ProposalEvidencePanel>`.  All fields are structured; no free-text
+/// provider output is exposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopEvidencePanelDtoViewModel {
+    /// Proposal identifier from provenance.
+    pub proposal_id: ProposalId,
+    /// Risk label from provenance.
+    pub risk_label: ProposalRiskLabel,
+    /// Privacy label from provenance (display-safe).
+    pub privacy_label_label: String,
+    /// Creation timestamp (milliseconds since epoch).
+    pub created_at: TimestampMillis,
+    /// Update timestamp (milliseconds since epoch).
+    pub updated_at: TimestampMillis,
+    /// Structured test results summary row, if present.
+    pub test_results: Option<DesktopTestResultsSummaryRow>,
+    /// Bounded list of command summary rows.
+    pub command_summary_rows: Vec<DesktopCommandSummaryRow>,
+    /// Risk rule label rows.
+    pub risk_rule_rows: Vec<DesktopRiskRuleRow>,
+}
+
+/// Structured test results row for the evidence panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopTestResultsSummaryRow {
+    /// Total test count.
+    pub total_count: u32,
+    /// Passed test count.
+    pub passed_count: u32,
+    /// Failed test count.
+    pub failed_count: u32,
+    /// Skipped test count.
+    pub skipped_count: u32,
+    /// Stable run identifier.
+    pub run_id: String,
+}
+
+/// Structured command summary row for the evidence panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopCommandSummaryRow {
+    /// Display-safe command class label (never raw command text).
+    pub command_class: String,
+    /// Process exit code when available.
+    pub exit_code: Option<i32>,
+    /// True when the full command text was redacted.
+    pub redacted: bool,
+}
+
+/// Structured risk rule row for the evidence panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopRiskRuleRow {
+    /// Stable rule identifier.
+    pub rule_id: String,
+    /// Whether the rule was triggered.
+    pub triggered: bool,
+    /// Display-safe rationale label.
+    pub rationale_label: String,
+}
+
+impl From<ProposalEvidencePanel> for DesktopEvidencePanelDtoViewModel {
+    fn from(panel: ProposalEvidencePanel) -> Self {
+        Self {
+            proposal_id: panel.provenance.proposal_id,
+            risk_label: panel.provenance.risk_label,
+            privacy_label_label: format!("{:?}", panel.provenance.privacy_label),
+            created_at: panel.provenance.created_at,
+            updated_at: panel.provenance.updated_at,
+            test_results: panel.test_results.map(|tr| DesktopTestResultsSummaryRow {
+                total_count: tr.total_count,
+                passed_count: tr.passed_count,
+                failed_count: tr.failed_count,
+                skipped_count: tr.skipped_count,
+                run_id: tr.run_id,
+            }),
+            command_summary_rows: panel
+                .command_summaries
+                .into_iter()
+                .map(|cs| DesktopCommandSummaryRow {
+                    command_class: cs.command_class,
+                    exit_code: cs.exit_code,
+                    redacted: cs.redacted,
+                })
+                .collect(),
+            risk_rule_rows: panel
+                .risk_rules
+                .into_iter()
+                .map(|rr| DesktopRiskRuleRow {
+                    rule_id: rr.rule_id,
+                    triggered: rr.triggered,
+                    rationale_label: rr.rationale_label,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Groups a Delegate proposal review into per-file rows plus per-hunk rows.

@@ -14,11 +14,12 @@ use legion_app::proposal::{
     filtered_batch_proposal_for_accepted_hunks, filtered_batch_proposal_for_accepted_targets,
 };
 use legion_protocol::{
-    BatchProposalPayload, CanonicalPath, CapabilityId, CorrelationId, DelegatedTaskProposalHunkDisposition,
-    FileId, PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity,
-    ProposalBatchItem, ProposalBatchRollbackPolicy, ProposalId, ProposalPayload,
-    ProposalTargetCoverage, ProposalTargetCoverageKind, ProposalTargetKind,
-    ProposalVersionPreconditions, TimestampMillis, WorkspaceId, WorkspaceProposal,
+    BatchProposalPayload, CanonicalPath, CapabilityId, CorrelationId,
+    DelegatedTaskProposalHunkDisposition, FileId, PreviewSummary, PrincipalId,
+    ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy,
+    ProposalId, ProposalPayload, ProposalTargetCoverage, ProposalTargetCoverageKind,
+    ProposalTargetKind, ProposalVersionPreconditions, TimestampMillis, WorkspaceId,
+    WorkspaceProposal,
 };
 use uuid::Uuid;
 
@@ -185,11 +186,7 @@ fn changed_files_have_non_empty_chunks() {
             .iter()
             .find(|s| s.target_id.as_deref() == Some(tid))
             .unwrap_or_else(|| panic!("section for {tid} not found"));
-        let total_changed: u32 = section
-            .chunks
-            .iter()
-            .map(|c| c.changed_line_count)
-            .sum();
+        let total_changed: u32 = section.chunks.iter().map(|c| c.changed_line_count).sum();
         assert!(
             total_changed > 0,
             "section for {tid} should have at least one changed line"
@@ -282,14 +279,22 @@ fn hunk_disposition_state_defaults_to_pending() {
     );
 
     // Accept one hunk.
-    state.set_hunk_disposition(pid, "hunk-1", DelegatedTaskProposalHunkDisposition::Accepted);
+    state.set_hunk_disposition(
+        pid,
+        "hunk-1",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
     assert_eq!(
         state.disposition(pid, "hunk-1"),
         DelegatedTaskProposalHunkDisposition::Accepted
     );
 
     // Reject another.
-    state.set_hunk_disposition(pid, "hunk-2", DelegatedTaskProposalHunkDisposition::Rejected);
+    state.set_hunk_disposition(
+        pid,
+        "hunk-2",
+        DelegatedTaskProposalHunkDisposition::Rejected,
+    );
     assert_eq!(
         state.disposition(pid, "hunk-2"),
         DelegatedTaskProposalHunkDisposition::Rejected
@@ -303,7 +308,11 @@ fn undo_disposition_change_restores_previous() {
     let pid = ProposalId(1);
 
     // Pending → Accept.
-    state.set_hunk_disposition(pid, "hunk-1", DelegatedTaskProposalHunkDisposition::Accepted);
+    state.set_hunk_disposition(
+        pid,
+        "hunk-1",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
     assert_eq!(
         state.disposition(pid, "hunk-1"),
         DelegatedTaskProposalHunkDisposition::Accepted
@@ -357,6 +366,208 @@ fn undo_on_empty_stack_returns_false() {
     assert_eq!(state.undo_depth(), 0);
 }
 
+/// T2-E (F2 conservative): accepting only SOME hunks of a target excludes the
+/// entire target from the filtered result.
+///
+/// A file with two well-separated diff hunks is used; accepting only one of them
+/// must NOT include that file — the conservative policy requires all hunks to be
+/// accepted before a target proceeds to the apply path.
+#[test]
+fn partial_hunk_accept_excludes_whole_target_conservative() {
+    use legion_protocol::{
+        BatchProposalPayload, CanonicalPath, CapabilityId, CorrelationId, FileId, PreviewSummary,
+        PrincipalId, ProposalAffectedTarget, ProposalBatchAtomicity, ProposalBatchItem,
+        ProposalBatchRollbackPolicy, ProposalId, ProposalPayload, ProposalTargetCoverage,
+        ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions,
+        TimestampMillis, WorkspaceId, WorkspaceProposal,
+    };
+
+    // Build old/new texts for one file where the changes are far enough apart
+    // (>2*CONTEXT_LINES) to produce two separate diff hunks.
+    let old_text = (0..16).map(|i| format!("line {i}\n")).collect::<String>();
+    let new_text = {
+        let mut lines: Vec<String> = (0..16).map(|i| format!("line {i}\n")).collect();
+        lines[0] = "changed first\n".to_string();
+        lines[14] = "changed last\n".to_string();
+        lines.join("")
+    };
+
+    let target = ProposalAffectedTarget {
+        target_id: "two-hunk-file".to_string(),
+        kind: ProposalTargetKind::ClosedFile,
+        workspace_id: Some(WorkspaceId(1)),
+        file_id: Some(FileId(99)),
+        buffer_id: None,
+        path: Some(CanonicalPath("src/two_hunk.rs".to_string())),
+        terminal_session_id: None,
+        plugin_id: None,
+        remote_authority: None,
+        collaboration_session_id: None,
+        byte_ranges: Vec::new(),
+        redaction_hints: Vec::new(),
+    };
+    let item = ProposalBatchItem {
+        order: 0,
+        item_id: "two-hunk-item".to_string(),
+        payload: Box::new(ProposalPayload::CreateFile(
+            legion_protocol::CreateFileProposal {
+                path: CanonicalPath("src/two_hunk.rs".to_string()),
+                initial_content: Some(new_text.clone()),
+            },
+        )),
+        target_ids: vec![target.target_id.clone()],
+        required_capability: CapabilityId("editor.create_file".to_string()),
+        rollback_step_ids: Vec::new(),
+    };
+    let proposal = WorkspaceProposal {
+        proposal_id: ProposalId(200),
+        principal: PrincipalId("p".to_string()),
+        capability: CapabilityId("c".to_string()),
+        correlation_id: CorrelationId(200),
+        payload: ProposalPayload::Batch(BatchProposalPayload {
+            batch_id: uuid::Uuid::from_u128(200),
+            atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
+            rollback_policy: ProposalBatchRollbackPolicy::NotRequired,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: vec![target.clone()],
+                omitted_target_count: 0,
+                redaction_hints: Vec::new(),
+            },
+            items: vec![item],
+            dependency_edges: Vec::new(),
+            rollback_steps: Vec::new(),
+            partial_failures: Vec::new(),
+            preview_warnings: Vec::new(),
+            schema_version: 1,
+        }),
+        preconditions: ProposalVersionPreconditions {
+            file_version: None,
+            buffer_version: None,
+            snapshot_id: None,
+            generation: None,
+            file_content_version: None,
+            workspace_generation: None,
+            expected_fingerprint: None,
+            expected_file_length: None,
+            expected_modified_at: None,
+        },
+        preview: PreviewSummary {
+            summary: "conservative hunk filter test".to_string(),
+            details: Vec::new(),
+        },
+        expires_at: None,
+        created_at: TimestampMillis(1),
+    };
+
+    let mut contents = HashMap::new();
+    contents.insert("two-hunk-file".to_string(), (old_text, new_text));
+    let surface = compute_proposal_diff_surface(&proposal, &contents);
+
+    // The section for "two-hunk-file" must have at least 2 chunks (one per
+    // separated change region).
+    let section = surface
+        .sections
+        .iter()
+        .find(|s| s.target_id.as_deref() == Some("two-hunk-file"))
+        .expect("section for two-hunk-file must exist");
+    assert!(
+        section.chunks.len() >= 2,
+        "expected ≥2 chunks from well-separated changes, got {}",
+        section.chunks.len()
+    );
+
+    // Accept only the FIRST chunk — conservative policy must EXCLUDE the target.
+    let partial_accept: HashSet<String> = section
+        .chunks
+        .iter()
+        .take(1)
+        .map(|c| c.chunk_id.clone())
+        .collect();
+    let result = filtered_batch_proposal_for_accepted_hunks(&proposal, &surface, &partial_accept);
+    assert!(
+        result.is_none(),
+        "accepting fewer than all hunks in a target must exclude it (conservative policy)"
+    );
+
+    // Accepting ALL chunks must INCLUDE the target.
+    let all_accept: HashSet<String> = section.chunks.iter().map(|c| c.chunk_id.clone()).collect();
+    let result = filtered_batch_proposal_for_accepted_hunks(&proposal, &surface, &all_accept)
+        .expect("accepting all hunks must include the target");
+    let ProposalPayload::Batch(ref batch) = result.payload else {
+        panic!("expected batch payload");
+    };
+    assert_eq!(batch.target_coverage.targets.len(), 1);
+    assert_eq!(batch.target_coverage.targets[0].target_id, "two-hunk-file");
+}
+
+/// T5 (F5 apply-path): Full filtering chain — create proposal, compute diff
+/// surface, record accepts via `ProposalHunkDispositionState`, and verify that
+/// only the accepted targets survive in the filtered proposal.
+///
+/// This exercises the complete pipeline short of an actual filesystem apply:
+/// proposal → diff surface → disposition state → filter → filtered proposal.
+#[test]
+fn full_filtering_chain_accepted_targets_only() {
+    let proposal = five_file_batch_proposal();
+    let contents = five_file_contents();
+    let surface = compute_proposal_diff_surface(&proposal, &contents);
+
+    // Use the disposition state to accept file-1 and file-3.
+    let mut state = ProposalHunkDispositionState::new();
+    for section in surface.sections.iter().filter(|s| {
+        matches!(
+            s.target_id.as_deref(),
+            Some("target-file-1") | Some("target-file-3")
+        )
+    }) {
+        for chunk in &section.chunks {
+            state.set_hunk_disposition(
+                proposal.proposal_id,
+                chunk.chunk_id.clone(),
+                DelegatedTaskProposalHunkDisposition::Accepted,
+            );
+        }
+    }
+
+    let accepted_ids = state.accepted_hunk_ids(proposal.proposal_id);
+    let filtered = filtered_batch_proposal_for_accepted_hunks(&proposal, &surface, &accepted_ids)
+        .expect("filtered proposal must be produced when accepted hunks are non-empty");
+
+    let ProposalPayload::Batch(ref batch) = filtered.payload else {
+        panic!("filtered proposal must be Batch");
+    };
+
+    // Only file-1 and file-3 have real changes in the diff surface; accepting
+    // their chunks must produce exactly those two targets.
+    let retained_ids: HashSet<&str> = batch
+        .target_coverage
+        .targets
+        .iter()
+        .map(|t| t.target_id.as_str())
+        .collect();
+    assert!(
+        retained_ids.contains("target-file-1"),
+        "target-file-1 must be retained after full-accept via disposition state"
+    );
+    assert!(
+        retained_ids.contains("target-file-3"),
+        "target-file-3 must be retained after full-accept via disposition state"
+    );
+    assert!(
+        !retained_ids.contains("target-file-2"),
+        "target-file-2 must be excluded (not accepted)"
+    );
+    assert!(
+        !retained_ids.contains("target-file-4"),
+        "target-file-4 must be excluded (no diff hunks — no chunks to accept)"
+    );
+    assert!(
+        !retained_ids.contains("target-file-5"),
+        "target-file-5 must be excluded (no diff hunks — no chunks to accept)"
+    );
+}
+
 /// T3-E: `filtered_batch_proposal_for_accepted_hunks` returns only the targets
 /// whose chunks were accepted via the diff surface.
 #[test]
@@ -378,12 +589,9 @@ fn filter_by_accepted_hunks_retains_correct_targets() {
         .flat_map(|s| s.chunks.iter().map(|c| c.chunk_id.clone()))
         .collect();
 
-    let filtered = filtered_batch_proposal_for_accepted_hunks(
-        &proposal,
-        &surface,
-        &accepted_hunk_ids,
-    )
-    .expect("filtered proposal must be produced");
+    let filtered =
+        filtered_batch_proposal_for_accepted_hunks(&proposal, &surface, &accepted_hunk_ids)
+            .expect("filtered proposal must be produced");
 
     let ProposalPayload::Batch(ref batch) = filtered.payload else {
         panic!("filtered proposal must be Batch");
@@ -394,8 +602,14 @@ fn filter_by_accepted_hunks_retains_correct_targets() {
         .iter()
         .map(|t| t.target_id.as_str())
         .collect();
-    assert!(retained_ids.contains("target-file-1"), "target-file-1 must be retained");
-    assert!(retained_ids.contains("target-file-2"), "target-file-2 must be retained");
+    assert!(
+        retained_ids.contains("target-file-1"),
+        "target-file-1 must be retained"
+    );
+    assert!(
+        retained_ids.contains("target-file-2"),
+        "target-file-2 must be retained"
+    );
     assert!(
         !retained_ids.contains("target-file-3"),
         "target-file-3 must be excluded"
@@ -408,13 +622,28 @@ fn accepted_hunk_ids_reflects_current_decisions() {
     let mut state = ProposalHunkDispositionState::new();
     let pid = ProposalId(5);
 
-    state.set_hunk_disposition(pid, "chunk-A", DelegatedTaskProposalHunkDisposition::Accepted);
-    state.set_hunk_disposition(pid, "chunk-B", DelegatedTaskProposalHunkDisposition::Rejected);
-    state.set_hunk_disposition(pid, "chunk-C", DelegatedTaskProposalHunkDisposition::Accepted);
+    state.set_hunk_disposition(
+        pid,
+        "chunk-A",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
+    state.set_hunk_disposition(
+        pid,
+        "chunk-B",
+        DelegatedTaskProposalHunkDisposition::Rejected,
+    );
+    state.set_hunk_disposition(
+        pid,
+        "chunk-C",
+        DelegatedTaskProposalHunkDisposition::Accepted,
+    );
 
     let ids = state.accepted_hunk_ids(pid);
     assert!(ids.contains("chunk-A"));
-    assert!(!ids.contains("chunk-B"), "Rejected hunk must not appear in accepted set");
+    assert!(
+        !ids.contains("chunk-B"),
+        "Rejected hunk must not appear in accepted set"
+    );
     assert!(ids.contains("chunk-C"));
 }
 
@@ -425,7 +654,7 @@ fn accepted_hunk_ids_reflects_current_decisions() {
 #[test]
 fn evidence_panel_carries_structured_fields_only() {
     use legion_protocol::{
-        ProposalEvidencePanel, ProposalProvenance, ProposalPrivacyLabel, ProposalRiskLabel,
+        ProposalEvidencePanel, ProposalPrivacyLabel, ProposalProvenance, ProposalRiskLabel,
         TimestampMillis,
     };
 
@@ -455,7 +684,7 @@ fn evidence_panel_carries_structured_fields_only() {
 #[test]
 fn evidence_panel_with_test_results_and_commands() {
     use legion_protocol::{
-        CommandSummary, ProposalEvidencePanel, ProposalProvenance, ProposalPrivacyLabel,
+        CommandSummary, ProposalEvidencePanel, ProposalPrivacyLabel, ProposalProvenance,
         ProposalRiskLabel, RiskRuleEvidence, TestResultsSummary, TimestampMillis,
     };
 

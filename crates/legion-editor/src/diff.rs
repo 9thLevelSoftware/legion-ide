@@ -142,10 +142,7 @@ pub fn diff_hunks_to_section_projection(
         .iter()
         .enumerate()
         .map(|(i, hunk)| {
-            hunk.to_chunk_descriptor(
-                format!("{}:chunk:{}", section_id, i),
-                target_id.clone(),
-            )
+            hunk.to_chunk_descriptor(format!("{}:chunk:{}", section_id, i), target_id.clone())
         })
         .collect();
 
@@ -218,8 +215,7 @@ fn lcs_ops(old: &[&str], new: &[&str]) -> Vec<Op> {
             ops.push(Op::Keep);
             i -= 1;
             j -= 1;
-        } else if j > 0 && (i == 0 || dp[i * row_width + (j - 1)] >= dp[(i - 1) * row_width + j])
-        {
+        } else if j > 0 && (i == 0 || dp[i * row_width + (j - 1)] >= dp[(i - 1) * row_width + j]) {
             ops.push(Op::Add);
             j -= 1;
         } else {

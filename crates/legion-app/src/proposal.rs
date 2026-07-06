@@ -214,15 +214,23 @@ pub fn filtered_batch_proposal_for_accepted_hunks(
         return None;
     }
 
-    // Map chunk_id → section target_id.
+    // Conservative target-level filtering: a section's target is included only when
+    // ALL of its chunks are in the accepted set AND the section has at least one chunk.
+    //
+    // Per-hunk intra-file filtering operates at target granularity because
+    // proposal items are atomic per-target; true intra-item filtering requires the
+    // apply engine to support partial operations (deferred to PKT-APPLY).  This
+    // conservative default prevents partially-reviewed targets from being silently
+    // applied with unreviewed hunks.
     let accepted_target_ids: HashSet<String> = diff_surface
         .sections
         .iter()
         .filter(|section| {
-            section
-                .chunks
-                .iter()
-                .any(|chunk| accepted_hunk_ids.contains(&chunk.chunk_id))
+            !section.chunks.is_empty()
+                && section
+                    .chunks
+                    .iter()
+                    .all(|chunk| accepted_hunk_ids.contains(&chunk.chunk_id))
         })
         .filter_map(|section| section.target_id.clone())
         .collect();
@@ -288,8 +296,7 @@ impl ProposalHunkDispositionState {
             return false;
         };
         if entry.previous == DelegatedTaskProposalHunkDisposition::Pending {
-            self.decisions
-                .remove(&(entry.proposal_id, entry.hunk_id));
+            self.decisions.remove(&(entry.proposal_id, entry.hunk_id));
         } else {
             self.decisions
                 .insert((entry.proposal_id, entry.hunk_id), entry.previous);
@@ -315,8 +322,7 @@ impl ProposalHunkDispositionState {
         self.decisions
             .iter()
             .filter(|((pid, _), disp)| {
-                *pid == proposal_id
-                    && **disp == DelegatedTaskProposalHunkDisposition::Accepted
+                *pid == proposal_id && **disp == DelegatedTaskProposalHunkDisposition::Accepted
             })
             .map(|((_, hunk_id), _)| hunk_id.clone())
             .collect()
