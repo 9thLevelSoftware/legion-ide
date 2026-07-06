@@ -5,9 +5,10 @@ use std::path::PathBuf;
 
 use legion_project::git_pull_request_url;
 use legion_protocol::{
-    AgentRunId, BufferId, CollaborationParticipantId, CollaborationSessionId, DebugConfigurationId,
-    DebugSessionId, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
-    DelegatedTaskToolPermissionDecision, FileId, LegionWorkflowConflictId, LegionWorkflowSessionId,
+    AgentRunId, AssistantRailCommand, BufferId, CollaborationParticipantId, CollaborationSessionId,
+    DebugConfigurationId, DebugSessionId, DelegatedTaskPlanId,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
+    InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
     LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
     ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
     RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
@@ -796,6 +797,32 @@ pub enum DesktopAction {
     DeleteProviderApiKey {
         /// Provider identifier whose key should be removed.
         provider_id: String,
+    },
+    /// Accept a ghost text prediction through the proposal pipeline (PKT-RAIL).
+    ///
+    /// Acceptance is proposal-mediated — this action never causes a direct buffer mutation.
+    AcceptGhostText {
+        /// Request identifier of the prediction to accept.
+        request_id: InlinePredictionRequestId,
+    },
+    /// Dismiss a ghost text prediction overlay (PKT-RAIL).
+    DismissGhostText {
+        /// Request identifier of the prediction to dismiss.
+        request_id: InlinePredictionRequestId,
+    },
+    /// Cancel an in-flight ghost text prediction (PKT-RAIL).
+    CancelGhostText {
+        /// Request identifier of the in-flight prediction to cancel.
+        request_id: InlinePredictionRequestId,
+    },
+    /// Execute an assistant rail command through the proposal pipeline (PKT-RAIL).
+    ///
+    /// Commands dispatch a proposal-only AI run; no direct buffer mutation occurs.
+    ExecuteRailCommand {
+        /// The rail command to execute.
+        command: AssistantRailCommand,
+        /// Optional text selection; `None` uses cursor context.
+        selection: Option<ProtocolTextRange>,
     },
 }
 
@@ -1987,6 +2014,45 @@ impl DesktopCommandBridge {
             // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
             DesktopAction::SetProviderApiKey { .. }
             | DesktopAction::DeleteProviderApiKey { .. } => DesktopBridgeOutput::Noop,
+            // PKT-RAIL: ghost text acceptance goes through the existing inline-prediction
+            // acceptance path so no direct buffer mutation occurs.
+            DesktopAction::AcceptGhostText { request_id } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::AcceptAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: Some(request_id.0),
+                    }
+                })
+            }
+            DesktopAction::DismissGhostText { request_id } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::DismissAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: Some(request_id.0),
+                    }
+                })
+            }
+            DesktopAction::CancelGhostText { request_id } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::CancelAssistInlinePrediction {
+                        buffer_id,
+                        prediction_id: Some(request_id.0),
+                    }
+                })
+            }
+            // PKT-RAIL: rail commands dispatch a proposal-only AI run; no direct mutation.
+            DesktopAction::ExecuteRailCommand { command, selection: _ } => {
+                let instruction_label = match command {
+                    AssistantRailCommand::Explain => "ai.rail.explain",
+                    AssistantRailCommand::Fix => "ai.rail.fix",
+                    AssistantRailCommand::Test => "ai.rail.test",
+                    AssistantRailCommand::Doc => "ai.rail.doc",
+                    AssistantRailCommand::Refactor => "ai.rail.refactor",
+                };
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+                    instruction_label: instruction_label.to_string(),
+                })
+            }
         }
     }
 
