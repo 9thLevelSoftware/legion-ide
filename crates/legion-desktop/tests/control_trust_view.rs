@@ -73,6 +73,7 @@ fn start_proposal(app: &mut AppComposition) {
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "add control trust guard".to_string(),
+            selection: None,
         })
         .expect("start assisted proposal");
     assert!(matches!(outcome, AppCommandOutcome::AiRunStarted(_)));

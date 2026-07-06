@@ -335,10 +335,7 @@ mod tests {
     fn streaming_rail_rows_accumulate_chunks() {
         use super::streaming_rail_rows;
         // Partial chunks without a closing fence → incomplete, never applyable.
-        let partial = vec![
-            "```rust\n".to_string(),
-            "fn partial() {}".to_string(),
-        ];
+        let partial = vec!["```rust\n".to_string(), "fn partial() {}".to_string()];
         let rows = streaming_rail_rows(&partial, Some(ProposalId(5)));
         let block = rows[0]
             .segments
@@ -349,7 +346,10 @@ mod tests {
             })
             .expect("partial stream must produce an incomplete code block");
         assert!(!block.complete, "in-flight block must be incomplete");
-        assert!(block.proposal_id.is_none(), "incomplete block must have no proposal");
+        assert!(
+            block.proposal_id.is_none(),
+            "incomplete block must have no proposal"
+        );
 
         // Full chunks with closing fence → complete block, proposal bound.
         let complete = vec![

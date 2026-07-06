@@ -630,6 +630,7 @@ fn intent_bridge_routes_assist_rail_slash_commands_through_proposals() {
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "desktop /fix".to_string(),
+            selection: None,
         })
     );
     assert_eq!(
@@ -641,6 +642,7 @@ fn intent_bridge_routes_assist_rail_slash_commands_through_proposals() {
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "desktop /test".to_string(),
+            selection: None,
         })
     );
     assert_eq!(
@@ -652,6 +654,7 @@ fn intent_bridge_routes_assist_rail_slash_commands_through_proposals() {
         ),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "desktop /doc".to_string(),
+            selection: None,
         })
     );
 }

@@ -1,18 +1,21 @@
 #![cfg(feature = "ai")]
 //! Tests for ghost text overlay view model (PKT-RAIL T1).
 
+use legion_ai_providers::{DETERMINISTIC_LOCAL_PROVIDER_ID, make_inline_prediction_registry};
 use legion_desktop::bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge};
 use legion_desktop::view::{GhostTextState, ghost_text_from_prediction};
 use legion_protocol::{
-    AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState,
-    BufferId, BufferVersion, FileContentVersion, FileFingerprint, InlinePredictionFingerprintMetadata,
+    AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState, BufferId,
+    BufferVersion, FileContentVersion, FileFingerprint, InlinePredictionFingerprintMetadata,
     InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionGhostText,
-    InlinePredictionLatencyMetadata, InlinePredictionProviderMetadata,
-    InlinePredictionRequestId, InlinePredictionResult, InlinePredictionResultId,
-    InlinePredictionResultState, InlinePredictionRetention, ProtocolTextRange, RedactionHint,
-    SnapshotId, TextCoordinate, TimestampMillis, WorkspaceGeneration,
+    InlinePredictionLatencyMetadata, InlinePredictionProviderMetadata, InlinePredictionRequestId,
+    InlinePredictionResult, InlinePredictionResultId, InlinePredictionResultState,
+    InlinePredictionRetention, ProtocolTextRange, RedactionHint, SnapshotId, TextCoordinate,
+    TimestampMillis, WorkspaceGeneration,
 };
-use legion_ui::{ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, Shell};
+use legion_ui::{
+    ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, Shell,
+};
 
 fn coord(line: u32, character: u32) -> TextCoordinate {
     TextCoordinate {
@@ -123,7 +126,10 @@ fn ghost_text_from_valid_prediction_creates_overlay() {
 
     assert_eq!(overlay.text, "fn answer() -> u32 { 42 }");
     assert_eq!(overlay.provider_id, "test-provider");
-    assert_eq!(overlay.request_id, InlinePredictionRequestId("req:1".to_string()));
+    assert_eq!(
+        overlay.request_id,
+        InlinePredictionRequestId("req:1".to_string())
+    );
     assert_eq!(overlay.insert_position.line, 3);
     assert_eq!(overlay.insert_position.character, 10);
     assert_eq!(overlay.state, GhostTextState::Displaying);
@@ -200,4 +206,92 @@ fn dismiss_ghost_text_clears_overlay() {
     // Other fields are preserved
     assert_eq!(dismissed.text, "fn hello() {}");
     assert_eq!(dismissed.provider_id, "test-provider");
+}
+
+// ─── C1: Registry wiring ─────────────────────────────────────────────────────
+
+#[test]
+fn ghost_text_provider_id_from_registry_is_accepted() {
+    // Proves that the inline prediction registry wiring reaches ghost text construction:
+    // a provider ID sourced from make_inline_prediction_registry() is accepted by
+    // ghost_text_from_prediction() without modification.
+    let registry = make_inline_prediction_registry();
+    let provider_ids = registry.provider_ids();
+
+    // The deterministic-local provider must always be in the registry.
+    assert!(
+        provider_ids.contains(&DETERMINISTIC_LOCAL_PROVIDER_ID.to_string()),
+        "deterministic-local must be registered in make_inline_prediction_registry()"
+    );
+
+    let result = fresh_prediction_with_ghost_text("fn registry_wired() {}");
+    let overlay = ghost_text_from_prediction(&result, DETERMINISTIC_LOCAL_PROVIDER_ID)
+        .expect("fresh prediction with registry provider id should create an overlay");
+
+    assert_eq!(
+        overlay.provider_id, DETERMINISTIC_LOCAL_PROVIDER_ID,
+        "provider_id on the overlay must match the registry-sourced ID"
+    );
+}
+
+// ─── I1: DismissGhostText and CancelGhostText bridge paths ───────────────────
+
+#[test]
+fn dismiss_ghost_text_dispatches_dismiss_intent() {
+    let bridge = DesktopCommandBridge::new();
+    let snapshot = snapshot_with_active_buffer();
+    let request_id = InlinePredictionRequestId("req:dismiss:1".to_string());
+
+    let result = bridge.translate(
+        DesktopAction::DismissGhostText {
+            request_id: request_id.clone(),
+        },
+        &snapshot,
+    );
+
+    match result {
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::DismissAssistInlinePrediction {
+            prediction_id,
+            ..
+        }) => {
+            assert_eq!(
+                prediction_id,
+                Some(request_id.0),
+                "prediction_id must be the request_id forwarded through the dismiss intent"
+            );
+        }
+        other => panic!(
+            "DismissGhostText must dispatch DismissAssistInlinePrediction intent, got: {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn cancel_ghost_text_dispatches_cancel_intent() {
+    let bridge = DesktopCommandBridge::new();
+    let snapshot = snapshot_with_active_buffer();
+    let request_id = InlinePredictionRequestId("req:cancel:1".to_string());
+
+    let result = bridge.translate(
+        DesktopAction::CancelGhostText {
+            request_id: request_id.clone(),
+        },
+        &snapshot,
+    );
+
+    match result {
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelAssistInlinePrediction {
+            prediction_id,
+            ..
+        }) => {
+            assert_eq!(
+                prediction_id,
+                Some(request_id.0),
+                "prediction_id must be the request_id forwarded through the cancel intent"
+            );
+        }
+        other => panic!(
+            "CancelGhostText must dispatch CancelAssistInlinePrediction intent, got: {other:?}"
+        ),
+    }
 }

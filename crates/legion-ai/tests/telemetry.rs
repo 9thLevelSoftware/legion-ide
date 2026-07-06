@@ -1,7 +1,9 @@
 //! Smoke tests: verify the telemetry module is re-exported from the crate root
 //! and that the consent-gated default-deny path is accessible externally.
 
-use legion_ai::telemetry::{suggestion_telemetry_recorded_event, suggestion_telemetry_spool_record};
+use legion_ai::telemetry::{
+    suggestion_telemetry_recorded_event, suggestion_telemetry_spool_record,
+};
 use legion_protocol::{
     AssistedAiOperationClass, AssistedAiProviderClass, AssistedAiProviderInvocationState,
     BufferVersion, CausalityId, CorrelationId, EventSequence, FileContentVersion, FileFingerprint,
@@ -101,9 +103,7 @@ fn sample_lifecycle() -> InlinePredictionLifecycleCommand {
         reason_labels: vec!["user.accepted".to_string()],
         requested_at: TimestampMillis(1001),
         correlation_id: CorrelationId(3),
-        causality_id: CausalityId(
-            Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap(),
-        ),
+        causality_id: CausalityId(Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap()),
         event_sequence: EventSequence(1),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,

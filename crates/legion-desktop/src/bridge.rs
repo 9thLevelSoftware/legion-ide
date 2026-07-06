@@ -1554,6 +1554,7 @@ impl DesktopCommandBridge {
                     Some(instruction_label) => {
                         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
                             instruction_label,
+                            selection: None,
                         })
                     }
                     None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
@@ -2041,7 +2042,7 @@ impl DesktopCommandBridge {
                 })
             }
             // PKT-RAIL: rail commands dispatch a proposal-only AI run; no direct mutation.
-            DesktopAction::ExecuteRailCommand { command, selection: _ } => {
+            DesktopAction::ExecuteRailCommand { command, selection } => {
                 let instruction_label = match command {
                     AssistantRailCommand::Explain => "ai.rail.explain",
                     AssistantRailCommand::Fix => "ai.rail.fix",
@@ -2051,6 +2052,7 @@ impl DesktopCommandBridge {
                 };
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
                     instruction_label: instruction_label.to_string(),
+                    selection,
                 })
             }
         }

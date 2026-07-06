@@ -31,7 +31,7 @@ Added to `crates/legion-protocol/src/lib.rs`:
 - `rail_command_capabilities() -> Vec<RailCommandCapability>` — returns 5 capabilities with IDs: `ai.rail.explain`, `ai.rail.fix`, `ai.rail.test`, `ai.rail.doc`, `ai.rail.refactor`
 
 Added to `crates/legion-desktop/src/view/assistant_rail.rs`:
-- `AssistantRailCommandViewModel` struct: `command`, `available`, `capability_id`, `label`
+- `AssistantRailCommandViewModel` struct: `command`, `label`, `available`
 - `rail_command_view_models(capabilities) -> Vec<AssistantRailCommandViewModel>` — emits one entry per canonical command; `available = true` only when capability appears in the granted set
 
 Added to `crates/legion-desktop/src/bridge.rs`:

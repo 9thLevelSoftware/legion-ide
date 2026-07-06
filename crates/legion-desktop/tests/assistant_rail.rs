@@ -102,12 +102,57 @@ fn rail_command_dispatches_proposal_not_mutation() {
     match result {
         DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
             instruction_label,
+            ..
         }) => {
             assert_eq!(instruction_label, "ai.rail.explain");
         }
-        other => panic!(
-            "ExecuteRailCommand must dispatch StartAiProposal, got: {other:?}"
-        ),
+        other => panic!("ExecuteRailCommand must dispatch StartAiProposal, got: {other:?}"),
+    }
+}
+
+#[test]
+fn rail_command_with_selection_forwards_selection_to_intent() {
+    use legion_protocol::{ProtocolTextRange, TextCoordinate};
+
+    let bridge = DesktopCommandBridge::new();
+    let snapshot = Shell::empty("RailWithSel").projection_snapshot();
+
+    let selection = ProtocolTextRange {
+        start: TextCoordinate {
+            line: 2,
+            character: 0,
+            byte_offset: Some(0),
+            utf16_offset: Some(0),
+        },
+        end: TextCoordinate {
+            line: 5,
+            character: 10,
+            byte_offset: Some(0),
+            utf16_offset: Some(0),
+        },
+    };
+
+    let result = bridge.translate(
+        DesktopAction::ExecuteRailCommand {
+            command: AssistantRailCommand::Fix,
+            selection: Some(selection),
+        },
+        &snapshot,
+    );
+
+    match result {
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label,
+            selection: forwarded_selection,
+        }) => {
+            assert_eq!(instruction_label, "ai.rail.fix");
+            assert_eq!(
+                forwarded_selection,
+                Some(selection),
+                "selection must be forwarded from ExecuteRailCommand into StartAiProposal"
+            );
+        }
+        other => panic!("ExecuteRailCommand must dispatch StartAiProposal, got: {other:?}"),
     }
 }
 
@@ -131,19 +176,31 @@ fn rail_command_view_models_reflect_capability_gates() {
         .find(|vm| vm.command == AssistantRailCommand::Fix)
         .expect("Fix must be present");
 
-    assert!(explain.available, "Explain is available when capability is granted");
-    assert!(!fix.available, "Fix is unavailable when capability is absent");
+    assert!(
+        explain.available,
+        "Explain is available when capability is granted"
+    );
+    assert!(
+        !fix.available,
+        "Fix is unavailable when capability is absent"
+    );
 }
 
 #[test]
 fn each_rail_command_has_stable_capability_id() {
     let caps = legion_protocol::rail_command_capabilities();
     let ids: Vec<&str> = caps.iter().map(|c| c.capability_id.as_str()).collect();
-    assert!(ids.contains(&"ai.rail.explain"), "explain id must be stable");
+    assert!(
+        ids.contains(&"ai.rail.explain"),
+        "explain id must be stable"
+    );
     assert!(ids.contains(&"ai.rail.fix"), "fix id must be stable");
     assert!(ids.contains(&"ai.rail.test"), "test id must be stable");
     assert!(ids.contains(&"ai.rail.doc"), "doc id must be stable");
-    assert!(ids.contains(&"ai.rail.refactor"), "refactor id must be stable");
+    assert!(
+        ids.contains(&"ai.rail.refactor"),
+        "refactor id must be stable"
+    );
 }
 
 #[test]
