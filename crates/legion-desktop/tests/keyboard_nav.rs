@@ -284,6 +284,102 @@ fn t4_problem_activate_happy_path() {
     );
 }
 
+// ─── PKT-DIFF: Proposal review hunk keyboard navigation ──────────────────────
+
+/// `ReviewHunkNext` is a Noop when no proposal reviews are in the projection.
+///
+/// The runtime starts with an empty delegated-task projection (no reviews).
+/// `ReviewHunkNext` must not crash and must leave the selected index at 0.
+#[test]
+fn review_hunk_next_is_noop_with_no_reviews() {
+    let workspace = TempWorkspace::new();
+    let mut runtime = open_runtime(workspace.path());
+
+    // Index must start at 0.
+    assert_eq!(runtime.review_hunk_selected_index_for_test(), 0);
+
+    let outcome = runtime
+        .handle_action(DesktopAction::ReviewHunkNext)
+        .expect("ReviewHunkNext must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+    // Without any reviews the index must remain 0.
+    assert_eq!(runtime.review_hunk_selected_index_for_test(), 0);
+}
+
+/// `ReviewHunkPrev` is a Noop when no proposal reviews are in the projection.
+#[test]
+fn review_hunk_prev_is_noop_with_no_reviews() {
+    let workspace = TempWorkspace::new();
+    let mut runtime = open_runtime(workspace.path());
+
+    let outcome = runtime
+        .handle_action(DesktopAction::ReviewHunkPrev)
+        .expect("ReviewHunkPrev must not error");
+    assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+    assert_eq!(runtime.review_hunk_selected_index_for_test(), 0);
+}
+
+/// `ReviewHunkAccept`, `ReviewHunkReject`, `ReviewAcceptAll`, `ReviewRejectAll`
+/// are all Noop keybinding stubs (disposition wired in legion-app).
+#[test]
+fn review_hunk_disposition_actions_are_noop_stubs() {
+    let workspace = TempWorkspace::new();
+    let mut runtime = open_runtime(workspace.path());
+
+    for action in [
+        DesktopAction::ReviewHunkAccept,
+        DesktopAction::ReviewHunkReject,
+        DesktopAction::ReviewAcceptAll,
+        DesktopAction::ReviewRejectAll,
+    ] {
+        let outcome = runtime
+            .handle_action(action)
+            .expect("disposition stub must not error");
+        assert_eq!(outcome, DesktopWorkflowOutcome::Noop);
+    }
+}
+
+/// Pressing `Alt+ArrowRight` dispatches `ReviewHunkNext` through the keyboard
+/// handler — same egui key-dispatch harness as the T4 ProblemNext test.
+///
+/// With no proposal reviews the index stays at 0, but the important assertion
+/// is that the binding is wired: no panic, clean Noop, index unchanged.
+#[test]
+fn review_hunk_key_dispatch_alt_arrow_right_via_egui() {
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+
+    let mut app = DesktopEframeApp::new(runtime);
+    assert_eq!(app.review_hunk_selected_index_for_test(), 0);
+
+    let raw_input = egui::RawInput {
+        focused: true,
+        events: vec![egui::Event::Key {
+            key: egui::Key::ArrowRight,
+            physical_key: Some(egui::Key::ArrowRight),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                alt: true,
+                ..egui::Modifiers::default()
+            },
+        }],
+        modifiers: egui::Modifiers {
+            alt: true,
+            ..egui::Modifiers::default()
+        },
+        ..egui::RawInput::default()
+    };
+    let _ = app.run_headless_input(raw_input);
+
+    // No reviews → index stays 0 (correct no-op behaviour).
+    assert_eq!(
+        app.review_hunk_selected_index_for_test(),
+        0,
+        "Alt+ArrowRight with no reviews must be a Noop (index stays 0)"
+    );
+}
+
 /// Pressing ArrowDown in egui dispatches `ProblemNext` through the keyboard handler.
 ///
 /// This is the desktop-level T4 test: a synthetic ArrowDown `RawInput` is

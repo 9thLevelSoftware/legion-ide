@@ -557,6 +557,8 @@ pub struct DesktopRuntime {
     last_definition_count: usize,
     /// Keyboard-focused row index in the Problems panel (T4).
     problems_selected_index: usize,
+    /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
+    review_hunk_selected_index: usize,
     // NOTE: completion_debounce, last_completion_count, hover_debounce, last_hover_id
     // have moved to AppComposition (I1 boundary fix: timing state is app authority).
 }
@@ -645,6 +647,7 @@ impl DesktopRuntime {
             definition_navigation_queued: false,
             last_definition_count: 0,
             problems_selected_index: 0,
+            review_hunk_selected_index: 0,
         };
         runtime.persist_diagnostics_if_configured();
         Ok(runtime)
@@ -707,6 +710,58 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
+            }
+            // PKT-DIFF: proposal review hunk keyboard navigation.
+            //
+            // The flat hunk count is derived from all proposal reviews in the
+            // delegated-task projection.  When no reviews are present the
+            // actions are no-ops so the runtime never panics on an empty list.
+            DesktopAction::ReviewHunkNext => {
+                self.refresh_projection()?;
+                let count: usize = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .map(|r| r.hunks.len())
+                    .sum();
+                if count > 0 {
+                    self.review_hunk_selected_index =
+                        (self.review_hunk_selected_index + 1) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ReviewHunkPrev => {
+                self.refresh_projection()?;
+                let count: usize = self
+                    .shell
+                    .projection_snapshot()
+                    .delegated_task_projection
+                    .proposal_reviews
+                    .iter()
+                    .map(|r| r.hunks.len())
+                    .sum();
+                if count > 0 {
+                    self.review_hunk_selected_index =
+                        (self.review_hunk_selected_index + count.saturating_sub(1)) % count;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            // Accept/Reject actions are keybinding stubs for PKT-DIFF; full
+            // disposition state lives in ProposalHunkDispositionState (legion-app)
+            // and will be wired in a follow-up packet.
+            DesktopAction::ReviewHunkAccept
+            | DesktopAction::ReviewHunkReject
+            | DesktopAction::ReviewAcceptAll
+            | DesktopAction::ReviewRejectAll => {
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
             }
             // T6: completion popup navigation — handled before the bridge.
             DesktopAction::CompletionNext => {
@@ -1161,6 +1216,7 @@ impl DesktopRuntime {
             completion_selected_index: self.completion_selected_index,
             hover_tooltip_visible: self.hover_tooltip_visible,
             problems_selected_index: self.problems_selected_index,
+            review_hunk_selected_index: self.review_hunk_selected_index,
         }
     }
 
@@ -1271,6 +1327,11 @@ impl DesktopRuntime {
     /// Expose problems selected index for assertion in tests.
     pub fn problems_selected_index_for_test(&self) -> usize {
         self.problems_selected_index
+    }
+
+    /// Expose review hunk selected index for assertion in tests (PKT-DIFF).
+    pub fn review_hunk_selected_index_for_test(&self) -> usize {
+        self.review_hunk_selected_index
     }
 
     /// Test-only setter for completion popup visibility.
@@ -2712,6 +2773,14 @@ impl DesktopEframeApp {
         self.runtime.problems_selected_index_for_test()
     }
 
+    /// Return the zero-based index of the currently focused review hunk (PKT-DIFF).
+    ///
+    /// Test-only delegate that forwards to the runtime so tests can assert
+    /// keyboard navigation state without reaching inside the runtime directly.
+    pub fn review_hunk_selected_index_for_test(&self) -> usize {
+        self.runtime.review_hunk_selected_index_for_test()
+    }
+
     /// Render one full application frame: keyboard handling, the projection
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
@@ -2874,6 +2943,35 @@ impl DesktopEframeApp {
                     if input.key_pressed(egui::Key::Enter) {
                         actions.push(DesktopAction::ProblemActivate);
                     }
+                }
+            }
+
+            // PKT-DIFF: Proposal review hunk keyboard navigation.
+            //
+            // Alt+ArrowRight / Alt+ArrowLeft navigate forward/backward through
+            // the flat hunk list.  Alt+Y / Alt+X accept or reject the focused
+            // hunk; Alt+Shift+Y / Alt+Shift+X accept or reject all hunks.
+            // These bindings use Alt to avoid conflicting with the Problems
+            // panel's plain ArrowDown/Up bindings above.
+            {
+                let alt = input.modifiers.alt && !command;
+                if alt && input.key_pressed(egui::Key::ArrowRight) {
+                    actions.push(DesktopAction::ReviewHunkNext);
+                }
+                if alt && input.key_pressed(egui::Key::ArrowLeft) {
+                    actions.push(DesktopAction::ReviewHunkPrev);
+                }
+                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::Y) {
+                    actions.push(DesktopAction::ReviewHunkAccept);
+                }
+                if alt && !input.modifiers.shift && input.key_pressed(egui::Key::X) {
+                    actions.push(DesktopAction::ReviewHunkReject);
+                }
+                if alt && input.modifiers.shift && input.key_pressed(egui::Key::Y) {
+                    actions.push(DesktopAction::ReviewAcceptAll);
+                }
+                if alt && input.modifiers.shift && input.key_pressed(egui::Key::X) {
+                    actions.push(DesktopAction::ReviewRejectAll);
                 }
             }
 
