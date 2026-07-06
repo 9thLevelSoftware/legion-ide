@@ -210,7 +210,9 @@ pub fn collect_symbol_context(symbols: &[ManifestSymbolSource]) -> Vec<ContextMa
 }
 
 /// Build `LspDiagnosticSummary` manifest items from LSP diagnostic summary DTOs.
-pub fn collect_diagnostic_context(diagnostics: &[LspDiagnosticSummary]) -> Vec<ContextManifestItem> {
+pub fn collect_diagnostic_context(
+    diagnostics: &[LspDiagnosticSummary],
+) -> Vec<ContextManifestItem> {
     diagnostics
         .iter()
         .map(|diag| ContextManifestItem {
@@ -244,9 +246,7 @@ pub fn collect_diagnostic_context(diagnostics: &[LspDiagnosticSummary]) -> Vec<C
 }
 
 /// Build `TerminalSummary` manifest items from terminal excerpt descriptors.
-pub fn collect_terminal_context(
-    excerpts: &[ManifestTerminalExcerpt],
-) -> Vec<ContextManifestItem> {
+pub fn collect_terminal_context(excerpts: &[ManifestTerminalExcerpt]) -> Vec<ContextManifestItem> {
     excerpts
         .iter()
         .map(|excerpt| ContextManifestItem {
@@ -374,10 +374,12 @@ pub fn assemble_context_manifest_from_sources(
         .filter(|item| item.inclusion == ContextManifestInclusionState::Excluded)
         .count() as u32;
 
-    // Detect stale or missing freshness metadata — any item without freshness
-    // data introduces risk that the manifest context is unverified.
-    let stale_or_missing_metadata_risk_present =
-        !all_items.is_empty() && all_items.iter().any(|item| item.freshness.is_none());
+    // Detect stale or missing freshness or precondition metadata — any item without
+    // either field introduces risk that the manifest context is unverified.
+    let stale_or_missing_metadata_risk_present = !all_items.is_empty()
+        && all_items
+            .iter()
+            .any(|item| item.freshness.is_none() || item.preconditions.is_none());
 
     // Generate a deterministic manifest_id from the sorted item IDs.
     let manifest_id = compute_manifest_id(&all_items);
@@ -436,10 +438,9 @@ fn compute_manifest_id(items: &[&ContextManifestItem]) -> String {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(FNV_PRIME);
         }
-        // Null-byte separator between IDs prevents collisions like "ab"+"c" vs "a"+"bc".
-        hash ^= 0u64;
+        // Non-zero separator between IDs prevents collisions like "ab"+"c" vs "a"+"bc".
+        hash ^= 0xFF;
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     format!("manifest:{hash:016x}")
 }
-

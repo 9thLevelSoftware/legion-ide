@@ -1,6 +1,6 @@
 use legion_ai::{
-    assemble_context_manifest, assemble_context_manifest_from_sources, collect_file_context,
-    ManifestMetadata,
+    ManifestMetadata, assemble_context_manifest, assemble_context_manifest_from_sources,
+    collect_file_context,
 };
 use legion_protocol::*;
 
@@ -300,7 +300,11 @@ fn egress_equality_with_mixed_inclusion_states() {
     };
 
     let record = assemble_context_manifest(assembly);
-    assert_eq!(record.items.len(), 5, "all 5 items must be present before egress filtering");
+    assert_eq!(
+        record.items.len(),
+        5,
+        "all 5 items must be present before egress filtering"
+    );
 
     let egress = redacted_for_egress(&record);
     assert_eq!(
@@ -371,9 +375,8 @@ fn excluded_items_never_appear_in_egress_bytes() {
     let record = assemble_context_manifest(assembly);
     let egress = redacted_for_egress(&record);
 
-    let egress_text =
-        String::from_utf8(serde_json::to_vec(&egress).expect("serialize egress"))
-            .expect("egress bytes are valid UTF-8");
+    let egress_text = String::from_utf8(serde_json::to_vec(&egress).expect("serialize egress"))
+        .expect("egress bytes are valid UTF-8");
 
     assert!(
         egress_text.contains("visible-file"),
@@ -439,7 +442,7 @@ fn egress_is_deterministic_across_assembly_paths() {
 
     // Path B: assemble_context_manifest_from_sources with identical source items.
     let sources_b = ContextManifestSources {
-        files: items,
+        files: items.clone(),
         selections: Vec::new(),
         symbols: Vec::new(),
         diagnostics: Vec::new(),
@@ -449,15 +452,42 @@ fn egress_is_deterministic_across_assembly_paths() {
     };
     let record_b = assemble_context_manifest_from_sources(sources_b, default_metadata_t3());
 
+    // Path C: manually constructed ContextManifestRecord with the same items.
+    // This verifies that the egress filtering is item-content–driven and does not
+    // depend on which assembly helper produced the record.
+    let record_c = ContextManifestRecord {
+        manifest_id: "egress:det:path-c".to_string(),
+        workspace_id: Some(WorkspaceId(10)),
+        proposal_id: None,
+        purpose: ContextManifestPurpose::Explanation,
+        workspace_trust_state: None,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        risk_label: ProposalRiskLabel::Low,
+        egress: ContextManifestEgressStatus::LocalOnly,
+        items: items.clone(),
+        permissions: Vec::new(),
+        omitted_item_count: 0,
+        stale_or_missing_metadata_risk_present: true,
+        generated_at: TimestampMillis(300),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+
     // Egress item sets must be identical regardless of assembly path used.
     let egress_items_a = redacted_for_egress(&record_a).items;
     let egress_items_b = redacted_for_egress(&record_b).items;
+    let egress_items_c = redacted_for_egress(&record_c).items;
 
     let bytes_a = serde_json::to_vec(&egress_items_a).expect("serialize path A items");
     let bytes_b = serde_json::to_vec(&egress_items_b).expect("serialize path B items");
+    let bytes_c = serde_json::to_vec(&egress_items_c).expect("serialize path C items");
 
     assert_eq!(
         bytes_a, bytes_b,
-        "egress item bytes must be identical across both assembly paths"
+        "egress item bytes must be identical across assembly paths A and B"
+    );
+    assert_eq!(
+        bytes_a, bytes_c,
+        "egress item bytes must be identical across assembly paths A and C (manual construction)"
     );
 }

@@ -1,13 +1,16 @@
 // P4.F2.T4 — privacy inspector deletion handles wired to retention vault tests.
 
 use legion_protocol::{
-    CanonicalPath, CausalityId, CorrelationId, EventSequence, PrincipalId,
-    RawSourceCaptureRequest, RawSourceRetentionConsentGrant, RawSourceRetentionPolicy,
-    RawSourceRetentionPurpose, TimestampMillis, WorkspaceId,
+    CanonicalPath, CausalityId, CorrelationId, EventSequence, PrincipalId, RawSourceCaptureRequest,
+    RawSourceRetentionConsentGrant, RawSourceRetentionPolicy, RawSourceRetentionPurpose,
+    TimestampMillis, WorkspaceId,
 };
 use legion_retention::{
-    RetentionFixtureVault, RawSourceVaultError,
-    privacy::{execute_privacy_deletion, format_deletion_handle, lookup_retention_bundle},
+    RawSourceVaultError, RetentionFixtureVault,
+    privacy::{
+        execute_privacy_deletion, format_deletion_handle, format_inspector_deletion_handle,
+        lookup_retention_bundle, parse_inspector_deletion_handle,
+    },
     training::build_raw_source_deletion_tombstone,
 };
 
@@ -78,7 +81,9 @@ fn privacy_deletion_removes_bundle_from_fixture_vault() {
         TimestampMillis(5_000),
         EventSequence(10),
         CorrelationId(10),
-        CausalityId(uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0010)),
+        CausalityId(uuid::Uuid::from_u128(
+            0x018f_0000_0000_7000_8000_0000_0000_0010,
+        )),
     )
     .expect("execute privacy deletion");
 
@@ -114,7 +119,9 @@ fn privacy_deletion_on_missing_bundle_returns_error() {
         TimestampMillis(5_000),
         EventSequence(1),
         CorrelationId(1),
-        CausalityId(uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0002)),
+        CausalityId(uuid::Uuid::from_u128(
+            0x018f_0000_0000_7000_8000_0000_0000_0002,
+        )),
     );
 
     assert!(
@@ -128,8 +135,8 @@ fn privacy_deletion_on_missing_bundle_returns_error() {
 fn lookup_retention_bundle_returns_descriptor() {
     let (vault, bundle_id) = vault_with_bundle();
 
-    let descriptor = lookup_retention_bundle(&vault, &bundle_id)
-        .expect("lookup must succeed for known bundle");
+    let descriptor =
+        lookup_retention_bundle(&vault, &bundle_id).expect("lookup must succeed for known bundle");
 
     assert_eq!(
         descriptor.bundle_id, bundle_id,
@@ -145,6 +152,92 @@ fn lookup_retention_bundle_returns_descriptor() {
     );
 }
 
+/// `execute_privacy_deletion` must return a handle that carries bundle_id, reason, and
+/// the deleted_at timestamp, and must never include raw source bytes.
+#[test]
+fn deletion_creates_tombstone_with_correct_metadata() {
+    let (mut vault, bundle_id) = vault_with_bundle();
+
+    let handle = execute_privacy_deletion(
+        &mut vault,
+        &bundle_id,
+        "privacy_inspector_tombstone_test",
+        TimestampMillis(9_000),
+        EventSequence(9),
+        CorrelationId(9),
+        CausalityId(uuid::Uuid::from_u128(
+            0x018f_0000_0000_7000_8000_0000_0000_0009,
+        )),
+    )
+    .expect("execute privacy deletion");
+
+    // bundle_id must appear in the handle.
+    assert!(
+        handle.contains(&bundle_id),
+        "tombstone handle must include bundle_id; got: {handle}"
+    );
+    // reason must appear in the handle.
+    assert!(
+        handle.contains("privacy_inspector_tombstone_test"),
+        "tombstone handle must include reason; got: {handle}"
+    );
+    // deleted_at timestamp must appear in the handle.
+    assert!(
+        handle.contains("9000"),
+        "tombstone handle must include deleted_at timestamp; got: {handle}"
+    );
+    // The handle is metadata-only — raw source bytes must never appear.
+    assert!(
+        !handle.contains("fn main"),
+        "tombstone handle must not contain raw source content"
+    );
+    // The bundle must be gone from the vault after deletion.
+    assert_eq!(
+        vault.bundle_count(),
+        0,
+        "bundle must be removed after deletion"
+    );
+}
+
+/// The handle format produced by `format_inspector_deletion_handle` must match the
+/// format that `privacy_inspector.rs` renders (`delete:{inspector_id}:record:{exposure_id}`),
+/// and `parse_inspector_deletion_handle` must round-trip back to the original components.
+#[test]
+fn deletion_handle_format_matches_inspector() {
+    let inspector_id = "bundle:ws-42:correlation-7";
+    let exposure_id = "exposure:record:1";
+
+    // The format must be exactly what privacy_inspector.rs renders.
+    let handle = format_inspector_deletion_handle(inspector_id, exposure_id);
+    assert_eq!(
+        handle,
+        format!("delete:{inspector_id}:record:{exposure_id}"),
+        "format_inspector_deletion_handle must produce the canonical inspector handle format"
+    );
+
+    // Parsing must round-trip back to the original components.
+    let (parsed_inspector_id, parsed_exposure_id) =
+        parse_inspector_deletion_handle(&handle).expect("handle must be parseable");
+    assert_eq!(
+        parsed_inspector_id, inspector_id,
+        "parsed inspector_id must match original"
+    );
+    assert_eq!(
+        parsed_exposure_id, exposure_id,
+        "parsed exposure_id must match original"
+    );
+
+    // A malformed handle must return None.
+    assert!(
+        parse_inspector_deletion_handle("run:foo:record:bar").is_none(),
+        "run: prefix must not parse as a deletion handle"
+    );
+    assert!(
+        parse_inspector_deletion_handle("delete:only").is_none(),
+        "handle without :record: segment must not parse"
+    );
+}
+
 /// `format_deletion_handle` must produce a stable, metadata-only string.
 #[test]
 fn format_deletion_handle_is_metadata_only() {
@@ -154,7 +247,9 @@ fn format_deletion_handle_is_metadata_only() {
         TimestampMillis(7_000),
         EventSequence(7),
         CorrelationId(7),
-        CausalityId(uuid::Uuid::from_u128(0x018f_0000_0000_7000_8000_0000_0000_0007)),
+        CausalityId(uuid::Uuid::from_u128(
+            0x018f_0000_0000_7000_8000_0000_0000_0007,
+        )),
         1,
     )
     .expect("build tombstone");

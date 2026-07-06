@@ -9,8 +9,8 @@ use legion_protocol::{
     RawSourceRetentionTombstone, TimestampMillis,
 };
 
-use crate::{RawSourceVault, RawSourceVaultError};
 use crate::training::build_raw_source_deletion_tombstone;
+use crate::{RawSourceVault, RawSourceVaultError};
 
 /// Look up a bundle descriptor by id via the vault trait.
 ///
@@ -47,6 +47,35 @@ pub fn format_deletion_handle(tombstone: &RawSourceRetentionTombstone) -> String
         tombstone.event_sequence.0,
         tombstone.schema_version,
     )
+}
+
+/// Format a privacy-inspector deletion handle from an inspector id and an exposure id.
+///
+/// This produces the canonical `delete:{inspector_id}:record:{exposure_id}` format that
+/// `privacy_inspector.rs` renders in the shell projection, making the handle parseable by
+/// [`parse_inspector_deletion_handle`] so the UI layer can map a rendered handle directly
+/// to a vault deletion call via [`execute_privacy_deletion`].
+pub fn format_inspector_deletion_handle(inspector_id: &str, exposure_id: &str) -> String {
+    format!("delete:{inspector_id}:record:{exposure_id}")
+}
+
+/// Parse a privacy-inspector deletion handle back into its constituent parts.
+///
+/// Returns `Some((inspector_id, exposure_id))` when the handle matches the
+/// `delete:{inspector_id}:record:{exposure_id}` format produced by
+/// [`format_inspector_deletion_handle`] (and rendered by `privacy_inspector.rs`).
+///
+/// Returns `None` for any handle that does not conform to this format.
+///
+/// The `inspector_id` returned here corresponds to the vault `bundle_id` and can be
+/// passed directly to [`execute_privacy_deletion`] to perform the vault deletion.
+pub fn parse_inspector_deletion_handle(handle: &str) -> Option<(String, String)> {
+    let rest = handle.strip_prefix("delete:")?;
+    let (inspector_id, after_inspector) = rest.split_once(":record:")?;
+    if inspector_id.is_empty() || after_inspector.is_empty() {
+        return None;
+    }
+    Some((inspector_id.to_string(), after_inspector.to_string()))
 }
 
 /// Execute a full privacy deletion: verify the bundle exists, build a
