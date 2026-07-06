@@ -1385,6 +1385,7 @@ impl DesktopRuntime {
             hover_tooltip_visible: self.hover_tooltip_visible,
             problems_selected_index: self.problems_selected_index,
             review_hunk_selected_index: self.review_hunk_selected_index,
+            durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
         }
     }
 

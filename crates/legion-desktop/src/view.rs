@@ -79,6 +79,9 @@ pub struct DesktopProjectionViewState {
     pub problems_selected_index: usize,
     /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
     pub review_hunk_selected_index: usize,
+    /// Durable checkpoint timeline rows from the checkpoint store (PKT-CKPT).
+    pub durable_checkpoint_timeline_rows:
+        Vec<crate::view::proposal_review::DesktopCheckpointTimelineRow>,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -94,6 +97,7 @@ impl Default for DesktopProjectionViewState {
             hover_tooltip_visible: false,
             problems_selected_index: 0,
             review_hunk_selected_index: 0,
+            durable_checkpoint_timeline_rows: Vec::new(),
         }
     }
 }

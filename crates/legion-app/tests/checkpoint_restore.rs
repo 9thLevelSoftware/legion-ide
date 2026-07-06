@@ -581,3 +581,80 @@ fn checkpoint_audit_records_created_and_restored() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// C2: Failure-path — restore error leaves checkpoint available, no audit
+// ---------------------------------------------------------------------------
+
+/// When the filesystem layer returns an error during restore (e.g. the target
+/// path is a directory instead of a file), restore_checkpoint propagates the
+/// error, leaves the checkpoint marked available, and writes no Restored audit.
+#[test]
+fn restore_failure_leaves_checkpoint_available_and_no_audit() {
+    use legion_protocol::CheckpointAuditEvent;
+
+    let root = create_root();
+    let mut app = AppComposition::new();
+    let opened = app
+        .open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".to_string()),
+        )
+        .expect("open workspace");
+
+    app.enable_checkpoint_persistence(&root);
+
+    let target = CanonicalPath(root.join("fail-restore.txt").to_string_lossy().into_owned());
+    let proposal_id = ProposalId(1201);
+    let proposal = create_file_proposal(proposal_id.0, target.clone(), opened.generation);
+
+    register_validate_preview(&mut app, &proposal);
+    app.handle_proposal_request(ProposalRequest::Apply(proposal))
+        .expect("apply");
+
+    // Checkpoint and Created audit must exist.
+    let checkpoints = app.list_checkpoints();
+    assert_eq!(checkpoints.len(), 1);
+    let ckpt_id = checkpoints[0].checkpoint_id.clone();
+    assert!(checkpoints[0].available);
+
+    let audits_before = app.query_checkpoint_audit(Some(proposal_id));
+    assert_eq!(audits_before.len(), 1);
+    assert_eq!(audits_before[0].event, CheckpointAuditEvent::Created);
+
+    // Sabotage: replace the created file with a directory so `remove_file`
+    // fails inside restore_files_for_checkpoint.
+    let target_path = std::path::Path::new(&target.0);
+    std::fs::remove_file(target_path).expect("remove created file");
+    std::fs::create_dir_all(target_path.join("blocker")).expect("create blocking dir");
+
+    // Restore must fail.
+    let result = app.restore_checkpoint(&ckpt_id);
+    assert!(
+        result.is_err(),
+        "restore should fail when the target is a directory"
+    );
+
+    // Checkpoint must still be available (not marked consumed).
+    let checkpoints_after = app.list_checkpoints();
+    let ckpt = checkpoints_after
+        .iter()
+        .find(|c| c.checkpoint_id == ckpt_id)
+        .expect("checkpoint must still exist");
+    assert!(
+        ckpt.available,
+        "checkpoint must remain available after failed restore"
+    );
+
+    // No Restored audit record should have been written.
+    let audits_after = app.query_checkpoint_audit(Some(proposal_id));
+    assert_eq!(
+        audits_after.len(),
+        1,
+        "only the Created audit record should exist"
+    );
+    assert_eq!(audits_after[0].event, CheckpointAuditEvent::Created);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
