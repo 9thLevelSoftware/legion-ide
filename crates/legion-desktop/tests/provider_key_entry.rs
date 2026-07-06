@@ -41,10 +41,14 @@ fn delete_provider_api_key_removes_from_keyring() {
 
 #[test]
 fn set_key_never_writes_to_disk() {
-    // This test verifies that the InMemorySecretStore path used in tests
-    // does not write any secret to disk. We write to the in-memory store,
-    // then scan the temp directory for any file containing the sentinel key.
+    // Verify that the InMemorySecretStore path used in tests does not write any
+    // secret to disk. We create a dedicated temp directory as a mock workspace
+    // root, store the sentinel in the in-memory store, then recursively scan the
+    // temp directory for any file containing the sentinel key.
     let sentinel = "PROV-TEST-SENTINEL-KEY-NO-DISK-LEAK-12345";
+
+    // Create an isolated temp directory so we only scan files we could own.
+    let workspace_root = tempfile::tempdir().expect("must be able to create temp dir");
 
     let store = InMemorySecretStore::default();
     let reference = provider_secret_reference(ANTHROPIC_PROVIDER_ID, "api_key");
@@ -52,19 +56,18 @@ fn set_key_never_writes_to_disk() {
         .store(&reference, sentinel)
         .expect("store must succeed");
 
-    // Scan temp directory for leaked sentinel value.
+    // Recursively scan the workspace root for the leaked sentinel value.
     // A well-behaved InMemorySecretStore must not write to any file.
-    let tmp_dir = std::env::temp_dir();
-    let leaked = scan_dir_for_string(&tmp_dir, sentinel);
+    let leaked = scan_dir_for_string_recursive(workspace_root.path(), sentinel);
     assert!(
         leaked.is_empty(),
-        "sentinel key must not appear in any temp file; found in: {leaked:?}"
+        "sentinel key must not appear in any file under the workspace root; found in: {leaked:?}"
     );
 }
 
-/// Recursively scan a directory for any file that contains `needle`.
-/// Returns a list of matching file paths.
-fn scan_dir_for_string(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
+/// Recursively scan a directory (and all subdirectories) for any file that
+/// contains `needle`. Returns a list of matching file paths.
+fn scan_dir_for_string_recursive(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;
@@ -72,10 +75,9 @@ fn scan_dir_for_string(dir: &std::path::Path, needle: &str) -> Vec<std::path::Pa
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.is_dir() {
-            // Limit recursion depth to avoid scanning the whole filesystem
-            continue;
-        }
-        if let Ok(contents) = std::fs::read_to_string(&path)
+            // Recurse into subdirectories.
+            found.extend(scan_dir_for_string_recursive(&path, needle));
+        } else if let Ok(contents) = std::fs::read_to_string(&path)
             && contents.contains(needle)
         {
             found.push(path);

@@ -242,8 +242,14 @@ fn gated_matrix_preserves_capabilities_when_activated() {
 
     let gated = gate_provider_capabilities(&matrix, tier, &consent, true);
 
-    assert!(gated.supports_streaming, "streaming must be preserved on activation");
-    assert!(gated.supports_structured_output, "structured output must be preserved on activation");
+    assert!(
+        gated.supports_streaming,
+        "streaming must be preserved on activation"
+    );
+    assert!(
+        gated.supports_structured_output,
+        "structured output must be preserved on activation"
+    );
     assert_eq!(gated.tool_labels, vec!["strict_tools".to_string()]);
     assert_eq!(
         gated.availability,
@@ -260,10 +266,22 @@ fn gated_matrix_zeros_capabilities_when_denied() {
 
     let gated = gate_provider_capabilities(&matrix, tier, &consent, false);
 
-    assert!(!gated.supports_streaming, "streaming must be zeroed when denied");
-    assert!(!gated.supports_structured_output, "structured output must be zeroed when denied");
-    assert!(gated.tool_labels.is_empty(), "tool labels must be empty when denied");
-    assert!(gated.thinking_mode_labels.is_empty(), "thinking labels must be empty when denied");
+    assert!(
+        !gated.supports_streaming,
+        "streaming must be zeroed when denied"
+    );
+    assert!(
+        !gated.supports_structured_output,
+        "structured output must be zeroed when denied"
+    );
+    assert!(
+        gated.tool_labels.is_empty(),
+        "tool labels must be empty when denied"
+    );
+    assert!(
+        gated.thinking_mode_labels.is_empty(),
+        "thinking labels must be empty when denied"
+    );
     assert_eq!(
         gated.availability,
         AssistedAiProviderAvailabilityState::Unavailable,
@@ -298,17 +316,67 @@ fn gated_matrix_never_adds_capabilities() {
     let gated = gate_provider_capabilities(&empty_matrix, tier, &consent, false);
 
     // LocalDefault activates, but still cannot add capabilities not present in the original
-    assert!(!gated.supports_streaming, "gate must not add streaming that wasn't there");
-    assert!(!gated.supports_structured_output, "gate must not add SO that wasn't there");
-    assert!(gated.tool_labels.is_empty(), "gate must not add tool labels that weren't there");
+    assert!(
+        !gated.supports_streaming,
+        "gate must not add streaming that wasn't there"
+    );
+    assert!(
+        !gated.supports_structured_output,
+        "gate must not add SO that wasn't there"
+    );
+    assert!(
+        gated.tool_labels.is_empty(),
+        "gate must not add tool labels that weren't there"
+    );
 }
 
 #[test]
 fn capability_matrix_requires_provider_declaration() {
-    // has_explicit_declaration returns true only when schema_version >= 1
-    let matrix = sample_byok_matrix();
+    // Gating an empty/zero-capability matrix with an *activated* provider must never
+    // add capabilities that were not present in the original matrix. The gate can only
+    // zero capabilities; it cannot manufacture them.
+    let empty_matrix = provider_capability_matrix(
+        DETERMINISTIC_LOCAL_PROVIDER_ID,
+        "Deterministic Local",
+        AssistedAiProviderClass::Local,
+        false,
+        false,
+        vec![],
+        vec![],
+        vec![],
+        "N/A",
+        None,
+        vec![],
+        "N/A",
+        AssistedAiProviderAvailabilityState::Available,
+    );
+    // LocalDefault with NotRequired consent always activates.
+    let tier = AssistedAiProviderTier::LocalDefault;
+    let consent = AssistedAiWorkspaceConsent::NotRequired;
+
+    let gated = gate_provider_capabilities(&empty_matrix, tier, &consent, false);
+
+    // Even though the provider is activated, the gate must not inject capabilities.
     assert!(
-        matrix.has_explicit_declaration(),
-        "provider_capability_matrix must produce a matrix with explicit declaration (schema_version=1)"
+        !gated.supports_streaming,
+        "gate must not add streaming to an empty matrix"
+    );
+    assert!(
+        !gated.supports_structured_output,
+        "gate must not add structured output to an empty matrix"
+    );
+    assert!(
+        gated.tool_labels.is_empty(),
+        "gate must not add tool labels to an empty matrix"
+    );
+    assert!(
+        gated.thinking_mode_labels.is_empty(),
+        "gate must not add thinking labels to an empty matrix"
+    );
+    // The provider was activated, so availability is preserved as Available.
+    assert_eq!(
+        gated.availability,
+        AssistedAiProviderAvailabilityState::Available,
+        "availability must remain Available for an activated provider"
     );
 }

@@ -1,5 +1,11 @@
-use legion_ai_providers::{provider_setup_rows as ai_provider_setup_rows, provider_tier};
-use legion_protocol::{AssistedAiProviderAvailabilityState, AssistedAiProviderClass, AssistedAiProviderTier};
+use legion_ai_providers::{
+    capabilities::{gate_provider_capabilities, provider_capability_matrix},
+    provider_setup_rows as ai_provider_setup_rows, provider_tier,
+};
+use legion_protocol::{
+    AssistedAiProviderAvailabilityState, AssistedAiProviderClass, AssistedAiProviderTier,
+    AssistedAiWorkspaceConsent,
+};
 use legion_ui::ShellProjectionSnapshot;
 
 pub(crate) fn setup_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
@@ -50,10 +56,35 @@ pub(crate) fn setup_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         // Credential presence is derived from availability metadata — never the credential value.
         let credential_present = provider.availability == AssistedAiProviderAvailabilityState::Available;
         let credential_label = if credential_present { "Present" } else { "Absent" };
-        let eligible = matches!(
-            tier,
-            AssistedAiProviderTier::LocalDefault | AssistedAiProviderTier::LocalLoopbackOptIn
-        ) || (tier == AssistedAiProviderTier::ByokConsentRequired && credential_present);
+        // Derive consent from tier: local tiers need no consent, BYOK defaults to Pending
+        // (ConsentRequired) as the safe default until explicit consent is recorded, and
+        // air-gapped workspaces map to Denied. This wires gate_provider_capabilities into
+        // the capability projection path (C1) and correctly handles the air-gap case (I3).
+        let consent = match tier {
+            AssistedAiProviderTier::LocalDefault
+            | AssistedAiProviderTier::LocalLoopbackOptIn => AssistedAiWorkspaceConsent::NotRequired,
+            AssistedAiProviderTier::ByokConsentRequired => AssistedAiWorkspaceConsent::Pending,
+            AssistedAiProviderTier::HostedDenied => AssistedAiWorkspaceConsent::Denied,
+        };
+        // Build a probe matrix and apply the activation gate; the gated availability
+        // determines eligibility instead of the inline ad-hoc check.
+        let probe = provider_capability_matrix(
+            &provider.provider_id,
+            &provider.provider_label,
+            provider.provider_class,
+            false,
+            false,
+            vec![],
+            vec![],
+            vec![],
+            "N/A",
+            None,
+            vec![],
+            "N/A",
+            AssistedAiProviderAvailabilityState::Available,
+        );
+        let gated = gate_provider_capabilities(&probe, tier, &consent, credential_present);
+        let eligible = gated.availability == AssistedAiProviderAvailabilityState::Available;
         let eligible_label = if eligible { "Eligible" } else { "NotEligible" };
         rows.push(format!(
             "provider {}: tier={} consent={} credential={} activation={}",

@@ -961,6 +961,7 @@ impl DesktopRuntime {
                 let reference = provider_secret_reference(&provider_id, "api_key");
                 match OsKeyringSecretStore.store(&reference, &api_key) {
                     Ok(()) => {
+                        // SensitiveString::drop() zeroizes the key bytes before deallocation.
                         drop(api_key);
                         self.set_status(
                             StatusSeverity::Info,
