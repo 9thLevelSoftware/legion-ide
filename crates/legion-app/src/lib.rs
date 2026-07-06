@@ -33,6 +33,9 @@ pub mod language;
 
 pub mod terminal_policy;
 
+/// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
+pub mod proposal;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
