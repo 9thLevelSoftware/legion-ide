@@ -10,6 +10,8 @@ pub mod agent_comm;
 pub mod plan_editor;
 /// Proposal review and checkpoint timeline view models.
 pub mod proposal_review;
+/// Risk strip view model and row projections for proposal review surfaces.
+pub mod risk_strip;
 /// Sandbox panel projection.
 pub mod sandbox_panel;
 /// Renderer-backed scope picker for delegated tasks.
@@ -23,6 +25,9 @@ pub use assistant_rail::{
     assistant_rail_rows, render_streaming_assistant_rows,
 };
 pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
+pub use risk_strip::{
+    DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model,
+};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
