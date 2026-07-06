@@ -23,7 +23,10 @@ use thiserror::Error;
 
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
-pub use policy::{BatchRuntimeApplyPolicy, ProposalApplyGate, ProposalAutoApprovalPolicy};
+pub use policy::{
+    BatchRuntimeApplyPolicy, ProposalApplyGate, ProposalAutoApprovalPolicy,
+    approval_level_audit_metadata, derive_approval_level,
+};
 pub mod risk;
 
 /// Trust state accepted by policy for workspace-sensitive decisions.

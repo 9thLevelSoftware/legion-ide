@@ -159,3 +159,24 @@ pub trait RiskRuleEngine {
     /// Evaluates a normalized change summary against deterministic rules.
     fn evaluate(&self, input: &RiskRuleInput) -> RiskAssessment;
 }
+
+/// Graduated human-approval level derived from a risk assessment and policy.
+///
+/// The ladder runs from fully-automatic (no human required) to unconditionally
+/// denied.  Every level except `Auto` surfaces at least some human-visible
+/// friction before the proposal can be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApprovalLevel {
+    /// All deterministic rules allow and the auto-approval policy is satisfied.
+    /// The proposal may be applied without a human approval step.
+    Auto,
+    /// All deterministic rules allow but the policy does not grant auto-approval.
+    /// Surface to the human for a quick confirm before applying.
+    Ask,
+    /// One or more rules deny but the change is not a critical-path violation.
+    /// The proposal is paused; explicit human approval is required before apply.
+    RequireExplicit,
+    /// Unconditionally denied — the proposal must not be applied.
+    /// Reserved for critical violations such as workspace-scope escape.
+    Deny,
+}
