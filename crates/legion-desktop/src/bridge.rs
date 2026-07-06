@@ -739,6 +739,13 @@ pub enum DesktopAction {
         /// Query label.
         query: String,
     },
+    /// Restore a durable checkpoint through app authority (PKT-CKPT).
+    ///
+    /// Binds to Alt+Z; intercepted in DesktopWorkflowRuntime::handle_action.
+    RestoreCheckpoint {
+        /// Stable checkpoint identifier selected from projected checkpoint timeline data.
+        checkpoint_id: String,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -1922,6 +1929,9 @@ impl DesktopCommandBridge {
                 .with_active_terminal(snapshot, |session_id| {
                     CommandDispatchIntent::TerminalSearch { session_id, query }
                 }),
+            // PKT-CKPT: handled in DesktopWorkflowRuntime::handle_action before reaching the
+            // bridge; this arm satisfies exhaustiveness but is never evaluated in production.
+            DesktopAction::RestoreCheckpoint { .. } => DesktopBridgeOutput::Noop,
         }
     }
 

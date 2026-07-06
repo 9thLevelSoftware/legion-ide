@@ -951,6 +951,29 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
             }
+            // PKT-CKPT: restore a durable checkpoint through app authority.
+            DesktopAction::RestoreCheckpoint { checkpoint_id } => {
+                match self.app.restore_checkpoint(&checkpoint_id) {
+                    Ok(()) => {
+                        self.set_status(
+                            StatusSeverity::Info,
+                            format!("Checkpoint {checkpoint_id} restored"),
+                        );
+                        self.persist_session_if_configured();
+                        self.refresh_projection()?;
+                        self.last_outcome = DesktopWorkflowOutcome::Noop;
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Noop)
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
             action => {
                 let snapshot = self.shell.projection_snapshot();
 
