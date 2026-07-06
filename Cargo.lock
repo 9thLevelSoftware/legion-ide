@@ -3758,6 +3758,7 @@ dependencies = [
 name = "legion-ai"
 version = "0.1.0"
 dependencies = [
+ "legion-observability",
  "legion-protocol",
  "legion-security",
  "regex",

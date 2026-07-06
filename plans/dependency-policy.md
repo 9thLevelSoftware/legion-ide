@@ -134,6 +134,7 @@ GUI Phase 4 activates `legion-app` composition edges to `legion-index` and `legi
 GUI Phase 2 editor experience authorizes `legion-app` to use `syntect` for app-side semantic-token enrichment of normal viewport projections. The dependency must remain outside `legion-editor`, `legion-ui`, and `legion-desktop` renderer ownership: editor continues to emit bounded viewport text slices, app maps visible slices into protocol `ViewportSemanticTokenOverlay` values, and desktop maps semantic token kinds into theme colors. Large-file degraded projections must continue to omit semantic overlays. The approved dependency configuration uses the pure-Rust `default-fancy` feature path rather than the native Oniguruma backend.
 
 - `legion-ai` may depend on:
+  - `legion-observability`
   - `legion-protocol`
   - `legion-security`
 
