@@ -4939,10 +4939,10 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
             ),
             "must detect 'could not compile'"
         );
-        // "error[e" — lowercase form of a Rust compiler diagnostic code
+        // "error[E" — standard Rust compiler diagnostic code prefix
         assert!(
             manual_renderer_build_failed("error[E0308]: mismatched types"),
-            "must detect 'error[e' (case-insensitive)"
+            "must detect 'error[E'"
         );
         // "aborting due to" — Rust compiler summary line
         assert!(
