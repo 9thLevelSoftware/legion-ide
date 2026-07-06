@@ -6,6 +6,8 @@ mod code_canvas_painter;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Pre-invocation context manifest panel with per-item exclusion toggles.
+pub mod manifest_panel;
 /// Editable plan editor projection.
 pub mod plan_editor;
 /// Proposal review and checkpoint timeline view models.
@@ -23,6 +25,10 @@ pub mod terminal_panel;
 pub use assistant_rail::{
     AssistantRailCodeBlockViewModel, AssistantRailRowViewModel, AssistantRailSegmentViewModel,
     assistant_rail_rows, render_streaming_assistant_rows,
+};
+pub use manifest_panel::{
+    DesktopManifestItemToggleViewModel, manifest_item_toggle_view_models, preview_rows,
+    toggle_manifest_item_inclusion,
 };
 pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
