@@ -13911,6 +13911,11 @@ impl AppComposition {
                 LspWorkerResult::DiagnosticBatch { raw_params } => {
                     self.ingest_lsp_diagnostic_batch(raw_params);
                 }
+                LspWorkerResult::TransportDead { .. } => {
+                    // Intercepted inside `LspSessionHandle::try_drain_results`
+                    // (routed through the restart circuit breaker); it never
+                    // reaches this dispatch.  Arm kept for exhaustiveness.
+                }
             }
         }
         changed
