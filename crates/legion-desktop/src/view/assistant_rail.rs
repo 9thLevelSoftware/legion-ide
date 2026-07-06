@@ -1,5 +1,7 @@
 use legion_ai::streaming::{MarkdownStreamSegment, split_markdown_stream};
-use legion_protocol::ProposalId;
+use legion_protocol::{
+    AssistantRailCommand, ProposalId, RailCommandCapability, rail_command_capabilities,
+};
 
 use crate::{bridge::DesktopAction, theme};
 
@@ -39,6 +41,51 @@ pub struct AssistantRailCodeBlockViewModel {
     /// True iff the block is complete *and* a verified per-block proposal
     /// binding ([`Self::proposal_id`]) exists.
     pub apply_as_proposal_available: bool,
+}
+
+/// View model for a single assistant rail command button (PKT-RAIL T2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantRailCommandViewModel {
+    /// The command this view model represents.
+    pub command: AssistantRailCommand,
+    /// Human-readable label for the command button.
+    pub label: String,
+    /// Whether this command is available based on capability gates.
+    ///
+    /// `false` when the command's capability ID is absent from the provided
+    /// capabilities slice (i.e., the gate is closed).
+    pub available: bool,
+}
+
+/// Builds view models for all rail commands, gating availability against the
+/// provided capability slice.
+///
+/// A command is `available` iff its stable capability ID appears in `capabilities`.
+/// Commands whose capability ID is absent get `available: false`.
+#[must_use]
+pub fn rail_command_view_models(
+    capabilities: &[RailCommandCapability],
+) -> Vec<AssistantRailCommandViewModel> {
+    rail_command_capabilities()
+        .into_iter()
+        .map(|cap| {
+            let available = capabilities
+                .iter()
+                .any(|c| c.capability_id == cap.capability_id);
+            let label = match cap.command {
+                AssistantRailCommand::Explain => "Explain",
+                AssistantRailCommand::Fix => "Fix",
+                AssistantRailCommand::Test => "Test",
+                AssistantRailCommand::Doc => "Doc",
+                AssistantRailCommand::Refactor => "Refactor",
+            };
+            AssistantRailCommandViewModel {
+                command: cap.command,
+                label: label.to_string(),
+                available,
+            }
+        })
+        .collect()
 }
 
 /// Converts assistant rail rows into structured markdown segments.
