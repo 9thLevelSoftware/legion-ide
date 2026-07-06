@@ -7,7 +7,7 @@ Date: 2026-07-06
 
 ## Status: DONE
 
-All 5 tasks complete. 6 commits produced. All verification gates green.
+All 5 tasks complete + 1 fix round (7 findings resolved). 7 commits produced. All verification gates green.
 
 ---
 
@@ -30,38 +30,44 @@ test result: ok. 8 passed; 0 failed; 0 ignored
 
 ### `cargo test -p legion-app --test proposal_review_surface` (Tasks 2, 3, 4)
 ```
-running 12 tests
+running 14 tests
+test accepted_hunk_ids_reflects_current_decisions ... ok
+test changed_files_have_non_empty_chunks ... ok
 test evidence_panel_carries_structured_fields_only ... ok
 test evidence_panel_with_test_results_and_commands ... ok
-test accepted_hunk_ids_reflects_current_decisions ... ok
-test hunk_disposition_state_defaults_to_pending ... ok
-test partial_accept_filters_to_two_targets ... ok
-test five_file_proposal_produces_five_sections ... ok
-test multiple_undo_operations_are_lifo ... ok
-test changed_files_have_non_empty_chunks ... ok
-test non_batch_proposal_produces_empty_surface ... ok
-test undo_disposition_change_restores_previous ... ok
 test filter_by_accepted_hunks_retains_correct_targets ... ok
+test five_file_proposal_produces_five_sections ... ok
+test full_filtering_chain_accepted_targets_only ... ok
+test hunk_disposition_state_defaults_to_pending ... ok
+test multiple_undo_operations_are_lifo ... ok
+test non_batch_proposal_produces_empty_surface ... ok
+test partial_accept_filters_to_two_targets ... ok
+test partial_hunk_accept_excludes_whole_target_conservative ... ok
+test undo_disposition_change_restores_previous ... ok
 test undo_on_empty_stack_returns_false ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored
+test result: ok. 14 passed; 0 failed; 0 ignored
 ```
 
 ### `cargo test -p legion-desktop --test keyboard_nav` (Task 5)
 ```
-running 10 tests
-test review_hunk_disposition_actions_are_noop_stubs ... ok
-test t4_problem_activate_with_no_problems_is_noop ... ok
-test review_hunk_prev_is_noop_with_no_reviews ... ok
-test review_hunk_next_is_noop_with_no_reviews ... ok
-test review_hunk_key_dispatch_alt_arrow_right_via_egui ... ok
+running 14 tests
 test product_mode_switch_accepts_keyboard_activation ... ok
+test review_accept_all_and_dismiss_lifecycle ... ok
+test review_hunk_accept_records_disposition_for_focused_hunk ... ok
+test review_hunk_disposition_actions_noop_with_no_reviews ... ok
+test review_hunk_key_dispatch_alt_arrow_right_via_egui ... ok
+test review_hunk_next_increments_and_wraps_with_seeded_hunks ... ok
+test review_hunk_next_is_noop_with_no_reviews ... ok
+test review_hunk_prev_decrements_and_wraps_with_seeded_hunks ... ok
+test review_hunk_prev_is_noop_with_no_reviews ... ok
+test t4_problem_activate_happy_path ... ok
+test t4_problem_activate_with_no_problems_is_noop ... ok
+test t4_problem_key_dispatch_via_egui ... ok
 test t4_problem_next_increments_selection ... ok
 test t4_problem_prev_decrements_selection ... ok
-test t4_problem_key_dispatch_via_egui ... ok
-test t4_problem_activate_happy_path ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored
+test result: ok. 14 passed; 0 failed; 0 ignored
 ```
 
 ### `cargo run -p xtask -- check-deps`
@@ -122,7 +128,17 @@ Fixed by using the correct fields.
 - Existing `DesktopProposalEvidencePanelViewModel` in `legion-desktop/src/view/proposal_review.rs` unchanged (already covers structured rendering)
 
 ### Task 5: `crates/legion-desktop/src/bridge.rs` + `workflow.rs` + `view.rs`
-- New `DesktopAction` variants: `ReviewHunkNext`, `ReviewHunkPrev`, `ReviewHunkAccept`, `ReviewHunkReject`, `ReviewAcceptAll`, `ReviewRejectAll`
+- New `DesktopAction` variants: `ReviewHunkNext`, `ReviewHunkPrev`, `ReviewHunkAccept`, `ReviewHunkReject`, `ReviewAcceptAll`, `ReviewRejectAll`, `ReviewApply`, `ReviewDismiss`
 - `review_hunk_selected_index: usize` in `DesktopRuntime` and `DesktopProjectionViewState`
-- Keybindings: `Alt+ArrowRight/Left` (next/prev), `Alt+Y/X` (accept/reject), `Alt+Shift+Y/X` (accept-all/reject-all)
+- `hunk_dispositions: ProposalHunkDispositionState` in `DesktopRuntime`
+- Keybindings: `Alt+ArrowRight/Left` (next/prev), `Alt+Y/X` (accept/reject), `Alt+Shift+Y/X` (accept-all/reject-all), `Alt+Enter` (apply), `Alt+Escape` (dismiss)
 - `review_hunk_selected_index_for_test()` accessor on both `DesktopRuntime` and `DesktopEframeApp`
+
+### Fix Round: Review findings F1–F7
+- F1 (Critical): Stub handlers wired to `ProposalHunkDispositionState` calls
+- F2: Conservative all-hunks-required filtering with test
+- F3: `ReviewApply` + `ReviewDismiss` actions with handlers
+- F4: `workspace_proposal_for_id` + `compute_diff_surface_for_proposal` public methods on AppComposition
+- F5: End-to-end filtering chain test
+- F6: `DesktopEvidencePanelDtoViewModel` with `From<ProposalEvidencePanel>` impl
+- F7: 4 seeded navigation tests with real hunk assertions

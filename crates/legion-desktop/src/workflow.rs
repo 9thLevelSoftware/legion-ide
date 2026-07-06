@@ -1415,7 +1415,6 @@ impl DesktopRuntime {
         let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
         let reviews = &snapshot.delegated_task_projection.proposal_reviews;
 
-        let mut applied_any = false;
         for review in reviews {
             let proposal_id = review.proposal_id;
             let accepted_hunk_ids = self.hunk_dispositions.accepted_hunk_ids(proposal_id);
@@ -1423,8 +1422,6 @@ impl DesktopRuntime {
                 continue;
             }
 
-            // Map accepted delegate hunk_ids → target_ids using the hunk review
-            // metadata (each hunk carries the target_id it belongs to).
             let accepted_target_ids: HashSet<String> = review
                 .hunks
                 .iter()
@@ -1436,8 +1433,6 @@ impl DesktopRuntime {
                 continue;
             }
 
-            // Retrieve the full proposal from the app coordinator so we can
-            // build the filtered payload.
             let Some(proposal) = self.app.workspace_proposal_for_id(proposal_id) else {
                 continue;
             };
@@ -1448,24 +1443,17 @@ impl DesktopRuntime {
                 continue;
             };
 
-            // Register the filtered proposal so the apply pipeline can find it.
             let _ = self.app.register_proposal_lifecycle(&filtered);
             let outcome = self.dispatch_intent(CommandDispatchIntent::ApplyProposal {
                 proposal_id: filtered.proposal_id,
             })?;
-            applied_any = true;
 
-            // Propagate the first non-Noop outcome.
             if outcome != DesktopWorkflowOutcome::Noop {
                 return Ok(outcome);
             }
         }
 
-        if applied_any {
-            Ok(DesktopWorkflowOutcome::Noop)
-        } else {
-            Ok(DesktopWorkflowOutcome::Noop)
-        }
+        Ok(DesktopWorkflowOutcome::Noop)
     }
 
     fn activate_selected_problem(&mut self) -> Result<DesktopWorkflowOutcome> {
