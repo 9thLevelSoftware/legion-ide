@@ -26,8 +26,8 @@ pub mod terminal_panel;
 #[cfg(feature = "ai")]
 pub use assistant_rail::{
     AssistantRailCodeBlockViewModel, AssistantRailCommandViewModel, AssistantRailRowViewModel,
-    AssistantRailSegmentViewModel, assistant_rail_rows, rail_command_view_models,
-    render_streaming_assistant_rows,
+    AssistantRailSegmentViewModel, assistant_rail_rows, bind_proposals_to_blocks,
+    rail_command_view_models, render_streaming_assistant_rows, streaming_rail_rows,
 };
 #[cfg(feature = "ai")]
 pub use ghost_text::{GhostTextOverlayViewModel, GhostTextState, ghost_text_from_prediction};

@@ -34,10 +34,10 @@ fn assistant_rail_rows_surface_apply_as_proposal_for_code_blocks() {
 }
 
 #[test]
-fn assistant_rail_rows_bind_proposal_to_a_single_block() {
-    // The matched proposal binds to exactly one code block; a second complete
-    // block in the same response must be unbound so the same proposal cannot be
-    // applied from multiple places.
+fn assistant_rail_rows_bind_proposal_to_every_complete_block() {
+    // Every complete code block must receive its own unique proposal binding so
+    // each can be applied independently. Block 0 gets the base ID, block 1 gets
+    // base + 1, etc. (T3 multi-block binding change.)
     let rows = assistant_rail_rows(
         &["```rust\nfn a() {}\n```\n```rust\nfn b() {}\n```".to_string()],
         Some(ProposalId(7)),
@@ -54,8 +54,9 @@ fn assistant_rail_rows_bind_proposal_to_a_single_block() {
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].proposal_id, Some(ProposalId(7)));
     assert!(blocks[0].apply_as_proposal_available);
-    assert_eq!(blocks[1].proposal_id, None);
-    assert!(!blocks[1].apply_as_proposal_available);
+    // Second block gets ProposalId(7 + 1) = ProposalId(8)
+    assert_eq!(blocks[1].proposal_id, Some(ProposalId(8)));
+    assert!(blocks[1].apply_as_proposal_available);
 }
 
 #[test]

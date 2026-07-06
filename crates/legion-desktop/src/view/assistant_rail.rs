@@ -90,17 +90,19 @@ pub fn rail_command_view_models(
 
 /// Converts assistant rail rows into structured markdown segments.
 ///
-/// A single assisted-AI proposal corresponds to exactly one applyable change,
-/// so the proposal is bound to the *first completed* fenced code block only.
-/// Subsequent code blocks in the same response never share (and therefore can
-/// never independently re-apply) that proposal, and streaming/incomplete blocks
-/// are never applyable.
+/// Every completed fenced code block gets its own apply-as-proposal affordance,
+/// bound to a unique per-block proposal ID derived from the base proposal ID:
+/// `ProposalId(base.0 + block_index)`. This allows independent application of
+/// each block without sharing a single proposal between them.
+///
+/// Streaming (incomplete) blocks are never applyable — they have no proposal
+/// binding until the closing fence arrives.
 #[must_use]
 pub fn assistant_rail_rows(
     rows: &[String],
     proposal_id: Option<ProposalId>,
 ) -> Vec<AssistantRailRowViewModel> {
-    let mut unbound_proposal = proposal_id;
+    let mut block_index: u64 = 0;
     rows.iter()
         .map(|row| {
             let segments = split_markdown_stream(row)
@@ -112,10 +114,17 @@ pub fn assistant_rail_rows(
                         code,
                         complete,
                     } => {
-                        // Bind (and consume) the proposal for the first complete
-                        // block; later/incomplete blocks get no binding.
+                        // Every complete block gets its own unique proposal ID by
+                        // offsetting the base by the block's ordinal position.
+                        // Incomplete (streaming) blocks get no binding.
                         let bound_proposal_id = if complete {
-                            unbound_proposal.take()
+                            if let Some(base) = proposal_id {
+                                let id = ProposalId(base.0.saturating_add(block_index));
+                                block_index += 1;
+                                Some(id)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -132,6 +141,50 @@ pub fn assistant_rail_rows(
             AssistantRailRowViewModel { segments }
         })
         .collect()
+}
+
+/// Assigns unique per-block proposal IDs to a slice of code block view models.
+///
+/// Each complete block at ordinal `i` receives `ProposalId(base.0 + i)`.
+/// Incomplete blocks receive `None` because they cannot be applied until the
+/// closing fence is observed.
+///
+/// Returns `(block, Option<ProposalId>)` pairs in input order.
+#[must_use]
+pub fn bind_proposals_to_blocks(
+    blocks: &[AssistantRailCodeBlockViewModel],
+    base_proposal_id: ProposalId,
+) -> Vec<(AssistantRailCodeBlockViewModel, Option<ProposalId>)> {
+    let mut block_index: u64 = 0;
+    blocks
+        .iter()
+        .map(|block| {
+            if block.complete {
+                let id = ProposalId(base_proposal_id.0.saturating_add(block_index));
+                block_index += 1;
+                (block.clone(), Some(id))
+            } else {
+                (block.clone(), None)
+            }
+        })
+        .collect()
+}
+
+/// Accumulates streaming response chunks into renderable rail rows.
+///
+/// Chunks are joined in order and processed as a single document.
+/// Per-block proposal bindings use the provided base proposal ID offset by
+/// block ordinal (same as [`assistant_rail_rows`]).
+///
+/// Non-streaming providers pass the full response as a single chunk in a
+/// single-element slice; per-block proposal bindings still apply.
+#[must_use]
+pub fn streaming_rail_rows(
+    stream_chunks: &[String],
+    proposal_id_base: Option<ProposalId>,
+) -> Vec<AssistantRailRowViewModel> {
+    let accumulated = stream_chunks.join("");
+    assistant_rail_rows(&[accumulated], proposal_id_base)
 }
 
 /// Renders assistant rows as streamed markdown text and fenced code blocks.
@@ -251,9 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn assistant_rail_rows_bind_proposal_to_first_complete_block_only() {
-        // Two complete code blocks must not share the same proposal: only the
-        // first carries the binding/affordance, the second is unbound.
+    fn assistant_rail_rows_bind_proposal_to_every_complete_block() {
+        // Every complete code block receives a unique proposal binding so each
+        // can be applied independently. Block 0 gets the base ID, block 1 gets
+        // base+1, etc.
         let rows = assistant_rail_rows(
             &["```rust\nfn first() {}\n```\n```rust\nfn second() {}\n```".to_string()],
             Some(ProposalId(11)),
@@ -272,8 +326,93 @@ mod tests {
         assert_eq!(code_blocks[0].proposal_id, Some(ProposalId(11)));
         assert!(code_blocks[0].apply_as_proposal_available);
 
-        assert_eq!(code_blocks[1].proposal_id, None);
-        assert!(!code_blocks[1].apply_as_proposal_available);
+        // Second block gets proposal_id = base + 1 = ProposalId(12)
+        assert_eq!(code_blocks[1].proposal_id, Some(ProposalId(12)));
+        assert!(code_blocks[1].apply_as_proposal_available);
+    }
+
+    #[test]
+    fn streaming_rail_rows_accumulate_chunks() {
+        use super::streaming_rail_rows;
+        // Partial chunks without a closing fence → incomplete, never applyable.
+        let partial = vec![
+            "```rust\n".to_string(),
+            "fn partial() {}".to_string(),
+        ];
+        let rows = streaming_rail_rows(&partial, Some(ProposalId(5)));
+        let block = rows[0]
+            .segments
+            .iter()
+            .find_map(|s| match s {
+                AssistantRailSegmentViewModel::CodeBlock(b) => Some(b),
+                _ => None,
+            })
+            .expect("partial stream must produce an incomplete code block");
+        assert!(!block.complete, "in-flight block must be incomplete");
+        assert!(block.proposal_id.is_none(), "incomplete block must have no proposal");
+
+        // Full chunks with closing fence → complete block, proposal bound.
+        let complete = vec![
+            "```rust\n".to_string(),
+            "fn done() {}\n".to_string(),
+            "```".to_string(),
+        ];
+        let rows = streaming_rail_rows(&complete, Some(ProposalId(5)));
+        let block = rows[0]
+            .segments
+            .iter()
+            .find_map(|s| match s {
+                AssistantRailSegmentViewModel::CodeBlock(b) => Some(b),
+                _ => None,
+            })
+            .expect("complete stream must produce a complete code block");
+        assert!(block.complete);
+        assert_eq!(block.proposal_id, Some(ProposalId(5)));
+    }
+
+    #[test]
+    fn non_streaming_response_gets_per_block_proposals() {
+        use super::streaming_rail_rows;
+        // Three code blocks in a batch response each get independent proposals.
+        let response = vec![
+            "```rust\nfn a() {}\n```\n```python\nprint('b')\n```\n```js\nconsole.log('c')\n```"
+                .to_string(),
+        ];
+        let rows = streaming_rail_rows(&response, Some(ProposalId(100)));
+        let blocks: Vec<_> = rows[0]
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                AssistantRailSegmentViewModel::CodeBlock(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].proposal_id, Some(ProposalId(100)));
+        assert_eq!(blocks[1].proposal_id, Some(ProposalId(101)));
+        assert_eq!(blocks[2].proposal_id, Some(ProposalId(102)));
+        for block in &blocks {
+            assert!(block.apply_as_proposal_available);
+        }
+    }
+
+    #[test]
+    fn incomplete_streaming_block_never_applyable() {
+        // An in-flight streaming block (no closing fence) must never have a
+        // proposal binding, regardless of the base proposal id.
+        let rows = assistant_rail_rows(
+            &["```rust\nfn streaming() {}".to_string()],
+            Some(ProposalId(3)),
+        );
+        match &rows[0].segments[0] {
+            AssistantRailSegmentViewModel::CodeBlock(code_block) => {
+                assert!(!code_block.complete);
+                assert_eq!(code_block.proposal_id, None);
+                assert!(!code_block.apply_as_proposal_available);
+            }
+            other => panic!("expected code block, got {other:?}"),
+        }
     }
 
     #[test]
