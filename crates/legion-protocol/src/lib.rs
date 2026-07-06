@@ -4991,6 +4991,37 @@ pub struct ProposalAuditRecord {
     pub schema_version: u16,
 }
 
+/// Event kind recorded in a checkpoint audit record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckpointAuditEvent {
+    /// A durable checkpoint was created following a proposal apply.
+    Created,
+    /// A checkpoint was restored, reverting targeted file mutations.
+    Restored,
+    /// A checkpoint was deleted from the store.
+    Deleted,
+}
+
+/// Audit record produced when a durable checkpoint is created, restored, or deleted.
+///
+/// Stored in `.legion/audit/` alongside `CheckpointAuditRecord` blobs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointAuditRecord {
+    /// Stable checkpoint identifier.
+    pub checkpoint_id: String,
+    /// Audit event kind.
+    pub event: CheckpointAuditEvent,
+    /// Proposal that triggered the checkpoint creation, or the proposal whose
+    /// targets were restored.
+    pub proposal_id: ProposalId,
+    /// Canonical paths of the files targeted by the checkpoint.
+    pub target_paths: Vec<CanonicalPath>,
+    /// Timestamp of the audit event in milliseconds since Unix epoch.
+    pub timestamp: TimestampMillis,
+    /// Schema version for forward compatibility.
+    pub schema_version: u16,
+}
+
 /// Display-safe lifecycle state label for proposal ledger projections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposalLifecycleStateDisplay {

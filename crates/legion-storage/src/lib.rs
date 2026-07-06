@@ -8,6 +8,9 @@ pub mod plan;
 /// Local file history metadata store.
 pub mod local_history;
 
+/// Durable checkpoint store for workspace-level file-mutation rollback.
+pub mod checkpoint;
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
