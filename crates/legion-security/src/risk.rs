@@ -286,6 +286,7 @@ impl RiskRuleEngine for DeterministicRiskRuleEngine {
         RiskAssessment {
             findings,
             aggregate_risk_label,
+            advisory_recommendation: None,
         }
     }
 }
@@ -293,6 +294,24 @@ impl RiskRuleEngine for DeterministicRiskRuleEngine {
 /// Evaluates risk rules using the default deterministic thresholds.
 pub fn evaluate_risk_rules(input: &RiskRuleInput) -> RiskAssessment {
     DeterministicRiskRuleEngine::default().evaluate(input)
+}
+
+/// Evaluates risk rules and attaches an optional advisory classifier label.
+///
+/// The classifier recommendation is **metadata only** — it is attached to the
+/// returned assessment for display but does NOT influence any deterministic
+/// finding, the aggregate risk label, or the approval level.  Deterministic
+/// rules have sole authority over all policy-bearing outcomes.
+///
+/// Pass `None` as `advisory_label` when no classifier output is available;
+/// the returned assessment will have `advisory_recommendation: None`.
+pub fn evaluate_with_advisory(
+    input: &RiskRuleInput,
+    advisory_label: Option<ProposalRiskLabel>,
+) -> RiskAssessment {
+    let mut assessment = DeterministicRiskRuleEngine::default().evaluate(input);
+    assessment.advisory_recommendation = advisory_label;
+    assessment
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 //! Deterministic approval-policy helpers for proposal auto-approval and apply gating.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Envelope policy controlling when a proposal may be auto-approved without a human in the loop.
@@ -145,6 +147,74 @@ impl Default for ProposalApplyGate {
             "proposal apply gate default deny".to_string(),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Graduated approval ladder
+// ---------------------------------------------------------------------------
+
+/// Derives a `ApprovalLevel` from a deterministic risk assessment and policy.
+///
+/// The graduated ladder maps the assessment outcome to one of four levels:
+///
+/// * **`Auto`** — all deterministic rules allow and the policy permits auto-approval
+///   for the exact set of rule IDs cited in the assessment.
+/// * **`Ask`** — all rules allow but the policy does not grant auto-approval.
+/// * **`RequireExplicit`** — one or more non-critical rules deny the change.
+/// * **`Deny`** — a critical path-scope violation is detected (workspace escape).
+///
+/// Empty findings can never produce `Auto` because `allows_rule_ids` rejects an
+/// empty slice (vacuous-truth guard in [`ProposalAutoApprovalPolicy::allows_rule_ids`]).
+pub fn derive_approval_level(
+    assessment: &legion_protocol::risk::RiskAssessment,
+    policy: &ProposalAutoApprovalPolicy,
+) -> legion_protocol::risk::ApprovalLevel {
+    use legion_protocol::risk::{ApprovalLevel, RiskRuleId};
+
+    // Critical violation: workspace-scope escape is unconditionally denied.
+    if let Some(finding) = assessment.finding(RiskRuleId::PathScope)
+        && finding.outcome.is_deny()
+    {
+        return ApprovalLevel::Deny;
+    }
+
+    // Any non-critical rule deny → pause and require explicit approval.
+    if !assessment.is_allow() {
+        return ApprovalLevel::RequireExplicit;
+    }
+
+    // All rules allow — check whether the policy grants auto-approval.
+    let rule_ids: Vec<String> = assessment
+        .findings
+        .iter()
+        .map(|f| f.rule_id.stable_id().to_string())
+        .collect();
+
+    if policy.allows_rule_ids(&rule_ids) {
+        ApprovalLevel::Auto
+    } else {
+        ApprovalLevel::Ask
+    }
+}
+
+/// Produces a metadata map recording the computed `ApprovalLevel` for audit rows.
+///
+/// Insert the returned map into any proposal audit record so every apply/deny
+/// decision carries which approval level was computed.
+pub fn approval_level_audit_metadata(
+    level: legion_protocol::risk::ApprovalLevel,
+) -> HashMap<String, String> {
+    use legion_protocol::risk::ApprovalLevel;
+
+    let level_str = match level {
+        ApprovalLevel::Auto => "Auto",
+        ApprovalLevel::Ask => "Ask",
+        ApprovalLevel::RequireExplicit => "RequireExplicit",
+        ApprovalLevel::Deny => "Deny",
+    };
+    let mut map = HashMap::new();
+    map.insert("approval_level".to_string(), level_str.to_string());
+    map
 }
 
 #[cfg(test)]

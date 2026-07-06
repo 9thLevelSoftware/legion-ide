@@ -193,8 +193,38 @@ apply_enabled = false
 repair_enabled = false
 explicit_repair_required = true
 
+# ---------------------------------------------------------------------------
+# Proposal auto-approval policy — graduated approval ladder
+# ---------------------------------------------------------------------------
+#
+# The graduated approval ladder has four levels:
+#
+#   Auto             — all deterministic rules allow AND every rule ID cited in
+#                      the assessment is listed in `allowed_rule_ids`.  The
+#                      proposal is applied without a human approval step.
+#
+#   Ask              — all rules allow but `enabled = false` or a rule ID is not
+#                      in `allowed_rule_ids`.  Surface to the human for a quick
+#                      confirm before applying.
+#
+#   RequireExplicit  — one or more non-critical rules denied the change (e.g.
+#                      file count exceeded, lockfile touched).  The proposal is
+#                      paused until the human explicitly approves.
+#
+#   Deny             — a critical path-scope violation was detected (a touched
+#                      path escapes the approved workspace root).  The proposal
+#                      is unconditionally blocked.
+#
+# Default (everything off): `enabled = false` → every proposal is Ask or higher.
+# Narrow allowlist example below trusts only path-scope and file-count rules.
+#
 [security_policy.proposal_auto_approval_policy]
+# Set `enabled = false` to revert to the conservative default (all proposals
+# require at least a quick human confirm — no auto-apply).
 enabled = true
+# Only proposals whose deterministic evidence comes from the rules listed below
+# may reach the Auto tier.  Rules not listed here force Ask or higher.
+# Remove entries to tighten the auto-approval surface.
 allowed_rule_ids = [
   "risk.path_scope",
   "risk.file_count",
