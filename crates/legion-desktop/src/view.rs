@@ -8,6 +8,8 @@ mod code_canvas_painter;
 pub mod agent_comm;
 /// Editable plan editor projection.
 pub mod plan_editor;
+/// Proposal review and checkpoint timeline view models.
+pub mod proposal_review;
 /// Sandbox panel projection.
 pub mod sandbox_panel;
 /// Renderer-backed scope picker for delegated tasks.
@@ -77,6 +79,9 @@ pub struct DesktopProjectionViewState {
     pub problems_selected_index: usize,
     /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
     pub review_hunk_selected_index: usize,
+    /// Durable checkpoint timeline rows from the checkpoint store (PKT-CKPT).
+    pub durable_checkpoint_timeline_rows:
+        Vec<crate::view::proposal_review::DesktopCheckpointTimelineRow>,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -92,6 +97,7 @@ impl Default for DesktopProjectionViewState {
             hover_tooltip_visible: false,
             problems_selected_index: 0,
             review_hunk_selected_index: 0,
+            durable_checkpoint_timeline_rows: Vec::new(),
         }
     }
 }

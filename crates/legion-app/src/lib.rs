@@ -36,6 +36,12 @@ pub mod terminal_policy;
 /// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
 pub mod proposal;
 
+/// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
+pub use legion_storage::checkpoint::DurableCheckpointSummary;
+/// Re-export so `legion-desktop`'s view layer can access this without reaching into the
+/// `proposal` submodule path directly.
+pub use proposal::proposal_risk_rule_ids_from_coverage;
+
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
 use legion_editor::{
@@ -71,32 +77,33 @@ use legion_project::{
     SearchPatternKind, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
     WorkspaceError, WorkspaceMutationRollbackCheckpoint,
     WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
-    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceSaveRequest,
-    WorkspaceSearchBatch, WorkspaceSearchFilters, WorkspaceSearchQuery, collect_git_snapshot,
-    commit_git_changes, create_git_branch, delete_git_branch, discover_cargo_debug_configurations,
-    git_repository_root, prune_git_worktrees, push_git_remote, remove_git_worktree,
-    resolve_git_conflict, stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
+    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceRestoreFileOp,
+    WorkspaceSaveRequest, WorkspaceSearchBatch, WorkspaceSearchFilters, WorkspaceSearchQuery,
+    collect_git_snapshot, commit_git_changes, create_git_branch, delete_git_branch,
+    discover_cargo_debug_configurations, git_repository_root, prune_git_worktrees, push_git_remote,
+    remove_git_worktree, resolve_git_conflict, stage_git_hunk, stash_git_changes,
+    switch_git_branch, unstage_git_hunk,
 };
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
     AssistedAiProviderInvocationState, BatchProposalPayload, BufferId, BufferVersion, ByteRange,
     CancellationTokenId, CanonicalPath, CapabilityBrokerPort, CapabilityDecision,
     CapabilityDecisionId, CapabilityId, CapabilityNamespace, CapabilityRequest,
-    CapabilityRequestContext, CapabilityResponse, CausalityId, CollaborationAcknowledgementStatus,
-    CollaborationAuditRecord, CollaborationDocumentBinding, CollaborationDocumentEpoch,
-    CollaborationDocumentOperation, CollaborationDocumentOperationKind, CollaborationGuiProjection,
-    CollaborationParticipant, CollaborationParticipantId, CollaborationParticipantRole,
-    CollaborationPermission, CollaborationPresenceProjection, CollaborationSessionDescriptor,
-    CollaborationSessionGuiRow, CollaborationSessionId, CollaborationSessionState,
-    CollaborationSharedProposalApproval, CollaborationSharedProposalDisposition,
-    CollaborationSharedProposalGuiRow, CollaborationTransportEnvelope,
-    CollaborationTransportPayload, CommandRiskLabel, CorrelationId, DebugAdapterAuditRecord,
-    DebugAdapterLaunchRequest, DebugBreakpointId, DebugBreakpointRecord, DebugConfigurationId,
-    DebugConsoleCategory, DebugConsoleEntry, DebugInlineValue, DebugLaunchConfiguration,
-    DebugSessionId, DebugSessionState, DebugStackFrame, DebugStepKind, DebugVariable, DebugWatchId,
-    DelegatedTaskChatMessage, DelegatedTaskChatRole, DelegatedTaskContextCitation,
-    DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProjection,
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
+    CapabilityRequestContext, CapabilityResponse, CausalityId, CheckpointAuditEvent,
+    CheckpointAuditRecord, CollaborationAcknowledgementStatus, CollaborationAuditRecord,
+    CollaborationDocumentBinding, CollaborationDocumentEpoch, CollaborationDocumentOperation,
+    CollaborationDocumentOperationKind, CollaborationGuiProjection, CollaborationParticipant,
+    CollaborationParticipantId, CollaborationParticipantRole, CollaborationPermission,
+    CollaborationPresenceProjection, CollaborationSessionDescriptor, CollaborationSessionGuiRow,
+    CollaborationSessionId, CollaborationSessionState, CollaborationSharedProposalApproval,
+    CollaborationSharedProposalDisposition, CollaborationSharedProposalGuiRow,
+    CollaborationTransportEnvelope, CollaborationTransportPayload, CommandRiskLabel, CorrelationId,
+    DebugAdapterAuditRecord, DebugAdapterLaunchRequest, DebugBreakpointId, DebugBreakpointRecord,
+    DebugConfigurationId, DebugConsoleCategory, DebugConsoleEntry, DebugInlineValue,
+    DebugLaunchConfiguration, DebugSessionId, DebugSessionState, DebugStackFrame, DebugStepKind,
+    DebugVariable, DebugWatchId, DelegatedTaskChatMessage, DelegatedTaskChatRole,
+    DelegatedTaskContextCitation, DelegatedTaskPlanContract, DelegatedTaskPlanId,
+    DelegatedTaskProjection, DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
     DelegatedTaskProposalReview, DelegatedTaskRuntimeActivationState,
     DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
     DelegatedTaskToolPermissionRequest, DelegatedTaskToolPermissionRequestInput, EditBatch,
@@ -176,6 +183,10 @@ use legion_security::{
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
+    checkpoint::{
+        CHECKPOINT_SCHEMA_VERSION, CheckpointStore, CheckpointTarget, CheckpointTargetKind,
+        DurableCheckpoint,
+    },
 };
 use legion_terminal::{
     TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
@@ -431,6 +442,9 @@ pub enum AppCompositionError {
     /// Search query validation failed.
     #[error("search validation failed: {0}")]
     SearchValidation(String),
+    /// Durable checkpoint operation failed.
+    #[error("checkpoint operation failed: {0}")]
+    Checkpoint(String),
 }
 
 /// Product-mode authority for app-owned AI dispatch.
@@ -13598,6 +13612,10 @@ pub struct AppComposition {
     /// Default is fail-closed (disabled). Set to an enabled policy for trusted
     /// workspaces to unblock commit and finalize in the execution contract.
     batch_apply_policy: BatchRuntimeApplyPolicy,
+    /// Durable checkpoint store for file-mutation rollback.
+    /// Defaults to in-memory only; swap to file-backed via
+    /// [`Self::enable_checkpoint_persistence`].
+    checkpoint_store: CheckpointStore,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -13818,6 +13836,7 @@ impl AppComposition {
             lsp_ui_last_hover_id: None,
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
+            checkpoint_store: CheckpointStore::new(),
         }
     }
 
@@ -13907,6 +13926,237 @@ impl AppComposition {
         self.set_palette_usage_repository(Box::new(
             legion_storage::FilePaletteUsageRepository::open(&palette_usage_path),
         ));
+    }
+
+    /// Enable file-backed checkpoint persistence for a workspace.
+    ///
+    /// Checkpoints are stored under `<workspace_root>/.legion/`.  Call this
+    /// after opening a trusted workspace to survive IDE restarts.  Tests use
+    /// the in-memory default (no persistence) unless they call this method.
+    pub fn enable_checkpoint_persistence(&mut self, workspace_root: &std::path::Path) {
+        let legion_dir = workspace_root.join(".legion");
+        let _ = std::fs::create_dir_all(&legion_dir);
+        self.checkpoint_store = CheckpointStore::with_base_dir(legion_dir);
+    }
+
+    /// List durable checkpoints newest-first.
+    pub fn list_checkpoints(&self) -> Vec<DurableCheckpointSummary> {
+        self.checkpoint_store.list_checkpoints()
+    }
+
+    /// Restore a checkpoint by reverting each targeted file to its pre-apply state.
+    ///
+    /// Only the files recorded in the checkpoint are touched; files manually
+    /// edited after the original apply that are NOT part of this checkpoint
+    /// remain unchanged.
+    ///
+    /// # C1 — proposal-mediated file I/O
+    /// All file mutations are routed through [`WorkspaceActor::restore_files_for_checkpoint`],
+    /// which uses the workspace's `FileSystemService` abstraction (`self.fs.*`) rather than
+    /// `std::fs` directly.  Full proposal lifecycle (fingerprint/generation checks) is not
+    /// used because there is no live proposal context for a restore: see
+    /// `WorkspaceRestoreFileOp` for the detailed rationale.
+    ///
+    /// # C2 — atomic error handling
+    /// If **any** file operation fails the method returns an error immediately.  The
+    /// checkpoint is NOT marked unavailable and NO audit record is written in that case,
+    /// leaving the checkpoint available for a retry.
+    ///
+    /// # I2 — displaced content preservation
+    /// Before the restore, targets whose current on-disk content would be overwritten or
+    /// deleted are compared against `content_before`.  If the on-disk state differs, a
+    /// pre-restore snapshot checkpoint is created so the displaced state can be recovered
+    /// later via another restore.
+    pub fn restore_checkpoint(&mut self, checkpoint_id: &str) -> Result<(), AppCompositionError> {
+        let checkpoint = self
+            .checkpoint_store
+            .load_checkpoint(checkpoint_id)
+            .map_err(|e| AppCompositionError::Checkpoint(e.to_string()))?
+            .ok_or_else(|| {
+                AppCompositionError::Checkpoint(format!("checkpoint not found: {checkpoint_id}"))
+            })?;
+
+        if !checkpoint.available {
+            return Err(AppCompositionError::Checkpoint(format!(
+                "checkpoint {checkpoint_id} has already been restored"
+            )));
+        }
+
+        // I2: Detect targets whose current disk state differs from content_before and
+        // create a pre-restore snapshot so those displaced edits can be recovered.
+        let pre_restore_snapshot = self.build_pre_restore_snapshot(&checkpoint);
+        if let Some(snap) = pre_restore_snapshot {
+            let _ = self.checkpoint_store.save_checkpoint(snap);
+        }
+
+        // C1: Build workspace-layer file ops — no raw std::fs calls.
+        let mut ops: Vec<WorkspaceRestoreFileOp> = Vec::new();
+        for target in &checkpoint.targets {
+            match &target.kind {
+                CheckpointTargetKind::CreatedFile => {
+                    // The proposal created this file; restoring it means deleting it.
+                    ops.push(WorkspaceRestoreFileOp::DeleteFile {
+                        path: target.path.clone(),
+                    });
+                }
+                CheckpointTargetKind::DeletedFile | CheckpointTargetKind::SavedFile => {
+                    // Restore the pre-mutation content.
+                    let content = target.content_before.clone().unwrap_or_default();
+                    ops.push(WorkspaceRestoreFileOp::WriteFile {
+                        path: target.path.clone(),
+                        content,
+                    });
+                }
+                CheckpointTargetKind::RenamedFile { original_path } => {
+                    // Move the current path (destination after rename) back to
+                    // the original source path.
+                    ops.push(WorkspaceRestoreFileOp::RenameFile {
+                        source: target.path.clone(),
+                        destination: original_path.clone(),
+                    });
+                }
+            }
+        }
+
+        // C2: Execute all ops through the workspace filesystem layer.
+        // On failure: return the error; do NOT mark unavailable or write audit.
+        self.workspace
+            .restore_files_for_checkpoint(&ops)
+            .map_err(|err| AppCompositionError::Checkpoint(format!("restore failed: {err}")))?;
+
+        // All ops succeeded — mark the checkpoint consumed.
+        self.checkpoint_store.mark_unavailable(checkpoint_id);
+
+        // Write a restore audit record.
+        let target_paths: Vec<CanonicalPath> =
+            checkpoint.targets.iter().map(|t| t.path.clone()).collect();
+        let audit = CheckpointAuditRecord {
+            checkpoint_id: checkpoint_id.to_string(),
+            event: CheckpointAuditEvent::Restored,
+            proposal_id: checkpoint.proposal_id,
+            target_paths,
+            timestamp: TimestampMillis::now(),
+            schema_version: 1,
+        };
+        let _ = self.checkpoint_store.save_audit_record(audit);
+
+        // Refresh the workspace so the file tree reflects the restored state.
+        self.refresh_workspace_after_checkpoint_restore();
+
+        Ok(())
+    }
+
+    /// Build a pre-restore snapshot checkpoint that captures the current on-disk state of
+    /// any checkpoint targets that have been displaced (manually edited after the proposal
+    /// was applied).  Returns `None` when no displacement is detected.
+    ///
+    /// A displaced target is one whose current disk content differs from the stored
+    /// `content_before`.  For `CreatedFile` targets (which will be deleted), any existing
+    /// on-disk content is captured as displaced.
+    fn build_pre_restore_snapshot(
+        &self,
+        checkpoint: &DurableCheckpoint,
+    ) -> Option<DurableCheckpoint> {
+        use legion_storage::checkpoint::CheckpointTarget;
+        let mut snap_targets: Vec<CheckpointTarget> = Vec::new();
+
+        for target in &checkpoint.targets {
+            let path = std::path::Path::new(&target.path.0);
+            let current = std::fs::read_to_string(path).ok();
+            let displaced = match &target.kind {
+                // For a CreatedFile we're about to delete the file; any current content is
+                // displaced.
+                CheckpointTargetKind::CreatedFile => current.as_deref().map(|c| c.to_owned()),
+                // For SavedFile/DeletedFile/RenamedFile, the file is about to be overwritten
+                // with content_before.  If the current content differs from content_before,
+                // it was manually edited after the proposal applied.
+                _ => {
+                    let expected = target.content_before.as_deref().unwrap_or("");
+                    match &current {
+                        Some(c) if c != expected => Some(c.clone()),
+                        _ => None,
+                    }
+                }
+            };
+
+            if let Some(displaced_content) = displaced {
+                snap_targets.push(CheckpointTarget {
+                    target_id: format!("pre-restore-{}", target.target_id),
+                    kind: CheckpointTargetKind::SavedFile,
+                    path: target.path.clone(),
+                    content_before: Some(displaced_content),
+                });
+            }
+        }
+
+        if snap_targets.is_empty() {
+            return None;
+        }
+
+        let snap_id = format!("pre-restore-{}", checkpoint.checkpoint_id);
+        Some(DurableCheckpoint {
+            checkpoint_id: snap_id,
+            proposal_id: checkpoint.proposal_id,
+            principal: checkpoint.principal.clone(),
+            created_at: TimestampMillis::now(),
+            targets: snap_targets,
+            available: true,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+        })
+    }
+
+    /// Query checkpoint audit records, optionally filtered by proposal identifier.
+    pub fn query_checkpoint_audit(
+        &self,
+        proposal_id: Option<ProposalId>,
+    ) -> Vec<CheckpointAuditRecord> {
+        self.checkpoint_store.query_checkpoint_audit(proposal_id)
+    }
+
+    /// Refresh the workspace after a checkpoint restore, mirroring the
+    /// post-rollback workspace close/reopen used by audit-failed mutations.
+    fn refresh_workspace_after_checkpoint_restore(&mut self) {
+        let Some(opened) = self.active_documents.opened_workspace.clone() else {
+            return;
+        };
+        let Some(root_path) = self.active_documents.workspace_root_path.clone() else {
+            return;
+        };
+        let principal = self
+            .active_documents
+            .active_principal_id
+            .clone()
+            .unwrap_or_else(|| PrincipalId("unknown".to_string()));
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .clone()
+            .unwrap_or(WorkspaceTrustState::Unknown);
+        let correlation = self.correlation_generator.next();
+
+        let _ = self
+            .workspace
+            .handle(WorkspaceRequest::Close(WorkspaceCloseRequest {
+                workspace_id: opened.workspace_id,
+                correlation_id: correlation,
+                principal_id: principal.clone(),
+            }));
+        if let Ok(WorkspaceResponse::Opened(reopened)) =
+            self.workspace
+                .handle(WorkspaceRequest::Open(WorkspaceOpenRequest {
+                    correlation_id: correlation,
+                    principal_id: principal.clone(),
+                    root_path: CanonicalPath(root_path.clone()),
+                    trust: Some(trust.clone()),
+                }))
+        {
+            self.active_documents.bind_workspace(
+                reopened,
+                CanonicalPath(root_path),
+                principal,
+                trust,
+            );
+        }
     }
 
     fn next_event_context(&mut self) -> EventContext {
@@ -23957,6 +24207,29 @@ impl AppComposition {
             if let Some(save_success) = deferred_save_success {
                 self.commit_deferred_save_success(save_success);
             }
+            // Auto-create a durable checkpoint when a file-mutation proposal applies
+            // successfully.  This captures the pre-mutation state so the apply can be
+            // undone later via `restore_checkpoint`.
+            if let ProposalResponse::Applied(_) = &response
+                && let Some(checkpoint) =
+                    Self::proposal_rollback_to_durable_checkpoint(&rollback, &proposal)
+            {
+                let _ = self.checkpoint_store.save_checkpoint(checkpoint.clone());
+                let target_paths = checkpoint
+                    .targets
+                    .iter()
+                    .map(|t| t.path.clone())
+                    .collect::<Vec<_>>();
+                let audit = CheckpointAuditRecord {
+                    checkpoint_id: checkpoint.checkpoint_id.clone(),
+                    event: CheckpointAuditEvent::Created,
+                    proposal_id: checkpoint.proposal_id,
+                    target_paths,
+                    timestamp: TimestampMillis::now(),
+                    schema_version: 1,
+                };
+                let _ = self.checkpoint_store.save_audit_record(audit);
+            }
             if let ProposalResponse::Applied(_) = &response
                 && let Some(session_id) = shared_session_id
                 && let Some(gate) = self
@@ -23976,6 +24249,74 @@ impl AppComposition {
                 }
             }
             Ok(response)
+        }
+    }
+
+    /// Convert a `ProposalMutationRollback` captured at apply time into a
+    /// `DurableCheckpoint` suitable for file-backed persistence.
+    ///
+    /// Returns `None` when the rollback material contains no file-level
+    /// checkpoints (e.g. pure in-buffer text edits).
+    fn proposal_rollback_to_durable_checkpoint(
+        rollback: &ProposalMutationRollback,
+        proposal: &WorkspaceProposal,
+    ) -> Option<DurableCheckpoint> {
+        let targets = Self::collect_checkpoint_targets(rollback);
+        if targets.is_empty() {
+            return None;
+        }
+        Some(DurableCheckpoint {
+            checkpoint_id: format!("ckpt-proposal-{}", proposal.proposal_id.0),
+            proposal_id: proposal.proposal_id,
+            principal: proposal.principal.clone(),
+            created_at: TimestampMillis::now(),
+            targets,
+            available: true,
+            schema_version: CHECKPOINT_SCHEMA_VERSION,
+        })
+    }
+
+    /// Recursively collect `CheckpointTarget` entries from rollback material.
+    fn collect_checkpoint_targets(rollback: &ProposalMutationRollback) -> Vec<CheckpointTarget> {
+        match rollback {
+            ProposalMutationRollback::WorkspaceFile(cp) => {
+                let (kind, path, content_before) = match cp {
+                    WorkspaceMutationRollbackCheckpoint::CreatedFile { path } => {
+                        (CheckpointTargetKind::CreatedFile, path.clone(), None)
+                    }
+                    WorkspaceMutationRollbackCheckpoint::DeletedFile { file, text } => (
+                        CheckpointTargetKind::DeletedFile,
+                        file.canonical_path.clone(),
+                        Some(text.clone()),
+                    ),
+                    WorkspaceMutationRollbackCheckpoint::SavedFile { file, text } => (
+                        CheckpointTargetKind::SavedFile,
+                        file.canonical_path.clone(),
+                        Some(text.clone()),
+                    ),
+                    WorkspaceMutationRollbackCheckpoint::RenamedFile { file, destination } => (
+                        CheckpointTargetKind::RenamedFile {
+                            original_path: file.canonical_path.clone(),
+                        },
+                        destination.clone(),
+                        None,
+                    ),
+                };
+                vec![CheckpointTarget {
+                    target_id: format!("target-{}", uuid::Uuid::new_v4()),
+                    kind,
+                    path,
+                    content_before,
+                }]
+            }
+            ProposalMutationRollback::Composite(items) => items
+                .iter()
+                .flat_map(Self::collect_checkpoint_targets)
+                .collect(),
+            ProposalMutationRollback::Scoped { rollback, .. } => {
+                Self::collect_checkpoint_targets(rollback)
+            }
+            _ => Vec::new(),
         }
     }
 

@@ -2511,6 +2511,48 @@ pub struct WorkspaceRenameFileRequest {
     pub causality_id: CausalityId,
 }
 
+/// A single file operation to apply during a checkpoint restore.
+///
+/// Checkpoint restore does NOT go through the `_with_proposal` path because:
+/// - There is no live proposal_id for a restore (it is a user-driven undo, not an AI proposal).
+/// - The fingerprint and generation preconditions recorded in `_with_proposal` reflect the
+///   state at proposal-apply time; they cannot be satisfied at restore time (the file content
+///   has since changed).
+/// - Routing a restore through a proposal would be circular: you cannot propose to undo a
+///   proposal using the proposal lifecycle itself.
+///
+/// Instead, restore uses the workspace filesystem layer (`self.fs.*`) without proposal
+/// lifecycle checks.  The workspace tree is rebuilt by the caller via
+/// `refresh_workspace_after_checkpoint_restore` after all operations complete.
+#[derive(Debug, Clone)]
+pub enum WorkspaceRestoreFileOp {
+    /// Write (or atomically overwrite) a file with the given UTF-8 content.
+    ///
+    /// Used for `SavedFile` and `DeletedFile` checkpoint targets.
+    WriteFile {
+        /// Canonical path to write.
+        path: CanonicalPath,
+        /// UTF-8 content to write.
+        content: String,
+    },
+    /// Remove a file.  If the file is absent the operation is a no-op.
+    ///
+    /// Used for `CreatedFile` checkpoint targets.
+    DeleteFile {
+        /// Canonical path to remove.
+        path: CanonicalPath,
+    },
+    /// Rename (move) a file from `source` to `destination`.
+    ///
+    /// Used for `RenamedFile` checkpoint targets (reversed rename).
+    RenameFile {
+        /// Current path to move from.
+        source: CanonicalPath,
+        /// Destination path.
+        destination: CanonicalPath,
+    },
+}
+
 /// Workspace-authorized rollback checkpoint target for accepted file mutations.
 #[derive(Debug, Clone)]
 pub enum WorkspaceMutationRollbackTarget {
@@ -5811,6 +5853,58 @@ impl WorkspaceActor {
             workspace_generation: state.generation,
             response: ProposalResponse::Applied(transition),
         })
+    }
+
+    /// Apply raw file operations for a durable checkpoint restore.
+    ///
+    /// # Why not `_with_proposal`
+    ///
+    /// See [`WorkspaceRestoreFileOp`] for the full rationale.  In short: restore has no
+    /// valid proposal context, so the fingerprint/generation preconditions in the
+    /// `_with_proposal` path cannot be satisfied.  This method goes directly through
+    /// `self.fs.*` to perform the file I/O without proposal lifecycle checks.
+    /// The workspace tree is rebuilt by the caller via
+    /// `refresh_workspace_after_checkpoint_restore` once all operations complete.
+    ///
+    /// Errors are propagated immediately; the caller is responsible for NOT
+    /// marking the checkpoint unavailable or writing audit records if any op
+    /// fails (see `AppComposition::restore_checkpoint`).
+    pub fn restore_files_for_checkpoint(
+        &self,
+        ops: &[WorkspaceRestoreFileOp],
+    ) -> Result<(), WorkspaceError> {
+        for op in ops {
+            match op {
+                WorkspaceRestoreFileOp::WriteFile { path, content } => {
+                    let dest = std::path::Path::new(&path.0);
+                    // `write_text_file_atomic` handles parent-dir creation internally;
+                    // propagate any failure.
+                    self.fs
+                        .write_text_file_atomic(dest, content)
+                        .map_err(WorkspaceError::Platform)?;
+                }
+                WorkspaceRestoreFileOp::DeleteFile { path } => {
+                    let target = std::path::Path::new(&path.0);
+                    // If the file is already absent the restore intention is satisfied.
+                    if target.exists() {
+                        self.fs
+                            .remove_file(target)
+                            .map_err(WorkspaceError::Platform)?;
+                    }
+                }
+                WorkspaceRestoreFileOp::RenameFile {
+                    source,
+                    destination,
+                } => {
+                    let src = std::path::Path::new(&source.0);
+                    let dst = std::path::Path::new(&destination.0);
+                    self.fs
+                        .rename_path(src, dst)
+                        .map_err(WorkspaceError::Platform)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn rollback_target_path(target: &WorkspaceMutationRollbackTarget) -> CanonicalPath {

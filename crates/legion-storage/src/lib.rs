@@ -8,6 +8,9 @@ pub mod plan;
 /// Local file history metadata store.
 pub mod local_history;
 
+/// Durable checkpoint store for workspace-level file-mutation rollback.
+pub mod checkpoint;
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -1000,6 +1003,18 @@ impl Clone for InMemoryStorage {
     }
 }
 
+// TODO(PKT-CKPT I4): `InMemoryStorageRepositoryPort` stores proposal audit records in
+// memory only — they are lost when the process restarts.  Task 4 of PKT-CKPT requires
+// making this storage durable using the same `local_history` pattern as `CheckpointStore`.
+// Concrete follow-up plan:
+//   1. Add `base_dir: Option<PathBuf>` to `InMemoryStorageRepositoryPort`.
+//   2. When set, `SaveProposalAuditRecord` writes blobs to
+//      `.legion/proposal-audit/<id>.json` via the same atomic-write helper used by
+//      `CheckpointStore`.
+//   3. On construction with `base_dir`, replay existing records from that directory.
+//   4. Omitting `base_dir` (current default) leaves behaviour unchanged — no disk I/O,
+//      all tests continue to work without a temp directory.
+// Risk: schema migration when the audit record format evolves; version the blobs.
 #[derive(Debug, Default)]
 /// Mutex-backed protocol repository adapter for [`InMemoryStorage`].
 pub struct InMemoryStorageRepositoryPort {

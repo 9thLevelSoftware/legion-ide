@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
-    AppSaveOutcome, AppSessionRestoreOutcome, LspDebounceKind,
+    AppSaveOutcome, AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind,
     proposal::{ProposalHunkDispositionState, filtered_batch_proposal_for_accepted_targets},
 };
 use legion_protocol::{
@@ -56,6 +56,7 @@ use crate::{
     view::{
         DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
         ime_composition_state, ime_composition_state_id,
+        proposal_review::DesktopCheckpointTimelineRow,
     },
 };
 
@@ -951,6 +952,29 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
             }
+            // PKT-CKPT: restore a durable checkpoint through app authority.
+            DesktopAction::RestoreCheckpoint { checkpoint_id } => {
+                match self.app.restore_checkpoint(&checkpoint_id) {
+                    Ok(()) => {
+                        self.set_status(
+                            StatusSeverity::Info,
+                            format!("Checkpoint {checkpoint_id} restored"),
+                        );
+                        self.persist_session_if_configured();
+                        self.refresh_projection()?;
+                        self.last_outcome = DesktopWorkflowOutcome::Noop;
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Noop)
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
+                        self.persist_diagnostics_if_configured();
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
             action => {
                 let snapshot = self.shell.projection_snapshot();
 
@@ -1041,6 +1065,45 @@ impl DesktopRuntime {
     /// Return the latest shell projection snapshot.
     pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
         self.shell.projection_snapshot()
+    }
+
+    /// Return durable checkpoint summaries from the app-owned checkpoint store.
+    ///
+    /// Usable by callers that cannot depend on `legion-storage` directly.
+    pub fn list_checkpoints(&self) -> Vec<DurableCheckpointSummary> {
+        self.app.list_checkpoints()
+    }
+
+    /// Map durable checkpoint summaries to `DesktopCheckpointTimelineRow` entries for
+    /// display in the checkpoint timeline panel.
+    ///
+    /// One row is emitted per checkpoint (not per-target), ordered newest-first.
+    /// This data flow is testable from real checkpoint data without requiring a
+    /// dependency on `legion-storage`.
+    ///
+    /// # I1 — panel wiring (PKT-CKPT)
+    /// The `DesktopCheckpointTimelineRow` struct was previously only populated from
+    /// the per-proposal `CheckpointRollbackProjection`.  This method provides a
+    /// durable-store-backed path that surfaces all checkpoints, not just the one
+    /// belonging to the currently reviewed proposal.
+    pub fn list_checkpoint_timeline_rows(&self) -> Vec<DesktopCheckpointTimelineRow> {
+        self.app
+            .list_checkpoints()
+            .into_iter()
+            .map(|summary| DesktopCheckpointTimelineRow {
+                target_id: summary.checkpoint_id.clone(),
+                kind_label: format!(
+                    "{} target(s) — proposal {}",
+                    summary.target_count, summary.proposal_id.0
+                ),
+                checkpoint_id: summary.checkpoint_id,
+                labels: vec![
+                    format!("principal: {}", summary.principal.0),
+                    format!("created: {}", summary.created_at.0),
+                ],
+                available: summary.available,
+            })
+            .collect()
     }
 
     /// Return the last workflow outcome.
@@ -1322,6 +1385,7 @@ impl DesktopRuntime {
             hover_tooltip_visible: self.hover_tooltip_visible,
             problems_selected_index: self.problems_selected_index,
             review_hunk_selected_index: self.review_hunk_selected_index,
+            durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
         }
     }
 
@@ -3151,6 +3215,29 @@ impl DesktopEframeApp {
                 }
                 if alt && input.key_pressed(egui::Key::Escape) {
                     actions.push(DesktopAction::ReviewDismiss);
+                }
+            }
+
+            // PKT-CKPT: Alt+Z restores the most-recent available durable checkpoint.
+            //
+            // Alt+Z is distinct from Ctrl+Z (undo) to avoid conflicting with the
+            // editor undo binding declared earlier in this function.  Restore
+            // requires a specific checkpoint_id, so the most-recent available
+            // checkpoint is selected here from the durable store.
+            {
+                let alt = input.modifiers.alt && !command;
+                if alt
+                    && !input.modifiers.shift
+                    && input.key_pressed(egui::Key::Z)
+                    && let Some(ckpt) = self
+                        .runtime
+                        .list_checkpoints()
+                        .into_iter()
+                        .find(|c| c.available)
+                {
+                    actions.push(DesktopAction::RestoreCheckpoint {
+                        checkpoint_id: ckpt.checkpoint_id.clone(),
+                    });
                 }
             }
 

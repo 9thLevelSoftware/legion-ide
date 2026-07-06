@@ -1,7 +1,7 @@
 use legion_app::proposal_risk_rule_ids_from_coverage;
 use legion_protocol::{
-    ByteRange, DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalReview, ProposalId,
-    ProposalEvidencePanel, ProposalLedgerRow, ProposalRiskLabel, TimestampMillis,
+    ByteRange, DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalReview,
+    ProposalEvidencePanel, ProposalId, ProposalLedgerRow, ProposalRiskLabel, TimestampMillis,
     VerificationRunRow, VerificationRunState,
 };
 use legion_ui::ShellProjectionSnapshot;
@@ -37,6 +37,7 @@ pub struct DesktopCheckpointTimelineRow {
     pub available: bool,
 }
 
+/// Proposal evidence row shown in the proposal review panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProposalEvidenceRow {
     /// Proposal identifier.
@@ -65,6 +66,7 @@ pub struct DesktopProposalEvidenceRow {
     pub verification_summary_count: usize,
 }
 
+/// Context-manifest view model for a proposal evidence panel row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProposalContextManifestViewModel {
     /// Stable manifest identifier.
@@ -79,6 +81,7 @@ pub struct DesktopProposalContextManifestViewModel {
     pub redaction_label: String,
 }
 
+/// Diff-summary view model for a proposal evidence panel row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProposalDiffSummaryViewModel {
     /// Diff summary kind label.
@@ -97,6 +100,7 @@ pub struct DesktopProposalDiffSummaryViewModel {
     pub diff_hash: Option<String>,
 }
 
+/// Provenance view model for a proposal evidence panel row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopProposalProvenanceViewModel {
     /// Creation timestamp.
@@ -109,6 +113,7 @@ pub struct DesktopProposalProvenanceViewModel {
     pub diagnostic_count: usize,
 }
 
+/// Verification-run evidence row shown in the proposal review panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopVerificationRunEvidenceRow {
     /// Run identifier.
@@ -274,7 +279,7 @@ impl From<ProposalEvidencePanel> for DesktopEvidencePanelDtoViewModel {
     }
 }
 
-/// Groups a Delegate proposal review into per-file rows plus per-hunk rows.
+#[allow(dead_code)]
 pub(crate) fn proposal_review_file_groups(
     review: &DelegatedTaskProposalReview,
 ) -> Vec<DesktopProposalReviewFileViewModel> {
@@ -327,6 +332,7 @@ pub(crate) fn proposal_review_file_groups(
     files.into_values().collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn proposal_evidence_panel(
     snapshot: &ShellProjectionSnapshot,
 ) -> DesktopProposalEvidencePanelViewModel {
@@ -370,6 +376,7 @@ pub(crate) fn proposal_evidence_panel(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_proposal_evidence_panel(
     ui: &mut egui::Ui,
     panel: &DesktopProposalEvidencePanelViewModel,
@@ -519,6 +526,7 @@ pub(crate) fn render_proposal_evidence_panel(
     });
 }
 
+#[allow(dead_code)]
 fn proposal_evidence_row(
     row: &ProposalLedgerRow,
     verification_summary_count: usize,
@@ -568,6 +576,7 @@ fn proposal_evidence_row(
     }
 }
 
+#[allow(dead_code)]
 fn verification_evidence_row(row: &VerificationRunRow) -> DesktopVerificationRunEvidenceRow {
     DesktopVerificationRunEvidenceRow {
         run_id: row.run_id.clone(),
