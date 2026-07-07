@@ -1,7 +1,9 @@
 name: Legion Smoke
 
-# GP-1 golden-path headless smoke: open fixture repo → edit Rust → diagnostics →
-# search → terminal cargo test → git workflow → evidence artifact.
+# GP-1/2/3 golden-path headless smoke: open fixture repo → edit Rust → diagnostics →
+# search → terminal cargo test → git workflow → evidence artifact (GP-1);
+# delegate mode scope/sandbox/kill/review flows (GP-2); full delegate task loop
+# with scope denial, sandbox teeth, orphan reap, and evidence TOML (GP-3).
 #
 # This is an INDEPENDENT workflow: its failures do NOT block pull-request merges
 # unless the team explicitly adds it to a branch-protection required-check set.
@@ -138,4 +140,57 @@ jobs:
         with:
           name: gp2-report-${{ matrix.os }}
           path: target/golden-path/gp2_report.toml
+          if-no-files-found: warn
+
+  smoke-gp3:
+    name: GP-3 smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report available disk space
+        shell: bash
+        run: |
+          echo "=== disk space report ==="
+          if command -v df >/dev/null 2>&1; then
+            df -h . || true
+          else
+            echo "(df not available on this runner)"
+          fi
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Run GP-3 smoke
+        run: cargo run -p xtask -- golden-path-3
+
+      - name: Upload GP-3 evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gp3-report-${{ matrix.os }}
+          path: target/golden-path/gp3_report.toml
           if-no-files-found: warn

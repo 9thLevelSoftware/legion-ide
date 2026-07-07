@@ -46,10 +46,21 @@ Run these before claiming code work is complete:
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
 cargo run -p xtask -- claim-audit
+cargo run -p xtask -- no-egui-textedit
+cargo run -p xtask -- verify-kanban-backlog
+cargo run -p xtask -- release-pipeline --dry-run
+cargo run -p xtask -- verify-release-pipeline
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check
+cargo run -p xtask -- rust-analyzer-smoke
+cargo run -p xtask -- golden-path-1
+cargo run -p xtask -- golden-path-2
+cargo run -p xtask -- golden-path-3
+cargo run -p xtask -- perf-harness
+cargo run -p xtask -- verify-perf-harness
 ```
 
 The full phase-gate scripts also run cargo-deny when installed locally:
