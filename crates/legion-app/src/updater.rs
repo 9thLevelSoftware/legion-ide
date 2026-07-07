@@ -184,7 +184,7 @@ pub enum UpdateCheck {
     /// A version newer than the installed one is available.
     Available {
         /// Parsed and validated manifest.
-        manifest: ReleaseManifestV1,
+        manifest: Box<ReleaseManifestV1>,
         /// `"signed/ed25519"` when the manifest carried a valid signature,
         /// `"unsigned-beta"` otherwise (only when policy permits).
         signer_status: String,
@@ -338,7 +338,7 @@ impl Updater {
         }
 
         Ok(UpdateCheck::Available {
-            manifest,
+            manifest: Box::new(manifest),
             signer_status,
             previous_version: policy.current_version.clone(),
         })

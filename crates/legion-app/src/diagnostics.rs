@@ -135,6 +135,7 @@ mod tests {
     use super::*;
     use legion_protocol::WorkbenchTelemetryConsent;
     use std::fs;
+    use std::path::Path;
 
     fn disabled_consent() -> WorkbenchTelemetryConsent {
         WorkbenchTelemetryConsent {
@@ -166,7 +167,7 @@ mod tests {
         dir
     }
 
-    fn write_crash(bundle_dir: &PathBuf, crash_id: &str, timestamp: u64, os: &str) {
+    fn write_crash(bundle_dir: &Path, crash_id: &str, timestamp: u64, os: &str) {
         let crash_dir = bundle_dir.join(crash_id);
         fs::create_dir_all(&crash_dir).unwrap();
         let summary = format!(

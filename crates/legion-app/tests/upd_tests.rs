@@ -425,7 +425,7 @@ fn run_full_pipeline(dir: &Path) -> (UpdateJournal, UpdateJournal, UpdateJournal
             manifest,
             signer_status,
             previous_version,
-        } => (manifest, signer_status, previous_version),
+        } => (*manifest, signer_status, previous_version),
         legion_app::updater::UpdateCheck::NoUpdate => {
             panic!("expected Available but got NoUpdate");
         }

@@ -310,7 +310,7 @@ fn run_s3(temp_dir: &Path, verifying_key: &[u8]) -> Result<S3Result, String> {
                 ));
             }
             Ok(S3Result {
-                manifest,
+                manifest: *manifest,
                 signer_status,
                 previous_version,
             })
@@ -460,7 +460,7 @@ fn run_s9(s2: &S2Result, seed: &[u8; 32], scratch_dir: &Path) -> Result<(), Stri
             previous_version,
         } => {
             match Updater::new().stage_update(
-                manifest,
+                *manifest,
                 &bad_dir,
                 signer_status,
                 Some(previous_version),
