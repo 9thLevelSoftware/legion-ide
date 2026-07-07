@@ -659,7 +659,8 @@ impl DesktopProjectionViewModel {
         let dock_rows = dock_rows(snapshot, state);
         let dock_panel_rows = dock_panel_rows(snapshot, state);
         let sandbox_rows = if snapshot.product_mode == DockMode::Delegate {
-            sandbox_panel::rows(snapshot)
+            let state = sandbox_panel::SandboxPanelState::from_snapshot(snapshot);
+            sandbox_panel::rows(snapshot, state)
         } else {
             Vec::new()
         };

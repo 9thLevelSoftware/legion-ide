@@ -14258,6 +14258,16 @@ impl AppComposition {
         }
     }
 
+    /// Returns the workspace root path, falling back to CWD when no workspace is open.
+    /// Used to ensure sandbox paths are anchored to the workspace, not the process CWD.
+    fn workspace_root_path(&self) -> std::path::PathBuf {
+        self.active_documents
+            .workspace_root_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().expect("current dir accessible"))
+    }
+
     fn require_automate_mode(&self) -> Result<(), AppCompositionError> {
         if self.product_mode.allows_automate() {
             Ok(())
@@ -17444,7 +17454,9 @@ impl AppComposition {
             .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
 
         // 2. Setup isolated sandbox orchestrator
-        let mut orchestrator = DelegatedTaskSandboxOrchestrator::new(&plan_id.0);
+        let workspace_root = self.workspace_root_path();
+        let mut orchestrator =
+            DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &plan_id.0);
         orchestrator.initialize(&permission).map_err(|e| {
             AppCompositionError::AiRuntime(format!("Failed to initialize sandbox: {e}"))
         })?;

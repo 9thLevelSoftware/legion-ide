@@ -9,6 +9,58 @@ use legion_sandbox::seatbelt::SeatbeltProfile;
 #[cfg(target_os = "windows")]
 use legion_sandbox::windows::WindowsProfile;
 
+/// What the sandbox panel should display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SandboxPanelState {
+    /// No sandbox allocated yet.
+    NoSandbox,
+    /// Sandbox allocated with enforcement data.
+    Active {
+        /// Human-readable label for the isolation mode (e.g. "git-worktree" or "directory-copy").
+        isolation_mode_label: String,
+        /// Backend used for OS-level enforcement.
+        backend_label: String,
+        /// Honest enforcement strength label.
+        strength_label: String,
+        /// Human-readable caveat descriptions for anything not enforced.
+        caveats: Vec<String>,
+        /// Whether an exclusive lease is held over the sandbox directory.
+        lease_held: bool,
+    },
+}
+
+impl SandboxPanelState {
+    /// Derives panel state from a projection snapshot.
+    ///
+    /// Uses the runtime activation state to determine `NoSandbox` vs `Active`,
+    /// and `host_profile_summary()` to populate the enforcement data for
+    /// `Active` states. `isolation_mode_label` and `lease_held` will be replaced
+    /// with richer data once the orchestrator state is piped through the snapshot.
+    pub(crate) fn from_snapshot(snapshot: &ShellProjectionSnapshot) -> Self {
+        let activation = snapshot.delegated_task_projection.runtime_activation;
+        match activation {
+            DelegatedTaskRuntimeActivationState::NotEncoded
+            | DelegatedTaskRuntimeActivationState::Planned => SandboxPanelState::NoSandbox,
+            _ => {
+                let summary = host_profile_summary();
+                let lease_held = !matches!(
+                    activation,
+                    DelegatedTaskRuntimeActivationState::Completed
+                        | DelegatedTaskRuntimeActivationState::Cancelled
+                        | DelegatedTaskRuntimeActivationState::Failed
+                );
+                SandboxPanelState::Active {
+                    isolation_mode_label: "worktree-or-copy".to_string(),
+                    backend_label: summary.backend_label,
+                    strength_label: summary.strength_label,
+                    caveats: summary.caveats,
+                    lease_held,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SandboxProfileSummary {
     backend_label: String,
@@ -16,28 +68,48 @@ struct SandboxProfileSummary {
     caveats: Vec<String>,
 }
 
-pub(crate) fn rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    let mut rows = Vec::with_capacity(4);
+pub(crate) fn rows(snapshot: &ShellProjectionSnapshot, state: SandboxPanelState) -> Vec<String> {
+    let mut rows = Vec::with_capacity(6);
     let activation = snapshot.delegated_task_projection.runtime_activation;
     rows.push(format!(
         "delegated runtime: {}",
         runtime_activation_label(activation)
     ));
 
-    let summary = host_profile_summary();
-    rows.push(format!(
-        "sandbox backend: {} (strength={})",
-        summary.backend_label, summary.strength_label
-    ));
+    match state {
+        SandboxPanelState::NoSandbox => {
+            rows.push("sandbox state: no sandbox/worktree allocated yet".to_string());
+        }
+        SandboxPanelState::Active {
+            isolation_mode_label,
+            backend_label,
+            strength_label,
+            caveats,
+            lease_held,
+        } => {
+            rows.push(format!(
+                "sandbox backend: {} (strength={})",
+                backend_label, strength_label
+            ));
+            rows.push(format!("sandbox isolation: {}", isolation_mode_label));
+            rows.push(format!(
+                "sandbox lease: {}",
+                if lease_held { "held" } else { "released" }
+            ));
+            rows.extend(
+                caveats
+                    .into_iter()
+                    .map(|caveat| format!("sandbox caveat: {caveat}")),
+            );
+            rows.push(activation_state_row(activation));
+        }
+    }
 
-    rows.extend(
-        summary
-            .caveats
-            .into_iter()
-            .map(|caveat| format!("sandbox caveat: {caveat}")),
-    );
+    rows
+}
 
-    rows.push(match activation {
+fn activation_state_row(activation: DelegatedTaskRuntimeActivationState) -> String {
+    match activation {
         DelegatedTaskRuntimeActivationState::NotEncoded
         | DelegatedTaskRuntimeActivationState::Planned => {
             "sandbox state: no sandbox/worktree allocated yet".to_string()
@@ -66,9 +138,7 @@ pub(crate) fn rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         DelegatedTaskRuntimeActivationState::Failed => {
             "sandbox state: failed after isolated execution".to_string()
         }
-    });
-
-    rows
+    }
 }
 
 fn host_profile_summary() -> SandboxProfileSummary {
@@ -143,10 +213,11 @@ fn sandbox_backend_label(backend: &SandboxBackend) -> String {
 
 fn sandbox_strength_label(backend: &SandboxBackend) -> &'static str {
     match backend {
+        SandboxBackend::Seatbelt => "os-enforced",
+        SandboxBackend::BubblewrapLandlock => "os-enforced",
+        SandboxBackend::RestrictedToken => "process-isolated",
+        SandboxBackend::AppContainer => "os-enforced",
         SandboxBackend::DocumentedFallback { .. } => "fallback",
-        // All other backends are descriptor-only until real OS enforcement lands (PKT-SANDBOX).
-        // Claiming "strong" without enforcement violates the honesty constraint.
-        _ => "descriptor-only",
     }
 }
 
@@ -179,9 +250,20 @@ mod tests {
         snapshot
     }
 
+    fn active_state() -> SandboxPanelState {
+        SandboxPanelState::Active {
+            isolation_mode_label: "git-worktree".to_string(),
+            backend_label: "TestBackend".to_string(),
+            strength_label: "os-enforced".to_string(),
+            caveats: vec!["test-caveat-a".to_string()],
+            lease_held: true,
+        }
+    }
+
     /// Verify that `sandbox_strength_label` never returns "strong" for any
-    /// `SandboxBackend` variant. The "strong" label is dishonest because no
-    /// backend currently performs real OS enforcement (PKT-SANDBOX is pending).
+    /// `SandboxBackend` variant — "strong" was dishonest before PKT-SANDBOX
+    /// enforcement landed. Now that enforcement is real the labels must be
+    /// accurate: "os-enforced", "process-isolated", or "fallback".
     #[test]
     fn sandbox_strength_label_never_returns_strong() {
         let backends = [
@@ -197,25 +279,111 @@ mod tests {
             let label = sandbox_strength_label(backend);
             assert_ne!(
                 label, "strong",
-                "sandbox_strength_label returned 'strong' for {backend:?} — this is dishonest until PKT-SANDBOX lands real enforcement",
+                "sandbox_strength_label returned 'strong' for {backend:?}"
+            );
+            assert_ne!(
+                label, "descriptor-only",
+                "sandbox_strength_label still returns 'descriptor-only' for {backend:?} — \
+                 PKT-SANDBOX enforcement has landed, labels must be updated"
             );
         }
     }
 
-    /// Verify that `rows()` output contains "descriptor-only" and not "strong"
-    /// for all activation states.
+    /// Verify honest labels per backend post-PKT-SANDBOX.
     #[test]
-    fn rows_output_contains_descriptor_only_not_strong() {
+    fn sandbox_strength_label_returns_honest_labels() {
+        assert_eq!(
+            sandbox_strength_label(&SandboxBackend::Seatbelt),
+            "os-enforced"
+        );
+        assert_eq!(
+            sandbox_strength_label(&SandboxBackend::BubblewrapLandlock),
+            "os-enforced"
+        );
+        assert_eq!(
+            sandbox_strength_label(&SandboxBackend::RestrictedToken),
+            "process-isolated"
+        );
+        assert_eq!(
+            sandbox_strength_label(&SandboxBackend::AppContainer),
+            "os-enforced"
+        );
+        assert_eq!(
+            sandbox_strength_label(&SandboxBackend::DocumentedFallback {
+                reason: "test".to_string()
+            }),
+            "fallback"
+        );
+    }
+
+    /// Panel rows for `NoSandbox` state show "no sandbox/worktree allocated yet".
+    #[test]
+    fn rows_nosandbox_state_shows_not_allocated() {
         let snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::NotEncoded);
-        let rows = rows(&snapshot);
+        let rows = rows(&snapshot, SandboxPanelState::NoSandbox);
+        let all = rows.join("\n");
+        assert!(
+            all.contains("no sandbox/worktree allocated yet"),
+            "NoSandbox rows must contain 'no sandbox/worktree allocated yet', got: {all}"
+        );
+        // Must NOT show backend, isolation, or lease rows when no sandbox is allocated.
+        assert!(
+            !all.contains("sandbox backend:"),
+            "NoSandbox rows must not contain 'sandbox backend:', got: {all}"
+        );
+        assert!(
+            !all.contains("sandbox isolation:"),
+            "NoSandbox rows must not contain 'sandbox isolation:', got: {all}"
+        );
+    }
+
+    /// Panel rows for `Active` state show backend, strength, caveats, isolation mode,
+    /// and lease status.
+    #[test]
+    fn rows_active_state_shows_all_enforcement_fields() {
+        let snapshot =
+            snapshot_with_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
+        let rows = rows(&snapshot, active_state());
+        let all = rows.join("\n");
+        assert!(
+            all.contains("sandbox backend: TestBackend (strength=os-enforced)"),
+            "Active rows must show backend and strength, got: {all}"
+        );
+        assert!(
+            all.contains("sandbox isolation: git-worktree"),
+            "Active rows must show isolation mode, got: {all}"
+        );
+        assert!(
+            all.contains("sandbox lease: held"),
+            "Active rows must show lease status, got: {all}"
+        );
+        assert!(
+            all.contains("sandbox caveat: test-caveat-a"),
+            "Active rows must show caveats, got: {all}"
+        );
+    }
+
+    /// Verify that `rows()` output contains honest labels, not "descriptor-only" or "strong".
+    #[test]
+    fn rows_output_contains_honest_label_not_strong_or_descriptor_only() {
+        let snapshot =
+            snapshot_with_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
+        let state = SandboxPanelState::from_snapshot(&snapshot);
+        let rows = rows(&snapshot, state);
         let all_output = rows.join("\n");
         assert!(
-            all_output.contains("descriptor-only") || all_output.contains("fallback"),
-            "rows() output should contain 'descriptor-only' or 'fallback', got: {all_output}",
+            all_output.contains("os-enforced")
+                || all_output.contains("process-isolated")
+                || all_output.contains("fallback"),
+            "rows() output should contain an honest enforcement label, got: {all_output}",
         );
         assert!(
             !all_output.contains("strong"),
             "rows() output must not contain 'strong' — dishonest label, got: {all_output}",
+        );
+        assert!(
+            !all_output.contains("descriptor-only"),
+            "rows() output must not contain 'descriptor-only' after PKT-SANDBOX landed, got: {all_output}",
         );
     }
 }

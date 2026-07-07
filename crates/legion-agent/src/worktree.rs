@@ -15,6 +15,17 @@ use legion_protocol::{
 
 use crate::AgentError;
 
+/// How the sandbox was actually initialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxIsolationMode {
+    /// Full git worktree isolation.
+    GitWorktree,
+    /// Plain directory copy (git worktree unavailable).
+    DirectoryCopy,
+    /// Not yet initialized.
+    NotInitialized,
+}
+
 /// Orchestrator for isolating agent tasks under `target/delegated-tasks/task-{run_id}`.
 /// Uses git worktrees with standard directory fallback if git is unavailable.
 #[derive(Debug, Clone)]
@@ -22,6 +33,8 @@ pub struct DelegatedTaskSandboxOrchestrator {
     sandbox_path: PathBuf,
     source_root: Option<PathBuf>,
     is_worktree: bool,
+    /// How the sandbox was initialized; `NotInitialized` until `initialize()` completes.
+    isolation_mode: SandboxIsolationMode,
     /// Exclusive lock handle over the sandbox's `.lock` lease file. `Arc`
     /// keeps this orchestrator `Clone`: every clone shares the same lease,
     /// so the lease outlives any single clone and is only released when the
@@ -38,17 +51,24 @@ impl DelegatedTaskSandboxOrchestrator {
             sandbox_path,
             source_root: None,
             is_worktree: false,
+            isolation_mode: SandboxIsolationMode::NotInitialized,
             lease: None,
         }
     }
 
     /// Creates a new orchestrator that isolates a specific workspace root.
+    ///
+    /// The sandbox directory is placed under `source_root/target/delegated-tasks/`
+    /// so the sandbox path is always derived from the workspace root, not CWD.
     pub fn with_workspace_root(source_root: &Path, run_id: &str) -> Self {
-        let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
+        let sandbox_path = source_root
+            .join("target/delegated-tasks")
+            .join(format!("task-{}", run_id));
         Self {
             sandbox_path,
             source_root: Some(source_root.to_path_buf()),
             is_worktree: false,
+            isolation_mode: SandboxIsolationMode::NotInitialized,
             lease: None,
         }
     }
@@ -76,6 +96,7 @@ impl DelegatedTaskSandboxOrchestrator {
             sandbox_path,
             source_root: source_root.map(|p| p.to_path_buf()),
             is_worktree: false,
+            isolation_mode: SandboxIsolationMode::NotInitialized,
             lease: None,
         }
     }
@@ -83,6 +104,18 @@ impl DelegatedTaskSandboxOrchestrator {
     /// Returns the sandbox path.
     pub fn sandbox_path(&self) -> &Path {
         &self.sandbox_path
+    }
+
+    /// Returns how the sandbox was actually initialized.
+    /// Returns `NotInitialized` until `initialize()` completes successfully.
+    pub fn isolation_mode(&self) -> SandboxIsolationMode {
+        self.isolation_mode
+    }
+
+    /// Returns whether an exclusive lease was acquired on the sandbox's lock file.
+    /// A `false` return means the sandbox is unprotected against concurrent reaper runs.
+    pub fn lease_acquired(&self) -> bool {
+        self.lease.is_some()
     }
 
     /// Returns the sibling lease file path for this sandbox
@@ -114,6 +147,16 @@ impl DelegatedTaskSandboxOrchestrator {
         permission: &DelegatedTaskToolPermissionRequest,
     ) -> Result<(), std::io::Error> {
         validate_sandbox_permission(permission, "initialize")?;
+
+        // Main-workspace protection: reject any configuration that would point the
+        // sandbox at the workspace root itself or any of its ancestor directories.
+        // This check must happen BEFORE any directory is created so there is no
+        // partial-creation window to clean up on failure.
+        if let Some(source_root) = &self.source_root {
+            validate_not_main_workspace(&self.sandbox_path, source_root)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+
         // Create the delegated-tasks root (the sandbox dir's parent) first —
         // this is shared, pre-existing infrastructure, not the sandbox
         // itself, so publishing it early is not a TOCTOU concern.
@@ -158,10 +201,12 @@ impl DelegatedTaskSandboxOrchestrator {
         let publish_result: Result<(), std::io::Error> = match output {
             Ok(output) if output.status.success() => {
                 self.is_worktree = true;
+                self.isolation_mode = SandboxIsolationMode::GitWorktree;
                 Ok(())
             }
             _ => {
                 self.is_worktree = false;
+                self.isolation_mode = SandboxIsolationMode::DirectoryCopy;
                 std::fs::create_dir_all(&self.sandbox_path).and_then(|()| {
                     if let Some(source_root) = &self.source_root {
                         copy_workspace_tree(source_root, &self.sandbox_path)
@@ -196,6 +241,7 @@ impl DelegatedTaskSandboxOrchestrator {
                 // process could be protecting — but following the same
                 // sequencing everywhere keeps the invariant uniform rather
                 // than relying on a case-by-case justification.
+                self.isolation_mode = SandboxIsolationMode::NotInitialized;
                 let _ = std::fs::remove_file(&lease_path);
                 drop(acquired_lease);
                 Err(error)
@@ -464,17 +510,34 @@ fn remove_stale_lease_files(delegated_tasks_root: &Path) -> Result<(), std::io::
 }
 
 fn copy_workspace_tree(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    // The root sandbox path is passed through all recursive calls so we can avoid
+    // copying any source entry that equals or contains the sandbox directory. This
+    // prevents the infinite-recursion / stack-overflow that would occur when the
+    // sandbox is nested inside the workspace root (the canonical `with_workspace_root`
+    // layout places it at `workspace_root/target/delegated-tasks/task-<id>`).
+    copy_workspace_tree_impl(source, destination, destination)
+}
+
+fn copy_workspace_tree_impl(
+    source: &Path,
+    destination: &Path,
+    root_sandbox: &Path,
+) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        if source_path == destination {
+        // Skip entries that are, or are ancestors of, the sandbox root. Without
+        // this guard, copying `workspace_root` into `workspace_root/target/…/sandbox`
+        // would recurse into `target`, then into `delegated-tasks`, then into
+        // `sandbox` itself — the copy-into-itself cycle — causing a stack overflow.
+        if source_path == root_sandbox || root_sandbox.starts_with(&source_path) {
             continue;
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             std::fs::create_dir_all(&destination_path)?;
-            copy_workspace_tree(&source_path, &destination_path)?;
+            copy_workspace_tree_impl(&source_path, &destination_path, root_sandbox)?;
         } else if file_type.is_file() {
             if let Some(parent) = destination_path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -482,6 +545,69 @@ fn copy_workspace_tree(source: &Path, destination: &Path) -> Result<(), std::io:
             std::fs::copy(&source_path, &destination_path)?;
         }
     }
+    Ok(())
+}
+
+/// Ensures `sandbox_path` is not the workspace root or any ancestor of it.
+///
+/// This prevents any configuration from accidentally targeting the main workspace
+/// as the sandbox write target, which would allow agent-generated writes to land
+/// directly in the source tree rather than an isolated copy.
+///
+/// Both paths are canonicalized (or lexically normalized when the path does not
+/// yet exist) before comparison so that symlink aliases and Windows UNC prefixes
+/// (`\\?\`) do not produce false negatives.
+///
+/// Returns `Err` when:
+/// - `sandbox_path` is the same directory as `workspace_root`, or
+/// - `sandbox_path` is an ancestor of `workspace_root` (i.e. the workspace root
+///   is *inside* the proposed sandbox directory).
+pub fn validate_not_main_workspace(
+    sandbox_path: &Path,
+    workspace_root: &Path,
+) -> Result<(), AgentError> {
+    let strip_unc = |p: PathBuf| -> PathBuf {
+        if let Some(s) = p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            PathBuf::from(s)
+        } else {
+            p
+        }
+    };
+
+    let canonical_workspace = std::fs::canonicalize(workspace_root)
+        .map(strip_unc)
+        .unwrap_or_else(|_| strip_unc(workspace_root.to_path_buf()));
+
+    let canonical_sandbox = std::fs::canonicalize(sandbox_path)
+        .map(strip_unc)
+        .unwrap_or_else(|_| strip_unc(sandbox_path.to_path_buf()));
+
+    if canonical_sandbox == canonical_workspace {
+        return Err(AgentError::InvalidMetadata(
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: format!(
+                    "sandbox path is identical to workspace root: {}",
+                    workspace_root.display()
+                ),
+            },
+        ));
+    }
+
+    // Also reject when the sandbox is a parent of the workspace root — placing
+    // the workspace inside the sandbox write boundary would expose it to writes.
+    if canonical_workspace.starts_with(&canonical_sandbox) {
+        return Err(AgentError::InvalidMetadata(
+            AssistedAiContractError::InvalidProposalMetadata {
+                reason: format!(
+                    "sandbox path '{}' is an ancestor of workspace root '{}' — \
+                     this would expose the workspace to sandbox writes",
+                    sandbox_path.display(),
+                    workspace_root.display()
+                ),
+            },
+        ));
+    }
+
     Ok(())
 }
 
@@ -830,6 +956,25 @@ pub(crate) fn stable_hash_128(bytes: &[u8]) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use legion_protocol::{
+        CapabilityId, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
+        DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass,
+        delegated_task_tool_permission_request,
+    };
+
+    /// Constructs an approved Write tool permission for sandbox operations.
+    fn approved_sandbox_permission() -> DelegatedTaskToolPermissionRequest {
+        delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+            request_id: "test-sandbox-permission".to_string(),
+            profile: DelegatedTaskToolPermissionProfile::Write,
+            action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+            capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+            target_id: None,
+            decision: DelegatedTaskToolPermissionDecision::Allow,
+            labels: vec![],
+            schema_version: 1,
+        })
+    }
 
     #[test]
     fn open_error_means_no_lease_file_is_true_only_for_not_found() {
@@ -862,5 +1007,156 @@ mod tests {
                 "error kind {kind:?} must fail closed (not be treated as an absent lease)"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // D1: isolation mode and lease status
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn isolation_mode_starts_as_not_initialized() {
+        let orchestrator = DelegatedTaskSandboxOrchestrator::new("test-run");
+        assert_eq!(
+            orchestrator.isolation_mode(),
+            SandboxIsolationMode::NotInitialized
+        );
+        assert!(!orchestrator.lease_acquired());
+    }
+
+    /// Initializes an orchestrator with a temp dir that has no git repo and verifies
+    /// that (a) the sandbox is created as a directory copy, and (b) `isolation_mode()`
+    /// returns `DirectoryCopy`.
+    #[test]
+    fn isolation_mode_is_directory_copy_when_git_not_available() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let source_root = tmp.path().join("source");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        std::fs::write(source_root.join("hello.txt"), "hello").expect("fixture file");
+
+        let sandbox_root = tmp.path().join("sandboxes");
+        std::fs::create_dir_all(&sandbox_root).expect("sandbox root");
+
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+            &sandbox_root,
+            "test-no-git",
+            Some(&source_root),
+        );
+
+        assert_eq!(
+            orchestrator.isolation_mode(),
+            SandboxIsolationMode::NotInitialized,
+            "mode must be NotInitialized before initialize()"
+        );
+
+        let permission = approved_sandbox_permission();
+        orchestrator
+            .initialize(&permission)
+            .expect("initialize should succeed via directory-copy fallback");
+
+        // Without a real git repo the worktree command fails → fallback to copy.
+        assert_eq!(
+            orchestrator.isolation_mode(),
+            SandboxIsolationMode::DirectoryCopy,
+            "expected DirectoryCopy when git worktree is unavailable"
+        );
+
+        assert!(
+            orchestrator.sandbox_path().exists(),
+            "sandbox directory must be created"
+        );
+        assert!(
+            orchestrator.sandbox_path().join("hello.txt").exists(),
+            "source files must be copied into the sandbox"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D3: main-workspace protection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_not_main_workspace_rejects_identical_paths() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let workspace_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+
+        let result = validate_not_main_workspace(&workspace_root, &workspace_root);
+        assert!(
+            result.is_err(),
+            "sandbox == workspace_root must be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("identical") || msg.contains("same"),
+            "error message should mention identity: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_not_main_workspace_rejects_when_sandbox_is_parent_of_workspace() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let workspace_root = tmp.path().join("projects").join("my-project");
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+
+        // sandbox_path = parent of workspace_root
+        let sandbox_path = tmp.path().join("projects");
+
+        let result = validate_not_main_workspace(&sandbox_path, &workspace_root);
+        assert!(
+            result.is_err(),
+            "sandbox being a parent of workspace_root must be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("ancestor") || msg.contains("parent"),
+            "error message should mention ancestry: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_not_main_workspace_accepts_sibling_directory() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let workspace_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+
+        let sandbox_path = tmp.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox_path).expect("sandbox dir");
+
+        let result = validate_not_main_workspace(&sandbox_path, &workspace_root);
+        assert!(
+            result.is_ok(),
+            "sibling sandbox path must be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn initialize_fails_when_sandbox_path_equals_workspace_root() {
+        // Craft sandbox_path == workspace_root by naming the workspace dir
+        // "task-<run_id>" and placing sandbox_root at its parent directory.
+        // with_sandbox_root(&parent, "run_id", ...) → sandbox_path = parent/task-run_id
+        // which equals workspace_root = parent/task-run_id.
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let workspace_root = tmp.path().join("task-run-protected");
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+
+        let mut orchestrator = DelegatedTaskSandboxOrchestrator::with_sandbox_root(
+            tmp.path(),
+            "run-protected",
+            Some(&workspace_root),
+        );
+        // sandbox_path is tmp/task-run-protected == workspace_root
+
+        let permission = approved_sandbox_permission();
+        let result = orchestrator.initialize(&permission);
+        assert!(
+            result.is_err(),
+            "initialize must fail when sandbox_path == workspace_root"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("identical") || msg.contains("same") || msg.contains("workspace"),
+            "error message should reference workspace protection: {msg}"
+        );
     }
 }

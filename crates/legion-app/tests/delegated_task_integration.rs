@@ -49,7 +49,17 @@ fn unique_plan_id(label: &str) -> DelegatedTaskPlanId {
     DelegatedTaskPlanId(format!("{label}-{}", uuid::Uuid::now_v7()))
 }
 
-fn sandbox_path(plan_id: &DelegatedTaskPlanId) -> PathBuf {
+/// Returns the expected sandbox path when a workspace root is known.
+/// After PKT-WORKTREE D2, sandbox paths are derived from the workspace root,
+/// not CWD, so callers that opened a workspace must pass it here.
+fn sandbox_path_in(workspace_root: &std::path::Path, plan_id: &DelegatedTaskPlanId) -> PathBuf {
+    workspace_root
+        .join("target/delegated-tasks")
+        .join(format!("task-{}", plan_id.0))
+}
+
+/// Fallback for tests that do not open a workspace: sandboxes fall back to CWD-relative paths.
+fn sandbox_path_cwd(plan_id: &DelegatedTaskPlanId) -> PathBuf {
     PathBuf::from("target/delegated-tasks").join(format!("task-{}", plan_id.0))
 }
 
@@ -163,7 +173,7 @@ fn execute_delegated_task_waits_for_write_permission_before_sandbox_allocation()
             );
             assert!(!request.runtime_allowed);
             assert!(request.human_approval_required);
-            assert!(!sandbox_path(&plan_id).exists());
+            assert!(!sandbox_path_in(&workspace_root, &plan_id).exists());
             let snapshot = app
                 .shell_projection_snapshot("Legion")
                 .expect("projection snapshot is available");
@@ -225,7 +235,8 @@ fn execute_delegated_task_fails_closed_after_denied_permission() {
             assert_eq!(request.decision, DelegatedTaskToolPermissionDecision::Deny);
             assert!(request.deny_overrides);
             assert!(!request.runtime_allowed);
-            assert!(!sandbox_path(&plan_id).exists());
+            // No workspace opened in this test: sandbox path falls back to CWD-relative.
+            assert!(!sandbox_path_cwd(&plan_id).exists());
         }
         other => panic!("expected Denied, got {other:?}"),
     }
@@ -285,7 +296,7 @@ fn execute_delegated_task_returns_proposal_after_explicit_write_allow() {
                 }
                 other => panic!("expected CreateFile proposal, got {other:?}"),
             }
-            assert!(!sandbox_path(&plan_id).exists());
+            assert!(!sandbox_path_in(&workspace_root, &plan_id).exists());
             let snapshot = app
                 .shell_projection_snapshot("Legion")
                 .expect("projection snapshot is available");
@@ -348,7 +359,7 @@ fn execute_delegated_task_uses_acp_host_command_and_projects_comm_stream() {
                 }
                 other => panic!("expected CreateFile proposal, got {other:?}"),
             }
-            assert!(!sandbox_path(&plan_id).exists());
+            assert!(!sandbox_path_in(&workspace_root, &plan_id).exists());
             let snapshot = app
                 .shell_projection_snapshot("Legion")
                 .expect("projection snapshot is available");
