@@ -10,6 +10,8 @@ pub mod redaction;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.
 pub mod telemetry;
+/// Tool-calling DTOs, trait, and scripted test provider.
+pub mod tool_calls;
 
 pub use manifest::{
     ManifestFileSource, ManifestMemoryRecordSource, ManifestMetadata, ManifestRuleRecordSource,
@@ -262,6 +264,8 @@ pub struct ProviderCapabilities {
     pub batch: bool,
     /// Supports inline next-edit prediction distinct from chat/proposal output.
     pub inline_prediction: bool,
+    /// Supports tool-calling (function-call) conversations.
+    pub tool_use: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -271,6 +275,7 @@ impl Default for ProviderCapabilities {
             embedding: false,
             batch: false,
             inline_prediction: false,
+            tool_use: false,
         }
     }
 }
@@ -393,6 +398,7 @@ impl ModelProvider for DeterministicInlinePredictionProvider {
             embedding: false,
             batch: false,
             inline_prediction: true,
+            tool_use: false,
         }
     }
 
@@ -835,6 +841,7 @@ mod tests {
                 embedding: false,
                 batch: false,
                 inline_prediction: false,
+                tool_use: false,
             }
         }
 

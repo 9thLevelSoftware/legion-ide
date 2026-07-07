@@ -240,6 +240,7 @@ impl ModelProvider for Gp2LocalCompletionProvider {
             embedding: false,
             batch: false,
             inline_prediction: false,
+            tool_use: false,
         }
     }
 
