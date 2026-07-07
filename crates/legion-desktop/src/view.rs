@@ -46,7 +46,9 @@ pub use manifest_panel::{
     DesktopManifestItemToggleViewModel, manifest_item_toggle_view_models, preview_rows,
     toggle_manifest_item_inclusion,
 };
-pub use plan_editor::{DesktopPlanEditorViewModel, DesktopPlanSectionViewModel};
+pub use plan_editor::{
+    DesktopPlanEditorViewModel, DesktopPlanSectionViewModel, edited_sections_from_plan_editor_draft,
+};
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 

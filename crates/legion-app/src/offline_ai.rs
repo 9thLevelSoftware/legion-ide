@@ -10,20 +10,25 @@ use legion_protocol::{
     AssistedAiProviderInvocationState, AssistedAiProviderRouteRequest,
     AssistedAiProviderRouteResponse, AssistedAiRefusalMetadata, AssistedAiRequestDisposition,
     AssistedAiRouteDecision, AssistedAiTrustProjectionReference, CancellationTokenId,
-    CanonicalPath, CapabilityBrokerPort, CapabilityId, CausalityId, CorrelationId,
-    DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest, EventSequence,
+    CanonicalPath, CapabilityBrokerPort, CapabilityId, CausalityId, CommandRiskLabel,
+    CorrelationId, DelegatedTaskAffectedTargetSummary, DelegatedTaskOperationClass,
+    DelegatedTaskToolPermissionProfile, DelegatedTaskToolPermissionRequest, DirectiveArtifact,
+    EditablePlanArtifact, EditablePlanSection, EditablePlanSectionKind, EventSequence,
     FileFingerprint, LegionEvidenceKind, LegionEvidencePrivacyScope, LegionEvidenceRecord,
     LegionEvidenceSource, LegionModelCapability, LegionProviderLocalityPreference,
     LegionProviderPrivacyPolicy, LegionProviderRouteHealth, LegionProviderRouteMetadata,
     LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket, LegionTaskPacketId,
     LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResult, LegionWorkerResultKind,
     LegionWorkflowConflict, LegionWorkflowConflictId, LegionWorkflowConflictKind,
-    LegionWorkflowConflictState, LegionWorkflowDependencyState, LegionWorkflowMergeReadiness,
-    LegionWorkflowModelBackend, LegionWorkflowSession, LegionWorkflowWorkerAssignment,
-    LegionWorkflowWorkerId, LegionWorkflowWorkerState, PermissionBudgetActionClass, PreviewSummary,
-    PrincipalId, ProposalAffectedTarget, ProposalId, ProposalPayload, ProposalPayloadKind,
-    ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProposalVersionPreconditions, RedactionHint, TimestampMillis, WorkspaceTrustState,
+    LegionWorkflowConflictState, LegionWorkflowDependency, LegionWorkflowDependencyId,
+    LegionWorkflowDependencyState, LegionWorkflowMergeReadiness, LegionWorkflowModelBackend,
+    LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowState,
+    LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerRole,
+    LegionWorkflowWorkerState, PermissionBudgetActionClass, PreviewSummary, PrincipalId,
+    PrivacyClassification, ProductMode, ProposalAffectedTarget, ProposalId, ProposalPayload,
+    ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
+    SpecArtifact, TaskGraphArtifact, TaskNode, TimestampMillis, WorkspaceTrustState,
     evaluate_legion_workflow_merge_readiness, validate_legion_evidence_record,
     validate_legion_provider_route_metadata, validate_legion_task_packet,
     validate_legion_worker_result, validate_legion_workflow_session,
@@ -33,6 +38,67 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+
+/// One node in an approved plan DAG for offline app builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDagNode {
+    /// Stable node identifier.
+    pub node_id: String,
+    /// Stable plan identifier.
+    pub plan_id: String,
+    /// Source plan section.
+    pub section_kind: EditablePlanSectionKind,
+    /// Stable entry index.
+    pub entry_index: usize,
+    /// Display-safe node label.
+    pub label: String,
+}
+
+/// One edge in an approved plan DAG for offline app builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDagEdge {
+    /// Source node identifier.
+    pub from_node_id: String,
+    /// Destination node identifier.
+    pub to_node_id: String,
+    /// Display-safe relation label.
+    pub relation_label: String,
+}
+
+/// Approved-plan DAG for offline app builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDag {
+    /// Stable plan identifier.
+    pub plan_id: String,
+    /// Stable DAG nodes.
+    pub nodes: Vec<WorkflowDagNode>,
+    /// Stable DAG edges.
+    pub edges: Vec<WorkflowDagEdge>,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+impl WorkflowDag {
+    /// Returns stable node identifiers in deterministic order.
+    pub fn node_ids(&self) -> Vec<String> {
+        self.nodes.iter().map(|node| node.node_id.clone()).collect()
+    }
+}
+
+/// Configuration for offline approved-plan session construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegionWorkflowSessionBuilderConfig {
+    /// Stable session identifier.
+    pub session_id: String,
+    /// Generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Audit correlation id.
+    pub correlation_id: CorrelationId,
+    /// Audit causality id.
+    pub causality_id: CausalityId,
+}
 
 /// Deterministic provider id used by existing app projections in offline builds.
 pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "offline-ai-disabled";
@@ -44,6 +110,292 @@ pub struct ProviderRegistry;
 /// Create an empty offline provider registry.
 pub fn make_stub_registry() -> ProviderRegistry {
     ProviderRegistry
+}
+
+fn plan_requirement_entries(
+    directive: &DirectiveArtifact,
+    spec: Option<&SpecArtifact>,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+    entries.extend(directive.scope_labels.iter().cloned());
+    if let Some(spec) = spec {
+        entries.extend(spec.constraint_labels.iter().cloned());
+        entries.extend(
+            spec.acceptance_criteria_hashes
+                .iter()
+                .map(|hash| format!("acceptance criterion hash {}", hash.value)),
+        );
+    }
+    if entries.is_empty() {
+        entries.push(format!(
+            "directive {} needs scope review",
+            directive.directive_id
+        ));
+    }
+    entries
+}
+
+fn plan_design_entries(directive: &DirectiveArtifact, spec: Option<&SpecArtifact>) -> Vec<String> {
+    let mut entries = vec![format!("directive goal hash {}", directive.goal_hash.value)];
+    if let Some(spec) = spec {
+        entries.extend(
+            spec.design_note_hashes
+                .iter()
+                .map(|hash| format!("design note hash {}", hash.value)),
+        );
+    } else {
+        entries.push("design notes pending user review".to_string());
+    }
+    entries
+}
+
+fn plan_task_entries(task_graph: Option<&TaskGraphArtifact>) -> Vec<String> {
+    match task_graph {
+        Some(task_graph) => task_graph
+            .nodes
+            .iter()
+            .map(|node| {
+                let mut line = node.task_id.clone();
+                if !node.target_labels.is_empty() {
+                    line.push_str(&format!(" -> {}", node.target_labels.join(", ")));
+                }
+                if !node.verification_requirements.is_empty() {
+                    line.push_str(&format!(" ({})", node.verification_requirements.join(", ")));
+                }
+                line
+            })
+            .collect(),
+        None => vec!["task graph pending coordinator breakdown".to_string()],
+    }
+}
+
+/// Builds an editable plan artifact without requiring the optional `legion-agent` crate.
+pub fn editable_plan_from_workflow_artifacts(
+    directive: &DirectiveArtifact,
+    spec: Option<&SpecArtifact>,
+    task_graph: Option<&TaskGraphArtifact>,
+    generated_at: TimestampMillis,
+) -> EditablePlanArtifact {
+    EditablePlanArtifact::new(
+        format!("plan:{}", directive.directive_id),
+        directive.directive_id.clone(),
+        spec.map(|spec| spec.artifact_id.clone()),
+        task_graph.map(|task_graph| task_graph.artifact_id.clone()),
+        format!("Editable plan for {}", directive.directive_id),
+        vec![
+            EditablePlanSection::new(
+                EditablePlanSectionKind::Requirements,
+                plan_requirement_entries(directive, spec),
+            ),
+            EditablePlanSection::new(
+                EditablePlanSectionKind::Design,
+                plan_design_entries(directive, spec),
+            ),
+            EditablePlanSection::new(
+                EditablePlanSectionKind::Tasks,
+                plan_task_entries(task_graph),
+            ),
+        ],
+        generated_at,
+    )
+}
+
+fn stable_plan_section_label(kind: EditablePlanSectionKind) -> &'static str {
+    match kind {
+        EditablePlanSectionKind::Requirements => "requirements",
+        EditablePlanSectionKind::Design => "design",
+        EditablePlanSectionKind::Tasks => "tasks",
+    }
+}
+
+/// Builds a DAG from an approved editable plan without requiring `legion-agent`.
+pub fn workflow_dag_from_approved_plan(
+    plan: &EditablePlanArtifact,
+    generated_at: TimestampMillis,
+) -> Option<WorkflowDag> {
+    if plan.review_required || !plan.is_editable() {
+        return None;
+    }
+    let mut nodes = Vec::new();
+    for section in plan.sections() {
+        for (entry_index, entry) in section.entries.iter().enumerate() {
+            nodes.push(WorkflowDagNode {
+                node_id: format!(
+                    "{}/{}/{}",
+                    plan.artifact_id,
+                    stable_plan_section_label(section.kind),
+                    entry_index
+                ),
+                plan_id: plan.artifact_id.clone(),
+                section_kind: section.kind,
+                entry_index,
+                label: entry.clone(),
+            });
+        }
+    }
+    let edges = nodes
+        .windows(2)
+        .map(|pair| WorkflowDagEdge {
+            from_node_id: pair[0].node_id.clone(),
+            to_node_id: pair[1].node_id.clone(),
+            relation_label: "next".to_string(),
+        })
+        .collect();
+    Some(WorkflowDag {
+        plan_id: plan.artifact_id.clone(),
+        nodes,
+        edges,
+        generated_at,
+        schema_version: 1,
+    })
+}
+
+fn stable_task_worker_id(plan_id: &str, task_index: usize) -> LegionWorkflowWorkerId {
+    LegionWorkflowWorkerId(format!("{plan_id}/tasks/{task_index}"))
+}
+
+fn offline_worker_assignment(
+    plan: &EditablePlanArtifact,
+    task: &TaskNode,
+    task_index: usize,
+    config: &LegionWorkflowSessionBuilderConfig,
+) -> LegionWorkflowWorkerAssignment {
+    LegionWorkflowWorkerAssignment {
+        worker_id: stable_task_worker_id(&plan.artifact_id, task_index),
+        role: LegionWorkflowWorkerRole::Implementer,
+        state: LegionWorkflowWorkerState::Pending,
+        model_backend: LegionWorkflowModelBackend::Local,
+        display_safe_model_label: "offline metadata planner".to_string(),
+        allowed_command_classes: vec![
+            DelegatedTaskOperationClass::ReadContextMetadata,
+            DelegatedTaskOperationClass::DraftProposalMetadata,
+            DelegatedTaskOperationClass::SummarizeVerificationReadiness,
+            DelegatedTaskOperationClass::RequestHumanApproval,
+        ],
+        linked_delegated_plan_id: None,
+        assisted_ai_route: None,
+        affected_targets: task
+            .target_labels
+            .iter()
+            .enumerate()
+            .map(|(target_index, label)| DelegatedTaskAffectedTargetSummary {
+                target_id: format!("{}/targets/{}", task.task_id, target_index),
+                kind: ProposalTargetKind::MetadataOnly,
+                workspace_id: None,
+                file_id: None,
+                buffer_id: None,
+                ranges: Vec::new(),
+                hashes: Vec::new(),
+                counts: Vec::new(),
+                labels: vec![label.clone()],
+                risk_label: task.risk_label,
+                privacy_label: task.privacy_label,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            })
+            .collect(),
+        risk_labels: vec![CommandRiskLabel::Review],
+        privacy_labels: vec![PrivacyClassification::Metadata],
+        correlation_id: config.correlation_id,
+        causality_id: config.causality_id,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+/// Builds session metadata from an approved plan in offline app builds.
+pub fn legion_workflow_session_from_approved_plan(
+    plan: &EditablePlanArtifact,
+    dag: &WorkflowDag,
+    task_graph: &TaskGraphArtifact,
+    config: LegionWorkflowSessionBuilderConfig,
+) -> Result<LegionWorkflowSession, OfflineAiError> {
+    if plan.review_required || dag.plan_id != plan.artifact_id {
+        return Err(OfflineAiError::InvalidLegionWorkflow(
+            "approved plan DAG is required before session construction".to_string(),
+        ));
+    }
+    let worker_assignments = task_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(task_index, task)| offline_worker_assignment(plan, task, task_index, &config))
+        .collect::<Vec<_>>();
+    let worker_ids_by_task = task_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(task_index, task)| {
+            (
+                task.task_id.clone(),
+                stable_task_worker_id(&plan.artifact_id, task_index),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut dependency_edges = Vec::new();
+    for (successor_index, task) in task_graph.nodes.iter().enumerate() {
+        let successor = worker_ids_by_task
+            .get(&task.task_id)
+            .cloned()
+            .ok_or_else(|| {
+                OfflineAiError::InvalidLegionWorkflow("task worker missing".to_string())
+            })?;
+        for dependency_task_id in &task.depends_on {
+            let predecessor = worker_ids_by_task
+                .get(dependency_task_id)
+                .cloned()
+                .ok_or_else(|| {
+                    OfflineAiError::InvalidLegionWorkflow(format!(
+                        "unknown task dependency {dependency_task_id} for {}",
+                        task.task_id
+                    ))
+                })?;
+            let predecessor_index = task_graph
+                .nodes
+                .iter()
+                .position(|candidate| candidate.task_id == *dependency_task_id)
+                .ok_or_else(|| {
+                    OfflineAiError::InvalidLegionWorkflow(format!(
+                        "unknown task dependency {dependency_task_id} for {}",
+                        task.task_id
+                    ))
+                })?;
+            dependency_edges.push(LegionWorkflowDependency {
+                dependency_id: LegionWorkflowDependencyId(format!(
+                    "{}/dependencies/{}/{}",
+                    plan.artifact_id, predecessor_index, successor_index
+                )),
+                predecessor_worker_id: predecessor,
+                successor_worker_id: successor.clone(),
+                state: LegionWorkflowDependencyState::Pending,
+                label: format!("{dependency_task_id} before {}", task.task_id),
+                schema_version: 1,
+            });
+        }
+    }
+    let session = LegionWorkflowSession {
+        session_id: LegionWorkflowSessionId(config.session_id),
+        directive_artifact_id: Some(plan.directive_id.clone()),
+        spec_artifact_id: plan.spec_artifact_id.clone(),
+        task_graph_artifact_id: plan.task_graph_artifact_id.clone(),
+        product_mode: ProductMode::LegionWorkflows,
+        worker_assignments,
+        dependency_edges,
+        conflict_summaries: Vec::new(),
+        verification_gates: Vec::new(),
+        sign_off_records: Vec::new(),
+        proposal_ids: Vec::new(),
+        merge_approval: None,
+        lifecycle_state: LegionWorkflowState::Planning,
+        generated_at: config.generated_at,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+        correlation_id: config.correlation_id,
+        causality_id: config.causality_id,
+    };
+    validate_legion_workflow_session(&session)
+        .map_err(|error| OfflineAiError::InvalidLegionWorkflow(error.message))?;
+    Ok(session)
 }
 
 /// Error type for offline AI replacements.

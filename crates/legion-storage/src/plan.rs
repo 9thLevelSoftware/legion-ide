@@ -49,6 +49,31 @@ impl PlanRevisionLedger {
         Ok(())
     }
 
+    /// Rebuilds a ledger from persisted revision artifacts.
+    pub fn from_revisions(
+        revisions: Vec<EditablePlanRevisionArtifact>,
+    ) -> Result<Self, StorageError> {
+        let mut ledger = Self::new();
+        for revision in revisions {
+            ledger.record_revision(revision)?;
+        }
+        Ok(ledger)
+    }
+
+    /// Returns every stored revision in deterministic recording order by plan and revision.
+    pub fn all_revisions(&self) -> Vec<EditablePlanRevisionArtifact> {
+        let mut plan_ids = self
+            .revision_ids_by_plan
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        plan_ids.sort();
+        plan_ids
+            .into_iter()
+            .flat_map(|plan_id| self.revisions(&plan_id))
+            .collect()
+    }
+
     /// Loads one revision by revision id.
     pub fn revision(&self, revision_id: &str) -> Option<EditablePlanRevisionArtifact> {
         self.revisions_by_id.get(revision_id).cloned()

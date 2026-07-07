@@ -32,16 +32,17 @@ use legion_observability::{SharedEventSink, event_metadata_record};
 use legion_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
     CollaborationAuditRecord, CollaborationSessionId, CorrelationId, DebugAdapterAuditRecord,
-    DebugBreakpointRecord, DebugSessionId, DelegatedTaskAuditLinkageRecord, EventEnvelope, EventId,
-    EventMetadataRecord, EventSequence, EventSinkPort, EventSinkRequest, FileId, FileMetadata,
-    HostedTelemetrySpoolRecord, Phase4RuntimeAuditRecord, PluginDenialReason,
-    PluginStorageOperation, PluginStorageRecord, PrincipalId, ProposalAuditRecord, ProposalId,
-    ProtocolError, ProtocolResult, RawSourceRetentionAccessAudit, RemoteAuditRecord,
-    RemoteTransportAuditSummary, RemoteWorkspaceSessionId, SemanticMetadataBatch,
-    SemanticMetadataFreshnessKey, SemanticMetadataQuery, SemanticMetadataReadResult,
-    SemanticMetadataRecord, SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId,
-    StorageBackupMarker, StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep,
-    StorageRecoveryOutcome, StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
+    DebugBreakpointRecord, DebugSessionId, DelegatedTaskAuditLinkageRecord,
+    EditablePlanRevisionArtifact, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
+    EventSinkPort, EventSinkRequest, FileId, FileMetadata, HostedTelemetrySpoolRecord,
+    Phase4RuntimeAuditRecord, PluginDenialReason, PluginStorageOperation, PluginStorageRecord,
+    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
+    RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
+    RemoteWorkspaceSessionId, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
+    SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
+    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker,
+    StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep, StorageRecoveryOutcome,
+    StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
     StorageRepositoryResponse, StorageSchemaManifest, TerminalAuditRecord, TerminalSessionId,
     TrustRecord, WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
     validate_agent_replay_manifest, validate_assisted_ai_audit_record,
@@ -58,6 +59,8 @@ use legion_protocol::{
 use legion_security::TrustState;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use plan::PlanRevisionLedger;
 
 const STORAGE_CHECKSUM_ALGORITHM: &str = "legion-storage-sha256-v1";
 /// Legacy non-cryptographic checksum algorithm retained only for verifying backups
@@ -512,6 +515,17 @@ pub trait SemanticMetadataRepository {
     ) -> StorageResult<Vec<SemanticMetadataTombstone>>;
 }
 
+/// Repository for metadata-only editable plan revision artifacts.
+pub trait PlanRevisionRepository {
+    /// Persist one audited plan revision.
+    fn record_plan_revision(&mut self, revision: EditablePlanRevisionArtifact)
+    -> StorageResult<()>;
+    /// Read all revisions for a plan in ledger order.
+    fn plan_revisions(&self, plan_artifact_id: &str) -> Vec<EditablePlanRevisionArtifact>;
+    /// Read the latest revision for a plan.
+    fn latest_plan_revision(&self, plan_artifact_id: &str) -> Option<EditablePlanRevisionArtifact>;
+}
+
 #[derive(Debug, Default)]
 /// Test-oriented, in-memory storage implementation.
 pub struct InMemoryStorage {
@@ -541,6 +555,7 @@ pub struct InMemoryStorage {
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
     protocol_plugin_storage: HashMap<String, PluginStorageRecord>,
+    protocol_plan_revision_ledger: PlanRevisionLedger,
 }
 
 #[derive(Debug)]
@@ -930,6 +945,8 @@ struct PersistedState {
     protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
     #[serde(default)]
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
+    #[serde(default)]
+    protocol_plan_revisions: Vec<EditablePlanRevisionArtifact>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
     #[serde(default)]
@@ -967,6 +984,7 @@ impl From<&InMemoryStorage> for PersistedState {
                 .protocol_raw_source_retention_access_audit
                 .clone(),
             protocol_event_metadata: value.protocol_event_metadata.clone(),
+            protocol_plan_revisions: value.protocol_plan_revision_ledger.all_revisions(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
             plugin_storage: value.protocol_plugin_storage.clone(),
@@ -1007,6 +1025,7 @@ impl Clone for InMemoryStorage {
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
             protocol_plugin_storage: self.protocol_plugin_storage.clone(),
+            protocol_plan_revision_ledger: self.protocol_plan_revision_ledger.clone(),
         }
     }
 }
@@ -1030,6 +1049,7 @@ pub struct InMemoryStorageRepositoryPort {
     event_sink: SharedEventSink,
     fail_next_proposal_audit_write: AtomicBool,
     fail_next_event_metadata_write: AtomicBool,
+    fail_next_plan_revision_write: AtomicBool,
 }
 
 impl InMemoryStorageRepositoryPort {
@@ -1045,6 +1065,7 @@ impl InMemoryStorageRepositoryPort {
             event_sink: SharedEventSink::default(),
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
+            fail_next_plan_revision_write: AtomicBool::new(false),
         }
     }
 
@@ -1055,6 +1076,7 @@ impl InMemoryStorageRepositoryPort {
             event_sink,
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
+            fail_next_plan_revision_write: AtomicBool::new(false),
         }
     }
 
@@ -1068,6 +1090,7 @@ impl InMemoryStorageRepositoryPort {
             event_sink,
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
+            fail_next_plan_revision_write: AtomicBool::new(false),
         }
     }
 
@@ -1080,6 +1103,12 @@ impl InMemoryStorageRepositoryPort {
     /// Cause the next event-metadata write to fail for fail-closed integration tests.
     pub fn fail_next_event_metadata_write(&self) {
         self.fail_next_event_metadata_write
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// Cause the next plan revision write to fail for fail-closed integration tests.
+    pub fn fail_next_plan_revision_write(&self) {
+        self.fail_next_plan_revision_write
             .store(true, Ordering::SeqCst);
     }
 
@@ -1118,6 +1147,44 @@ impl InMemoryStorageRepositoryPort {
     pub fn with_storage<T>(&self, read: impl FnOnce(&InMemoryStorage) -> T) -> ProtocolResult<T> {
         let storage = self.storage.lock().map_err(Self::poisoned_error)?;
         Ok(read(&storage))
+    }
+
+    /// Persist one metadata-only plan revision in the wrapped store.
+    pub fn record_plan_revision(
+        &self,
+        revision: EditablePlanRevisionArtifact,
+    ) -> ProtocolResult<()> {
+        if self
+            .fail_next_plan_revision_write
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(ProtocolError {
+                code: "storage_failed".to_string(),
+                message: "injected plan revision write failure".to_string(),
+            });
+        }
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        storage
+            .record_plan_revision(revision)
+            .map_err(InMemoryStorage::protocol_error)
+    }
+
+    /// Read all plan revisions for a plan from the wrapped store.
+    pub fn plan_revisions(
+        &self,
+        plan_artifact_id: &str,
+    ) -> ProtocolResult<Vec<EditablePlanRevisionArtifact>> {
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        Ok(storage.plan_revisions(plan_artifact_id))
+    }
+
+    /// Read the latest plan revision for a plan from the wrapped store.
+    pub fn latest_plan_revision(
+        &self,
+        plan_artifact_id: &str,
+    ) -> ProtocolResult<Option<EditablePlanRevisionArtifact>> {
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        Ok(storage.latest_plan_revision(plan_artifact_id))
     }
 
     fn poisoned_error(
@@ -1164,9 +1231,13 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
     }
 }
 
-impl From<PersistedState> for InMemoryStorage {
-    fn from(value: PersistedState) -> Self {
-        Self {
+impl TryFrom<PersistedState> for InMemoryStorage {
+    type Error = StorageError;
+
+    fn try_from(value: PersistedState) -> StorageResult<Self> {
+        let protocol_plan_revision_ledger =
+            PlanRevisionLedger::from_revisions(value.protocol_plan_revisions)?;
+        Ok(Self {
             workspace_configs: value.workspace_configs,
             trust: value.trust,
             metadata: value.metadata,
@@ -1198,10 +1269,48 @@ impl From<PersistedState> for InMemoryStorage {
             protocol_raw_source_retention_access_audit: value
                 .protocol_raw_source_retention_access_audit,
             protocol_event_metadata: value.protocol_event_metadata,
+            protocol_plan_revision_ledger,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
             protocol_plugin_storage: value.plugin_storage,
-        }
+        })
+    }
+}
+
+impl PlanRevisionRepository for InMemoryStorage {
+    fn record_plan_revision(
+        &mut self,
+        revision: EditablePlanRevisionArtifact,
+    ) -> StorageResult<()> {
+        self.protocol_plan_revision_ledger.record_revision(revision)
+    }
+
+    fn plan_revisions(&self, plan_artifact_id: &str) -> Vec<EditablePlanRevisionArtifact> {
+        self.protocol_plan_revision_ledger
+            .revisions(plan_artifact_id)
+    }
+
+    fn latest_plan_revision(&self, plan_artifact_id: &str) -> Option<EditablePlanRevisionArtifact> {
+        self.protocol_plan_revision_ledger
+            .latest_revision(plan_artifact_id)
+    }
+}
+
+impl PlanRevisionRepository for FileBackedStorage {
+    fn record_plan_revision(
+        &mut self,
+        revision: EditablePlanRevisionArtifact,
+    ) -> StorageResult<()> {
+        self.state.record_plan_revision(revision)?;
+        self.flush()
+    }
+
+    fn plan_revisions(&self, plan_artifact_id: &str) -> Vec<EditablePlanRevisionArtifact> {
+        self.state.plan_revisions(plan_artifact_id)
+    }
+
+    fn latest_plan_revision(&self, plan_artifact_id: &str) -> Option<EditablePlanRevisionArtifact> {
+        self.state.latest_plan_revision(plan_artifact_id)
     }
 }
 
@@ -1217,25 +1326,11 @@ impl FileBackedStorage {
 
         let state = match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<PersistedState>(&contents) {
-                Ok(persisted) => InMemoryStorage::from(persisted),
-                Err(_) => {
-                    let quarantine = Self::quarantine_path(&path);
-                    // Only report the file as quarantined if the move actually succeeded. A failed
-                    // rename must not leave the corrupt primary in place while claiming otherwise.
-                    return match fs::rename(&path, &quarantine) {
-                        Ok(()) => Err(StorageError::Corrupt {
-                            path: path.to_string_lossy().into_owned(),
-                            quarantine_path: quarantine.to_string_lossy().into_owned(),
-                        }),
-                        Err(rename_err) => Err(StorageError::Failed {
-                            message: format!(
-                                "storage corruption detected at `{}` but quarantine to `{}` failed: {rename_err}",
-                                path.display(),
-                                quarantine.display()
-                            ),
-                        }),
-                    };
-                }
+                Ok(persisted) => match InMemoryStorage::try_from(persisted) {
+                    Ok(storage) => storage,
+                    Err(_) => return Err(Self::quarantine_corrupt(&path)),
+                },
+                Err(_) => return Err(Self::quarantine_corrupt(&path)),
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => InMemoryStorage::new(),
             Err(err) => {
@@ -1248,6 +1343,25 @@ impl FileBackedStorage {
         let mut storage = Self { path, state };
         storage.flush()?;
         Ok(storage)
+    }
+
+    fn quarantine_corrupt(path: &Path) -> StorageError {
+        let quarantine = Self::quarantine_path(path);
+        // Only report the file as quarantined if the move actually succeeded. A failed
+        // rename must not leave the corrupt primary in place while claiming otherwise.
+        match fs::rename(path, &quarantine) {
+            Ok(()) => StorageError::Corrupt {
+                path: path.to_string_lossy().into_owned(),
+                quarantine_path: quarantine.to_string_lossy().into_owned(),
+            },
+            Err(rename_err) => StorageError::Failed {
+                message: format!(
+                    "storage corruption detected at `{}` but quarantine to `{}` failed: {rename_err}",
+                    path.display(),
+                    quarantine.display()
+                ),
+            },
+        }
     }
 
     fn quarantine_path(path: &Path) -> PathBuf {

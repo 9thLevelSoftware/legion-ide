@@ -106,6 +106,36 @@ impl From<&EditablePlanArtifact> for DesktopPlanEditorViewModel {
     }
 }
 
+/// Converts a plan editor draft back into metadata-only edited plan sections.
+pub fn edited_sections_from_plan_editor_draft(
+    model: &DesktopPlanEditorViewModel,
+    draft: &DesktopPlanEditorDraft,
+) -> Vec<EditablePlanSection> {
+    model
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            let body = draft
+                .section_bodies
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or(section.body.as_str());
+            EditablePlanSection {
+                kind: section.kind,
+                entries: body
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }
+        })
+        .collect()
+}
+
 /// Renders the editable plan editor panel.
 pub fn render_plan_editor(
     ui: &mut egui::Ui,

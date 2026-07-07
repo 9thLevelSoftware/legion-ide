@@ -1356,6 +1356,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-protocol", "cargo test -p legion-desktop"]
     acceptance = ["Workflow never starts from opaque instruction text; user can edit the plan first."]
     stop_condition = "Stop if the plan is generated and immediately handed to the coordinator without user review."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-PLAN-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F1.T2"
@@ -1367,6 +1369,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-storage"]
     acceptance = ["Each plan revision has an audit row and a diffable representation."]
     stop_condition = "Stop if revisions overwrite without preserving prior versions."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-PLAN-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F1.T3"
@@ -1378,6 +1382,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent"]
     acceptance = ["Approved plan produces a DAG with stable node ids; rejected plans do not produce a DAG."]
     stop_condition = "Stop if the DAG is generated before plan approval."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-PLAN-evidence.md"
 
   [[epics.features]]
   id = "P6.F2"

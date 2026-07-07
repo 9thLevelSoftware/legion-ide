@@ -439,6 +439,15 @@ pub enum DesktopWorkflowOutcome {
         /// User-visible status summary.
         message: String,
     },
+    /// Legion workflow plan request changed through app-owned plan authority.
+    LegionWorkflowPlanReviewed {
+        /// Plan artifact identifier.
+        plan_id: String,
+        /// Normalized desktop Legion workflow status.
+        status: DesktopLegionWorkflowStatus,
+        /// User-visible status summary.
+        message: String,
+    },
     /// Explorer projection was refreshed.
     ExplorerRefreshed,
     /// Adapter-local explorer expansion changed.
@@ -508,6 +517,12 @@ pub enum DesktopDelegatedTaskStatus {
 /// Desktop-facing status for Legion workflow command-center requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopLegionWorkflowStatus {
+    /// Plan revision metadata was submitted.
+    PlanRevisionSubmitted,
+    /// Plan was approved for DAG/session construction.
+    PlanApproved,
+    /// Plan was rejected and remains review-gated.
+    PlanRejected,
     /// Session metadata was inspected without execution.
     SessionInspected,
     /// Linked proposal preview was requested through proposal authority.
@@ -1822,6 +1837,67 @@ impl DesktopRuntime {
                     }
                 }
             }
+            DesktopAppRequest::SubmitLegionWorkflowPlanRevision {
+                plan_id,
+                edited_sections,
+            } => match self
+                .app
+                .revise_legion_workflow_plan(&plan_id, edited_sections)
+            {
+                Ok(revision) => {
+                    let message = format!(
+                        "Legion workflow plan revision submitted {} changed_sections={}",
+                        revision.revision_id,
+                        revision.changed_section_count()
+                    );
+                    Ok(self.legion_workflow_plan_request_outcome(
+                        plan_id,
+                        DesktopLegionWorkflowStatus::PlanRevisionSubmitted,
+                        message,
+                    ))
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    Ok(DesktopWorkflowOutcome::Error(message))
+                }
+            },
+            DesktopAppRequest::ApproveLegionWorkflowPlan { plan_id } => {
+                match self.app.approve_legion_workflow_plan(&plan_id) {
+                    Ok(revision) => {
+                        let message =
+                            format!("Legion workflow plan approved {}", revision.revision_id);
+                        Ok(self.legion_workflow_plan_request_outcome(
+                            plan_id,
+                            DesktopLegionWorkflowStatus::PlanApproved,
+                            message,
+                        ))
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
+            DesktopAppRequest::RejectLegionWorkflowPlan { plan_id } => {
+                match self.app.reject_legion_workflow_plan(&plan_id) {
+                    Ok(revision) => {
+                        let message =
+                            format!("Legion workflow plan rejected {}", revision.revision_id);
+                        Ok(self.legion_workflow_plan_request_outcome(
+                            plan_id,
+                            DesktopLegionWorkflowStatus::PlanRejected,
+                            message,
+                        ))
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
+                }
+            }
             DesktopAppRequest::InspectLegionWorkflowSession { session_id } => {
                 let message = format!(
                     "Legion workflow session inspected {}: app-owned, proposal-mediated, autonomous merge unsupported",
@@ -1984,6 +2060,20 @@ impl DesktopRuntime {
                 DesktopLegionWorkflowStatus::KillSwitchTriggered,
                 format!("Legion workflow kill switch requested: {reason_label}"),
             )),
+        }
+    }
+
+    fn legion_workflow_plan_request_outcome(
+        &mut self,
+        plan_id: String,
+        status: DesktopLegionWorkflowStatus,
+        message: String,
+    ) -> DesktopWorkflowOutcome {
+        self.set_status(StatusSeverity::Info, message.clone());
+        DesktopWorkflowOutcome::LegionWorkflowPlanReviewed {
+            plan_id,
+            status,
+            message,
         }
     }
 

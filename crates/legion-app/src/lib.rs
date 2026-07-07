@@ -17,6 +17,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use legion_agent::{
     AgentRuntime, DelegatedTaskProposalGenerator, DelegatedTaskProposalInput,
     DelegatedTaskSandboxOrchestrator, LegionWorkflowCoordinator, LegionWorkflowCoordinatorOutput,
+    coordinator::{LegionWorkflowSessionBuilderConfig, legion_workflow_session_from_approved_plan},
+    dag::{WorkflowDag, workflow_dag_from_approved_plan},
+    plan::editable_plan_from_workflow_artifacts,
 };
 #[cfg(feature = "ai")]
 use legion_ai::{InlinePredictionRequest, ProviderRegistry, ProviderRouter};
@@ -112,13 +115,14 @@ use legion_protocol::{
     DelegatedTaskProjection, DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
     DelegatedTaskProposalReview, DelegatedTaskRuntimeActivationState,
     DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,
-    DelegatedTaskToolPermissionRequest, DelegatedTaskToolPermissionRequestInput, EditBatch,
-    EditorApplyTransactionRequest, EventEnvelope, EventSequence, EventSinkPort, EventSinkRequest,
-    FileConflictContext, FileConflictLifecycleState, FileConflictReason, FileConflictState,
-    FileContentVersion, FileFingerprint, FileId, FileIdentity, FileKind, FileTreeNode,
-    INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES, InlinePredictionAcceptanceId,
-    InlinePredictionDismissalId, InlinePredictionFingerprintMetadata, InlinePredictionFreshness,
-    InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
+    DelegatedTaskToolPermissionRequest, DelegatedTaskToolPermissionRequestInput, DirectiveArtifact,
+    EditBatch, EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
+    EditablePlanSection, EditorApplyTransactionRequest, EventEnvelope, EventSequence,
+    EventSinkPort, EventSinkRequest, FileConflictContext, FileConflictLifecycleState,
+    FileConflictReason, FileConflictState, FileContentVersion, FileFingerprint, FileId,
+    FileIdentity, FileKind, FileTreeNode, INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES,
+    InlinePredictionAcceptanceId, InlinePredictionDismissalId, InlinePredictionFingerprintMetadata,
+    InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
     InlinePredictionLifecycleAction, InlinePredictionLifecycleCommand, InlinePredictionProjection,
     InlinePredictionProviderMetadata, InlinePredictionRequestId, InlinePredictionRequestMetadata,
     InlinePredictionResult, InlinePredictionResultState, InlinePredictionRetention,
@@ -159,9 +163,9 @@ use legion_protocol::{
     SaveIntent, SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
-    StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
-    SymbolFileMapRecord, TerminalInput, TerminalKillEscalation, TerminalKillRequest,
-    TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
+    SpecArtifact, StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
+    SymbolFileMapRecord, TaskGraphArtifact, TerminalInput, TerminalKillEscalation,
+    TerminalKillRequest, TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
     TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
     TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
@@ -193,6 +197,7 @@ use legion_storage::{
         CHECKPOINT_SCHEMA_VERSION, CheckpointStore, CheckpointTarget, CheckpointTargetKind,
         DurableCheckpoint,
     },
+    plan::PlanRevisionLedger,
 };
 use legion_terminal::{
     TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
@@ -227,7 +232,10 @@ use legion_ui::{
 use offline_ai::{
     AgentRuntime, DETERMINISTIC_LOCAL_PROVIDER_ID, DelegatedTaskProposalGenerator,
     DelegatedTaskProposalInput, DelegatedTaskSandboxOrchestrator, LegionWorkflowCoordinator,
-    LegionWorkflowCoordinatorOutput, ProviderRegistry, ProviderRouter, make_stub_registry,
+    LegionWorkflowCoordinatorOutput, LegionWorkflowSessionBuilderConfig, ProviderRegistry,
+    ProviderRouter, WorkflowDag, editable_plan_from_workflow_artifacts,
+    legion_workflow_session_from_approved_plan, make_stub_registry,
+    workflow_dag_from_approved_plan,
 };
 use serde_json::{Value, json};
 use syntect::easy::ScopeRangeIterator;
@@ -13761,6 +13769,8 @@ pub struct AppComposition {
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
+    legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
+    plan_revision_ledger: PlanRevisionLedger,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
     search_projection: SearchProjection,
@@ -13821,6 +13831,11 @@ struct InlinePredictionRequestArgs<'a> {
 struct AppDocumentResolver {
     /// Maps file URI (e.g. `file:///C:/path/main.rs`) → resolved context.
     by_uri: HashMap<String, crate::language::ResolvedDocument>,
+}
+
+#[derive(Debug, Clone)]
+struct LegionWorkflowPlanArtifacts {
+    task_graph: Option<TaskGraphArtifact>,
 }
 
 impl AppDocumentResolver {
@@ -14001,6 +14016,8 @@ impl AppComposition {
             delegated_task_plan_contracts: Vec::new(),
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
+            legion_workflow_plan_artifacts: HashMap::new(),
+            plan_revision_ledger: PlanRevisionLedger::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
             search_projection: SearchProjection::idle(),
@@ -18165,6 +18182,217 @@ impl AppComposition {
         }
         self.legion_workflow_sessions = valid_sessions;
         Ok(())
+    }
+
+    fn plan_revision_id(&self, plan_artifact_id: &str) -> String {
+        format!(
+            "{plan_artifact_id}/revisions/{}",
+            self.plan_revision_ledger.revisions(plan_artifact_id).len() + 1
+        )
+    }
+
+    fn audited_plan_revision(
+        &mut self,
+        plan: EditablePlanArtifact,
+        previous: Option<&EditablePlanArtifact>,
+    ) -> EditablePlanRevisionArtifact {
+        let previous_revision_id = self
+            .plan_revision_ledger
+            .latest_revision(&plan.artifact_id)
+            .map(|revision| revision.revision_id);
+        let event_context = self.next_event_context();
+        let audit_row = EditablePlanRevisionAuditRow::new(
+            self.plan_revision_id(&plan.artifact_id),
+            plan.artifact_id.clone(),
+            plan.directive_id.clone(),
+            previous_revision_id,
+            TimestampMillis::now(),
+            event_context.correlation_id,
+            event_context.causality_id,
+        );
+        EditablePlanRevisionArtifact::from_plan_and_previous(plan, previous, audit_row)
+    }
+
+    /// Record an audited metadata-only plan revision in app and storage ledgers.
+    pub fn record_plan_revision(
+        &mut self,
+        revision: EditablePlanRevisionArtifact,
+    ) -> Result<(), AppCompositionError> {
+        let mut updated_ledger = self.plan_revision_ledger.clone();
+        updated_ledger
+            .record_revision(revision.clone())
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        self.storage
+            .record_plan_revision(revision)
+            .map_err(AppCompositionError::Protocol)?;
+        self.plan_revision_ledger = updated_ledger;
+        Ok(())
+    }
+
+    /// Return all plan revisions for a plan in recording order.
+    pub fn plan_revisions(&self, plan_artifact_id: &str) -> Vec<EditablePlanRevisionArtifact> {
+        self.plan_revision_ledger.revisions(plan_artifact_id)
+    }
+
+    /// Return the latest plan revision for a plan.
+    pub fn latest_plan_revision(
+        &self,
+        plan_artifact_id: &str,
+    ) -> Option<EditablePlanRevisionArtifact> {
+        self.plan_revision_ledger.latest_revision(plan_artifact_id)
+    }
+
+    /// Return audited plan revision rows for a plan.
+    pub fn plan_revision_audit_rows(
+        &self,
+        plan_artifact_id: &str,
+    ) -> Vec<EditablePlanRevisionAuditRow> {
+        self.plan_revision_ledger.audit_rows(plan_artifact_id)
+    }
+
+    /// Create an editable Legion workflow plan and record its first audited revision.
+    pub fn create_legion_workflow_plan(
+        &mut self,
+        directive: DirectiveArtifact,
+        spec: Option<SpecArtifact>,
+        task_graph: Option<TaskGraphArtifact>,
+    ) -> EditablePlanArtifact {
+        let plan = editable_plan_from_workflow_artifacts(
+            &directive,
+            spec.as_ref(),
+            task_graph.as_ref(),
+            TimestampMillis::now(),
+        );
+        self.legion_workflow_plan_artifacts.insert(
+            plan.artifact_id.clone(),
+            LegionWorkflowPlanArtifacts { task_graph },
+        );
+        let revision = self.audited_plan_revision(plan.clone(), None);
+        self.record_plan_revision(revision)
+            .expect("generated plan revision should persist");
+        plan
+    }
+
+    /// Revise an editable Legion workflow plan and record an audited revision.
+    pub fn revise_legion_workflow_plan(
+        &mut self,
+        plan_artifact_id: &str,
+        edited_sections: Vec<EditablePlanSection>,
+    ) -> Result<EditablePlanRevisionArtifact, AppCompositionError> {
+        let previous = self
+            .latest_plan_revision(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} not found"
+                ))
+            })?
+            .plan;
+        let mut revised = previous.clone();
+        revised.sections = edited_sections;
+        revised.review_required = true;
+        revised.updated_at = TimestampMillis::now();
+        revised
+            .validate()
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        let revision = self.audited_plan_revision(revised, Some(&previous));
+        self.record_plan_revision(revision.clone())?;
+        Ok(revision)
+    }
+
+    /// Approve a Legion workflow plan for DAG/session construction.
+    pub fn approve_legion_workflow_plan(
+        &mut self,
+        plan_artifact_id: &str,
+    ) -> Result<EditablePlanRevisionArtifact, AppCompositionError> {
+        let previous = self
+            .latest_plan_revision(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} not found"
+                ))
+            })?
+            .plan;
+        let mut approved = previous.clone();
+        approved.review_required = false;
+        approved.updated_at = TimestampMillis::now();
+        let revision = self.audited_plan_revision(approved, Some(&previous));
+        self.record_plan_revision(revision.clone())?;
+        Ok(revision)
+    }
+
+    /// Reject a Legion workflow plan and keep its review gate closed.
+    pub fn reject_legion_workflow_plan(
+        &mut self,
+        plan_artifact_id: &str,
+    ) -> Result<EditablePlanRevisionArtifact, AppCompositionError> {
+        let previous = self
+            .latest_plan_revision(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} not found"
+                ))
+            })?
+            .plan;
+        let mut rejected = previous.clone();
+        rejected.review_required = true;
+        rejected.updated_at = TimestampMillis::now();
+        let revision = self.audited_plan_revision(rejected, Some(&previous));
+        self.record_plan_revision(revision.clone())?;
+        Ok(revision)
+    }
+
+    /// Build the approved-plan DAG for a plan, returning `None` while review is required.
+    pub fn legion_workflow_dag_for_plan(&self, plan_artifact_id: &str) -> Option<WorkflowDag> {
+        let plan = self.latest_plan_revision(plan_artifact_id)?.plan;
+        workflow_dag_from_approved_plan(&plan, TimestampMillis::now())
+    }
+
+    /// Create Legion workflow session metadata from an approved editable plan.
+    pub fn create_legion_workflow_session_from_plan(
+        &mut self,
+        plan_artifact_id: &str,
+        builder_config: LegionWorkflowSessionBuilderConfig,
+    ) -> Result<LegionWorkflowSession, AppCompositionError> {
+        let plan = self
+            .latest_plan_revision(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} not found"
+                ))
+            })?
+            .plan;
+        if plan.review_required {
+            return Err(AppCompositionError::LegionWorkflow(format!(
+                "workflow plan {plan_artifact_id} requires review"
+            )));
+        }
+        let dag = self
+            .legion_workflow_dag_for_plan(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} has no approved DAG"
+                ))
+            })?;
+        let artifacts = self
+            .legion_workflow_plan_artifacts
+            .get(plan_artifact_id)
+            .ok_or_else(|| {
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow plan {plan_artifact_id} source artifacts not found"
+                ))
+            })?;
+        let task_graph = artifacts.task_graph.as_ref().ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow plan {plan_artifact_id} has no task graph"
+            ))
+        })?;
+        let session =
+            legion_workflow_session_from_approved_plan(&plan, &dag, task_graph, builder_config)
+                .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        self.legion_workflow_sessions
+            .retain(|existing| existing.session_id != session.session_id);
+        self.legion_workflow_sessions.push(session.clone());
+        Ok(session)
     }
 
     /// Returns a metadata-only Legion workflow projection owned by the app layer.
@@ -24310,6 +24538,11 @@ impl AppComposition {
     /// Inject a one-shot event metadata write failure for integration validation.
     pub fn fail_next_event_metadata_write_for_test(&self) {
         self.storage.fail_next_event_metadata_write();
+    }
+
+    /// Inject a one-shot plan revision write failure for integration validation.
+    pub fn fail_next_plan_revision_write_for_test(&self) {
+        self.storage.fail_next_plan_revision_write();
     }
 
     /// Expose event publisher port placeholder for integration validation and future wiring.

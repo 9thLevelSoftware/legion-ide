@@ -7,8 +7,8 @@ use legion_project::git_pull_request_url;
 use legion_protocol::{
     AgentRunId, AssistantRailCommand, BufferId, CollaborationParticipantId, CollaborationSessionId,
     DebugConfigurationId, DebugSessionId, DelegatedTaskPlanId,
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
-    InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, EditablePlanSection,
+    FileId, InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
     LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
     ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
     RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
@@ -483,6 +483,23 @@ pub enum DesktopAction {
         /// Human decision.
         decision: DelegatedTaskToolPermissionDecision,
     },
+    /// Submit edited Legion workflow plan sections for app-owned revision.
+    SubmitLegionWorkflowPlanRevision {
+        /// Plan artifact identifier.
+        plan_id: String,
+        /// Edited plan sections.
+        edited_sections: Vec<EditablePlanSection>,
+    },
+    /// Approve a reviewed Legion workflow plan.
+    ApproveLegionWorkflowPlan {
+        /// Plan artifact identifier.
+        plan_id: String,
+    },
+    /// Reject a Legion workflow plan and keep review required.
+    RejectLegionWorkflowPlan {
+        /// Plan artifact identifier.
+        plan_id: String,
+    },
     /// Inspect a projected Legion workflow session.
     InspectLegionWorkflowSession {
         /// Workflow session identifier selected from projection data.
@@ -918,6 +935,23 @@ pub enum DesktopAppRequest {
         /// Proposal identifier.
         proposal_id: ProposalId,
     },
+    /// Submit edited Legion workflow plan sections for app-owned revision.
+    SubmitLegionWorkflowPlanRevision {
+        /// Plan artifact identifier.
+        plan_id: String,
+        /// Edited plan sections.
+        edited_sections: Vec<EditablePlanSection>,
+    },
+    /// Approve a reviewed Legion workflow plan.
+    ApproveLegionWorkflowPlan {
+        /// Plan artifact identifier.
+        plan_id: String,
+    },
+    /// Reject a Legion workflow plan and keep review required.
+    RejectLegionWorkflowPlan {
+        /// Plan artifact identifier.
+        plan_id: String,
+    },
     /// Inspect Legion workflow session metadata.
     InspectLegionWorkflowSession {
         /// Workflow session identifier.
@@ -1156,6 +1190,9 @@ pub enum DesktopBridgeError {
         /// Unknown permission request id.
         request_id: String,
     },
+    /// Legion workflow plan id was empty.
+    #[error("legion workflow plan id is empty")]
+    InvalidLegionWorkflowPlan,
     /// Legion workflow session id was empty.
     #[error("legion workflow session id is empty")]
     InvalidLegionWorkflowSession,
@@ -1719,6 +1756,38 @@ impl DesktopCommandBridge {
                     decision,
                 }
             }),
+            DesktopAction::SubmitLegionWorkflowPlanRevision {
+                plan_id,
+                edited_sections,
+            } => match normalized_plan_id(plan_id) {
+                Some(plan_id) => DesktopBridgeOutput::AppRequest(
+                    DesktopAppRequest::SubmitLegionWorkflowPlanRevision {
+                        plan_id,
+                        edited_sections,
+                    },
+                ),
+                None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidLegionWorkflowPlan),
+            },
+            DesktopAction::ApproveLegionWorkflowPlan { plan_id } => {
+                match normalized_plan_id(plan_id) {
+                    Some(plan_id) => DesktopBridgeOutput::AppRequest(
+                        DesktopAppRequest::ApproveLegionWorkflowPlan { plan_id },
+                    ),
+                    None => {
+                        DesktopBridgeOutput::Error(DesktopBridgeError::InvalidLegionWorkflowPlan)
+                    }
+                }
+            }
+            DesktopAction::RejectLegionWorkflowPlan { plan_id } => {
+                match normalized_plan_id(plan_id) {
+                    Some(plan_id) => DesktopBridgeOutput::AppRequest(
+                        DesktopAppRequest::RejectLegionWorkflowPlan { plan_id },
+                    ),
+                    None => {
+                        DesktopBridgeOutput::Error(DesktopBridgeError::InvalidLegionWorkflowPlan)
+                    }
+                }
+            }
             DesktopAction::InspectLegionWorkflowSession { session_id } => self
                 .with_known_legion_workflow_session(snapshot, session_id, |session_id| {
                     DesktopAppRequest::InspectLegionWorkflowSession { session_id }
@@ -2653,6 +2722,15 @@ fn normalized_instruction(label: String) -> Option<String> {
         None
     } else {
         Some(label.to_string())
+    }
+}
+
+fn normalized_plan_id(plan_id: String) -> Option<String> {
+    let plan_id = plan_id.trim();
+    if plan_id.is_empty() {
+        None
+    } else {
+        Some(plan_id.to_string())
     }
 }
 

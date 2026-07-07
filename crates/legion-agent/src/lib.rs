@@ -6,6 +6,8 @@
 pub mod agent_loop;
 /// Parsed communication log lines for agent workflows.
 pub mod comm;
+/// Approved-plan workflow-session construction.
+pub mod coordinator;
 /// Approved-plan DAG helpers for Legion workflow coordination.
 pub mod dag;
 /// Evidence record construction and worker artifact bridging.
