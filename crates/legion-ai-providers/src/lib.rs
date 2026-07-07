@@ -972,7 +972,7 @@ where
             embedding: true,
             batch: false,
             inline_prediction: false,
-            tool_use: false,
+            tool_use: true,
         }
     }
 
@@ -1056,6 +1056,141 @@ where
             request.provider,
             "OpenAI-compatible inline prediction provider is not configured",
         ))
+    }
+}
+
+impl<T> ToolCallingProvider for OpenAiCompatibleProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        let bearer_token = self.bearer_token()?;
+
+        // Build the messages array: optional system message, then all turns.
+        let mut messages: Vec<Value> = Vec::new();
+        if !request.system.is_empty() {
+            messages.push(json!({
+                "role": "system",
+                "content": request.system,
+            }));
+        }
+        messages.extend(request.turns.iter().flat_map(serialize_openai_tool_turn));
+
+        // Convert tool definitions to OpenAI function format.
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t: &ToolDefinition| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+
+        let mut payload = json!({
+            "model": request.model,
+            "max_tokens": request.max_tokens,
+            "messages": messages,
+        });
+        if !tools.is_empty() {
+            payload["tools"] = json!(tools);
+        }
+
+        let response = self.transport.post_json(
+            &self.endpoint("/chat/completions"),
+            bearer_token,
+            payload,
+        )?;
+
+        // Navigate to choices[0].
+        let choice = response
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .ok_or_else(|| ProviderError::RequestFailed {
+                provider: self.id.clone(),
+                message: "OpenAI tool response missing choices[0]".to_string(),
+            })?;
+
+        let message = choice
+            .get("message")
+            .ok_or_else(|| ProviderError::RequestFailed {
+                provider: self.id.clone(),
+                message: "OpenAI tool response missing choices[0].message".to_string(),
+            })?;
+
+        let mut blocks: Vec<ToolTurnBlock> = Vec::new();
+
+        // Extract text content (may be absent or null when tool_calls is present).
+        if let Some(text) = message.get("content").and_then(Value::as_str) {
+            if !text.is_empty() {
+                blocks.push(ToolTurnBlock::Text(text.to_string()));
+            }
+        }
+
+        // Extract tool_calls array and convert to ToolUse blocks.
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in tool_calls {
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let func =
+                    call.get("function")
+                        .ok_or_else(|| ProviderError::RequestFailed {
+                            provider: self.id.clone(),
+                            message: "OpenAI tool_call missing function object".to_string(),
+                        })?;
+                let name = func
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // arguments is a JSON *string* — parse it explicitly.
+                let arguments_str = func
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                let input: Value =
+                    serde_json::from_str(arguments_str).map_err(|e| {
+                        ProviderError::RequestFailed {
+                            provider: self.id.clone(),
+                            message: format!(
+                                "OpenAI tool_call arguments is not valid JSON: {e}. Raw: {arguments_str:?}"
+                            ),
+                        }
+                    })?;
+                blocks.push(ToolTurnBlock::ToolUse { id, name, input });
+            }
+        }
+
+        // Map finish_reason to stop reason.
+        let finish_reason = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("stop");
+
+        let stop_reason = match finish_reason {
+            "tool_calls" => ToolCompletionStopReason::ToolUse,
+            "length" => ToolCompletionStopReason::MaxTokens,
+            _ => ToolCompletionStopReason::EndTurn,
+        };
+
+        Ok(ToolCompletionResponse {
+            provider: self.id.clone(),
+            model: request.model,
+            blocks,
+            stop_reason,
+        })
     }
 }
 
@@ -1939,6 +2074,93 @@ fn serialize_tool_turn(turn: &ToolConversationTurn) -> Value {
         "role": turn.role,
         "content": content,
     })
+}
+
+/// Serialize a `ToolConversationTurn` into one or more OpenAI chat-completions
+/// wire-format messages.
+///
+/// A single turn may expand into multiple messages:
+/// - An "assistant" turn collapses to ONE `role:"assistant"` message: `Text` blocks
+///   concatenated into `content`; `ToolUse` blocks emitted as the `tool_calls` array.
+/// - A "user" turn with `ToolResult` blocks expands to one `role:"tool"` message per
+///   result (wire-order requirement — a 400 is returned if tool messages don't immediately
+///   follow the assistant message that issued the tool_calls). Any `Text` blocks become a
+///   `role:"user"` message emitted *after* the tool messages.
+fn serialize_openai_tool_turn(turn: &ToolConversationTurn) -> Vec<Value> {
+    let mut messages = Vec::new();
+    match turn.role.as_str() {
+        "assistant" => {
+            let mut text_parts: Vec<&str> = Vec::new();
+            let mut tool_calls: Vec<Value> = Vec::new();
+            for block in &turn.blocks {
+                match block {
+                    ToolTurnBlock::Text(t) => text_parts.push(t.as_str()),
+                    ToolTurnBlock::ToolUse { id, name, input } => {
+                        tool_calls.push(json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                // arguments must be a JSON string, not a parsed object.
+                                "arguments": input.to_string()
+                            }
+                        }));
+                    }
+                    ToolTurnBlock::ToolResult { .. } => {} // should not appear in assistant turns
+                }
+            }
+            let mut msg = json!({ "role": "assistant" });
+            if !text_parts.is_empty() {
+                msg["content"] = json!(text_parts.join("\n"));
+            }
+            if !tool_calls.is_empty() {
+                msg["tool_calls"] = json!(tool_calls);
+            }
+            messages.push(msg);
+        }
+        _ => {
+            // "user" role: ToolResult blocks → role:"tool" messages first (wire-order),
+            // then Text blocks → role:"user" message.
+            for block in &turn.blocks {
+                if let ToolTurnBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = block
+                {
+                    // OpenAI has no native is_error field — prefix with "ERROR: " instead.
+                    let wire_content = if *is_error {
+                        format!("ERROR: {content}")
+                    } else {
+                        content.clone()
+                    };
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": tool_use_id,
+                        "content": wire_content,
+                    }));
+                }
+            }
+            let user_texts: Vec<&str> = turn
+                .blocks
+                .iter()
+                .filter_map(|b| {
+                    if let ToolTurnBlock::Text(t) = b {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !user_texts.is_empty() {
+                messages.push(json!({
+                    "role": "user",
+                    "content": user_texts.join("\n"),
+                }));
+            }
+        }
+    }
+    messages
 }
 
 impl<T> ToolCallingProvider for AnthropicMessagesClient<T>
@@ -4712,6 +4934,611 @@ mod tests {
             "Live smoke test passed: stop_reason={:?}, blocks={}",
             response.stop_reason,
             response.blocks.len()
+        );
+    }
+
+    // ---- D4: OpenAI tool-calling tests ----
+
+    /// Fixed-response `ProviderHttpTransport` for OpenAI tool-calling unit tests.
+    #[derive(Debug, Clone)]
+    struct FixedOpenAiTransport {
+        response: Value,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    impl FixedOpenAiTransport {
+        fn new(response: Value) -> Self {
+            Self {
+                response,
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+        fn calls(&self) -> Vec<Value> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl ProviderHttpTransport for FixedOpenAiTransport {
+        fn post_json(
+            &self,
+            _endpoint: &str,
+            _bearer_token: Option<&str>,
+            payload: Value,
+        ) -> Result<Value, ProviderError> {
+            self.calls.lock().expect("calls lock").push(payload);
+            Ok(self.response.clone())
+        }
+    }
+
+    /// Build a provider backed by a fixed OpenAI-format response.
+    fn openai_tool_provider(response: Value) -> OpenAiCompatibleProvider<FixedOpenAiTransport> {
+        OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            FixedOpenAiTransport::new(response),
+        )
+    }
+
+    /// Minimal single-user-turn request for finish-reason and similar simple tests.
+    fn simple_openai_request(model: &str) -> ToolCompletionRequest {
+        ToolCompletionRequest {
+            provider: "openai-test".to_string(),
+            model: model.to_string(),
+            system: String::new(),
+            turns: vec![ToolConversationTurn {
+                role: "user".to_string(),
+                blocks: vec![ToolTurnBlock::Text("test".to_string())],
+            }],
+            tools: vec![],
+            max_tokens: 64,
+        }
+    }
+
+    // --- Serialization ---
+
+    #[test]
+    fn openai_tool_calling_serializes_request_correctly() {
+        let response = json!({
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }]
+        });
+        let transport = FixedOpenAiTransport::new(response);
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        let request = ToolCompletionRequest {
+            provider: "openai-test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            system: "You are a helpful assistant.".to_string(),
+            turns: vec![ToolConversationTurn {
+                role: "user".to_string(),
+                blocks: vec![ToolTurnBlock::Text("What is the weather in London?".to_string())],
+            }],
+            tools: vec![ToolDefinition {
+                name: "get_weather".to_string(),
+                description: "Get the current weather".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "location": { "type": "string" } },
+                    "required": ["location"]
+                }),
+            }],
+            max_tokens: 256,
+        };
+        provider.complete_with_tools(request).expect("completes");
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        let payload = &calls[0];
+
+        // System message must be first.
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(
+            payload["messages"][0]["content"],
+            "You are a helpful assistant."
+        );
+        // User message follows.
+        assert_eq!(payload["messages"][1]["role"], "user");
+        assert_eq!(
+            payload["messages"][1]["content"],
+            "What is the weather in London?"
+        );
+        // Tools in OpenAI function format.
+        assert_eq!(payload["tools"][0]["type"], "function");
+        assert_eq!(payload["tools"][0]["function"]["name"], "get_weather");
+        assert!(payload["tools"][0]["function"]["parameters"].is_object());
+        // Model and max_tokens present.
+        assert_eq!(payload["model"], "gpt-4o-mini");
+        assert_eq!(payload["max_tokens"], 256);
+    }
+
+    // --- Deserialization ---
+
+    #[test]
+    fn openai_tool_calling_parses_tool_use_response() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-abc",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\": \"London\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let provider = openai_tool_provider(response);
+        let resp = provider
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("parses OK");
+
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::ToolUse);
+        assert_eq!(resp.blocks.len(), 1);
+        let ToolTurnBlock::ToolUse { id, name, input } = &resp.blocks[0] else {
+            panic!("expected ToolUse block, got {:?}", resp.blocks[0]);
+        };
+        assert_eq!(id, "call-abc");
+        assert_eq!(name, "get_weather");
+        assert_eq!(input["location"], "London");
+    }
+
+    // --- tool_call_id round-trip ---
+
+    #[test]
+    fn openai_tool_call_id_round_trips_as_tool_message() {
+        let transport = FixedOpenAiTransport::new(json!({
+            "choices": [{ "message": { "content": "done" }, "finish_reason": "stop" }]
+        }));
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        // Feed back a ToolResult whose tool_use_id matches the previous tool_call id.
+        provider
+            .complete_with_tools(ToolCompletionRequest {
+                provider: "openai-test".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                system: String::new(),
+                turns: vec![
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::Text("do it".to_string())],
+                    },
+                    ToolConversationTurn {
+                        role: "assistant".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolUse {
+                            id: "call-xyz".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "foo.rs"}),
+                        }],
+                    },
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolResult {
+                            tool_use_id: "call-xyz".to_string(),
+                            content: "file content here".to_string(),
+                            is_error: false,
+                        }],
+                    },
+                ],
+                tools: vec![],
+                max_tokens: 256,
+            })
+            .expect("round-trip succeeds");
+
+        let calls = transport.calls();
+        let messages = calls[0]["messages"].as_array().expect("messages is array");
+
+        // Tool result message must have tool_call_id matching the assistant's id.
+        let tool_msg = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("must have a role:tool message");
+        assert_eq!(tool_msg["tool_call_id"], "call-xyz");
+        assert_eq!(tool_msg["content"], "file content here");
+
+        // Assistant message must have the tool_calls array with matching id.
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("must have role:assistant message");
+        assert_eq!(assistant_msg["tool_calls"][0]["id"], "call-xyz");
+        assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "read");
+    }
+
+    // --- Multi-tool_call turn ---
+
+    #[test]
+    fn openai_tool_calling_multi_tool_call_parsed() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        { "id": "call-1", "type": "function", "function": { "name": "read",  "arguments": "{\"path\": \"a.rs\"}" } },
+                        { "id": "call-2", "type": "function", "function": { "name": "grep", "arguments": "{\"pattern\": \"fn main\"}" } }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let provider = openai_tool_provider(response);
+        let resp = provider
+            .complete_with_tools(simple_openai_request("gpt-4o"))
+            .expect("parses");
+
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::ToolUse);
+        assert_eq!(resp.blocks.len(), 2, "expected 2 ToolUse blocks");
+
+        let ToolTurnBlock::ToolUse {
+            id: id1,
+            name: name1,
+            ..
+        } = &resp.blocks[0]
+        else {
+            panic!("block 0 not ToolUse");
+        };
+        let ToolTurnBlock::ToolUse {
+            id: id2,
+            name: name2,
+            ..
+        } = &resp.blocks[1]
+        else {
+            panic!("block 1 not ToolUse");
+        };
+        assert_eq!(id1, "call-1");
+        assert_eq!(name1, "read");
+        assert_eq!(id2, "call-2");
+        assert_eq!(name2, "grep");
+    }
+
+    // --- Tool-message ordering (the 400 trap) ---
+
+    #[test]
+    fn openai_tool_result_messages_appear_immediately_after_assistant_tool_calls() {
+        let transport = FixedOpenAiTransport::new(json!({
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }]
+        }));
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        // Two-round tool call conversation:
+        // user → assistant(c1) → tool(c1) → assistant(c2) → tool(c2)
+        provider
+            .complete_with_tools(ToolCompletionRequest {
+                provider: "openai-test".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                system: String::new(),
+                turns: vec![
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::Text("start".to_string())],
+                    },
+                    ToolConversationTurn {
+                        role: "assistant".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolUse {
+                            id: "c1".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "a"}),
+                        }],
+                    },
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolResult {
+                            tool_use_id: "c1".to_string(),
+                            content: "result1".to_string(),
+                            is_error: false,
+                        }],
+                    },
+                    ToolConversationTurn {
+                        role: "assistant".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolUse {
+                            id: "c2".to_string(),
+                            name: "grep".to_string(),
+                            input: json!({"pattern": "fn"}),
+                        }],
+                    },
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolResult {
+                            tool_use_id: "c2".to_string(),
+                            content: "result2".to_string(),
+                            is_error: false,
+                        }],
+                    },
+                ],
+                tools: vec![],
+                max_tokens: 256,
+            })
+            .expect("round-trip succeeds");
+
+        let calls = transport.calls();
+        let messages = calls[0]["messages"].as_array().expect("messages array");
+        // Expected wire order: user, assistant(c1), tool(c1), assistant(c2), tool(c2)
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "c1");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "c1");
+        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "c2");
+        assert_eq!(messages[4]["role"], "tool");
+        assert_eq!(messages[4]["tool_call_id"], "c2");
+    }
+
+    // --- Finish reason mapping ---
+
+    #[test]
+    fn openai_finish_reason_stop_maps_to_end_turn() {
+        let r = json!({"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]});
+        let resp = openai_tool_provider(r)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .unwrap();
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::EndTurn);
+    }
+
+    #[test]
+    fn openai_finish_reason_length_maps_to_max_tokens() {
+        let r = json!({"choices":[{"message":{"content":"done"},"finish_reason":"length"}]});
+        let resp = openai_tool_provider(r)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .unwrap();
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::MaxTokens);
+    }
+
+    #[test]
+    fn openai_finish_reason_tool_calls_maps_to_tool_use() {
+        let r = json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{"id":"x","type":"function","function":{"name":"f","arguments":"{}"}}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let resp = openai_tool_provider(r)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .unwrap();
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::ToolUse);
+    }
+
+    // --- Malformed arguments → hard error ---
+
+    #[test]
+    fn openai_malformed_arguments_returns_provider_error() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "not valid json {{{" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let err = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect_err("malformed JSON must fail");
+
+        assert!(
+            matches!(err, ProviderError::RequestFailed { .. }),
+            "expected RequestFailed, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not valid JSON") || msg.contains("arguments"),
+            "error message should describe the JSON parse failure: {msg}"
+        );
+    }
+
+    // --- is_error → "ERROR: " prefix ---
+
+    #[test]
+    fn openai_error_tool_result_gets_error_prefix() {
+        let transport = FixedOpenAiTransport::new(json!({
+            "choices": [{ "message": { "content": "noted" }, "finish_reason": "stop" }]
+        }));
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        provider
+            .complete_with_tools(ToolCompletionRequest {
+                provider: "openai-test".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                system: String::new(),
+                turns: vec![
+                    ToolConversationTurn {
+                        role: "assistant".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolUse {
+                            id: "c1".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "x"}),
+                        }],
+                    },
+                    ToolConversationTurn {
+                        role: "user".to_string(),
+                        blocks: vec![ToolTurnBlock::ToolResult {
+                            tool_use_id: "c1".to_string(),
+                            content: "file not found".to_string(),
+                            is_error: true,
+                        }],
+                    },
+                ],
+                tools: vec![],
+                max_tokens: 64,
+            })
+            .expect("ok");
+
+        let calls = transport.calls();
+        let messages = calls[0]["messages"].as_array().unwrap();
+        let tool_msg = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message");
+        assert_eq!(
+            tool_msg["content"], "ERROR: file not found",
+            "is_error:true result must be prefixed with 'ERROR: '"
+        );
+    }
+
+    // --- capabilities() advertises tool_use ---
+
+    #[test]
+    fn openai_compatible_capabilities_has_tool_use() {
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-test",
+            "https://api.openai.com/v1",
+            Some("test-key".to_string()),
+            RecordingProviderTransport::default(),
+        );
+        assert!(
+            provider.capabilities().tool_use,
+            "OpenAiCompatibleProvider must advertise tool_use capability"
+        );
+    }
+
+    // --- Live smoke test (optional, gated on OPENAI_API_KEY) ---
+
+    #[test]
+    fn openai_tool_calling_live_smoke() {
+        let api_key = match std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+        {
+            Some(key) => key,
+            None => {
+                println!(
+                    "SKIP: OPENAI_API_KEY is not set — skipping live OpenAI tool-calling smoke test"
+                );
+                return;
+            }
+        };
+
+        let model = std::env::var("LEGION_SMOKE_OPENAI_MODEL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "gpt-4o-mini".to_string());
+
+        let provider = OpenAiCompatibleProvider::with_transport(
+            "openai-live",
+            "https://api.openai.com/v1",
+            Some(api_key),
+            ReqwestProviderHttpTransport,
+        );
+
+        let weather_tool = ToolDefinition {
+            name: "get_weather".to_string(),
+            description: "Get the current weather for a location".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "location": { "type": "string", "description": "City name" }
+                },
+                "required": ["location"]
+            }),
+        };
+
+        // Round 1: model should call get_weather.
+        let request = ToolCompletionRequest {
+            provider: "openai-live".to_string(),
+            model: model.clone(),
+            system: "Use the get_weather tool to answer the user's question.".to_string(),
+            turns: vec![ToolConversationTurn {
+                role: "user".to_string(),
+                blocks: vec![ToolTurnBlock::Text(
+                    "What is the weather in London?".to_string(),
+                )],
+            }],
+            tools: vec![weather_tool.clone()],
+            max_tokens: 256,
+        };
+        let response = provider
+            .complete_with_tools(request)
+            .expect("live tool-calling smoke test succeeds");
+
+        assert!(
+            !response.blocks.is_empty(),
+            "live response must contain at least one block"
+        );
+        assert_eq!(
+            response.stop_reason,
+            ToolCompletionStopReason::ToolUse,
+            "expected ToolUse stop reason"
+        );
+        let ToolTurnBlock::ToolUse { id, .. } = &response.blocks[0] else {
+            panic!("expected ToolUse block from live response");
+        };
+        let tool_call_id = id.clone();
+
+        // Round 2: feed back a result, expect EndTurn.
+        let final_request = ToolCompletionRequest {
+            provider: "openai-live".to_string(),
+            model: model.clone(),
+            system: "Use the get_weather tool to answer the user's question.".to_string(),
+            turns: vec![
+                ToolConversationTurn {
+                    role: "user".to_string(),
+                    blocks: vec![ToolTurnBlock::Text(
+                        "What is the weather in London?".to_string(),
+                    )],
+                },
+                ToolConversationTurn {
+                    role: "assistant".to_string(),
+                    blocks: response.blocks.clone(),
+                },
+                ToolConversationTurn {
+                    role: "user".to_string(),
+                    blocks: vec![ToolTurnBlock::ToolResult {
+                        tool_use_id: tool_call_id,
+                        content: "Sunny, 22°C".to_string(),
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![weather_tool],
+            max_tokens: 256,
+        };
+        let final_response = provider
+            .complete_with_tools(final_request)
+            .expect("second live call succeeds");
+
+        assert_eq!(
+            final_response.stop_reason,
+            ToolCompletionStopReason::EndTurn,
+            "final response should be EndTurn after tool result"
+        );
+        println!(
+            "OpenAI live smoke test passed: model={model}, blocks={}, stop_reason={:?}",
+            final_response.blocks.len(),
+            final_response.stop_reason
         );
     }
 }

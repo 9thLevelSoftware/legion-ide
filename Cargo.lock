@@ -3759,6 +3759,7 @@ version = "0.1.0"
 dependencies = [
  "globset",
  "legion-ai",
+ "legion-ai-providers",
  "legion-debug",
  "legion-platform",
  "legion-protocol",
