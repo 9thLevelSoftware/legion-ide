@@ -39,6 +39,9 @@ pub mod updater;
 /// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
 pub mod proposal;
 
+/// App-side support-bundle surface: list crash reports, build metadata-only or raw exports.
+pub mod diagnostics;
+
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
 pub use legion_storage::checkpoint::DurableCheckpointSummary;
 /// Re-export so `legion-desktop`'s view layer can access this without reaching into the

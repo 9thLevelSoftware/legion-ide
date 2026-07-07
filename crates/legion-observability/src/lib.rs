@@ -35,6 +35,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod telemetry;
+pub mod minidump;
+pub mod crash_capture;
+pub mod export;
 
 /// Observability validation and redaction errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

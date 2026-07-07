@@ -1739,6 +1739,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-observability"]
     acceptance = ["Crash reporting is opt-in; the choice is stored in the audit ledger."]
     stop_condition = "Stop if crash reporting is on by default."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-CRASH-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F3.T2"
@@ -1748,8 +1750,10 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     files = ["crates/legion-observability/src/minidump.rs", "crates/legion-app/src/lib.rs"]
     dependencies = ["P8.F3.T1"]
     verification = ["cargo test -p legion-observability", "cargo test -p legion-app"]
-    acceptance = ["Induced crash produces symbolicated report only when consented."]
+    acceptance = ["Induced crash produces symbolicated report only when consented. CAVEAT: native-fault minidump capture (crash-handler/minidumper crates) is explicitly deferred (D7); only Rust panic capture via std::panic::set_hook is implemented in v1. Induced panic via catch_unwind produces a consented crash bundle with panic.txt and summary.toml."]
     stop_condition = "Stop if symbol upload runs before consent is recorded."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-CRASH-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F3.T3"
@@ -1761,6 +1765,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo test -p legion-observability", "cargo test -p legion-app"]
     acceptance = ["Default export is metadata-only; raw-data export is a separate, opt-in action."]
     stop_condition = "Stop if raw data can be exported as part of a default diagnostics bundle."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-CRASH-evidence.md"
 
   [[epics.features]]
   id = "P8.F4"

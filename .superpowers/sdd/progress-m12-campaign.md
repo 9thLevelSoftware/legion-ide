@@ -11,8 +11,8 @@ Prior ledger: `.superpowers/sdd/progress-m10-campaign.md` (complete, 9/9 packets
 - [x] PKT-PROPOSAL-SURFACE: delegate proposals reach review (branch m12/proposal-surface)
 - [x] PKT-OPENAI-TOOLS: OpenAI tool-calling provider (branch m12/openai-tools)
 - [x] PKT-SIGN: P8.F1 real signing paths (branch m12/release-signing)
-- [ ] PKT-UPDATER: P8.F2 update/rollback client + drill (branch m12/updater)
-- [ ] PKT-CRASH: P8.F3 consent-gated local crash capture (branch m12/crash-capture)
+- [x] PKT-UPDATER: P8.F2 update/rollback client + drill (branch m12/updater)
+- [x] PKT-CRASH: P8.F3 consent-gated local crash capture (branch m12/crash-capture)
 
 ## Completion log
 
@@ -45,3 +45,18 @@ Prior ledger: `.superpowers/sdd/progress-m10-campaign.md` (complete, 9/9 packets
 - Deliverables: ReleaseManifestV1 DTO, signing module (DalekSigner + resolver chain), three-mode pipeline, release-manifest subcommand, 17 signing tests, config + runbook docs, kanban P8.F1.T1/T2/T4 done
 - Tests: 17/17 manifest_sign, 17/17 release_pipeline, cargo deny clean, verify-kanban-backlog pass
 - Minor deferred to final review: seed_arr stack copy not Zeroizing-wrapped, evidence test name mismatch, check-deps pre-existing failures
+
+### PKT-UPDATER COMPLETE (2026-07-07)
+- Commits: 5ace1ea..62bbb68 (squash merge on main)
+- Review: Approved (sonnet, 2 rounds) — R1: 0 Critical, 1 Important (verify→verify_strict in both updater.rs and xtask/signing.rs), 4 Minor (drill report temp-rename, evidence filename, report test count, drill v0.1.0 fabrication); R2: Important + 2 Minor fixed, 1 new Minor (ledger test name) fixed post-review, approved
+- Deliverables: updater.rs (ManifestSource + LocalDirManifestSource, sig-before-parse, channel guard, version compare, staging + journal, idempotent rollback), 19/19 upd_tests, update_drill.rs 11-step drill (19th standing gate), xtask update-drill subcommand, CI 3-OS job, gate docs 19-gate set, kanban P8.F2.T1/T2/T3 done with T3 truth-repair, PR-REL-001 partial update, evidence file
+- Tests: 19/19 upd_tests, 17/17 manifest_sign, 1/1 manual_zero_egress, update-drill 11/11 steps, verify-kanban-backlog pass (146 tasks)
+- Minor deferred to final review: drill doesn't fabricate separate v0.1.0 artifact (v0.1.0 represented as policy field only), report test count 18 vs actual 19
+- Notable fix: Windows installer-detection heuristic auto-elevates binaries named "update*" — renamed to upd_tests.rs and upd-drill
+
+### PKT-CRASH COMPLETE (2026-07-07)
+- Commits: on branch m12/crash-capture
+- Deliverables: crash_capture.rs (consent-gated panic hook, fail-closed, bundle writer), export.rs (metadata-only export + double-opt-in for raw data), diagnostics.rs (app-side SupportBundleAssembler), minidump.rs declared pub mod, 8 TDD tests in crash_capture_tests.rs
+- Tests: 8/8 crash_capture_tests, 36/36 legion-observability lib, 103/103 legion-app lib (3 new), 1/1 manual_zero_egress, verify-kanban-backlog PASS
+- Kanban: P8.F3.T1/T2/T3 → done; PR-REL-001 final M12 refresh (honest remaining-gaps list)
+- Native-fault deferral (D7): crash-handler/minidumper/minidump crates explicitly out of scope; panic capture only via std::panic::set_hook
