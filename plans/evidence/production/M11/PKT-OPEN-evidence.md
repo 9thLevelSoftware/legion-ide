@@ -123,7 +123,7 @@ Re-inspected status during the review-fix round:
 
 This run remains part of the historical record, but only for the intermediate two-commit opener state ending at `e0e36a3`.
 
-### D6: Corrective hosted `legion-smoke` dispatch against the latest pushed opener SHA
+### D6: Corrective hosted `legion-smoke` dispatch against the then-current pushed opener SHA
 
 Review finding: the initial evidence implied run `28893311632` validated the final opener state, but the final committed opener evidence actually landed later at `7d17d0e`.
 
@@ -150,7 +150,7 @@ Status snapshot at corrective-capture time:
   - `Update drill (macos-latest)` — `in_progress`
   - remaining `GP-1` / `GP-2` / `GP-3` jobs — `in_progress`
 
-This corrective run is the hosted smoke record that actually targets the latest pushed opener state before this review-fix commit.
+This corrective run is the hosted smoke record that actually targets the then-current pushed opener state at `7d17d0e`. It does not validate later evidence-only follow-up commits.
 
 ### D7: PKT-OPEN ledger completion update
 
@@ -180,10 +180,11 @@ Notes:
 ## Current opener state and self-reference limitation
 
 - Working branch: `main`
-- Latest pushed opener SHA before this review-fix commit: `7d17d0e` (`docs: record PKT-OPEN M11 evidence`)
-- First repair commit in this fix round: `5b0579a` (`docs: repair PKT-OPEN evidence sequencing`)
-- Corrective hosted smoke dispatch now recorded against that pushed SHA via run `28893658693`
-- This committed evidence repair cannot also include a hosted run for its own future commit SHA without another follow-up commit, because the run ID and target SHA are only knowable after push. No such impossible certainty is claimed here.
+- Run `28893311632` targeted `e0e36a3` and is intermediate-state-only.
+- Run `28893658693` targeted `7d17d0e` and is the corrective post-push smoke for the then-current opener state.
+- Subsequent commits `5b0579a` (`docs: repair PKT-OPEN evidence sequencing`), `4b9721f` (`docs: finalize PKT-OPEN repair ledger`), and the final evidence self-reference repair commit that carries this wording are evidence-only ledger/audit repairs, not product or runtime changes.
+- Because a committed evidence file cannot contain its own future commit SHA without an infinite amend loop, the final PKT-OPEN packet head must be determined from `git log` or `origin/main`, not from a self-referential SHA embedded in this file.
+- No hosted run is claimed for a future evidence-only commit that did not exist yet when the run was dispatched.
 
 ## Files changed by this packet
 
@@ -194,5 +195,5 @@ Notes:
 ## Concerns
 
 - Initial hosted smoke run `28893311632` is real but only validates intermediate opener SHA `e0e36a3`; it later finished `cancelled` after the corrective dispatch superseded it.
-- Corrective hosted smoke run `28893658693` targets the latest pushed opener SHA `7d17d0e`, but it was still `in_progress` at capture time.
-- The repair commit that carries this corrected evidence necessarily post-dates corrective run target `7d17d0e`; a committed file cannot cite a future run against its own as-yet-unpushed SHA without another follow-up commit.
+- Corrective hosted smoke run `28893658693` targets `7d17d0e`, but it was still `in_progress` at capture time.
+- Later evidence-only follow-up commits, including `5b0579a`, `4b9721f`, and this final repair commit, update the audit text and ledger only. They do not change product/runtime behavior and are not retroactively validated by run `28893658693`.
