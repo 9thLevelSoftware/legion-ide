@@ -662,6 +662,41 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// Run the scripted GP-3 golden-path smoke against a throwaway fixture workspace.
+    ///
+    /// Drives the delegate-mode legion-app product APIs (AppComposition,
+    /// start_delegated_task, ScriptedToolCallingProviderBuilder,
+    /// SharedCancellationFlag, reap_orphaned_sandboxes, proposal lifecycle)
+    /// against a copy of `fixtures/gp1-rust` in a temp directory.  Writes
+    /// `target/golden-path/gp3_report.toml`.
+    ///
+    /// Compiled with **default features** (which include `ai`) plus
+    /// `--features test-helpers` (needed for inject_cancellation_flag_for_test).
+    ///
+    /// Steps:
+    ///   s1 copy-fixture + open workspace (Trusted) + set Delegate mode
+    ///   s2 build DelegatedTaskScope (Module, secrets.txt in forbidden_paths)
+    ///   s3 worker loop: read+grep+edit-as-proposal → assert Completed + audit pairing
+    ///   s4 scope denial: read secrets.txt → assert Blocked + ToolCallRejected
+    ///   s5 sandbox teeth: TerminalCommand → assert Completed or Blocked
+    ///   s6 kill switch: pre-cancelled flag → assert Cancelled
+    ///   s7 orphan reap: create stale task- dir → assert removed, decoy survived
+    ///   s8 review-apply: CreateFile proposal lifecycle + checkpoint verify + restore
+    ///   s9 write evidence TOML
+    #[command(name = "golden-path-3")]
+    GoldenPath3 {
+        /// Path to the fixture directory relative to workspace root.
+        #[arg(long, default_value = "fixtures/gp1-rust")]
+        fixture_dir: String,
+        /// Output directory for the evidence TOML.
+        #[arg(long, default_value = "target/golden-path")]
+        out_dir: String,
+        /// If provided, copy the evidence TOML to this directory after the
+        /// smoke completes (typically `plans/evidence/production/M10/`).
+        /// Omit for routine runs to avoid churning the evidence tree.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
     /// Run the hostile eval suite and write a hostile eval report.
     ///
     /// Scores the 4 adversarial scenarios (exfiltration, prompt injection,
@@ -740,6 +775,11 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_2_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::GoldenPath3 {
+            fixture_dir,
+            out_dir,
+            record_evidence,
+        } => run_golden_path_3_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
         Commands::HostileEvals { out } => run_hostile_evals_command(&out),
         Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
     };
@@ -1570,6 +1610,44 @@ fn run_golden_path_2_command(
             workspace_root
                 .join(out_dir)
                 .join("gp2_report.toml")
+                .display()
+        );
+    }
+    code
+}
+
+fn run_golden_path_3_command(
+    fixture_dir: &str,
+    out_dir: &str,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("golden-path-3 failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::golden_path_3::GoldenPath3Options {
+        fixture_dir: fixture_dir.to_string(),
+        out_dir: out_dir.to_string(),
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    let code = xtask::golden_path_3::run_golden_path_3(&workspace_root, &opts);
+    if code == 0 {
+        println!(
+            "golden-path-3: smoke passed; report written to {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp3_report.toml")
+                .display()
+        );
+    } else {
+        eprintln!(
+            "golden-path-3: smoke exited with code {code}; check {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp3_report.toml")
                 .display()
         );
     }
