@@ -55,8 +55,15 @@ Prior ledger: `.superpowers/sdd/progress-m10-campaign.md` (complete, 9/9 packets
 - Notable fix: Windows installer-detection heuristic auto-elevates binaries named "update*" — renamed to upd_tests.rs and upd-drill
 
 ### PKT-CRASH COMPLETE (2026-07-07)
-- Commits: on branch m12/crash-capture
-- Deliverables: crash_capture.rs (consent-gated panic hook, fail-closed, bundle writer), export.rs (metadata-only export + double-opt-in for raw data), diagnostics.rs (app-side SupportBundleAssembler), minidump.rs declared pub mod, 8 TDD tests in crash_capture_tests.rs
-- Tests: 8/8 crash_capture_tests, 36/36 legion-observability lib, 103/103 legion-app lib (3 new), 1/1 manual_zero_egress, verify-kanban-backlog PASS
-- Kanban: P8.F3.T1/T2/T3 → done; PR-REL-001 final M12 refresh (honest remaining-gaps list)
+- Commits: 62bbb68..02379f4 (squash merge on main)
+- Review: Approved (sonnet, 2 rounds) — R1: 0 Critical, 2 Important (missing audit envelope, redundant flag logic), 5 Minor; R2: both Important fixed (audit.json in panic hook, simplified metadata_only flag), approved
+- Deliverables: crash_capture.rs (consent-gated panic hook, fail-closed, bundle writer with audit.json), export.rs (metadata-only export + double-opt-in for raw data), diagnostics.rs (app-side SupportBundleAssembler), 8 TDD tests in crash_capture_tests.rs, kanban P8.F3.T1/T2/T3 done, PR-REL-001 final M12 refresh, evidence file
+- Tests: 8/8 crash_capture_tests, 36/36 legion-observability lib, 103/103 legion-app lib, 1/1 manual_zero_egress, verify-kanban-backlog PASS
+- Minor deferred to final review: subprocess test approach for consent-off (uses catch_unwind instead), temp dir cleanup in tests
 - Native-fault deferral (D7): crash-handler/minidumper/minidump crates explicitly out of scope; panic capture only via std::panic::set_hook
+
+## Campaign Complete
+
+All 6/6 packets squash-merged to main. Campaign M12 is complete.
+Main at 02379f4 (17 commits ahead of origin/main).
+Post-campaign: push main to origin, workflow_dispatch legion-smoke for validation.
