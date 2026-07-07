@@ -186,7 +186,15 @@ impl ScriptedToolCallingProviderBuilder {
     }
 
     /// Build the provider.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expect_prior_result_contains` was called with no following turn.
     pub fn build(self, provider_id: &str) -> ScriptedToolCallingProvider {
+        assert!(
+            self.pending_expect.is_none(),
+            "expect_prior_result_contains called with no following turn"
+        );
         ScriptedToolCallingProvider {
             id: provider_id.to_string(),
             turns: self.turns,
@@ -419,5 +427,14 @@ mod tests {
             msg.contains("exhausted"),
             "error message should contain 'exhausted', got: {msg}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_prior_result_contains called with no following turn")]
+    fn scripted_provider_build_panics_on_trailing_expect() {
+        ScriptedToolCallingProviderBuilder::new()
+            .end_turn("done")
+            .expect_prior_result_contains("dangling guard")
+            .build("test");
     }
 }
