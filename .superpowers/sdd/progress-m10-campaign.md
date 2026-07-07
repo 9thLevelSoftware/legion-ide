@@ -13,7 +13,7 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - [x] PKT-LOOP: native execution loop (branch m10/agent-loop)
 - [x] PKT-WORKTREE: worktree scope + honest UI (branch m10/worktree-scope)
 - [x] PKT-START: scope picker + production dispatch (branch m10/delegate-start)
-- [ ] PKT-WORKER: worker panel + kill switch (branch m10/worker-panel)
+- [x] PKT-WORKER: worker panel + kill switch (branch m10/worker-panel)
 - [ ] PKT-EVAL: adversarial evals (branch m10/adversarial-evals)
 - [ ] PKT-GP3: GP-3 harness + exit gate (branch m10/gp3-smoke)
 
@@ -66,3 +66,11 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - New deps: legion-sandbox (ai feature dep of legion-app)
 - Partial: D4 proposal extraction deferred — DelegatedTaskLoopResult doesn't surface proposals (tracked as PKT-PROPOSAL-SURFACE)
 - Renames: AppDelegatedTaskStartOutcome → AppDelegatedTaskOutcome, DelegatedTaskStarted → DelegatedTaskCompleted, ChatSent → TaskLoopCompleted
+
+### PKT-WORKER COMPLETE (2026-07-07)
+- Commits: abf0212..71d925b (7 commits on m10/worker-panel, squash merged as 1e26322)
+- Review: Approved (sonnet task + opus final) — Task review: 0 Critical, 2 Important (evidence file errors — method name, test name, cancel semantics — all fixed inline), 2 Minor (evidence test name mismatch fixed, Kill button unconditional accepted). Final review: 0 Critical, 2 Important (loop error path leaves activation at Executing, Kill button shows red error when idle — both fixed), 2 Minor (evidence concerns section, is_cancelled duplication).
+- Deliverables: worker_panel module declared + wired into Delegation Console, SharedCancellationFlag (Arc<AtomicBool> Release/Acquire) implementing DelegatedTaskCancellationProbe, NeverCancelled stub removed, Executing + Cancelled activation states wired, Kill button gated on Executing, CancelDelegatedTask command pipeline (4 layers), cancel_delegated_task method, evidence file
+- Tests: 15 delegated_task_integration tests (1 new: pre_cancelled_flag), 3 SharedCancellationFlag unit tests, all pass, manual_zero_egress green
+- No new deps
+- Known limitation: kill switch requires background-thread dispatch for live cancellation (start_delegated_task is synchronous with &mut self)
