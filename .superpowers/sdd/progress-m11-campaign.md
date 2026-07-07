@@ -10,7 +10,7 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 
 - [x] PKT-OPEN: post-M12 housekeeping (branch m11/opener)
 - [x] PKT-PLAN: plan artifact wiring (branch m11/plan-artifact)
-- [ ] PKT-WORKERS: real delegate workers in workflow path (branch m11/real-workers)
+- [x] PKT-WORKERS: real delegate workers in workflow path (branch m11/real-workers)
 - [ ] PKT-LANES: parallel lanes, conflict pause/resume, merge evidence export (branch m11/parallel-conflict-merge)
 - [ ] PKT-CONSOLE: workflow board, fleet cards, comm stream, budget meter (branch m11/fleet-console)
 - [ ] PKT-GP4: GP-4 harness, gate/docs sweep, campaign close (branch m11/gp4-harness)
@@ -32,3 +32,11 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 - Notes: the earlier rustfmt and Clippy deviations were fixed before serializing PKT-PLAN. No PKT-WORKERS behavior was started or claimed.
 
 - SDD Task PKT-PLAN: complete (commits 8d4193d..bfdeeb5, review clean after durability fix round)
+
+### PKT-WORKERS COMPLETE (2026-07-07)
+- Commits: final packet commit is created after this ledger entry; use `git log --oneline -1` on `m11/real-workers` for the exact hash.
+- Deliverables: default-feature `LegionWorkerProviderResolver`, resolver-backed `execute_legion_workflow_with_providers`, honest no-provider `execute_legion_workflow` blocking for Local/ProviderBacked workers, real sequential delegated-loop worker execution with proposal lifecycle registration and coordinator result/evidence recording, provider-backed route metadata preserved before unavailable-provider blocking, old mock delegated-task execution and ACP host hook gated to tests/`test-helpers`.
+- Verification: focused workflow/delegated-task/manual-zero-egress tests passed; `cargo check -p legion-app --no-default-features --features offline` passed with offline-only unused-code warnings; final local standing gates passed with split logs (`target/m11-pkt-workers-gates-prefix.log` through rust-analyzer smoke, and `target/m11-pkt-workers-gates-tail.log` for GP-1/2/3, perf-harness, verify-perf-harness, and update-drill).
+- Notes: PKT-LANES threading/parallelism, PKT-CONSOLE, GP-4, and P6.F4/ACP external-agent work remain untouched.
+
+- SDD Task PKT-WORKERS: complete; final local commit hash is reported by git after commit creation.

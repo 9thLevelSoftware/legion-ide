@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use legion_agent::LegionWorkflowCoordinatorOutput;
+use legion_ai::tool_calls::{ScriptedToolCallingProviderBuilder, ToolCallingProvider};
 use legion_ai_providers::{McpClient, McpClientError, McpTransport};
 use legion_app::{
     AppAutomateToolCallOutcome, AppComposition, AppCompositionError, AppMcpClientToolRuntime,
-    AppProductMode,
+    AppProductMode, LegionWorkerProviderResolver,
 };
 use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
@@ -314,6 +315,76 @@ fn automate_app() -> AppComposition {
     app
 }
 
+struct QueueWorkerProviderResolver {
+    providers: Mutex<Vec<Box<dyn ToolCallingProvider + Send>>>,
+}
+
+impl QueueWorkerProviderResolver {
+    fn new(providers: Vec<Box<dyn ToolCallingProvider + Send>>) -> Self {
+        Self {
+            providers: Mutex::new(providers.into_iter().rev().collect()),
+        }
+    }
+}
+
+impl LegionWorkerProviderResolver for QueueWorkerProviderResolver {
+    fn resolve_worker_provider(
+        &self,
+        _assignment: &LegionWorkflowWorkerAssignment,
+    ) -> Option<Box<dyn ToolCallingProvider + Send>> {
+        self.providers.lock().expect("providers lock").pop()
+    }
+}
+
+#[derive(Default)]
+struct EmptyWorkerProviderResolver;
+
+impl LegionWorkerProviderResolver for EmptyWorkerProviderResolver {
+    fn resolve_worker_provider(
+        &self,
+        _assignment: &LegionWorkflowWorkerAssignment,
+    ) -> Option<Box<dyn ToolCallingProvider + Send>> {
+        None
+    }
+}
+
+fn scripted_main_edit_provider(
+    provider_id: &str,
+    replacement: &str,
+) -> Box<dyn ToolCallingProvider + Send> {
+    Box::new(
+        ScriptedToolCallingProviderBuilder::new()
+            .tool_use("read-main", "read", json!({ "path": "main.txt" }))
+            .expect_prior_result_contains("clean")
+            .tool_use(
+                "edit-main",
+                "edit-as-proposal",
+                json!({
+                    "path": "main.txt",
+                    "replacement": replacement,
+                    "proposal_title": "Workflow edit",
+                    "proposal_reason": "resolver-backed worker script",
+                }),
+            )
+            .expect_prior_result_contains("Proposal created")
+            .end_turn("Workflow worker completed with a proposal.")
+            .build(provider_id),
+    )
+}
+
+fn scripted_rejected_tool_provider(provider_id: &str) -> Box<dyn ToolCallingProvider + Send> {
+    Box::new(
+        ScriptedToolCallingProviderBuilder::new()
+            .tool_use(
+                "terminal-denied",
+                "terminal-command",
+                json!({ "command": "echo forbidden" }),
+            )
+            .end_turn("should not be reached")
+            .build(provider_id),
+    )
+}
+
 fn test_mcp_registry(server_id: &McpServerId, tool_name: &McpToolName) -> McpRegistrySnapshot {
     McpRegistrySnapshot {
         registry_id: format!("mcp-registry:{}:1", server_id.0),
@@ -348,14 +419,6 @@ fn test_mcp_registry(server_id: &McpServerId, tool_name: &McpToolName) -> McpReg
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
-}
-
-fn allow_delegated_runtime(app: &mut AppComposition, plan_id: &DelegatedTaskPlanId) {
-    app.record_delegate_tool_permission_decision(
-        format!("delegate:permission:{}:runtime", plan_id.0),
-        DelegatedTaskToolPermissionDecision::Allow,
-    )
-    .expect("allow delegated runtime");
 }
 
 fn cloud_lane_task_request(workspace_id: WorkspaceId) -> LegionCloudLaneTaskRequest {
@@ -538,15 +601,25 @@ fn legion_cloud_lane_app_submit_enforces_policy_and_projects_status() {
 #[test]
 fn legion_workflow_local_worker_reaches_waiting_for_approval_metadata() {
     let mut app = automate_app();
+    let root = temp_workspace("waiting");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:waiting".to_string()),
+    )
+    .expect("open workspace");
     let (session, plan_id) = local_session("waiting", false);
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
-    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_main_edit_provider(
+        "test-scripted-waiting",
+        "resolver payload: waiting\n",
+    )]);
 
     let outcome = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute workflow");
 
     assert_eq!(
@@ -566,14 +639,144 @@ fn legion_workflow_local_worker_reaches_waiting_for_approval_metadata() {
             output,
             LegionWorkflowCoordinatorOutput::ProposalReady(proposal)
                 if proposal.proposal_id.0 != 0
+                    && match &proposal.payload {
+                        legion_protocol::ProposalPayload::CreateFile(create) => create
+                            .initial_content
+                            .as_deref()
+                            .is_some_and(|content| content.contains("resolver payload: waiting")
+                                && !content.contains("delegated-task-proposal")),
+                        _ => false,
+                    }
         )
     }));
     assert_eq!(outcome.projection.rows.len(), 1);
 }
 
 #[test]
+fn legion_workflow_local_worker_without_provider_blocks() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("no-provider-local", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let outcome = app
+        .execute_legion_workflow(&session_id)
+        .expect("execute no-provider workflow");
+
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason == "legion_workflow.worker_provider_unavailable"))
+    }));
+    assert!(
+        !outcome
+            .outputs
+            .iter()
+            .any(|output| { matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)) })
+    );
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::Blocked
+    );
+}
+
+#[test]
+fn legion_workflow_resolver_returning_none_blocks_worker() {
+    let mut app = automate_app();
+    let (session, plan_id) = local_session("resolver-none", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let resolver = EmptyWorkerProviderResolver;
+
+    let outcome = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute resolver-none workflow");
+
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason == "legion_workflow.worker_provider_unavailable"))
+    }));
+    assert!(
+        !outcome
+            .outputs
+            .iter()
+            .any(|output| { matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)) })
+    );
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::Blocked
+    );
+}
+
+#[test]
+fn legion_workflow_real_loop_tool_rejection_blocks_with_evidence() {
+    let mut app = automate_app();
+    let root = temp_workspace("tool-rejected");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:tool-rejected".to_string()),
+    )
+    .expect("open workspace");
+    let (session, plan_id) = local_session("tool-rejected", false);
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_rejected_tool_provider(
+        "test-scripted-tool-rejected",
+    )]);
+
+    let outcome = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute rejected-tool workflow");
+
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason.contains("ToolCallRejected")))
+    }));
+    let evidence = outcome
+        .outputs
+        .iter()
+        .find_map(|output| match output {
+            LegionWorkflowCoordinatorOutput::EvidenceReady(evidence) => Some(evidence.as_ref()),
+            _ => None,
+        })
+        .expect("tool rejection evidence");
+    assert!(
+        evidence
+            .redacted_payload_summary
+            .contains("ToolCallRejected")
+    );
+    validate_legion_evidence_record(evidence).expect("tool rejection evidence validates");
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::Blocked
+    );
+}
+
+#[test]
 fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker() {
     let mut app = automate_app();
+    let root = temp_workspace("dependency-chain");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:dependency-chain".to_string()),
+    )
+    .expect("open workspace");
     let root_plan_id = DelegatedTaskPlanId("plan-chain-root".to_string());
     let child_plan_id = DelegatedTaskPlanId("plan-chain-child".to_string());
     let mut session = workflow_session(
@@ -614,13 +817,15 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
         delegated_contract(root_plan_id.clone()),
         delegated_contract(child_plan_id.clone()),
     ]);
-    allow_delegated_runtime(&mut app, &root_plan_id);
-    allow_delegated_runtime(&mut app, &child_plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![
+        scripted_main_edit_provider("test-scripted-chain-root", "resolver payload: root\n"),
+        scripted_main_edit_provider("test-scripted-chain-child", "resolver payload: child\n"),
+    ]);
 
     let first = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute first workflow pass");
 
     assert_eq!(
@@ -659,7 +864,7 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
     assert_eq!(stored.proposal_ids.len(), 1);
 
     let second = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute resumed workflow pass");
 
     assert_eq!(
@@ -721,12 +926,16 @@ fn legion_workflow_provider_worker_emits_route_required_metadata_without_invocat
                 if route.health_labels.iter().any(|label| label == "provider_route.not_invoked")
         )
     }));
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason == "legion_workflow.worker_provider_unavailable"))
+    }));
     let stored = app
         .legion_workflow_session(&session_id)
         .expect("stored session remains app-owned");
     assert_eq!(
         stored.worker_assignments[0].state,
-        LegionWorkflowWorkerState::ProviderRouteRequired
+        LegionWorkflowWorkerState::Blocked
     );
 }
 
@@ -904,9 +1113,12 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
     );
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
-    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session.clone()])
         .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_main_edit_provider(
+        "test-scripted-ready",
+        "resolver payload: ready\n",
+    )]);
 
     app.record_legion_workflow_verification(
         &session_id,
@@ -926,7 +1138,7 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
         .expect("record approval");
 
     let outcome = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute ready workflow");
 
     assert_eq!(
@@ -1217,15 +1429,25 @@ fn legion_workflow_mcp_worker_waits_for_permission_and_resumes_after_allow() {
 #[test]
 fn legion_workflow_local_worker_emits_canonical_task_packet_worker_result_and_evidence() {
     let mut app = automate_app();
+    let root = temp_workspace("canonical-local");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:canonical-local".to_string()),
+    )
+    .expect("open workspace");
     let (session, plan_id) = local_session("canonical-local", false);
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
-    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_main_edit_provider(
+        "test-scripted-canonical",
+        "resolver payload: canonical\n",
+    )]);
 
     let outcome = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute workflow");
 
     assert!(
@@ -1403,12 +1625,12 @@ fn legion_workflow_provider_worker_repeated_execution_does_not_duplicate_route_o
         "first execution must emit exactly one ProviderRouteMetadataReady"
     );
     assert_eq!(
-        second_routes, 1,
-        "second execution must emit exactly one ProviderRouteRequired (not duplicate)"
+        second_routes, 0,
+        "blocked no-provider workers are not rescheduled on the second pass"
     );
     assert_eq!(
-        second_metadata, 1,
-        "second execution must emit exactly one ProviderRouteMetadataReady (not duplicate)"
+        second_metadata, 0,
+        "blocked no-provider workers do not re-emit provider metadata on the second pass"
     );
 
     let stored = app
@@ -1416,23 +1638,33 @@ fn legion_workflow_provider_worker_repeated_execution_does_not_duplicate_route_o
         .expect("stored session");
     assert_eq!(
         stored.worker_assignments[0].state,
-        LegionWorkflowWorkerState::ProviderRouteRequired,
-        "worker remains in ProviderRouteRequired across executions"
+        LegionWorkflowWorkerState::Blocked,
+        "worker blocks after route metadata when no provider is available"
     );
 }
 
 #[test]
 fn legion_workflow_canonical_output_rejects_direct_workspace_mutation() {
     let mut app = automate_app();
+    let root = temp_workspace("mutation-reject");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:mutation-reject".to_string()),
+    )
+    .expect("open workspace");
     let (session, plan_id) = local_session("mutation-reject", false);
     let session_id = session.session_id.clone();
     app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
-    allow_delegated_runtime(&mut app, &plan_id);
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_main_edit_provider(
+        "test-scripted-mutation",
+        "resolver payload: mutation\n",
+    )]);
 
     let outcome = app
-        .execute_legion_workflow(&session_id)
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute workflow");
 
     let packet = outcome

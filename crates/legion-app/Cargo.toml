@@ -67,6 +67,11 @@ hex = { workspace = true }
 name = "upd-drill"
 path = "src/bin/update_drill.rs"
 
+[[bin]]
+name = "golden_path_3"
+path = "src/bin/golden_path_3.rs"
+required-features = ["ai"]
+
 [dev-dependencies]
 tempfile = "3"
 serde_json = { workspace = true }

@@ -1394,11 +1394,13 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     title = "Wire LegionWorkflowCoordinator to real Delegate workers"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = ["crates/legion-agent/src/coordinator.rs", "crates/legion-agent/src/dag.rs"]
+    files = ["crates/legion-app/src/lib.rs", "crates/legion-app/tests/legion_workflow_integration.rs"]
     dependencies = ["P5.F1.T2", "P6.F1.T3"]
-    verification = ["cargo test -p legion-agent"]
+    verification = ["cargo test -p legion-app --test legion_workflow_integration", "cargo test -p legion-app --test delegated_task_integration", "cargo check -p legion-app --no-default-features --features offline", "cargo clippy -p legion-app --all-targets -- -D warnings"]
     acceptance = ["Coordinator dispatches tasks to real workers; mock workers are out of the product path."]
     stop_condition = "Stop if the coordinator can be used with a mock worker outside of a tagged test."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-WORKERS-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F2.T2"
