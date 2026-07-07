@@ -31,6 +31,8 @@ pub mod delegate_loop;
 /// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
+/// Release manifest DTO for the auto-updater (ADR-0042).
+pub mod release_manifest;
 pub mod risk;
 pub mod scope;
 pub mod tools;
@@ -44,6 +46,7 @@ pub use plan::{
     EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
     EditablePlanSection, EditablePlanSectionKind,
 };
+pub use release_manifest::{ReleaseArtifact, ReleaseManifestV1};
 pub use scope::{DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind};
 pub use tools::{
     LegionToolCallFeedback, LegionToolCallFeedbackKind, LegionToolCallInvocation,

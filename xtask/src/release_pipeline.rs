@@ -8,9 +8,15 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::signing::{SignerResolution, SigningConfig, UpdaterConfig, resolve_signer};
+
 pub const DRY_RUN_SIGNER_STATUS: &str = "dry-run/no-production-signer";
+pub const UNSIGNED_BETA_SIGNER_STATUS: &str = "unsigned-beta/no-signer-configured";
+pub const SIGNED_ED25519_SIGNER_STATUS: &str = "signed/ed25519";
 pub const VERSION_STAMP_FILE: &str = "version_stamp.toml";
 pub const VERIFY_REPORT_FILE: &str = "verify_report.toml";
+pub const RELEASE_MANIFEST_FILE: &str = "release-manifest.v1.toml";
+pub const RELEASE_MANIFEST_SIG_FILE: &str = "release-manifest.v1.toml.sig";
 const DRY_RUN_VERIFIER_STATUS: &str = "dry-run/unchecked";
 const DRY_RUN_VERIFIER_MESSAGE: &str =
     "verification_command not executed in dry-run; pending real artifact hash and signer";
@@ -57,6 +63,10 @@ pub struct ReleasePipelineConfig {
     pub package_name: String,
     pub dist_tool: String,
     pub installer_targets: Vec<InstallerTargetConfig>,
+    /// Signer reference configuration (no key material — reference only).
+    pub signing: Option<SigningConfig>,
+    /// Updater strategy configuration.
+    pub updater: Option<UpdaterConfig>,
 }
 
 impl Default for ReleasePipelineConfig {
@@ -65,6 +75,8 @@ impl Default for ReleasePipelineConfig {
             package_name: "legion-desktop".to_string(),
             dist_tool: "cargo-dist".to_string(),
             installer_targets: Vec::new(),
+            signing: None,
+            updater: None,
         }
     }
 }
@@ -165,11 +177,25 @@ pub struct VerificationReport {
     pub descriptors: Vec<DescriptorVerificationEntry>,
 }
 
+/// Plan a release pipeline.
+///
+/// # Modes
+///
+/// * `dry_run = true` — generate descriptor stubs only; no artifact hashing or
+///   signing.  Signer status is `"dry-run/no-production-signer"` and sha256 is
+///   `"pending"`.
+/// * `artifacts_dir = Some(dir)` — locate artifacts in `dir`, compute real
+///   SHA-256 hashes; missing files get `sha256_status = "artifact-absent"`.
+///   The signer from `config.signing` is resolved and the status reflects its
+///   availability.
+/// * Neither — returns a clear error indicating that `--dry-run` or
+///   `--from-artifacts` is required.
 pub fn plan_release_pipeline(
     workspace_root: &Path,
     config: &ReleasePipelineConfig,
     channel: ReleaseChannel,
     dry_run: bool,
+    artifacts_dir: Option<&Path>,
 ) -> Result<ReleasePipelinePlan, String> {
     if !workspace_root.exists() {
         return Err(format!(
@@ -177,8 +203,12 @@ pub fn plan_release_pipeline(
             workspace_root.display()
         ));
     }
-    if !dry_run {
-        return Err("release pipeline currently supports descriptor dry-run only".to_string());
+    if !dry_run && artifacts_dir.is_none() {
+        return Err(
+            "release pipeline requires --dry-run or --from-artifacts mode; \
+             neither was provided"
+                .to_string(),
+        );
     }
     if config.installer_targets.is_empty() {
         return Err(
@@ -203,26 +233,68 @@ pub fn plan_release_pipeline(
         workspace_root,
     )?;
 
+    // Resolve signer when in from-artifacts mode (not dry-run).
+    let signer_status_for_mode: Option<String> = if !dry_run {
+        // from-artifacts mode: resolve signing infrastructure
+        let status = match &config.signing {
+            None => UNSIGNED_BETA_SIGNER_STATUS.to_string(),
+            Some(signing_cfg) => match resolve_signer(signing_cfg) {
+                SignerResolution::Available(_) => SIGNED_ED25519_SIGNER_STATUS.to_string(),
+                SignerResolution::Unavailable { .. } => UNSIGNED_BETA_SIGNER_STATUS.to_string(),
+            },
+        };
+        Some(status)
+    } else {
+        None
+    };
+
     let mut descriptors = config
         .installer_targets
         .iter()
-        .map(|target| InstallerDescriptor {
-            schema_version: 1,
-            package_name: config.package_name.clone(),
-            channel: version_stamp.channel.clone(),
-            version: version.clone(),
-            dist_tool: config.dist_tool.clone(),
-            name: target.name.clone(),
-            platform: target.platform.clone(),
-            target: target.target.clone(),
-            artifact: target.artifact.clone(),
-            build_command: target.build_command.clone(),
-            verification_command: target.verification_command.clone(),
-            signer_status: DRY_RUN_SIGNER_STATUS.to_string(),
-            sha256: "pending".to_string(),
-            sha256_status: "dry-run descriptor only; artifact hash is unavailable until build"
-                .to_string(),
-            version_stamp: version_stamp.clone(),
+        .map(|target| {
+            let (signer_status, sha256, sha256_status) = if dry_run {
+                (
+                    DRY_RUN_SIGNER_STATUS.to_string(),
+                    "pending".to_string(),
+                    "dry-run descriptor only; artifact hash is unavailable until build"
+                        .to_string(),
+                )
+            } else {
+                // from-artifacts mode
+                let dir = artifacts_dir.expect("artifacts_dir checked above");
+                let artifact_file = dir.join(format!("{}.{}", target.name, target.artifact));
+                let (sha256, sha256_status) = if artifact_file.is_file() {
+                    match compute_sha256_file(&artifact_file) {
+                        Ok(hash) => (hash, "computed".to_string()),
+                        Err(err) => ("".to_string(), format!("sha256-error: {err}")),
+                    }
+                } else {
+                    ("".to_string(), "artifact-absent".to_string())
+                };
+                let signer_status = signer_status_for_mode
+                    .as_deref()
+                    .unwrap_or(UNSIGNED_BETA_SIGNER_STATUS)
+                    .to_string();
+                (signer_status, sha256, sha256_status)
+            };
+
+            InstallerDescriptor {
+                schema_version: 1,
+                package_name: config.package_name.clone(),
+                channel: version_stamp.channel.clone(),
+                version: version.clone(),
+                dist_tool: config.dist_tool.clone(),
+                name: target.name.clone(),
+                platform: target.platform.clone(),
+                target: target.target.clone(),
+                artifact: target.artifact.clone(),
+                build_command: target.build_command.clone(),
+                verification_command: target.verification_command.clone(),
+                signer_status,
+                sha256,
+                sha256_status,
+                version_stamp: version_stamp.clone(),
+            }
         })
         .collect::<Vec<_>>();
     descriptors.sort_by(|left, right| left.name.cmp(&right.name));
@@ -298,10 +370,20 @@ pub fn write_descriptors(
 /// fail-closed integrity check: missing files or on-disk tampering cause a hard
 /// rejection so the dry-run surface still proves descriptor integrity before
 /// real signing / checksum manifests land.
+///
+/// # Extended options
+///
+/// * `artifacts_dir` — when provided, recompute the SHA-256 of each artifact
+///   file and compare against the recorded hash (real pass/fail instead of
+///   unchecked).
+/// * `verifying_key_bytes` — when provided, verify the Ed25519 detached
+///   signature on the release manifest file in `out_dir`.
 pub fn verify_descriptors(
     _workspace_root: &Path,
     plan: &ReleasePipelinePlan,
     out_dir: &Path,
+    artifacts_dir: Option<&Path>,
+    verifying_key_bytes: Option<&[u8]>,
 ) -> Result<VerificationReport, String> {
     if !out_dir.is_dir() {
         return Err(format!(
@@ -318,6 +400,11 @@ pub fn verify_descriptors(
             "release pipeline version stamp at `{}` does not match the planned descriptor metadata",
             out_dir.join(VERSION_STAMP_FILE).display()
         ));
+    }
+
+    // Optionally verify the manifest signature when a verifying key is provided.
+    if let Some(vk_bytes) = verifying_key_bytes {
+        verify_manifest_signature(out_dir, vk_bytes)?;
     }
 
     let mut entries = Vec::with_capacity(plan.descriptors.len());
@@ -348,12 +435,7 @@ pub fn verify_descriptors(
                     descriptor_path.display()
                 )
             })?;
-            if actual_text == expected_text {
-                (
-                    DRY_RUN_VERIFIER_STATUS.to_string(),
-                    DRY_RUN_VERIFIER_MESSAGE.to_string(),
-                )
-            } else {
+            if actual_text != expected_text {
                 (
                     "failed/tampered-descriptor".to_string(),
                     format!(
@@ -361,12 +443,68 @@ pub fn verify_descriptors(
                         descriptor_path.display()
                     ),
                 )
+            } else if let Some(art_dir) = artifacts_dir {
+                // Artifact files present: recompute sha256 and compare.
+                let artifact_file =
+                    art_dir.join(format!("{}.{}", descriptor.name, descriptor.artifact));
+                if artifact_file.is_file() {
+                    match compute_sha256_file(&artifact_file) {
+                        Ok(computed) if !descriptor.sha256.is_empty() && computed == descriptor.sha256 => {
+                            (
+                                "passed/sha256-verified".to_string(),
+                                format!(
+                                    "artifact `{}` sha256 verified",
+                                    artifact_file.display()
+                                ),
+                            )
+                        }
+                        Ok(computed) if descriptor.sha256.is_empty() => {
+                            // sha256 field is blank (e.g. artifact-absent mode)
+                            (
+                                DRY_RUN_VERIFIER_STATUS.to_string(),
+                                format!(
+                                    "artifact `{}` found (sha256={computed}) but descriptor sha256 is empty",
+                                    artifact_file.display()
+                                ),
+                            )
+                        }
+                        Ok(computed) => (
+                            "failed/sha256-mismatch".to_string(),
+                            format!(
+                                "artifact `{}` sha256 mismatch: expected `{}`, computed `{computed}`",
+                                artifact_file.display(),
+                                descriptor.sha256
+                            ),
+                        ),
+                        Err(err) => (
+                            "failed/sha256-error".to_string(),
+                            format!(
+                                "unable to compute sha256 for artifact `{}`: {err}",
+                                artifact_file.display()
+                            ),
+                        ),
+                    }
+                } else {
+                    // Artifact file is genuinely absent — unchecked is appropriate.
+                    (
+                        DRY_RUN_VERIFIER_STATUS.to_string(),
+                        format!(
+                            "artifact file `{}` not present; sha256 check skipped",
+                            artifact_file.display()
+                        ),
+                    )
+                }
+            } else {
+                (
+                    DRY_RUN_VERIFIER_STATUS.to_string(),
+                    DRY_RUN_VERIFIER_MESSAGE.to_string(),
+                )
             }
         };
-        if verifier_status == DRY_RUN_VERIFIER_STATUS {
-            summary.unchecked += 1;
-        } else {
-            summary.failed += 1;
+        match verifier_status.as_str() {
+            s if s.starts_with("passed") => summary.passed += 1,
+            s if s.starts_with("failed") => summary.failed += 1,
+            _ => summary.unchecked += 1,
         }
         entries.push(DescriptorVerificationEntry {
             name: descriptor.name.clone(),
@@ -407,6 +545,175 @@ pub fn verify_descriptors(
     })?;
 
     Ok(report)
+}
+
+/// Build a `ReleaseManifestV1` from the pipeline plan and write it to
+/// `out_dir` (defaulting to `artifacts_dir`).
+///
+/// If a signer is configured and available, also writes a detached `.sig`
+/// file (`release-manifest.v1.toml.sig`).  If no signer is available, only
+/// the manifest TOML is written and `"unsigned-beta/no-signer-configured"` is
+/// logged.
+///
+/// # Parameters
+/// * `plan` — the release pipeline plan (version stamp + descriptors)
+/// * `artifacts_dir` — directory containing built artifact files
+/// * `out_dir` — directory to write the manifest to (often == `artifacts_dir`)
+/// * `previous_version` — optional rollback pointer
+/// * `signing_cfg` — signer reference config (no key material)
+pub fn write_release_manifest(
+    plan: &ReleasePipelinePlan,
+    artifacts_dir: &Path,
+    out_dir: &Path,
+    previous_version: Option<&str>,
+    signing_cfg: Option<&SigningConfig>,
+) -> Result<(PathBuf, Option<PathBuf>, String), String> {
+    use legion_protocol::ReleaseArtifact;
+    use legion_protocol::ReleaseManifestV1;
+
+    // Build artifact entries with real sha256 hashes.
+    let artifacts: Vec<ReleaseArtifact> = plan
+        .descriptors
+        .iter()
+        .map(|descriptor| {
+            let artifact_file =
+                artifacts_dir.join(format!("{}.{}", descriptor.name, descriptor.artifact));
+            let sha256 = if artifact_file.is_file() {
+                compute_sha256_file(&artifact_file).unwrap_or_else(|_| String::new())
+            } else {
+                String::new()
+            };
+            ReleaseArtifact::new(
+                descriptor.name.clone(),
+                descriptor.platform.clone(),
+                descriptor.target.clone(),
+                artifact_file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                sha256,
+            )
+        })
+        .collect();
+
+    let signer_reference = signing_cfg.map(|cfg| cfg.reference.clone());
+
+    let manifest = ReleaseManifestV1::new(
+        plan.version_stamp.package_name.clone(),
+        plan.version_stamp.channel.clone(),
+        plan.version_stamp.package_version.clone(),
+        Some(plan.version_stamp.rollout_policy.clone()),
+        previous_version.map(ToOwned::to_owned),
+        artifacts,
+        current_utc_rfc3339(),
+        signer_reference,
+    );
+
+    manifest.validate().map_err(|err| {
+        format!("release manifest validation failed: {err}")
+    })?;
+
+    // Serialize the manifest to TOML.
+    let manifest_toml = toml::to_string_pretty(&manifest)
+        .map_err(|err| format!("unable to serialize release manifest: {err}"))?;
+
+    fs::create_dir_all(out_dir).map_err(|err| {
+        format!(
+            "unable to create manifest output dir `{}`: {err}",
+            out_dir.display()
+        )
+    })?;
+
+    let manifest_path = out_dir.join(RELEASE_MANIFEST_FILE);
+    fs::write(&manifest_path, &manifest_toml).map_err(|err| {
+        format!(
+            "unable to write release manifest `{}`: {err}",
+            manifest_path.display()
+        )
+    })?;
+
+    // Resolve signer and optionally write .sig file.
+    let (sig_path, signer_status) = match signing_cfg {
+        None => {
+            println!(
+                "release-manifest: {} (no signing config)",
+                UNSIGNED_BETA_SIGNER_STATUS
+            );
+            (None, UNSIGNED_BETA_SIGNER_STATUS.to_string())
+        }
+        Some(cfg) => match resolve_signer(cfg) {
+            SignerResolution::Available(signer) => {
+                let sig_bytes = signer
+                    .sign_bytes(manifest_toml.as_bytes())
+                    .map_err(|err| format!("signing failed: {err}"))?;
+                let sig_path = out_dir.join(RELEASE_MANIFEST_SIG_FILE);
+                fs::write(&sig_path, &sig_bytes).map_err(|err| {
+                    format!(
+                        "unable to write signature file `{}`: {err}",
+                        sig_path.display()
+                    )
+                })?;
+                println!(
+                    "release-manifest: {} — manifest signed with Ed25519",
+                    SIGNED_ED25519_SIGNER_STATUS
+                );
+                (Some(sig_path), SIGNED_ED25519_SIGNER_STATUS.to_string())
+            }
+            SignerResolution::Unavailable { reason } => {
+                println!(
+                    "release-manifest: {} — {reason}",
+                    UNSIGNED_BETA_SIGNER_STATUS
+                );
+                (None, UNSIGNED_BETA_SIGNER_STATUS.to_string())
+            }
+        },
+    };
+
+    Ok((manifest_path, sig_path, signer_status))
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn verify_manifest_signature(out_dir: &Path, vk_bytes: &[u8]) -> Result<(), String> {
+    use crate::signing::verify_ed25519_signature;
+
+    let manifest_path = out_dir.join(RELEASE_MANIFEST_FILE);
+    let sig_path = out_dir.join(RELEASE_MANIFEST_SIG_FILE);
+
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "release manifest `{}` not found; run `xtask release-manifest` first",
+            manifest_path.display()
+        ));
+    }
+    if !sig_path.is_file() {
+        return Err(format!(
+            "manifest signature `{}` not found; the manifest was produced unsigned-beta",
+            sig_path.display()
+        ));
+    }
+
+    let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
+        format!("unable to read manifest `{}`: {err}", manifest_path.display())
+    })?;
+    let sig_bytes = fs::read(&sig_path).map_err(|err| {
+        format!("unable to read signature `{}`: {err}", sig_path.display())
+    })?;
+
+    verify_ed25519_signature(&manifest_bytes, &sig_bytes, vk_bytes)
+        .map_err(|err| format!("manifest signature verification failed: {err}"))
+}
+
+pub fn compute_sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest as _;
+    let bytes = fs::read(path).map_err(|err| {
+        format!("unable to read `{}` for sha256: {err}", path.display())
+    })?;
+    let hash = sha2::Sha256::digest(&bytes);
+    Ok(hex::encode(hash))
 }
 
 fn read_written_version_stamp(out_dir: &Path) -> Result<VersionStamp, String> {

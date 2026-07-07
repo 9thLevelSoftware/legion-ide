@@ -8,8 +8,8 @@ use std::{
 
 use xtask::release_pipeline::{
     DRY_RUN_SIGNER_STATUS, InstallerTargetConfig, ReleaseChannel, ReleasePipelineConfig,
-    VersionStamp, channel_rollout_policy, plan_release_pipeline, verify_descriptors,
-    write_descriptors,
+    UNSIGNED_BETA_SIGNER_STATUS, VersionStamp, channel_rollout_policy, plan_release_pipeline,
+    verify_descriptors, write_descriptors,
 };
 
 struct TempRepo {
@@ -73,6 +73,8 @@ fn test_config() -> ReleasePipelineConfig {
                 verification_command: "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -DryRun".to_string(),
             },
         ],
+        signing: None,
+        updater: None,
     }
 }
 
@@ -81,9 +83,9 @@ fn release_pipeline_plan_is_deterministic_for_same_inputs() {
     let repo = TempRepo::new("deterministic");
     let config = test_config();
 
-    let mut first = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let mut first = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan first release pipeline");
-    let mut second = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let mut second = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan second release pipeline");
 
     // The plan embeds a wall-clock `built_at_utc`; two back-to-back plans can
@@ -109,7 +111,7 @@ fn release_pipeline_descriptors_use_dry_run_signer_and_pending_sha256() {
     let repo = TempRepo::new("dry-run");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
 
     assert_eq!(plan.descriptors.len(), 2);
@@ -127,9 +129,9 @@ fn release_pipeline_preview_channel_changes_version_label_only() {
     let repo = TempRepo::new("preview");
     let config = test_config();
 
-    let stable = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let stable = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan stable release pipeline");
-    let preview = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true)
+    let preview = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true, None)
         .expect("plan preview release pipeline");
 
     assert_eq!(stable.descriptors.len(), preview.descriptors.len());
@@ -146,7 +148,7 @@ fn release_pipeline_preview_channel_changes_version_label_only() {
 fn release_pipeline_write_descriptors_is_idempotent() {
     let repo = TempRepo::new("write");
     let config = test_config();
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
 
@@ -185,9 +187,11 @@ fn release_pipeline_write_descriptors_rejects_file_name_collision() {
             installer("legion-desktop linux x64"),
             installer("legion-desktop-linux-x64"),
         ],
+        signing: None,
+        updater: None,
     };
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
 
@@ -197,14 +201,48 @@ fn release_pipeline_write_descriptors_rejects_file_name_collision() {
 }
 
 #[test]
-fn release_pipeline_rejects_non_dry_run_until_signing_policy_exists() {
-    let repo = TempRepo::new("rejects-non-dry-run");
+fn release_pipeline_rejects_when_neither_mode_given() {
+    let repo = TempRepo::new("rejects-no-mode");
     let config = test_config();
 
-    let error = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, false)
-        .expect_err("non-dry-run release planning should be blocked");
+    // Passing dry_run=false and artifacts_dir=None is the "rejected" mode.
+    let error = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, false, None)
+        .expect_err("release planning without a mode should be blocked");
 
-    assert!(error.contains("dry-run only"));
+    assert!(
+        error.contains("dry-run") || error.contains("from-artifacts"),
+        "error should mention the required modes, got: {error}"
+    );
+}
+
+#[test]
+fn release_pipeline_from_artifacts_mode_with_absent_files_uses_unsigned_beta() {
+    let repo = TempRepo::new("from-artifacts-absent");
+    let config = test_config();
+    // Point at a dir that exists but has no artifact files
+    let artifacts_dir = repo.path("target/artifacts");
+    fs::create_dir_all(&artifacts_dir).expect("create artifacts dir");
+
+    let plan = plan_release_pipeline(
+        &repo.root,
+        &config,
+        ReleaseChannel::Stable,
+        false,
+        Some(&artifacts_dir),
+    )
+    .expect("plan from-artifacts mode");
+
+    // Without a signer configured, all descriptors should report unsigned-beta
+    for descriptor in &plan.descriptors {
+        assert_eq!(
+            descriptor.signer_status, UNSIGNED_BETA_SIGNER_STATUS,
+            "absent signer should produce unsigned-beta status"
+        );
+        assert_eq!(
+            descriptor.sha256_status, "artifact-absent",
+            "missing artifact file should produce artifact-absent sha256 status"
+        );
+    }
 }
 
 #[test]
@@ -237,7 +275,7 @@ fn release_pipeline_records_reproducible_version_stamp() {
     let _ = init_temp_git_repo(&repo.root);
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
 
     for descriptor in &plan.descriptors {
@@ -266,7 +304,7 @@ fn release_pipeline_preview_channel_overrides_rollout_policy_in_stamp() {
     let repo = TempRepo::new("preview-stamp");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true, None)
         .expect("plan release pipeline");
 
     for descriptor in &plan.descriptors {
@@ -282,7 +320,7 @@ fn release_pipeline_stamp_git_sha_is_workspace_head() {
     let head = init_temp_git_repo(&repo.root).expect("init temp git repo");
 
     let config = test_config();
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
 
     for descriptor in &plan.descriptors {
@@ -315,7 +353,7 @@ fn release_pipeline_written_descriptors_round_trip_version_stamp() {
     let repo = TempRepo::new("round-trip-stamp");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
     let written = write_descriptors(&plan, &out_dir).expect("write descriptors");
@@ -343,12 +381,13 @@ fn release_pipeline_verify_descriptors_marks_dry_run_verifiers_unchecked() {
     let repo = TempRepo::new("verify-dry");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
     write_descriptors(&plan, &out_dir).expect("write descriptors");
 
-    let report = verify_descriptors(&repo.root, &plan, &out_dir).expect("verify descriptors");
+    let report =
+        verify_descriptors(&repo.root, &plan, &out_dir, None, None).expect("verify descriptors");
 
     assert_eq!(report.descriptors.len(), plan.descriptors.len());
     for entry in &report.descriptors {
@@ -375,7 +414,7 @@ fn release_pipeline_verify_descriptors_uses_written_version_stamp() {
     let repo = TempRepo::new("verify-version-stamp");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
     write_descriptors(&plan, &out_dir).expect("write descriptors");
@@ -386,7 +425,8 @@ fn release_pipeline_verify_descriptors_uses_written_version_stamp() {
         descriptor.version_stamp.built_at_utc = stale_plan.version_stamp.built_at_utc.clone();
     }
 
-    let report = verify_descriptors(&repo.root, &stale_plan, &out_dir).expect("verify descriptors");
+    let report = verify_descriptors(&repo.root, &stale_plan, &out_dir, None, None)
+        .expect("verify descriptors");
 
     assert_eq!(report.summary.failed, 0);
     assert_eq!(report.summary.unchecked, stale_plan.descriptors.len());
@@ -398,7 +438,7 @@ fn release_pipeline_verify_descriptors_rejects_tampered_descriptor_bytes() {
     let repo = TempRepo::new("verify-tamper");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Stable, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
     let written = write_descriptors(&plan, &out_dir).expect("write descriptors");
@@ -419,7 +459,8 @@ fn release_pipeline_verify_descriptors_rejects_tampered_descriptor_bytes() {
         .and_then(|mut file| std::io::Write::write_all(&mut file, b"\n# tampered\n"))
         .expect("tamper descriptor bytes");
 
-    let report = verify_descriptors(&repo.root, &plan, &out_dir).expect("verify descriptors");
+    let report =
+        verify_descriptors(&repo.root, &plan, &out_dir, None, None).expect("verify descriptors");
     let tampered_entry = report
         .descriptors
         .iter()
@@ -442,12 +483,13 @@ fn release_pipeline_verify_descriptors_aggregates_summary_counts() {
     let repo = TempRepo::new("verify-summary");
     let config = test_config();
 
-    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true)
+    let plan = plan_release_pipeline(&repo.root, &config, ReleaseChannel::Preview, true, None)
         .expect("plan release pipeline");
     let out_dir = repo.path("target/release-pipeline");
     write_descriptors(&plan, &out_dir).expect("write descriptors");
 
-    let report = verify_descriptors(&repo.root, &plan, &out_dir).expect("verify descriptors");
+    let report =
+        verify_descriptors(&repo.root, &plan, &out_dir, None, None).expect("verify descriptors");
 
     assert_eq!(report.summary.total, plan.descriptors.len());
     assert_eq!(report.summary.unchecked, plan.descriptors.len());

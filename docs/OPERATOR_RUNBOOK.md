@@ -59,6 +59,43 @@ Operational notes:
 - Use `ci-secret` when CI injects a signer reference and the actual credential remains in the CI secret store.
 - Never commit the private key, certificate, token value, or notarization credential itself; only commit the reference needed to look it up.
 
+### Ed25519 signing key format (PKT-SIGN / ADR-0042)
+
+Legion uses detached Ed25519 signatures (ADR-0042) for the auto-updater manifest. The signing key is a **base64-encoded 32-byte seed** (standard unpadded or padded base64 — the resolver accepts either). The verifying key is derived automatically from the seed and is embedded in the manifest via `signer_reference`.
+
+Key generation (operator workstation only; never commit the output):
+
+```sh
+# Generate a 32-byte random seed and base64-encode it
+openssl rand -base64 32
+```
+
+Store the resulting string as the env var or keyring secret named in `[signing].reference`. The key material must be zeroized from memory after use (the `xtask` signing module handles this automatically via the `zeroize` crate).
+
+### Release manifest commands (PKT-SIGN)
+
+Generate a signed or unsigned-beta release manifest after artifacts are built:
+
+```sh
+cargo run -p xtask -- release-manifest \
+  --config xtask/release-pipeline.example.toml \
+  --channel stable \
+  --artifacts <path-to-built-artifacts> \
+  --out target/release-pipeline
+```
+
+The command writes `release-manifest.v1.toml` and, when a signer is resolved, `release-manifest.v1.toml.sig` alongside it. The manifest `signer_status` field records either `signed/ed25519` or `unsigned-beta/no-signer-configured`.
+
+### Unsigned-beta policy (WS17-T2 / P8.F1.T4)
+
+If Legion ships before production signing credentials are provisioned, every release descriptor and the auto-updater manifest must carry `signer_status = "unsigned-beta/no-signer-configured"`. This is a first-class outcome — not an error — governed by the policy in `plans/product-readiness-ledger.md` (WS17-T2 entry). The unsigned-beta status must be:
+
+1. Visible in the release descriptor TOML written by `xtask release-pipeline --from-artifacts`.
+2. Visible in the auto-updater manifest written by `xtask release-manifest`.
+3. Documented in the readiness ledger before shipping.
+
+An unsigned-beta release must never be silently treated as signed. The pipeline hard-rejects any attempt to run without `--dry-run` or `--from-artifacts`.
+
 ### Expected artifacts
 
 - Windows package directory: `target/gui-phase6-package/`

@@ -501,6 +501,11 @@ enum Commands {
         /// Generate descriptors only; do not build, sign, or hash artifacts.
         #[arg(long)]
         dry_run: bool,
+        /// Locate artifacts in this directory, compute real SHA-256 hashes,
+        /// and resolve the signer from config.  Mutually exclusive intent
+        /// with --dry-run (if both are given, --dry-run takes precedence).
+        #[arg(long)]
+        from_artifacts: Option<String>,
     },
     /// Verify previously-written release pipeline descriptors.
     VerifyReleasePipeline {
@@ -512,6 +517,33 @@ enum Commands {
         /// Output directory holding descriptors and version stamp.
         #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH)]
         out: String,
+    },
+    /// Build a signed release manifest (ReleaseManifestV1) from artifact files.
+    ///
+    /// Reads the release pipeline config to determine the artifact list, then
+    /// hashes each artifact file found in `--artifacts <dir>` and writes
+    /// `release-manifest.v1.toml` to the output directory.  If the signer
+    /// configured in `[signing]` is available, also writes the detached
+    /// `release-manifest.v1.toml.sig` file.  Otherwise, only the manifest TOML
+    /// is written and `"unsigned-beta/no-signer-configured"` is reported.
+    #[command(name = "release-manifest")]
+    ReleaseManifest {
+        /// Path to release pipeline TOML configuration.
+        #[arg(long, default_value = DEFAULT_RELEASE_PIPELINE_CONFIG_PATH)]
+        config: String,
+        /// Release channel: stable or preview.
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        /// Directory containing built artifact files.
+        #[arg(long)]
+        artifacts: String,
+        /// Previous accepted version / rollback pointer (optional).
+        #[arg(long)]
+        previous: Option<String>,
+        /// Output directory for manifest and signature files.
+        /// Defaults to the --artifacts directory.
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Run the M0 performance-harness skeleton and write a perf report.
     ///
@@ -738,10 +770,30 @@ fn main() {
             out,
             channel,
             dry_run,
-        } => run_release_pipeline_command(&config, &out, &channel, dry_run),
+            from_artifacts,
+        } => run_release_pipeline_command(
+            &config,
+            &out,
+            &channel,
+            dry_run,
+            from_artifacts.as_deref(),
+        ),
         Commands::VerifyReleasePipeline { config, out } => {
             run_verify_release_pipeline_command(&config, &out)
         }
+        Commands::ReleaseManifest {
+            config,
+            channel,
+            artifacts,
+            previous,
+            out,
+        } => run_release_manifest_command(
+            &config,
+            &channel,
+            &artifacts,
+            previous.as_deref(),
+            out.as_deref(),
+        ),
         Commands::PerfHarness {
             out,
             strict,
@@ -974,7 +1026,13 @@ fn run_no_egui_textedit_command(config_path: &str) -> i32 {
     }
 }
 
-fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry_run: bool) -> i32 {
+fn run_release_pipeline_command(
+    config_path: &str,
+    out: &str,
+    channel: &str,
+    dry_run: bool,
+    from_artifacts: Option<&str>,
+) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -997,11 +1055,14 @@ fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry
             return 1;
         }
     };
+    let artifacts_dir_buf = from_artifacts.map(|d| workspace_root.join(d));
+    let artifacts_dir = artifacts_dir_buf.as_deref();
     let plan = match xtask::release_pipeline::plan_release_pipeline(
         &workspace_root,
         &config,
         channel,
         dry_run,
+        artifacts_dir,
     ) {
         Ok(plan) => plan,
         Err(err) => {
@@ -1017,8 +1078,15 @@ fn run_release_pipeline_command(config_path: &str, out: &str, channel: &str, dry
             return 1;
         }
     };
+    let mode_label = if dry_run {
+        "dry-run"
+    } else if artifacts_dir.is_some() {
+        "from-artifacts"
+    } else {
+        "unknown"
+    };
     println!(
-        "release pipeline dry-run wrote {} descriptor(s) to {}",
+        "release pipeline ({mode_label}) wrote {} descriptor(s) to {}",
         written.len(),
         out_dir.display()
     );
@@ -1073,6 +1141,7 @@ fn run_verify_release_pipeline_command(config_path: &str, out: &str) -> i32 {
         &config,
         channel,
         true,
+        None,
     ) {
         Ok(plan) => plan,
         Err(err) => {
@@ -1080,8 +1149,13 @@ fn run_verify_release_pipeline_command(config_path: &str, out: &str) -> i32 {
             return 1;
         }
     };
-    let report = match xtask::release_pipeline::verify_descriptors(&workspace_root, &plan, &out_dir)
-    {
+    let report = match xtask::release_pipeline::verify_descriptors(
+        &workspace_root,
+        &plan,
+        &out_dir,
+        None,
+        None,
+    ) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("release pipeline verify failed: {err}");
@@ -1100,6 +1174,80 @@ fn run_verify_release_pipeline_command(config_path: &str, out: &str) -> i32 {
             .display(),
     );
     if report.summary.failed > 0 { 1 } else { 0 }
+}
+
+fn run_release_manifest_command(
+    config_path: &str,
+    channel: &str,
+    artifacts: &str,
+    previous: Option<&str>,
+    out: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("release-manifest failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config_path = workspace_root.join(config_path);
+    let config = match xtask::release_pipeline::ReleasePipelineConfig::from_file(&config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("release-manifest failed: {err}");
+            return 1;
+        }
+    };
+    let channel_parsed = match xtask::release_pipeline::ReleaseChannel::parse(channel) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("release-manifest failed: {err}");
+            return 1;
+        }
+    };
+    let artifacts_dir = workspace_root.join(artifacts);
+    // Build plan in from-artifacts mode so sha256 hashes are computed.
+    let plan = match xtask::release_pipeline::plan_release_pipeline(
+        &workspace_root,
+        &config,
+        channel_parsed,
+        false,
+        Some(&artifacts_dir),
+    ) {
+        Ok(plan) => plan,
+        Err(err) => {
+            eprintln!("release-manifest failed: {err}");
+            return 1;
+        }
+    };
+    // Per the brief: --out defaults to the --artifacts directory so that the
+    // manifest lands alongside the artifact files when --out is omitted.
+    let out_dir = workspace_root.join(out.unwrap_or(artifacts));
+    let signing_cfg = config.signing.as_ref();
+    match xtask::release_pipeline::write_release_manifest(
+        &plan,
+        &artifacts_dir,
+        &out_dir,
+        previous,
+        signing_cfg,
+    ) {
+        Ok((manifest_path, sig_path, signer_status)) => {
+            println!(
+                "release-manifest: wrote {} (signer_status={}{})",
+                manifest_path.display(),
+                signer_status,
+                sig_path
+                    .as_ref()
+                    .map(|p| format!(", sig={}", p.display()))
+                    .unwrap_or_default(),
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("release-manifest failed: {err}");
+            1
+        }
+    }
 }
 
 fn run_perf_harness_command(out: &str, strict: bool) -> i32 {

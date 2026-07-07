@@ -1642,6 +1642,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- release-pipeline --dry-run", "cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Signer config exists in operator docs; no signing secret is committed."]
     stop_condition = "Stop if any signing secret appears in the tracked tree."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-SIGN-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F1.T2"
@@ -1653,6 +1655,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- release-pipeline --dry-run", "cargo run -p xtask -- verify-release-pipeline"]
     acceptance = ["Release descriptors carry real signer/verifier status or an explicit unsigned-beta status."]
     stop_condition = "Stop if a dry-run descriptor is silently accepted as a real signed descriptor."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-SIGN-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F1.T3"
@@ -1675,6 +1679,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- docs-hygiene"]
     acceptance = ["If unsigned-beta is shipped, the policy is documented in operator docs and readiness ledger."]
     stop_condition = "Stop if unsigned-beta is shipped without the explicit policy."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-SIGN-evidence.md"
 
   [[epics.features]]
   id = "P8.F2"

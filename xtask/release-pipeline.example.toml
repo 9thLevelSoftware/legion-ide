@@ -1,26 +1,54 @@
-# Legion desktop release pipeline (WS17.T1 dry-run scaffold)
+# Legion desktop release pipeline (WS17.T1 dry-run scaffold + PKT-SIGN signing paths)
 #
 # channel: "stable"  -> version = <workspace.package.version>, rollout_policy = "full"
 # channel: "preview" -> version = <workspace.package.version>-preview, rollout_policy = "staged"
 #
-# Real signing/notarization is owned by WS17.T2. Until then every descriptor
-# reports signer_status = "dry-run/no-production-signer" and sha256 = "pending"
-# and the verify-release-pipeline command records verifier_status =
-# "dry-run/unchecked".
+# Signing modes (PKT-SIGN / ADR-0042):
+#   --dry-run         : signer_status = "dry-run/no-production-signer", sha256 = "pending"
+#   --from-artifacts  : real sha256 computed; signer resolved from [signing] below
+#   (neither)         : rejected with a clear error
 #
-# Non-committed signer reference (documentation only; no private material in repo):
-# - source = "env": reference an exported environment variable name only.
-# - source = "keyring": reference an OS keyring service/account entry only.
-# - source = "kms": reference a deployment-supplied KMS adapter plus key URI/ARN only.
-# - source = "ci-secret": reference the CI secret name or variable only.
+# Signer resolution:
+#   source = "env" / "ci-secret": reads base64 32-byte Ed25519 seed from the
+#     named environment variable.  Key material stays in the process environment,
+#     NOT in the repository.
+#   source = "keyring": looks up the OS keyring by service=reference / user=identity.
+#   source = "kms": always "KMS signer not yet implemented — honest unavailable".
 #
-# Example shape for operators (keep the values as references, not secrets):
-# [signing]
-# source = "keyring"
-# reference = "legion-release/signing-profile"
-# identity = "release-signing-profile"
+# If the signer is unavailable, the pipeline records
+#   signer_status = "unsigned-beta/no-signer-configured"
+# and the release-manifest subcommand omits the .sig file.  This is a first-class
+# outcome (not an error) — see M5 WS17-T2 unsigned-beta policy.
+#
+# NEVER put key material in this file — only reference strings.
 package_name = "legion-desktop"
 dist_tool = "cargo-dist"
+
+# ---------------------------------------------------------------------------
+# Signer reference (ADR-0042 / PKT-SIGN) — reference only, no key material.
+# ---------------------------------------------------------------------------
+# Key format: base64-encoded 32-byte Ed25519 seed.
+# Generate a test key:
+#   python3 -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+# Export it:
+#   export LEGION_SIGNING_KEY=<base64-output>
+#
+# For production, store the seed in your CI secret store and reference it here
+# by name only.  NEVER commit the decoded bytes, the base64 string, or any
+# other form of the private key material.
+
+[signing]
+source = "env"
+reference = "LEGION_SIGNING_KEY"
+identity = "legion-ide release signing"
+
+# ---------------------------------------------------------------------------
+# Updater strategy (ADR-0042 custom Zed-style updater)
+# ---------------------------------------------------------------------------
+[updater]
+strategy = "custom-zed-style"
+manifest = "release-manifest.v1.toml"
+signature = "ed25519-detached"
 
 [[installer_targets]]
 name = "legion-desktop-macos-x64-dmg"
