@@ -13,10 +13,10 @@ use legion_ai::tool_calls::{
     ToolDefinition, ToolTurnBlock,
 };
 use legion_protocol::{
-    CapabilityId, CapabilityRequest, CapabilityRequestContext, CapabilityResponse, CorrelationId,
-    DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind, DelegatedTaskLoopStepRecord,
-    DelegatedTaskScope, LegionToolCallFeedback, LegionToolCallFeedbackKind, LegionToolKind,
-    PrincipalId, WorkspaceTrustState,
+    AssistedAiEditProposalOutput, CapabilityId, CapabilityRequest, CapabilityRequestContext,
+    CapabilityResponse, CorrelationId, DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind,
+    DelegatedTaskLoopStepRecord, DelegatedTaskScope, LegionToolCallFeedback,
+    LegionToolCallFeedbackKind, LegionToolKind, PrincipalId, WorkspaceTrustState,
 };
 use uuid::Uuid;
 
@@ -81,6 +81,14 @@ pub struct DelegatedTaskLoopConfig {
     pub forbidden_paths: Vec<String>,
 }
 
+/// Output returned by a single tool executor call.
+pub struct ToolExecutionOutput {
+    /// Text content to feed back to the model.
+    pub content: String,
+    /// Proposal built by `execute_edit_as_proposal`, if any.
+    pub proposal: Option<AssistedAiEditProposalOutput>,
+}
+
 /// Outcome of a delegated task loop run.
 #[derive(Debug, Clone)]
 pub enum DelegatedTaskLoopResult {
@@ -88,6 +96,12 @@ pub enum DelegatedTaskLoopResult {
     Completed {
         /// Final text from the model.
         final_message: String,
+        /// Edit proposals surfaced by `edit-as-proposal` tool calls during the run.
+        ///
+        /// Proposals carry `ProposalId(0)` as a placeholder; the caller must
+        /// reassign real IDs via the app-side proposal coordinator before
+        /// registering them for human review.
+        proposals: Vec<AssistedAiEditProposalOutput>,
     },
     /// Budget exhausted.
     BudgetExhausted {
@@ -629,7 +643,7 @@ fn execute_edit_as_proposal(
     worktree_root: &Path,
     loop_correlation_id: u64,
     causality_id: Uuid,
-) -> Result<String, LegionToolCallFeedback> {
+) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::EditAsProposal)?;
     let replacement = require_string_field(input, "replacement", LegionToolKind::EditAsProposal)?;
     let proposal_title = input
@@ -693,7 +707,7 @@ fn execute_edit_as_proposal(
         )
     })?;
 
-    // Return a textual description — no disk write.
+    // Build a textual summary for the model — no disk write.
     let payload_variant = match &proposal.payload {
         legion_protocol::ProposalPayload::CreateFile(_) => "CreateFile",
         legion_protocol::ProposalPayload::TextEdit(_) => "TextEdit",
@@ -706,13 +720,17 @@ fn execute_edit_as_proposal(
         legion_protocol::ProposalPayload::TerminalCommand(_) => "TerminalCommand",
         legion_protocol::ProposalPayload::Batch(_) => "Batch",
     };
-    Ok(format!(
+    let content = format!(
         "Proposal created for {path_str}\nTitle: {proposal_title}\nReason: {proposal_reason}\n\
          Proposal ID: {:?}\nProposal kind: {}\nReplacement ({} bytes) staged for review.",
         proposal.proposal_id,
         payload_variant,
         replacement.len(),
-    ))
+    );
+    Ok(ToolExecutionOutput {
+        content,
+        proposal: Some(proposal),
+    })
 }
 
 fn execute_terminal_command(
@@ -785,7 +803,7 @@ fn execute_mcp_passthrough(
 
 /// Validate and execute a single tool call.
 ///
-/// Returns `Ok(raw_output)` on success or `Err(feedback)` on rejection.
+/// Returns `Ok(ToolExecutionOutput)` on success or `Err(feedback)` on rejection.
 #[allow(clippy::too_many_arguments)]
 fn validate_and_execute(
     config: &DelegatedTaskLoopConfig,
@@ -795,7 +813,7 @@ fn validate_and_execute(
     tool_host: &dyn DelegatedToolHost,
     loop_correlation_id: u64,
     causality_id: Uuid,
-) -> Result<String, LegionToolCallFeedback> {
+) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     // Step 1: parse tool kind
     let tool = parse_tool_kind(tool_name).ok_or_else(|| {
         LegionToolCallFeedback::new(
@@ -886,12 +904,16 @@ fn validate_and_execute(
     // Step 5: broker capability check
     check_broker_capability(broker, tool, loop_correlation_id)?;
 
-    // Execute tool
+    // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
     match tool {
-        LegionToolKind::Read => execute_read(input, &config.worktree_root),
-        LegionToolKind::Grep => execute_grep(input, &config.worktree_root),
-        LegionToolKind::Glob => execute_glob(input, &config.worktree_root),
-        LegionToolKind::Outline => execute_outline(input, &config.worktree_root),
+        LegionToolKind::Read => execute_read(input, &config.worktree_root)
+            .map(|content| ToolExecutionOutput { content, proposal: None }),
+        LegionToolKind::Grep => execute_grep(input, &config.worktree_root)
+            .map(|content| ToolExecutionOutput { content, proposal: None }),
+        LegionToolKind::Glob => execute_glob(input, &config.worktree_root)
+            .map(|content| ToolExecutionOutput { content, proposal: None }),
+        LegionToolKind::Outline => execute_outline(input, &config.worktree_root)
+            .map(|content| ToolExecutionOutput { content, proposal: None }),
         LegionToolKind::EditAsProposal => execute_edit_as_proposal(
             input,
             &config.worktree_root,
@@ -900,8 +922,10 @@ fn validate_and_execute(
         ),
         LegionToolKind::TerminalCommand => {
             execute_terminal_command(input, &config.worktree_root, tool_host)
+                .map(|content| ToolExecutionOutput { content, proposal: None })
         }
-        LegionToolKind::McpPassthrough => execute_mcp_passthrough(input, tool_host),
+        LegionToolKind::McpPassthrough => execute_mcp_passthrough(input, tool_host)
+            .map(|content| ToolExecutionOutput { content, proposal: None }),
     }
 }
 
@@ -944,6 +968,9 @@ pub fn run_delegated_task_loop(
     let mut total_output_bytes: u64 = 0;
     let mut event_seq: u32 = 0;
     let mut step_index: u32 = 0;
+    // Proposals accumulate across all model turns; only `Completed` returns them.
+    // Blocked/BudgetExhausted/Cancelled discard partial proposals.
+    let mut accumulated_proposals: Vec<AssistedAiEditProposalOutput> = Vec::new();
 
     let start_time = if config.budget.wall_clock_limit_ms > 0 {
         Some(std::time::Instant::now())
@@ -1037,7 +1064,10 @@ pub fn run_delegated_task_loop(
         match response.stop_reason {
             ToolCompletionStopReason::EndTurn => {
                 let final_message = extract_text_from_blocks(&response.blocks);
-                return Ok(DelegatedTaskLoopResult::Completed { final_message });
+                return Ok(DelegatedTaskLoopResult::Completed {
+                    final_message,
+                    proposals: accumulated_proposals,
+                });
             }
             ToolCompletionStopReason::MaxTokens => {
                 return Ok(DelegatedTaskLoopResult::MaxTokensExhausted);
@@ -1106,7 +1136,14 @@ pub fn run_delegated_task_loop(
                         correlation_id_u64,
                         causality_uuid,
                     ) {
-                        Ok(raw_output) => {
+                        Ok(ToolExecutionOutput {
+                            content: raw_output,
+                            proposal,
+                        }) => {
+                            // Accumulate any proposal produced by edit-as-proposal.
+                            if let Some(p) = proposal {
+                                accumulated_proposals.push(p);
+                            }
                             // Apply redaction and per-call byte cap.
                             let bound = redact_model_bound_output(
                                 &raw_output,

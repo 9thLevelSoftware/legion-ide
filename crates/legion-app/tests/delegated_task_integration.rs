@@ -804,3 +804,111 @@ fn start_delegated_task_rejects_forbidden_path_read() {
         other => panic!("expected Blocked (scope denial is non-retryable), got {other:?}"),
     }
 }
+
+/// End-to-end integration test for the proposal surface path:
+/// scripted provider → edit-as-proposal → proposals.len()==1 →
+/// id resolves in the ledger projection → review_delegate_proposal_hunk succeeds.
+///
+/// This test was required by the PKT-PROPOSAL-SURFACE task brief and exercises the
+/// fix for the silently-discarded register_proposal_lifecycle error (Finding 1):
+/// a proposal that fails registration would not appear in the ledger and
+/// review_delegate_proposal_hunk would return "proposal not found".
+#[test]
+fn start_delegated_task_surfaces_proposal_and_review_succeeds() {
+    let root = temp_workspace("proposal-surface");
+    fs::write(root.join("hello.rs"), "fn hello() -> u32 { 42 }\n")
+        .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("proposal-surface-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    // Scripted provider: read the file, then propose an edit via edit-as-proposal.
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("t1", "read", serde_json::json!({ "path": "hello.rs" }))
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "hello.rs",
+                "replacement": "fn hello() -> u32 { 99 }\n"
+            }),
+        )
+        .end_turn("Proposed an edit to hello.rs.")
+        .build("test-scripted-proposal-surface");
+
+    let outcome = app
+        .start_delegated_task(
+            "Edit hello.rs to return 99".to_string(),
+            test_scope(&root),
+            &provider,
+        )
+        .expect("start_delegated_task should succeed");
+
+    match outcome {
+        AppDelegatedTaskOutcome::Completed { proposals, .. } => {
+            // The edit-as-proposal tool call must surface exactly one proposal.
+            assert_eq!(
+                proposals.len(),
+                1,
+                "expected 1 proposal from edit-as-proposal; got {}",
+                proposals.len()
+            );
+
+            let proposal = &proposals[0];
+
+            // The proposal must reference hello.rs.
+            let targets_hello = match &proposal.payload {
+                ProposalPayload::CreateFile(p) => {
+                    p.path.0.ends_with("hello.rs") || p.path.0.contains("hello.rs")
+                }
+                _ => false,
+            };
+            assert!(
+                targets_hello,
+                "proposal should target hello.rs; got: {:?}",
+                proposal.payload
+            );
+
+            // The proposal must be resolvable in the app's ledger. A phantom proposal
+            // (one where register_proposal_lifecycle was silently discarded) would cause
+            // review_delegate_proposal_hunk to return "proposal not found".
+            // Retrieve the hunk_id from the shell projection rather than constructing
+            // it manually: the exact chunk id format is an implementation detail.
+            let proposal_id = proposal.proposal_id;
+            let snapshot = app
+                .shell_projection_snapshot("proposal-surface-review")
+                .expect("snapshot should build");
+            let review = snapshot
+                .delegated_task_projection
+                .proposal_reviews
+                .iter()
+                .find(|review| review.proposal_id == proposal_id)
+                .expect(
+                    "registered proposal must appear in the ledger projection — \
+                     if registration was silently discarded no review would be projected",
+                );
+            let hunk_id = review
+                .hunks
+                .first()
+                .expect("at least one hunk should be projected for the edit-as-proposal")
+                .hunk_id
+                .clone();
+            app.review_delegate_proposal_hunk(
+                proposal_id,
+                hunk_id,
+                DelegatedTaskProposalHunkDisposition::Accepted,
+            )
+            .expect(
+                "proposal hunk must be reviewable via the app ledger — \
+                 if registration was silently discarded this call would fail with \
+                 'proposal not found'",
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}

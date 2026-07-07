@@ -43,9 +43,10 @@ use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
 use legion_app::{AppComposition, AppDelegatedTaskOutcome, AppProductMode};
 use legion_protocol::{
     CanonicalPath, CapabilityId, CorrelationId, CreateFileProposal, DelegatedTaskLoopStepKind,
-    DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind, LegionToolKind,
-    PreviewSummary, PrincipalId, ProposalId, ProposalPayload, ProposalRequest, ProposalResponse,
-    ProposalVersionPreconditions, TimestampMillis, WorkspaceProposal, WorkspaceTrustState,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
+    DelegatedTaskScopeTargetKind, LegionToolKind, PreviewSummary, PrincipalId, ProposalId,
+    ProposalPayload, ProposalRequest, ProposalResponse, ProposalVersionPreconditions,
+    TimestampMillis, WorkspaceProposal, WorkspaceTrustState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,11 +425,50 @@ fn run_s3(
                 ));
             }
 
-            // proposals may be empty due to PKT-PROPOSAL-SURFACE deferral.
+            // Assert exactly 1 proposal was surfaced (the edit-as-proposal on src/main.rs).
+            if proposals.len() != 1 {
+                return Err(format!(
+                    "s3: expected 1 proposal from edit-as-proposal, got {}",
+                    proposals.len()
+                ));
+            }
+
+            let proposal = &proposals[0];
+
+            // Assert the proposal targets src/main.rs.
+            let targets_main_rs = match &proposal.payload {
+                ProposalPayload::CreateFile(p) => {
+                    p.path.0.ends_with("main.rs") || p.path.0.contains("src/main.rs")
+                }
+                _ => false,
+            };
+            if !targets_main_rs {
+                return Err(format!(
+                    "s3: proposal does not target src/main.rs; payload: {:?}",
+                    proposal.payload
+                ));
+            }
+
+            // Assert a ledger row exists and one hunk review can be dispatched.
+            // hunk_id format: "delegate:proposal:{id}:metadata-chunk:0"
+            let proposal_id = proposal.proposal_id;
+            let hunk_id = format!("delegate:proposal:{}:metadata-chunk:0", proposal_id.0);
+            app.review_delegate_proposal_hunk(
+                proposal_id,
+                hunk_id.clone(),
+                DelegatedTaskProposalHunkDisposition::Accepted,
+            )
+            .map_err(|e| {
+                format!(
+                    "s3: review_delegate_proposal_hunk({hunk_id}) failed: {e:?}"
+                )
+            })?;
+
             eprintln!(
-                "[s3] Completed: {} audit steps, {} proposals (extraction deferred per PKT-PROPOSAL-SURFACE)",
+                "[s3] Completed: {} audit steps, 1 proposal targeting src/main.rs \
+                 (proposal_id={:?}); hunk review dispatched",
                 audit_steps.len(),
-                proposals.len()
+                proposal_id,
             );
             Ok(S3Result {
                 audit_step_count: audit_steps.len(),

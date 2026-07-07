@@ -18067,13 +18067,49 @@ impl AppComposition {
         let audit_steps = audit_sink.steps;
 
         Ok(match loop_result {
-            DelegatedTaskLoopResult::Completed { final_message } => {
-                // The loop's EditAsProposal executor generates proposals in-memory
-                // but DelegatedTaskLoopResult does not yet surface them.
-                // Proposal extraction requires loop API changes (tracked for a future packet).
+            DelegatedTaskLoopResult::Completed {
+                final_message,
+                proposals: loop_proposals,
+            } => {
+                // Assign real ProposalIds and register each proposal for human review.
+                // The loop stamps ProposalId(0) as a placeholder; we replace it here.
+                let mut registered = Vec::new();
+                for mut proposal_output in loop_proposals {
+                    let real_id = self.proposal_coordinator.next_id();
+                    proposal_output.proposal_id = real_id;
+                    // Build WorkspaceProposal directly: agent-loop preconditions carry only
+                    // file-level guards (no buffer/snapshot versioning), so we bypass
+                    // to_workspace_proposal() which requires the full core-precondition set.
+                    let workspace_proposal = WorkspaceProposal {
+                        proposal_id: real_id,
+                        principal: proposal_output.principal.clone(),
+                        capability: proposal_output.capability.clone(),
+                        correlation_id: proposal_output.correlation_id,
+                        payload: proposal_output.payload.clone(),
+                        preconditions: proposal_output.preconditions.clone(),
+                        preview: proposal_output.preview.clone(),
+                        expires_at: proposal_output.expires_at,
+                        created_at: proposal_output.created_at,
+                    };
+                    // Propagate registration errors and verify the Created variant; skip
+                    // proposals for which registration fails or returns an unexpected
+                    // response so callers do not see phantom proposals that would fail
+                    // with "proposal not found" when review_delegate_proposal_hunk
+                    // looks them up in the ledger.
+                    match self.register_proposal_lifecycle(&workspace_proposal)? {
+                        ProposalResponse::Created(_) => {
+                            registered.push(proposal_output);
+                        }
+                        _unexpected => {
+                            // Registration did not return Created — the proposal was not
+                            // entered into the ledger. Exclude it so callers never attempt
+                            // to review a phantom proposal.
+                        }
+                    }
+                }
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
-                    proposals: vec![],
+                    proposals: registered,
                     audit_steps,
                 }
             }

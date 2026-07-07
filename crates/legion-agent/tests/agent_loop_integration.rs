@@ -18,7 +18,7 @@ use legion_protocol::{
     CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
     CapabilityResponse, DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind,
     DelegatedTaskLoopStepRecord, DelegatedTaskRiskTolerance, DelegatedTaskScope,
-    DelegatedTaskScopeTargetKind, LegionToolKind, ProtocolResult,
+    DelegatedTaskScopeTargetKind, LegionToolKind, ProposalPayload, ProtocolResult,
 };
 use tempfile::TempDir;
 
@@ -248,7 +248,7 @@ fn basic_tool_use_loop_completes() {
         "expected Completed, got {result:?}"
     );
 
-    if let DelegatedTaskLoopResult::Completed { final_message } = &result {
+    if let DelegatedTaskLoopResult::Completed { final_message, .. } = &result {
         assert!(
             final_message.contains("Hello"),
             "final message should contain 'Hello'"
@@ -770,4 +770,192 @@ fn wall_clock_limit_fires_budget_exhausted() {
     );
 
     assert_event_sequence_monotonic(&sink.steps);
+}
+
+// ─── Proposal-surfacing tests (PKT-PROPOSAL-SURFACE) ─────────────────────────
+
+/// 10. Single edit-as-proposal: loop returns exactly 1 proposal with the
+///     correct target path in the Completed variant.
+#[test]
+fn proposal_surfacing_single_edit() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("t1", "read", serde_json::json!({"path": "src/main.rs"}))
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "src/main.rs",
+                "replacement": "fn main() { /* surfaced */ }\n",
+            }),
+        )
+        .end_turn("Done: read and proposed an edit.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    match result {
+        DelegatedTaskLoopResult::Completed {
+            final_message,
+            proposals,
+        } => {
+            assert!(
+                final_message.contains("Done"),
+                "unexpected final_message: {final_message}"
+            );
+            assert_eq!(
+                proposals.len(),
+                1,
+                "expected exactly 1 proposal, got {}",
+                proposals.len()
+            );
+            let proposal = &proposals[0];
+            let targets_main_rs = match &proposal.payload {
+                ProposalPayload::CreateFile(p) => {
+                    p.path.0.ends_with("main.rs") || p.path.0.contains("src/main.rs")
+                }
+                _ => false,
+            };
+            assert!(
+                targets_main_rs,
+                "proposal payload does not target src/main.rs"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+
+    assert_audit_pairing(&sink.steps);
+    assert_event_sequence_monotonic(&sink.steps);
+}
+
+/// 11. Multi-edit: 2 edit-as-proposal calls → Completed carries 2 proposals in order.
+#[test]
+fn proposal_surfacing_multi_edit() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "pub fn a() {}").unwrap();
+    std::fs::write(dir.path().join("src/b.rs"), "pub fn b() {}").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "src/a.rs",
+                "replacement": "pub fn a() { /* patched */ }\n",
+            }),
+        )
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "src/b.rs",
+                "replacement": "pub fn b() { /* patched */ }\n",
+            }),
+        )
+        .end_turn("Both files proposed.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    match result {
+        DelegatedTaskLoopResult::Completed { proposals, .. } => {
+            assert_eq!(
+                proposals.len(),
+                2,
+                "expected 2 proposals, got {}",
+                proposals.len()
+            );
+            // First proposal targets a.rs, second targets b.rs (in submission order).
+            let first_targets_a = match &proposals[0].payload {
+                ProposalPayload::CreateFile(p) => p.path.0.ends_with("a.rs"),
+                _ => false,
+            };
+            let second_targets_b = match &proposals[1].payload {
+                ProposalPayload::CreateFile(p) => p.path.0.ends_with("b.rs"),
+                _ => false,
+            };
+            assert!(first_targets_a, "first proposal should target a.rs");
+            assert!(second_targets_b, "second proposal should target b.rs");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+
+    assert_audit_pairing(&sink.steps);
+}
+
+/// 12. Blocked run discards proposals: edit-as-proposal succeeds (proposal
+///     accumulated), then a read outside scope returns Blocked — the proposals
+///     must not appear in the result (they are partial, unreviewed work).
+#[test]
+fn blocked_run_discards_proposals() {
+    let dir = TempDir::new().unwrap();
+    let outside_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+    let outside_path = outside_dir
+        .path()
+        .join("secret.txt")
+        .to_string_lossy()
+        .into_owned();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        // Turn 1: edit succeeds → proposal accumulated
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "src/main.rs",
+                "replacement": "fn main() { /* blocked run */ }\n",
+            }),
+        )
+        // Turn 2: read from outside scope → Blocked (non-retryable)
+        .tool_use("t2", "read", serde_json::json!({"path": outside_path}))
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Blocked { .. }),
+        "expected Blocked (scope denial after proposal), got {result:?}"
+    );
+    // Blocked variant carries no proposals field — verified by the match above.
+    assert_audit_pairing(&sink.steps);
 }

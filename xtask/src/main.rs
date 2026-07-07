@@ -676,7 +676,7 @@ enum Commands {
     /// Steps:
     ///   s1 copy-fixture + open workspace (Trusted) + set Delegate mode
     ///   s2 build DelegatedTaskScope (Module, secrets.txt in forbidden_paths)
-    ///   s3 worker loop: read+grep+edit-as-proposal → assert Completed + audit pairing
+    ///   s3 worker loop: read+grep+edit-as-proposal → assert Completed + 1 proposal + audit pairing
     ///   s4 scope denial: read secrets.txt → assert Blocked + ToolCallRejected
     ///   s5 sandbox teeth: TerminalCommand → assert Completed or Blocked
     ///   s6 kill switch: pre-cancelled flag → assert Cancelled
