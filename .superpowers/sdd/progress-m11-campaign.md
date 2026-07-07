@@ -8,7 +8,7 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 
 ## Packets
 
-- [ ] PKT-OPEN: post-M12 housekeeping (branch m11/opener)
+- [x] PKT-OPEN: post-M12 housekeeping (branch m11/opener)
 - [ ] PKT-PLAN: plan artifact wiring (branch m11/plan-artifact)
 - [ ] PKT-WORKERS: real delegate workers in workflow path (branch m11/real-workers)
 - [ ] PKT-LANES: parallel lanes, conflict pause/resume, merge evidence export (branch m11/parallel-conflict-merge)
@@ -18,3 +18,9 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 ## Completion log
 
 (entries appended as packets complete)
+
+### PKT-OPEN COMPLETE (2026-07-07)
+- Commits: `b2ad9e0` (`docs: close M12 campaign ledger`), `e0e36a3` (`docs: open M11 campaign ledger`)
+- Deliverables: M12 ledger closed on main, M11 ledger created with P6.F4 / ACP deferral recorded, `main` pushed to `origin`, local `m12/updater` and `m12/crash-capture` branches removed after squash-parity proof, `legion-smoke` workflow dispatched on `main`, PKT-OPEN evidence file written
+- Verification: conflict-marker sweep run (matches limited to expected test/assertion fixtures), `gh auth status` verified, git status checked before commits and after push, hosted smoke run `28893311632` recorded with live URL and in-progress per-OS status for `smoke-gp3` and `update-drill`
+- Notes: full 19-gate local chain intentionally skipped because this packet is documentation/housekeeping only and the brief treats hosted smoke as independent/non-blocking
