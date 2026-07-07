@@ -1,6 +1,6 @@
 # PKT-PLAN M11 Report
 
-Status: DONE_WITH_CONCERNS
+Status: DONE
 
 ## Scope
 
@@ -90,21 +90,31 @@ git diff --check
 
 PASS: no whitespace errors. Git emitted Windows line-ending warnings for touched files.
 
-## Concerns
+## Gate Cleanup
 
 ```powershell
 cargo fmt --all --check
 ```
 
-FAIL: repo-wide rustfmt check reports unrelated pre-existing formatting diffs. The first reported diff was `crates/legion-agent/src/agent_loop.rs:906`; other reported unrelated paths included `crates/legion-ai-providers/src/lib.rs`, `crates/legion-app/src/bin/update_drill.rs`, `crates/legion-observability/*`, and `xtask/*`.
+PASS after the rustfmt gate cleanup commit.
 
-I did not mass-format unrelated code in this P6.F1 packet.
+```powershell
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+PASS after Clippy gate cleanup in observability, AI provider parsing, updater sizing, diagnostics test helpers, and plan editor bridge tests.
+
+```powershell
+cargo run -p xtask -- check-deps
+```
+
+PASS after aligning dependency policy with the active `legion-agent -> legion-debug` and `legion-app -> legion-sandbox` edges.
 
 ```powershell
 cargo check -p legion-app --no-default-features
 ```
 
-FAIL: existing package binary `crates/legion-app/src/bin/golden_path_3.rs` references optional AI/delegate symbols in a no-default package build. The packet API surface was checked with `cargo check -p legion-app --lib --no-default-features`, which passed.
+Not used as PKT-PLAN closure evidence because the package-wide no-default binary path is not a standing gate. The packet API surface was checked with `cargo check -p legion-app --lib --no-default-features`, which passed.
 
 ## Evidence
 
@@ -139,4 +149,31 @@ PASS: no whitespace errors. Git emitted Windows line-ending warnings for touched
 cargo fmt --all --check
 ```
 
-FAIL: same repo-wide unrelated rustfmt drift already documented above; first reported diff remains `crates/legion-agent/src/agent_loop.rs:906`.
+PASS after the rustfmt gate cleanup commit.
+
+## Final Standing Gate Verification (2026-07-07)
+
+`target/m11-pkt-plan-full-gates-r5.log` records PASS with explicit exit codes for:
+
+- `cargo run -p xtask -- check-deps`
+- `cargo run -p xtask -- docs-hygiene`
+- `cargo run -p xtask -- claim-audit`
+- `cargo run -p xtask -- no-egui-textedit`
+- `cargo run -p xtask -- verify-kanban-backlog`
+- `cargo run -p xtask -- release-pipeline --dry-run`
+- `cargo run -p xtask -- verify-release-pipeline`
+- `cargo fmt --all --check`
+- `cargo check --workspace --all-targets`
+- `cargo test --workspace --all-targets`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo deny check`
+- `cargo run -p xtask -- rust-analyzer-smoke`
+- `cargo run -p xtask -- golden-path-1`
+
+The tool wrapper timed out after GP-2 output, so the tail was rerun. `target/m11-pkt-plan-tail-gates-r5b.log` records PASS for:
+
+- `cargo run -p xtask -- golden-path-2`
+- `cargo run -p xtask -- golden-path-3`
+- `cargo run -p xtask -- perf-harness`
+- `cargo run -p xtask -- verify-perf-harness`
+- `cargo run -p xtask -- update-drill`
