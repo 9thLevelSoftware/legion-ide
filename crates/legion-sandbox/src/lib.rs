@@ -11,6 +11,7 @@ use std::{
 pub mod landlock;
 pub mod network;
 pub mod seatbelt;
+pub mod spawn;
 pub mod windows;
 
 /// Platform-specific sandbox backend selection.
@@ -270,6 +271,18 @@ pub enum SandboxError {
         /// Reason the weaker documented fallback is required.
         reason: String,
     },
+    /// The platform sandbox mechanism is unavailable.
+    PlatformUnavailable {
+        /// Which platform was attempted.
+        platform: String,
+        /// Why it's unavailable.
+        reason: String,
+    },
+    /// The sandboxed process failed to spawn.
+    SpawnFailed {
+        /// Why the spawn failed.
+        reason: String,
+    },
 }
 
 impl fmt::Display for SandboxError {
@@ -280,6 +293,12 @@ impl fmt::Display for SandboxError {
             }
             Self::DocumentedFallbackRequired { reason } => {
                 write!(f, "documented fallback required: {reason}")
+            }
+            Self::PlatformUnavailable { platform, reason } => {
+                write!(f, "platform sandbox unavailable on {platform}: {reason}")
+            }
+            Self::SpawnFailed { reason } => {
+                write!(f, "sandboxed spawn failed: {reason}")
             }
         }
     }

@@ -72,6 +72,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pki-types = { version = "1.14", features = ["std"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 windows = "0.62"
+landlock = "0.4"
+tempfile = "3"
 
 # Internal crates (version managed by workspace)
 legion-protocol = { path = "crates/legion-protocol" }

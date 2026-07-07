@@ -34,13 +34,25 @@ What this means for users:
 
 ## Sandbox guarantees and platform caveats
 
-Legion’s sandbox story is policy-backed and OS-assisted where the platform supports it.
+Legion’s sandbox story is policy-backed and OS-assisted where the platform supports it.  Each platform backend reports its actual enforcement honestly via `SandboxEnforcementReport`; no backend ever claims enforcement it cannot deliver.
 
-Supported enforcement direction:
+### Per-platform enforcement matrix (M10, PKT-SANDBOX)
 
-- Linux: bubblewrap-style sandboxing for stronger filesystem and egress containment.
-- macOS: Seatbelt-style sandboxing.
-- Windows: restricted-token / AppContainer-style mitigations, with weaker guarantees that are explicitly documented.
+| Capability | Linux (Landlock) | macOS (Seatbelt) | Windows (Job Object) |
+|---|---|---|---|
+| Filesystem write isolation | **Enforced** — Landlock `AccessFs::WriteFile` | **Enforced** — SBPL `(deny default)` + selective `file-write*` | **Not enforced** — job object does not restrict paths |
+| Filesystem read isolation | Partial (Landlock write, not read) | **Not enforced** — SBPL `(allow file-read* (subpath "/"))` grants unrestricted filesystem reads | **Not enforced** |
+| Network egress isolation | **Not enforced** — AccessNet rules not implemented (always false regardless of ABI level) | **Enforced** — SBPL `(deny network*)` + per-host allows | **Not enforced** |
+| Process kill on timeout | Yes — `child.kill()` via SIGKILL | Yes — `child.kill()` via SIGKILL | **Yes** — `KILL_ON_JOB_CLOSE` kills the entire process group |
+| Backend identifier | `landlock` | `seatbelt-sbpl` | `job-object-kill-on-close` |
+
+**Windows note:** The Windows implementation uses a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.  This enforces process lifetime (all child processes are killed when the job handle closes, including on timeout) but does **not** restrict filesystem or network access.  The `SandboxEnforcementReport` returned on Windows always has `filesystem_write_enforced: false` and `network_enforced: false` with corresponding caveat labels.  This is an intentional, documented limitation of the current implementation — the enforcement report is honest rather than aspirational.
+
+Upgrading the Windows tier to use restricted tokens or AppContainer would require `SE_ASSIGNPRIMARYTOKEN_PRIVILEGE`, which is not available to normal user processes.  That upgrade is tracked as a follow-on item.
+
+### Escape probe
+
+`crates/legion-sandbox/src/bin/sandbox-escape-probe.rs` is a test binary used to validate sandbox enforcement in integration tests.  It accepts `write <path>` and `connect <addr>` subcommands, prints `WRITE_OK`/`WRITE_DENIED` or `CONNECT_OK`/`CONNECT_DENIED`, and is exercised by `crates/legion-sandbox/tests/escape_attempts.rs`.
 
 Important caveat: Windows is not presented as equivalent to the strongest Linux/macOS tiers. The product keeps the same security model across platforms, but the Windows implementation is intentionally honest about its weaker enforcement surface.
 
@@ -144,5 +156,6 @@ This document is reviewed against the current implementation in these areas:
 - `crates/legion-app/src/terminal_policy.rs` — shell selection, env allow/deny policy, scrollback limit, failure kind enum.
 - `crates/legion-plugin` — manifest validation, capability/quota checks, deny-by-default plugin host calls, and namespace isolation.
 - `crates/legion-ai-providers` — provider metadata, including metadata-only redaction defaults and local/offline support labels.
+- `crates/legion-sandbox/src/spawn.rs` — `spawn_sandboxed`, `SandboxSpawnSpec`, `SandboxEnforcementReport`, `SandboxedCommandOutput`, SBPL profile generator, per-platform enforcement backends.
 
 If one of those layers changes, this document should be updated in the same change set.

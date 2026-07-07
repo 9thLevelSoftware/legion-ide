@@ -3737,6 +3737,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "landlock"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "635839550ae8b90d9fd2571460a6645dc0aec070225956ca7a2831ed31d2795d"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4037,6 +4048,11 @@ dependencies = [
 [[package]]
 name = "legion-sandbox"
 version = "0.1.0"
+dependencies = [
+ "landlock",
+ "tempfile",
+ "windows",
+]
 
 [[package]]
 name = "legion-security"

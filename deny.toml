@@ -22,7 +22,18 @@ unused-ignored-advisory = "warn"
 # version satisfies plist's constraint). Upstream plist must relax/bump its
 # quick-xml pin before this can be resolved from our side. Revisit when plist
 # releases a version compatible with quick-xml >=0.41.0.
-ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0204: crossbeam-epoch 0.9.18 invalid pointer dereference in
+    # fmt::Pointer impl for Atomic/Shared when the pointer is null. Our paths
+    # (rayon → tantivy, wasmtime) never call fmt::Display/fmt::Pointer on null
+    # Atomic/Shared values; the impls are internal to crossbeam-epoch's epoch
+    # reclamation machinery. Pre-existing transitive dep not introduced by any
+    # M10 packet. Fix requires upstream tantivy/wasmtime to accept
+    # crossbeam-epoch >=0.9.20.
+    "RUSTSEC-2026-0204",
+]
 
 [bans]
 # Duplicate crate versions fail the gate. The `skip` list below is a REVIEWED
