@@ -14,7 +14,7 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - [x] PKT-WORKTREE: worktree scope + honest UI (branch m10/worktree-scope)
 - [x] PKT-START: scope picker + production dispatch (branch m10/delegate-start)
 - [x] PKT-WORKER: worker panel + kill switch (branch m10/worker-panel)
-- [ ] PKT-EVAL: adversarial evals (branch m10/adversarial-evals)
+- [x] PKT-EVAL: adversarial evals (branch m10/adversarial-evals)
 - [ ] PKT-GP3: GP-3 harness + exit gate (branch m10/gp3-smoke)
 
 ## Completion log
@@ -74,3 +74,11 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - Tests: 15 delegated_task_integration tests (1 new: pre_cancelled_flag), 3 SharedCancellationFlag unit tests, all pass, manual_zero_egress green
 - No new deps
 - Known limitation: kill switch requires background-thread dispatch for live cancellation (start_delegated_task is synchronous with &mut self)
+
+### PKT-EVAL COMPLETE (2026-07-07)
+- Commits: 8d7d90d..6507ba6 (7 commits on m10/adversarial-evals, squash merged as a972ae0)
+- Review: Approved (sonnet task + opus final) — Task review: 0 Critical, 2 Important (verify-hostile-evals structural no-op, redundant import — both fixed), 2 Minor (test name/assertion gap, terminal-command naming — already addressed by implementer). Final review: 0 Critical, 2 Important (test 4 claims exceed assertions, dead objective_for arm — both fixed), 3 Minor (TOML/test name inconsistency, ledger redundancy, temp workspace labels).
+- Deliverables: 4 hostile eval TOML fixtures expanded (exfiltration, prompt-injection, hostile-file, tool-output), 4 integration tests in hostile_eval_integration.rs, HostileEval task kind + plan_hostile_eval_suite + hostile-evals/verify-hostile-evals xtask subcommands, PR-AI-002 readiness ledger updated, evidence file
+- Tests: 4 hostile_eval_integration tests, hostile-evals + verify-hostile-evals (4/4 pass), all workspace tests pass, manual_zero_egress green
+- No new deps
+- Remaining: live-model adversarial evals deferred (requires provider API keys in CI); Windows network enforcement caveat (tested in PKT-SANDBOX)
