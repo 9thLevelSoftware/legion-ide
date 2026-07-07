@@ -15,7 +15,7 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - [x] PKT-START: scope picker + production dispatch (branch m10/delegate-start)
 - [x] PKT-WORKER: worker panel + kill switch (branch m10/worker-panel)
 - [x] PKT-EVAL: adversarial evals (branch m10/adversarial-evals)
-- [ ] PKT-GP3: GP-3 harness + exit gate (branch m10/gp3-smoke)
+- [x] PKT-GP3: GP-3 harness + exit gate (branch m10/gp3-smoke)
 
 ## Completion log
 
@@ -82,3 +82,13 @@ Prior ledger: `.superpowers/sdd/progress-m9-campaign.md` (complete).
 - Tests: 4 hostile_eval_integration tests, hostile-evals + verify-hostile-evals (4/4 pass), all workspace tests pass, manual_zero_egress green
 - No new deps
 - Remaining: live-model adversarial evals deferred (requires provider API keys in CI); Windows network enforcement caveat (tested in PKT-SANDBOX)
+
+### PKT-GP3 COMPLETE (2026-07-07)
+- Commits: 88370d7..a2a9183 (5 commits on m10/gp3-smoke, squash merged as 1ae144f)
+- Review: Approved (sonnet task + opus final) — Task review: 0 Critical, 0 Important, 3 Minor (redundant is_file guard, unused s8 params, byte-offset slice). Final review: 0 Critical, 0 Important, 4 Minor (same 3 + s5 shell redirect portability — all fixed in a2a9183).
+- Deliverables: golden_path_3.rs binary (9 steps: fixture/workspace/Delegate, scope-select, worker-loop, scope-denial, sandbox-teeth, kill-switch, orphan-reap, review-apply, evidence TOML), xtask golden-path-3 subcommand (--features test-helpers), regenerated GP-3 delegate walkthrough, PKT-GP3 evidence file
+- Tests: 9/9 steps pass, all workspace tests pass, manual_zero_egress green, fmt + clippy clean
+- No new deps
+- Remaining: 3-OS CI job pending (legion-smoke.yml smoke-gp3); live-model run deferred; PKT-PROPOSAL-SURFACE extraction deferred
+
+## M10 Campaign COMPLETE — all 9/9 packets merged
