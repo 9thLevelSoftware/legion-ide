@@ -1128,10 +1128,10 @@ where
         let mut blocks: Vec<ToolTurnBlock> = Vec::new();
 
         // Extract text content (may be absent or null when tool_calls is present).
-        if let Some(text) = message.get("content").and_then(Value::as_str) {
-            if !text.is_empty() {
-                blocks.push(ToolTurnBlock::Text(text.to_string()));
-            }
+        if let Some(text) = message.get("content").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            blocks.push(ToolTurnBlock::Text(text.to_string()));
         }
 
         // Extract tool_calls array and convert to ToolUse blocks.
