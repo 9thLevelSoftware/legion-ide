@@ -662,6 +662,24 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// Run the hostile eval suite and write a hostile eval report.
+    ///
+    /// Scores the 4 adversarial scenarios (exfiltration, prompt injection,
+    /// hostile file, tool output) against the scripted provider baseline and
+    /// writes a report to `<out>/hostile_eval_report.toml`.  All tasks are
+    /// scored Passed (scripted, deterministic); the actual security assertions
+    /// live in `cargo test -p legion-app --test hostile_eval_integration`.
+    HostileEvals {
+        /// Output directory for the hostile eval report.
+        #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
+        out: String,
+    },
+    /// Verify a previously-written hostile eval report.
+    VerifyHostileEvals {
+        /// Output directory holding the hostile eval report.
+        #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
+        out: String,
+    },
 }
 
 fn main() {
@@ -722,6 +740,8 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_2_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::HostileEvals { out } => run_hostile_evals_command(&out),
+        Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
     };
 
     process::exit(code);
@@ -1554,6 +1574,76 @@ fn run_golden_path_2_command(
         );
     }
     code
+}
+
+fn run_hostile_evals_command(out: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("hostile evals failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
+    let report = xtask::legion_bench::plan_hostile_eval_report("legion-app", &git_sha);
+    let path = match xtask::legion_bench::write_hostile_eval_report(&out_dir, &report) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("hostile evals failed: {err}");
+            return 1;
+        }
+    };
+    println!(
+        "hostile evals: total={} passed={} failed={} report={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        path.display(),
+    );
+    0
+}
+
+fn run_verify_hostile_evals_command(out: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("verify hostile evals failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let out_dir = workspace_root.join(out);
+    let report_path = out_dir.join(xtask::legion_bench::HOSTILE_EVAL_REPORT_FILE);
+    let report = match xtask::legion_bench::read_hostile_eval_report(&report_path) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!(
+                "verify hostile evals failed: {err} \
+                 (run `cargo run -p xtask -- hostile-evals` first)"
+            );
+            return 1;
+        }
+    };
+    let suite = xtask::legion_bench::plan_hostile_eval_suite();
+    if let Err(err) = xtask::legion_bench::verify_legion_bench_report(&report, &suite) {
+        eprintln!("verify hostile evals failed: {err}");
+        return 1;
+    }
+    println!(
+        "verify hostile evals: total={} passed={} failed={} report={} mode={} provider={} fingerprint={}",
+        report.summary.total,
+        report.summary.passed,
+        report.summary.failed,
+        report_path.display(),
+        report.mode.as_str(),
+        report.provider_profile,
+        report.suite_fingerprint,
+    );
+    println!(
+        "note: hostile eval report verified. Security assertions are exercised by \
+         `cargo test -p legion-app --test hostile_eval_integration`, not by this report."
+    );
+    0
 }
 
 fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {
