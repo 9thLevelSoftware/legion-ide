@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use super::{bounded_join, theme};
 
 /// Structured proposal-evidence panel model used by the desktop proposal review surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DesktopProposalEvidencePanelViewModel {
     /// Proposal identifier represented by the checkpoint timeline.
     pub checkpoint_proposal_id: Option<ProposalId>,

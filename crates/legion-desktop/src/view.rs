@@ -24,6 +24,8 @@ pub mod sandbox_panel;
 pub mod scope_picker;
 /// Terminal panel render-model helpers.
 pub mod terminal_panel;
+/// Worker panel view model and renderer for active delegated task monitoring.
+pub mod worker_panel;
 
 #[cfg(feature = "ai")]
 pub use assistant_rail::{
@@ -3438,10 +3440,22 @@ fn render_delegation_console(
                 prompt_label: "desktop delegated context".to_string(),
             });
         }
+        if snapshot.delegated_task_projection.runtime_activation
+            == legion_protocol::DelegatedTaskRuntimeActivationState::Executing
+            && primary_button(ui, "Kill", theme::tokens().accent.red).clicked()
+        {
+            actions.push(DesktopAction::CancelDelegatedTask);
+        }
     });
     section_label(ui, "Approval Queue", Some(theme::tokens().accent.orange));
     render_proposal_cards(ui, snapshot, actions);
     render_delegated_tool_permission_controls(ui, snapshot, actions);
+    section_label(ui, "Worker", Some(theme::tokens().accent.violet));
+    {
+        let panel_vm = worker_panel::DesktopWorkerPanelViewModel::from_snapshot(snapshot);
+        let evidence = proposal_review::DesktopProposalEvidencePanelViewModel::default();
+        worker_panel::render_worker_panel(ui, &panel_vm, &evidence, actions);
+    }
     ui.checkbox(show_trust, "Trust details");
     if *show_trust {
         render_console_section(ui, "Trust", &model.trust_rows, "No trust warnings");

@@ -465,6 +465,8 @@ pub enum DesktopAction {
         /// Scope for the delegated task.
         scope: legion_protocol::DelegatedTaskScope,
     },
+    /// Cancel the currently running delegated task loop via the shared cancellation flag.
+    CancelDelegatedTask,
     /// Record a human review decision for a projected Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal containing the hunk.
@@ -1691,6 +1693,9 @@ impl DesktopCommandBridge {
                 }
                 None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
             },
+            DesktopAction::CancelDelegatedTask => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelDelegatedTask)
+            }
             DesktopAction::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,

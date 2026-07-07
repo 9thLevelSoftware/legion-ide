@@ -3012,6 +3012,8 @@ pub enum CommandDispatchIntent {
         /// Scope for the delegated task.
         scope: legion_protocol::DelegatedTaskScope,
     },
+    /// Cancel the currently running delegated task loop via the shared cancellation flag.
+    CancelDelegatedTask,
     /// Record a human decision for one Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal being reviewed.

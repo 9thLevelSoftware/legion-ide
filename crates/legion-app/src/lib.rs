@@ -841,6 +841,48 @@ pub enum AppDelegatedTaskOutcome {
     },
 }
 
+/// Thread-safe cancellation flag shared between the UI kill switch and the delegated task loop.
+///
+/// The UI thread calls [`SharedCancellationFlag::cancel`] and the delegated task loop polls
+/// [`SharedCancellationFlag::is_cancelled`] before every model turn and every tool execution.
+#[derive(Clone)]
+pub struct SharedCancellationFlag {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SharedCancellationFlag {
+    /// Create a new flag in the non-cancelled state.
+    pub fn new() -> Self {
+        Self {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Signal cancellation. The delegated task loop will observe this on its next poll.
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns true if cancellation has been signalled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Default for SharedCancellationFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "ai")]
+impl legion_agent::agent_loop::DelegatedTaskCancellationProbe for SharedCancellationFlag {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// Tool host for the native delegated task loop backed by `spawn_sandboxed`.
 ///
 /// `TerminalCommand` calls are forwarded to an OS-sandboxed child process;
@@ -8521,6 +8563,8 @@ pub enum AppCommandRequest {
         /// Scope for the delegated task.
         scope: legion_protocol::DelegatedTaskScope,
     },
+    /// Cancel the currently running delegated task loop via the shared cancellation flag.
+    CancelDelegatedTask,
     /// Record a human decision for one Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal being reviewed.
@@ -8871,6 +8915,7 @@ impl CommandExecutionService {
             | AppCommandRequest::StartAiProposal { .. }
             | AppCommandRequest::SendDelegateChat { .. }
             | AppCommandRequest::StartDelegatedTask { .. }
+            | AppCommandRequest::CancelDelegatedTask
             | AppCommandRequest::ReviewDelegateProposalHunk { .. }
             | AppCommandRequest::RecordDelegateToolPermission { .. }
             | AppCommandRequest::RecordLegionWorkflowToolPermission { .. }
@@ -9414,6 +9459,9 @@ impl CommandDispatcher {
                 task_description,
                 scope,
             }),
+            CommandDispatchIntent::CancelDelegatedTask => {
+                Ok(AppCommandRequest::CancelDelegatedTask)
+            }
             CommandDispatchIntent::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,
@@ -13699,6 +13747,11 @@ pub struct AppComposition {
     remote: RemoteComposition,
     legion_cloud_lane: LegionCloudLaneComposition,
     delegate_workflow: DelegateWorkflowState,
+    /// Shared cancellation flag for the currently running delegated task loop, if any.
+    /// Set to `Some` when `start_delegated_task` begins execution; cleared to `None` when the
+    /// loop returns. The UI kill switch calls `cancel_delegated_task` which sets the flag to
+    /// signal the loop to stop before its next model turn or tool execution.
+    active_cancellation_flag: Option<SharedCancellationFlag>,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
@@ -13938,6 +13991,7 @@ impl AppComposition {
             remote: RemoteComposition::default(),
             legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
+            active_cancellation_flag: None,
             delegated_task_plan_contracts: Vec::new(),
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
@@ -14375,6 +14429,22 @@ impl AppComposition {
         } else {
             Err(AppCompositionError::AiRuntime(
                 "Delegate dispatch requires Delegate or Automate mode".to_string(),
+            ))
+        }
+    }
+
+    /// Cancel the currently running delegated task loop by signalling the shared cancellation flag.
+    ///
+    /// Intended to be called from the UI thread while `start_delegated_task` is blocking on a
+    /// background thread. Returns an error if no delegated task is currently running.
+    pub fn cancel_delegated_task(&self) -> Result<(), AppCompositionError> {
+        self.require_delegate_mode()?;
+        if let Some(flag) = &self.active_cancellation_flag {
+            flag.cancel();
+            Ok(())
+        } else {
+            Err(AppCompositionError::AiRuntime(
+                "no delegated task running".to_string(),
             ))
         }
     }
@@ -15087,6 +15157,15 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
         self.lsp_session.set_live_health_for_test(health);
+    }
+
+    /// Test-only: inject a pre-created cancellation flag so that tests can
+    /// pre-cancel it before calling `start_delegated_task`, causing the loop
+    /// to exit immediately with `Cancelled` without making any real API calls.
+    /// PKT-WORKER D3.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_cancellation_flag_for_test(&mut self, flag: SharedCancellationFlag) {
+        self.active_cancellation_flag = Some(flag);
     }
 
     /// Test-only: returns `true` if the LSP session handle is in the `Idle`
@@ -16966,6 +17045,10 @@ impl AppComposition {
                     )))
                 }
             }
+            AppCommandRequest::CancelDelegatedTask => {
+                self.cancel_delegated_task()?;
+                Ok(AppCommandOutcome::Noop)
+            }
             AppCommandRequest::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,
@@ -17797,8 +17880,8 @@ impl AppComposition {
         provider: &dyn legion_ai::tool_calls::ToolCallingProvider,
     ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
         use legion_agent::agent_loop::{
-            DelegatedTaskAuditSink, DelegatedTaskCancellationProbe, DelegatedTaskLoopConfig,
-            DelegatedTaskLoopResult, run_delegated_task_loop,
+            DelegatedTaskAuditSink, DelegatedTaskLoopConfig, DelegatedTaskLoopResult,
+            run_delegated_task_loop,
         };
         use legion_protocol::DelegatedTaskLoopBudget;
 
@@ -17880,13 +17963,10 @@ impl AppComposition {
         }
         let mut audit_sink = VecAuditSink { steps: Vec::new() };
 
-        // Cancellation probe — always returns false; PKT-WORKER wires real cancellation.
-        struct NeverCancelled;
-        impl DelegatedTaskCancellationProbe for NeverCancelled {
-            fn is_cancelled(&self) -> bool {
-                false
-            }
-        }
+        // Cancellation probe — reuse a pre-injected flag (e.g., from tests) or create a fresh one.
+        // The UI kill switch calls `cancel_delegated_task` which sets the Arc<AtomicBool>.
+        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
+        self.active_cancellation_flag = Some(cancellation_flag.clone());
 
         // Capability broker — scope enforcement is the primary gate inside
         // the loop; the loop's scope validator and containment checks enforce
@@ -17928,15 +18008,38 @@ impl AppComposition {
             forbidden_paths: scope.forbidden_paths.iter().map(|p| p.0.clone()).collect(),
         };
 
-        let loop_result = run_delegated_task_loop(
+        // Signal that the loop is executing; polled by the projection to show live status.
+        self.delegate_workflow
+            .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
+
+        let loop_result = match run_delegated_task_loop(
             &config,
             provider,
             &tool_host,
             &mut audit_sink,
-            &NeverCancelled,
+            &cancellation_flag,
             &allow_all_broker,
-        )
-        .map_err(|e| AppCompositionError::AiRuntime(format!("delegated loop error: {e}")))?;
+        ) {
+            Ok(result) => {
+                // Clear the flag on the success path.
+                self.active_cancellation_flag = None;
+                result
+            }
+            Err(e) => {
+                // On error: clear the flag, mark the activation as Failed, run cleanup,
+                // then propagate the error.  Without this the activation stays stuck at
+                // Executing for the rest of the session.
+                self.active_cancellation_flag = None;
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {
+                    // Cleanup failure is non-fatal — orphan reaping handles stale sandboxes.
+                }
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "delegated loop error: {e}"
+                )));
+            }
+        };
 
         // Update workflow activation state based on loop outcome.
         match &loop_result {
@@ -17944,6 +18047,10 @@ impl AppComposition {
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
                 );
+            }
+            DelegatedTaskLoopResult::Cancelled => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Cancelled);
             }
             _ => {
                 self.delegate_workflow
@@ -29214,5 +29321,131 @@ mod lsp_lazy_start_tests {
             "session must have re-attempted (Refused again) after restart"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod pkt_worker_tests {
+    use super::*;
+
+    // ── D2: SharedCancellationFlag unit tests ────────────────────────────────
+
+    #[test]
+    fn shared_cancellation_flag_starts_not_cancelled() {
+        let flag = SharedCancellationFlag::new();
+        assert!(!flag.is_cancelled(), "new flag must not be cancelled");
+    }
+
+    #[test]
+    fn shared_cancellation_flag_cancel_makes_is_cancelled_true() {
+        let flag = SharedCancellationFlag::new();
+        flag.cancel();
+        assert!(
+            flag.is_cancelled(),
+            "flag must report cancelled after cancel()"
+        );
+    }
+
+    #[test]
+    fn shared_cancellation_flag_clone_shares_state() {
+        let flag = SharedCancellationFlag::new();
+        let clone = flag.clone();
+        flag.cancel();
+        assert!(
+            clone.is_cancelled(),
+            "clone must observe cancellation signalled on original"
+        );
+    }
+
+    #[test]
+    fn cancel_delegated_task_returns_error_when_no_task_running() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Delegate);
+        let result = app.cancel_delegated_task();
+        assert!(
+            result.is_err(),
+            "cancel_delegated_task must fail when no task is running"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no delegated task running"),
+            "error must mention 'no delegated task running', got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn cancel_delegated_task_returns_error_outside_delegate_mode() {
+        let app = AppComposition::new();
+        // Default product mode is Manual, not Delegate.
+        let result = app.cancel_delegated_task();
+        assert!(result.is_err(), "must fail outside delegate mode");
+    }
+
+    // ── D3: pre-cancelled flag → Cancelled activation state ─────────────────
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn pre_cancelled_flag_causes_loop_to_exit_with_cancelled_state() {
+        use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+        use legion_protocol::{
+            CanonicalPath, DelegatedTaskRiskTolerance, DelegatedTaskScope,
+            DelegatedTaskScopeTargetKind, LegionToolKind,
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Create an isolated temp workspace so shell_projection_snapshot succeeds.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let workspace_root = std::env::temp_dir().join(format!("legion-pkt-worker-d3-{nanos}"));
+        std::fs::create_dir_all(&workspace_root).expect("create temp workspace");
+
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &workspace_root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("test".to_string()),
+        )
+        .expect("open workspace");
+        app.set_product_mode(AppProductMode::Delegate);
+
+        // Pre-inject a cancelled flag — the loop will observe this before its
+        // first model turn and return Cancelled without making any API calls.
+        let flag = SharedCancellationFlag::new();
+        flag.cancel();
+        app.inject_cancellation_flag_for_test(flag);
+
+        let provider = ScriptedToolCallingProviderBuilder::new().build("pre-cancelled-test");
+        let scope = DelegatedTaskScope {
+            target_kind: DelegatedTaskScopeTargetKind::Repo,
+            workspace_root: CanonicalPath(workspace_root.to_string_lossy().into_owned()),
+            target_path: None,
+            risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+            allowed_tools: vec![LegionToolKind::Read],
+            forbidden_paths: vec![],
+            schema_version: 1,
+        };
+
+        let outcome = app
+            .start_delegated_task("test task".to_string(), scope, &provider)
+            .expect("start_delegated_task must not error");
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+
+        assert!(
+            matches!(outcome, AppDelegatedTaskOutcome::Cancelled),
+            "pre-cancelled flag must cause Cancelled outcome, got: {outcome:?}"
+        );
+
+        // Verify the activation state is set to Cancelled in the projection.
+        let snapshot = app
+            .shell_projection_snapshot("Legion")
+            .expect("snapshot must succeed");
+        assert_eq!(
+            snapshot.delegated_task_projection.runtime_activation,
+            DelegatedTaskRuntimeActivationState::Cancelled,
+            "runtime_activation must be Cancelled after loop exits with pre-cancelled flag"
+        );
     }
 }
