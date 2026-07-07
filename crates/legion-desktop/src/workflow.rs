@@ -501,6 +501,8 @@ pub enum DesktopDelegatedTaskStatus {
     ProposalHunkReviewed,
     /// Delegate tool permission decision was recorded.
     ToolPermissionRecorded,
+    /// Delegated task loop completed (may have completed, blocked, or been cancelled).
+    TaskLoopCompleted,
 }
 
 /// Desktop-facing status for Legion workflow command-center requests.
@@ -2411,6 +2413,42 @@ impl DesktopRuntime {
                     format!("Worktree evidence exported to {path}"),
                 );
                 DesktopWorkflowOutcome::Noop
+            }
+            AppCommandOutcome::DelegatedTaskCompleted(outcome) => {
+                use legion_app::AppDelegatedTaskOutcome;
+                let message = match outcome.as_ref() {
+                    AppDelegatedTaskOutcome::Completed {
+                        final_message,
+                        proposals,
+                        audit_steps,
+                    } => format!(
+                        "Delegated task completed proposals={} steps={}; {}",
+                        proposals.len(),
+                        audit_steps.len(),
+                        final_message.lines().next().unwrap_or("done")
+                    ),
+                    AppDelegatedTaskOutcome::BudgetExhausted {
+                        reason,
+                        audit_steps,
+                    } => format!(
+                        "Delegated task budget exhausted steps={}: {reason}",
+                        audit_steps.len()
+                    ),
+                    AppDelegatedTaskOutcome::Blocked { reason, .. } => {
+                        format!("Delegated task blocked: {reason}")
+                    }
+                    AppDelegatedTaskOutcome::Cancelled => "Delegated task cancelled".to_string(),
+                    AppDelegatedTaskOutcome::SandboxAllocationFailed { reason } => {
+                        format!("Delegated task sandbox failed: {reason}")
+                    }
+                };
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: None,
+                    proposal_id: None,
+                    status: DesktopDelegatedTaskStatus::TaskLoopCompleted,
+                    message,
+                }
             }
         }
     }

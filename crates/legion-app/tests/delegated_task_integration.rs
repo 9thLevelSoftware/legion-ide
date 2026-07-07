@@ -1,12 +1,18 @@
 use std::{fs, path::PathBuf};
 
-use legion_app::{AppComposition, AppDelegatedTaskExecutionOutcome, AppProductMode};
+use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+#[cfg(feature = "ai")]
+use legion_app::AppDelegatedToolHost;
+use legion_app::{
+    AppComposition, AppDelegatedTaskExecutionOutcome, AppDelegatedTaskOutcome, AppProductMode,
+};
 use legion_protocol::{
-    CausalityId, CorrelationId, DelegatedTaskPlanContract, DelegatedTaskPlanId,
+    CanonicalPath, CausalityId, CorrelationId, DelegatedTaskPlanContract, DelegatedTaskPlanId,
     DelegatedTaskPlanningBoundaryInput, DelegatedTaskProposalHunkDisposition,
-    DelegatedTaskRuntimeActivationState, DelegatedTaskToolPermissionDecision, FileFingerprint,
-    PrincipalId, ProposalPayload, TimestampMillis, WorkspaceId, WorkspaceTrustState,
-    delegated_task_plan_from_boundary_input,
+    DelegatedTaskRiskTolerance, DelegatedTaskRuntimeActivationState, DelegatedTaskScope,
+    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileFingerprint,
+    LegionToolKind, PrincipalId, ProposalPayload, TimestampMillis, WorkspaceId,
+    WorkspaceTrustState, delegated_task_plan_from_boundary_input,
 };
 
 fn delegated_plan_contract(plan_id: DelegatedTaskPlanId) -> DelegatedTaskPlanContract {
@@ -528,6 +534,169 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     assert_eq!(outcome.projection.tool_permission_request_count, 1);
 }
 
+/// Build a repo-scoped `DelegatedTaskScope` for test workspace at `root`.
+fn test_scope(root: &std::path::Path) -> DelegatedTaskScope {
+    DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(root.to_string_lossy().into_owned()),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![
+            LegionToolKind::Read,
+            LegionToolKind::Grep,
+            LegionToolKind::Glob,
+            LegionToolKind::Outline,
+            LegionToolKind::EditAsProposal,
+        ],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    }
+}
+
+#[test]
+fn start_delegated_task_completes_with_scripted_end_turn() {
+    let root = temp_workspace("start-task-complete");
+    fs::write(root.join("hello.rs"), "fn hello() {}\n").expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("start-task-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("Task complete: read the file and understood the structure.")
+        .build("test-scripted");
+
+    let outcome = app
+        .start_delegated_task(
+            "Describe the structure of hello.rs".to_string(),
+            test_scope(&root),
+            &provider,
+        )
+        .expect("start_delegated_task should succeed");
+
+    match outcome {
+        AppDelegatedTaskOutcome::Completed {
+            final_message,
+            proposals,
+            audit_steps,
+        } => {
+            assert!(
+                final_message.contains("Task complete"),
+                "final message should include scripted text; got: {final_message}"
+            );
+            // TODO(PKT-PROPOSAL-SURFACE): proposals will be non-empty once DelegatedTaskLoopResult surfaces them
+            assert_eq!(
+                proposals.len(),
+                0,
+                "no proposals expected from end_turn only run"
+            );
+            assert!(
+                !audit_steps.is_empty(),
+                "at least one audit step should be recorded"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[test]
+fn start_delegated_task_audit_steps_are_paired_for_tool_call() {
+    use legion_protocol::DelegatedTaskLoopStepKind;
+
+    let root = temp_workspace("start-task-paired");
+    fs::write(root.join("target.rs"), "fn target() {}\n").expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("start-task-paired-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("tool-1", "read", serde_json::json!({ "path": "target.rs" }))
+        .end_turn("Read target.rs successfully.")
+        .build("test-scripted-paired");
+
+    let outcome = app
+        .start_delegated_task(
+            "Read target.rs and summarize".to_string(),
+            test_scope(&root),
+            &provider,
+        )
+        .expect("start_delegated_task should succeed");
+
+    match outcome {
+        AppDelegatedTaskOutcome::Completed { audit_steps, .. } => {
+            // There must be a ToolCallRequest step paired with a ToolCallResult.
+            let request_steps: Vec<_> = audit_steps
+                .iter()
+                .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRequest)
+                .collect();
+            let result_steps: Vec<_> = audit_steps
+                .iter()
+                .filter(|s| {
+                    s.kind == DelegatedTaskLoopStepKind::ToolCallResult
+                        || s.kind == DelegatedTaskLoopStepKind::ToolCallRejected
+                })
+                .collect();
+
+            assert_eq!(
+                request_steps.len(),
+                result_steps.len(),
+                "every ToolCallRequest must have a paired result/rejection"
+            );
+
+            for request in &request_steps {
+                let paired = result_steps
+                    .iter()
+                    .any(|r| r.causality_id == request.causality_id);
+                assert!(
+                    paired,
+                    "request with causality_id={} has no paired result",
+                    request.causality_id
+                );
+            }
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[test]
+fn start_delegated_task_rejects_manual_mode() {
+    let root = temp_workspace("start-task-manual-reject");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("manual-reject-test".to_string()),
+    )
+    .expect("workspace should open");
+    // Manual mode (default): should reject.
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("should not reach here")
+        .build("test-scripted-reject");
+
+    let err = app
+        .start_delegated_task(
+            "attempt in manual mode".to_string(),
+            test_scope(&root),
+            &provider,
+        )
+        .expect_err("manual mode should reject start_delegated_task");
+
+    assert!(
+        err.to_string().contains("Delegate dispatch requires"),
+        "error should mention delegate requirement; got: {err}"
+    );
+}
+
 #[test]
 fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_it() {
     let reap_root =
@@ -555,4 +724,83 @@ fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_i
     );
 
     let _ = fs::remove_dir_all(&reap_root);
+}
+
+#[test]
+#[cfg(feature = "ai")]
+fn app_delegated_tool_host_runs_echo_command() {
+    use legion_agent::agent_loop::DelegatedToolHost;
+
+    let tmp = temp_workspace("tool-host-echo");
+    let host = AppDelegatedToolHost {
+        worktree_root: tmp.root.clone(),
+        allowed_egress: std::collections::BTreeSet::new(),
+    };
+
+    let output = host
+        .run_terminal_command("echo hello", None, None)
+        .expect("echo should succeed");
+
+    assert!(
+        output.contains("hello"),
+        "output should contain 'hello'; got: {output}"
+    );
+}
+
+#[test]
+fn start_delegated_task_rejects_forbidden_path_read() {
+    use legion_protocol::DelegatedTaskLoopStepKind;
+
+    let root = temp_workspace("start-task-forbidden");
+    fs::write(root.join("secrets.txt"), "top secret data\n")
+        .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("forbidden-path-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    // Scope forbids reading secrets.txt. The loop resolves tool paths against
+    // the sandbox worktree and then maps them back to workspace-absolute paths,
+    // so the forbidden-path entry must be an absolute path.
+    let scope = DelegatedTaskScope {
+        forbidden_paths: vec![CanonicalPath(
+            root.join("secrets.txt").to_string_lossy().into_owned(),
+        )],
+        ..test_scope(&root)
+    };
+
+    // Scripted provider: attempt to read the forbidden file, then end turn.
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "tool-forbidden",
+            "read",
+            serde_json::json!({ "path": "secrets.txt" }),
+        )
+        .end_turn("Done after forbidden read attempt.")
+        .build("test-scripted-forbidden");
+
+    let outcome = app
+        .start_delegated_task("Try to read secrets.txt".to_string(), scope, &provider)
+        .expect("start_delegated_task should succeed even with a rejected tool call");
+
+    // A non-retryable ScopeDenied rejection stops the loop with Blocked.
+    // The audit_steps carried by Blocked must include the ToolCallRejected entry.
+    match outcome {
+        AppDelegatedTaskOutcome::Blocked { audit_steps, .. } => {
+            let rejected_steps: Vec<_> = audit_steps
+                .iter()
+                .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRejected)
+                .collect();
+            assert!(
+                !rejected_steps.is_empty(),
+                "at least one ToolCallRejected step expected when forbidden path is accessed; \
+                 got audit steps: {audit_steps:?}"
+            );
+        }
+        other => panic!("expected Blocked (scope denial is non-retryable), got {other:?}"),
+    }
 }

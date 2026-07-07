@@ -458,6 +458,13 @@ pub enum DesktopAction {
         /// Display-safe prompt label.
         prompt_label: String,
     },
+    /// Start a delegated task loop using the native agent loop.
+    StartDelegatedTask {
+        /// Display-safe task description.
+        task_description: String,
+        /// Scope for the delegated task.
+        scope: legion_protocol::DelegatedTaskScope,
+    },
     /// Record a human review decision for a projected Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal containing the hunk.
@@ -1672,6 +1679,18 @@ impl DesktopCommandBridge {
                     None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
                 }
             }
+            DesktopAction::StartDelegatedTask {
+                task_description,
+                scope,
+            } => match normalized_instruction(task_description) {
+                Some(task_description) => {
+                    DesktopBridgeOutput::Intent(CommandDispatchIntent::StartDelegatedTask {
+                        task_description,
+                        scope,
+                    })
+                }
+                None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidInstructionLabel),
+            },
             DesktopAction::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,

@@ -3005,6 +3005,13 @@ pub enum CommandDispatchIntent {
         /// Display-safe prompt label.
         prompt_label: String,
     },
+    /// Start a delegated task loop using the native agent loop.
+    StartDelegatedTask {
+        /// Display-safe task description.
+        task_description: String,
+        /// Scope for the delegated task.
+        scope: legion_protocol::DelegatedTaskScope,
+    },
     /// Record a human decision for one Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal being reviewed.

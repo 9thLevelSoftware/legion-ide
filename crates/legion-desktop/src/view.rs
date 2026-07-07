@@ -3423,6 +3423,8 @@ fn render_delegation_console(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegation Console", DesktopProductMode::Delegates);
+    section_label(ui, "Task Scope", Some(theme::tokens().accent.violet));
+    scope_picker::render_scope_picker(ui, &DesktopScopePickerViewModel::default());
     section_label(ui, "Delegate Task", Some(theme::tokens().accent.violet));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::muted("Delegate a scoped task to projected agents"));

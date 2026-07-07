@@ -806,6 +806,110 @@ pub enum AppDelegatedTaskExecutionOutcome {
     ProposalReady(Box<AssistedAiEditProposalOutput>),
 }
 
+/// App-owned outcome for a delegated task loop run started via `StartDelegatedTask`.
+#[derive(Debug, Clone)]
+pub enum AppDelegatedTaskOutcome {
+    /// The agent loop completed naturally; proposals may be empty if no edits were proposed.
+    Completed {
+        /// Final text from the model.
+        final_message: String,
+        /// Edit proposals extracted from the sandbox worktree.
+        proposals: Vec<AssistedAiEditProposalOutput>,
+        /// Audit steps recorded during the run.
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    },
+    /// Budget was exhausted before the loop completed.
+    BudgetExhausted {
+        /// Human-readable reason label.
+        reason: String,
+        /// Audit steps recorded before exhaustion.
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    },
+    /// A non-retryable policy denial stopped the loop.
+    Blocked {
+        /// Human-readable reason label.
+        reason: String,
+        /// Audit steps recorded before the loop was blocked.
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    },
+    /// The loop was cancelled via the cancellation probe.
+    Cancelled,
+    /// Sandbox allocation failed before the loop could start.
+    SandboxAllocationFailed {
+        /// Human-readable reason label.
+        reason: String,
+    },
+}
+
+/// Tool host for the native delegated task loop backed by `spawn_sandboxed`.
+///
+/// `TerminalCommand` calls are forwarded to an OS-sandboxed child process;
+/// `McpPassthrough` calls return an error — MCP integration is wired in a
+/// later packet.
+#[cfg(feature = "ai")]
+pub struct AppDelegatedToolHost {
+    /// Worktree root for spawned commands (writable root for the sandbox).
+    pub worktree_root: PathBuf,
+    /// Allowed network egress destinations (empty = no network).
+    pub allowed_egress: std::collections::BTreeSet<String>,
+}
+
+#[cfg(feature = "ai")]
+impl legion_agent::agent_loop::DelegatedToolHost for AppDelegatedToolHost {
+    fn run_terminal_command(
+        &self,
+        command: &str,
+        workdir: Option<&Path>,
+        timeout_seconds: Option<u32>,
+    ) -> Result<String, String> {
+        use legion_sandbox::spawn::{SandboxSpawnSpec, spawn_sandboxed};
+        use std::time::Duration;
+
+        let working_dir = workdir.unwrap_or(&self.worktree_root).to_path_buf();
+        let timeout = Duration::from_secs(u64::from(timeout_seconds.unwrap_or(30)));
+
+        let spec = SandboxSpawnSpec {
+            program: if cfg!(windows) {
+                PathBuf::from("cmd.exe")
+            } else {
+                PathBuf::from("/bin/sh")
+            },
+            args: if cfg!(windows) {
+                vec!["/C".to_string(), command.to_string()]
+            } else {
+                vec!["-c".to_string(), command.to_string()]
+            },
+            working_dir,
+            writable_root: self.worktree_root.clone(),
+            allowed_egress: self.allowed_egress.clone(),
+            timeout,
+            env: vec![],
+        };
+
+        match spawn_sandboxed(&spec) {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.timed_out {
+                    Err(format!("command timed out after {}s", timeout.as_secs()))
+                } else {
+                    Ok(format!("{stdout}{stderr}"))
+                }
+            }
+            Err(e) => Err(format!("sandbox spawn failed: {e}")),
+        }
+    }
+
+    fn call_mcp_tool(
+        &self,
+        _server_id: &str,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        Err("MCP passthrough not yet available in production dispatch".to_string())
+    }
+}
+
 /// App-owned outcome for a Delegate chat turn.
 #[derive(Debug, Clone)]
 pub struct AppDelegateChatOutcome {
@@ -8410,6 +8514,13 @@ pub enum AppCommandRequest {
         /// Display-safe prompt label.
         prompt_label: String,
     },
+    /// Start a delegated task loop using the native agent loop.
+    StartDelegatedTask {
+        /// Display-safe task description.
+        task_description: String,
+        /// Scope for the delegated task.
+        scope: legion_protocol::DelegatedTaskScope,
+    },
     /// Record a human decision for one Delegate proposal hunk.
     ReviewDelegateProposalHunk {
         /// Proposal being reviewed.
@@ -8759,6 +8870,7 @@ impl CommandExecutionService {
             | AppCommandRequest::StartAiExplain { .. }
             | AppCommandRequest::StartAiProposal { .. }
             | AppCommandRequest::SendDelegateChat { .. }
+            | AppCommandRequest::StartDelegatedTask { .. }
             | AppCommandRequest::ReviewDelegateProposalHunk { .. }
             | AppCommandRequest::RecordDelegateToolPermission { .. }
             | AppCommandRequest::RecordLegionWorkflowToolPermission { .. }
@@ -9295,6 +9407,13 @@ impl CommandDispatcher {
             CommandDispatchIntent::SendDelegateChat { prompt_label } => {
                 Ok(AppCommandRequest::SendDelegateChat { prompt_label })
             }
+            CommandDispatchIntent::StartDelegatedTask {
+                task_description,
+                scope,
+            } => Ok(AppCommandRequest::StartDelegatedTask {
+                task_description,
+                scope,
+            }),
             CommandDispatchIntent::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,
@@ -11688,6 +11807,8 @@ pub enum AppCommandOutcome {
     CollaborationOperationApplied(TextTransactionDescriptor),
     /// Delegate chat turn completed with metadata-only context citations.
     DelegateChatCompleted(Box<AppDelegateChatOutcome>),
+    /// Delegated task loop completed with outcome, proposals, and audit steps.
+    DelegatedTaskCompleted(Box<AppDelegatedTaskOutcome>),
     /// Delegate proposal hunk review changed after human input.
     DelegateProposalHunkReviewed(DelegatedTaskProjection),
     /// Delegate tool permission row changed after human input.
@@ -16822,6 +16943,29 @@ impl AppComposition {
                     self.send_delegate_chat(prompt_label)?,
                 )))
             }
+            AppCommandRequest::StartDelegatedTask {
+                task_description,
+                scope,
+            } => {
+                #[cfg(feature = "ai")]
+                {
+                    let provider =
+                        legion_ai_providers::AnthropicMessagesClient::from_env("anthropic");
+                    Ok(AppCommandOutcome::DelegatedTaskCompleted(Box::new(
+                        self.start_delegated_task(task_description, scope, &provider)?,
+                    )))
+                }
+                #[cfg(not(feature = "ai"))]
+                {
+                    let _ = (task_description, scope);
+                    Ok(AppCommandOutcome::DelegatedTaskCompleted(Box::new(
+                        AppDelegatedTaskOutcome::Blocked {
+                            reason: "AI feature not enabled in this build".to_string(),
+                            audit_steps: vec![],
+                        },
+                    )))
+                }
+            }
             AppCommandRequest::ReviewDelegateProposalHunk {
                 proposal_id,
                 hunk_id,
@@ -17631,6 +17775,219 @@ impl AppComposition {
         Ok(AppDelegatedTaskExecutionOutcome::ProposalReady(Box::new(
             proposal,
         )))
+    }
+
+    /// Run a delegated task loop to completion inside an allocated sandbox.
+    ///
+    /// # Blocking
+    ///
+    /// This method blocks the calling thread until the loop terminates (completion,
+    /// budget exhaustion, cancellation, or scope denial). Callers must run it off
+    /// the main/UI thread. Async dispatch and cancellation wiring land in PKT-WORKER.
+    ///
+    /// Accepts a `&dyn ToolCallingProvider` so tests can inject a scripted
+    /// provider while the production call site wires in the Anthropic client.
+    /// MCP passthrough is not yet available; the tool host returns an honest
+    /// error for any `mcp-passthrough` calls.
+    #[cfg(feature = "ai")]
+    pub fn start_delegated_task(
+        &mut self,
+        task_description: String,
+        scope: legion_protocol::DelegatedTaskScope,
+        provider: &dyn legion_ai::tool_calls::ToolCallingProvider,
+    ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
+        use legion_agent::agent_loop::{
+            DelegatedTaskAuditSink, DelegatedTaskCancellationProbe, DelegatedTaskLoopConfig,
+            DelegatedTaskLoopResult, run_delegated_task_loop,
+        };
+        use legion_protocol::DelegatedTaskLoopBudget;
+
+        self.require_delegate_mode()?;
+
+        let event_context = self.next_event_context();
+        let correlation_id = event_context.correlation_id;
+        let causality_id = event_context.causality_id;
+        let event_sequence = self.event_sequence_generator.next();
+
+        let workspace_root = self.workspace_root_path();
+
+        // Allocate the sandbox worktree for this task run.
+        let task_id = uuid::Uuid::new_v4().to_string();
+
+        // Initialize the AgentRuntime state machine: Observing → Planning → Proposing.
+        let run_id = legion_protocol::AgentRunId(format!("run-{task_id}"));
+        let mut agent_runtime = AgentRuntime::new(run_id);
+        agent_runtime
+            .transition(
+                legion_protocol::AgentRunState::Planning,
+                "task.start",
+                correlation_id,
+                causality_id,
+                event_sequence,
+            )
+            .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
+        agent_runtime
+            .transition(
+                legion_protocol::AgentRunState::Proposing,
+                "task.propose",
+                correlation_id,
+                causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|e| AppCompositionError::AiRuntime(e.to_string()))?;
+        // agent_runtime state is validated; it is not stored as the runtime
+        // registration hook (PKT-AGENT-REG) is tracked for a future packet.
+        drop(agent_runtime);
+
+        let mut orchestrator =
+            DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &task_id);
+
+        // The permission for the production dispatch is an implicit Allow
+        // since `require_delegate_mode` already enforces delegate context.
+        let implicit_permission =
+            delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+                request_id: format!("start.delegated.{task_id}"),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some(task_id.clone()),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+                labels: vec![],
+                schema_version: 1,
+            });
+
+        orchestrator.initialize(&implicit_permission).map_err(|e| {
+            AppCompositionError::AiRuntime(format!("sandbox allocation failed: {e}"))
+        })?;
+        self.delegate_workflow
+            .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
+        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+
+        // Build the tool host backed by `spawn_sandboxed`.
+        let tool_host = AppDelegatedToolHost {
+            worktree_root: sandbox_path.clone(),
+            allowed_egress: std::collections::BTreeSet::new(),
+        };
+
+        // Audit sink that collects step records.
+        struct VecAuditSink {
+            steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+        }
+        impl DelegatedTaskAuditSink for VecAuditSink {
+            fn record_step(&mut self, step: legion_protocol::DelegatedTaskLoopStepRecord) {
+                self.steps.push(step);
+            }
+        }
+        let mut audit_sink = VecAuditSink { steps: Vec::new() };
+
+        // Cancellation probe — always returns false; PKT-WORKER wires real cancellation.
+        struct NeverCancelled;
+        impl DelegatedTaskCancellationProbe for NeverCancelled {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+        }
+
+        // Capability broker — scope enforcement is the primary gate inside
+        // the loop; the loop's scope validator and containment checks enforce
+        // restrictions before any tool executor runs.  The broker here grants
+        // all capability requests so it does not double-deny tools that
+        // already passed scope validation.
+        struct AllowAllCapabilityBroker;
+        impl legion_protocol::CapabilityBrokerPort for AllowAllCapabilityBroker {
+            fn handle(&self, request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
+                let cap_id = match &request {
+                    CapabilityRequest::Request { capability_id, .. } => capability_id.clone(),
+                    _ => CapabilityId("unknown".to_string()),
+                };
+                Ok(CapabilityResponse::Decision(CapabilityDecision {
+                    decision_id: CapabilityDecisionId(1),
+                    granted: true,
+                    capability: cap_id,
+                    reason: None,
+                }))
+            }
+        }
+        let allow_all_broker = AllowAllCapabilityBroker;
+
+        let config = DelegatedTaskLoopConfig {
+            system_prompt: concat!(
+                "You are a focused, proposal-mediated coding agent running inside a sandbox. ",
+                "Use the available tools to read the codebase and emit edit proposals. ",
+                "Do not attempt network access or writes outside the worktree. ",
+                "Complete the task and call end_turn when done."
+            )
+            .to_string(),
+            initial_message: task_description,
+            model: "claude-sonnet-4-20250514".to_string(),
+            provider: "anthropic".to_string(),
+            budget: DelegatedTaskLoopBudget::default(),
+            workspace_root: workspace_root.clone(),
+            worktree_root: sandbox_path.clone(),
+            scope: scope.clone(),
+            forbidden_paths: scope.forbidden_paths.iter().map(|p| p.0.clone()).collect(),
+        };
+
+        let loop_result = run_delegated_task_loop(
+            &config,
+            provider,
+            &tool_host,
+            &mut audit_sink,
+            &NeverCancelled,
+            &allow_all_broker,
+        )
+        .map_err(|e| AppCompositionError::AiRuntime(format!("delegated loop error: {e}")))?;
+
+        // Update workflow activation state based on loop outcome.
+        match &loop_result {
+            DelegatedTaskLoopResult::Completed { .. } => {
+                self.delegate_workflow.set_runtime_activation(
+                    DelegatedTaskRuntimeActivationState::WaitingForApproval,
+                );
+            }
+            _ => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Blocked);
+            }
+        }
+
+        // Best-effort cleanup; failure is non-fatal and does not override the loop outcome.
+        if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {
+            // Cleanup failure is non-fatal — the sandbox directory may persist on disk.
+            // Lease-based orphan reaping (reap_orphaned_sandboxes) handles stale sandboxes.
+        }
+
+        let audit_steps = audit_sink.steps;
+
+        Ok(match loop_result {
+            DelegatedTaskLoopResult::Completed { final_message } => {
+                // The loop's EditAsProposal executor generates proposals in-memory
+                // but DelegatedTaskLoopResult does not yet surface them.
+                // Proposal extraction requires loop API changes (tracked for a future packet).
+                AppDelegatedTaskOutcome::Completed {
+                    final_message,
+                    proposals: vec![],
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::BudgetExhausted { reason } => {
+                AppDelegatedTaskOutcome::BudgetExhausted {
+                    reason,
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::MaxTokensExhausted => {
+                AppDelegatedTaskOutcome::BudgetExhausted {
+                    reason: "max tokens exhausted on every model turn".to_string(),
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::Cancelled => AppDelegatedTaskOutcome::Cancelled,
+            DelegatedTaskLoopResult::Blocked { reason } => AppDelegatedTaskOutcome::Blocked {
+                reason,
+                audit_steps,
+            },
+        })
     }
 
     /// Replace app-owned Legion workflow session metadata for tests and smoke harnesses.
