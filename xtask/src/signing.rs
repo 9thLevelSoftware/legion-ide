@@ -196,9 +196,7 @@ fn resolve_from_env(config: &SigningConfig) -> SignerResolution {
         Ok(bytes) => Zeroizing::new(bytes),
         Err(err) => {
             return SignerResolution::Unavailable {
-                reason: format!(
-                    "env var `{var_name}` is not a valid base64 Ed25519 seed: {err}"
-                ),
+                reason: format!("env var `{var_name}` is not a valid base64 Ed25519 seed: {err}"),
             };
         }
     };
@@ -213,7 +211,10 @@ fn resolve_from_env(config: &SigningConfig) -> SignerResolution {
         };
     }
 
-    let seed_arr: [u8; 32] = seed_bytes.as_slice().try_into().expect("length checked above");
+    let seed_arr: [u8; 32] = seed_bytes
+        .as_slice()
+        .try_into()
+        .expect("length checked above");
     let signer = DalekSigner::from_seed(&seed_arr);
     // seed_bytes is dropped (and zeroed) by Zeroizing's Drop impl here.
 
@@ -272,13 +273,14 @@ fn resolve_from_keyring(config: &SigningConfig) -> SignerResolution {
         let len = seed_bytes.len();
         // seed_bytes is dropped (and zeroed) here by Zeroizing's Drop impl.
         return SignerResolution::Unavailable {
-            reason: format!(
-                "keyring entry decoded to {len} bytes; expected 32-byte Ed25519 seed"
-            ),
+            reason: format!("keyring entry decoded to {len} bytes; expected 32-byte Ed25519 seed"),
         };
     }
 
-    let seed_arr: [u8; 32] = seed_bytes.as_slice().try_into().expect("length checked above");
+    let seed_arr: [u8; 32] = seed_bytes
+        .as_slice()
+        .try_into()
+        .expect("length checked above");
     let signer = DalekSigner::from_seed(&seed_arr);
     // seed_bytes is dropped (and zeroed) by Zeroizing's Drop impl here.
 

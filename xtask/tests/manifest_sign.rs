@@ -10,8 +10,7 @@
 //!   does not stay in the environment.
 
 use xtask::signing::{
-    DalekSigner, Signer, SignerResolution, SigningConfig, resolve_signer,
-    verify_ed25519_signature,
+    DalekSigner, Signer, SignerResolution, SigningConfig, resolve_signer, verify_ed25519_signature,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,8 +53,7 @@ fn signing_keypair_roundtrip() {
     assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
     assert_eq!(vk.len(), 32, "Ed25519 verifying key must be 32 bytes");
 
-    verify_ed25519_signature(data, &sig, &vk)
-        .expect("verify should succeed for a valid signature");
+    verify_ed25519_signature(data, &sig, &vk).expect("verify should succeed for a valid signature");
 }
 
 /// Changing the manifest body (data) makes verification fail.
@@ -90,10 +88,7 @@ fn tampered_signature_fails_verification() {
     sig[0] ^= 0x01;
 
     let result = verify_ed25519_signature(data, &sig, &vk);
-    assert!(
-        result.is_err(),
-        "tampered signature must fail verification"
-    );
+    assert!(result.is_err(), "tampered signature must fail verification");
 }
 
 /// Modifying an artifact sha256 in the manifest payload makes verification fail.
@@ -105,7 +100,9 @@ fn tampered_artifact_hash_fails_verification() {
 
     let manifest_data =
         b"schema_version = 1\nsha256 = \"aabbccdd1122334455667788\"\npackage_name = \"legion-desktop\"";
-    let sig = signer.sign_bytes(manifest_data).expect("sign original manifest");
+    let sig = signer
+        .sign_bytes(manifest_data)
+        .expect("sign original manifest");
 
     // Tamper: change the sha256 field value.
     let tampered =
@@ -152,10 +149,7 @@ fn unsigned_beta_status_when_env_signer_unavailable() {
 
     match resolve_signer(&config) {
         SignerResolution::Unavailable { reason } => {
-            assert!(
-                !reason.is_empty(),
-                "unavailable reason should be non-empty"
-            );
+            assert!(!reason.is_empty(), "unavailable reason should be non-empty");
         }
         SignerResolution::Available(_) => {
             panic!("env resolver should be Unavailable when env var is not set");
@@ -376,7 +370,9 @@ fn release_manifest_v1_validates_well_formed() {
         None,
     );
 
-    manifest.validate().expect("well-formed manifest should validate");
+    manifest
+        .validate()
+        .expect("well-formed manifest should validate");
 }
 
 /// ReleaseManifestV1::validate() rejects an empty artifact list.
@@ -395,8 +391,13 @@ fn release_manifest_v1_rejects_empty_artifacts() {
         None,
     );
 
-    let err = manifest.validate().expect_err("empty artifacts should fail validation");
-    assert!(err.contains("artifact"), "error should mention artifacts: {err}");
+    let err = manifest
+        .validate()
+        .expect_err("empty artifacts should fail validation");
+    assert!(
+        err.contains("artifact"),
+        "error should mention artifacts: {err}"
+    );
 }
 
 /// ReleaseManifestV1::validate() rejects an artifact with an empty sha256 field.
@@ -421,7 +422,9 @@ fn release_manifest_v1_rejects_empty_artifact_sha256() {
         None,
     );
 
-    let err = manifest.validate().expect_err("empty sha256 should fail validation");
+    let err = manifest
+        .validate()
+        .expect_err("empty sha256 should fail validation");
     assert!(err.contains("sha256"), "error should mention sha256: {err}");
 }
 

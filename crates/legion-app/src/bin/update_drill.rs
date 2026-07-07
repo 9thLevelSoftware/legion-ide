@@ -214,7 +214,10 @@ fn run_s1() -> Result<S1Result, String> {
             verifying_key.len()
         ));
     }
-    Ok(S1Result { seed, verifying_key })
+    Ok(S1Result {
+        seed,
+        verifying_key,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,8 +234,7 @@ struct S2Result {
 
 fn run_s2(seed: &[u8; 32], base_dir: &Path) -> Result<S2Result, String> {
     let temp_dir = base_dir.to_path_buf();
-    fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("create temp_dir: {e}"))?;
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("create temp_dir: {e}"))?;
 
     // Fabricate artifact bytes for v0.2.0.
     let artifact_bytes_v2: &[u8] = b"legion-desktop v0.2.0 binary payload (drill)";
@@ -247,8 +249,8 @@ fn run_s2(seed: &[u8; 32], base_dir: &Path) -> Result<S2Result, String> {
         Some("0.1.0"),
     );
 
-    let manifest_toml = toml::to_string_pretty(&manifest_v2)
-        .map_err(|e| format!("serialize manifest: {e}"))?;
+    let manifest_toml =
+        toml::to_string_pretty(&manifest_v2).map_err(|e| format!("serialize manifest: {e}"))?;
     let manifest_toml_bytes = manifest_toml.into_bytes();
 
     // Write manifest.
@@ -260,11 +262,8 @@ fn run_s2(seed: &[u8; 32], base_dir: &Path) -> Result<S2Result, String> {
 
     // Sign manifest bytes with the ephemeral key.
     let sig_bytes = sign_with_seed(seed, &manifest_toml_bytes);
-    fs::write(
-        temp_dir.join("release-manifest.v1.toml.sig"),
-        &sig_bytes,
-    )
-    .map_err(|e| format!("write sig: {e}"))?;
+    fs::write(temp_dir.join("release-manifest.v1.toml.sig"), &sig_bytes)
+        .map_err(|e| format!("write sig: {e}"))?;
 
     Ok(S2Result {
         temp_dir,
@@ -297,19 +296,24 @@ fn run_s3(temp_dir: &Path, verifying_key: &[u8]) -> Result<S3Result, String> {
         .map_err(|e| format!("check_for_update failed: {e}"))?;
 
     match check {
-        UpdateCheck::Available { manifest, signer_status, previous_version } => {
+        UpdateCheck::Available {
+            manifest,
+            signer_status,
+            previous_version,
+        } => {
             if manifest.version != "0.2.0" {
-                return Err(format!(
-                    "expected version 0.2.0, got {}",
-                    manifest.version
-                ));
+                return Err(format!("expected version 0.2.0, got {}", manifest.version));
             }
             if signer_status != "signed/ed25519" {
                 return Err(format!(
                     "expected signer_status=signed/ed25519, got {signer_status}"
                 ));
             }
-            Ok(S3Result { manifest, signer_status, previous_version })
+            Ok(S3Result {
+                manifest,
+                signer_status,
+                previous_version,
+            })
         }
         UpdateCheck::NoUpdate => Err("expected Available, got NoUpdate".to_string()),
     }
@@ -384,11 +388,7 @@ fn run_s7(
 // Step s8 (negative): bad signature → SignatureInvalid
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_s8(
-    s2: &S2Result,
-    verifying_key: &[u8],
-    scratch_dir: &Path,
-) -> Result<(), String> {
+fn run_s8(s2: &S2Result, verifying_key: &[u8], scratch_dir: &Path) -> Result<(), String> {
     let bad_dir = scratch_dir.join("bad_sig");
     fs::create_dir_all(&bad_dir).map_err(|e| format!("s8 mkdir: {e}"))?;
 
@@ -414,9 +414,7 @@ fn run_s8(
 
     match Updater::new().check_for_update(&source, &policy, Some(verifying_key)) {
         Err(UpdateError::SignatureInvalid(_)) => Ok(()),
-        other => Err(format!(
-            "expected SignatureInvalid, got {other:?}"
-        )),
+        other => Err(format!("expected SignatureInvalid, got {other:?}")),
     }
 }
 
@@ -436,11 +434,8 @@ fn run_s9(s2: &S2Result, seed: &[u8; 32], scratch_dir: &Path) -> Result<(), Stri
     .map_err(|e| format!("s9 write manifest: {e}"))?;
 
     // …and a valid sig…
-    fs::write(
-        bad_dir.join("release-manifest.v1.toml.sig"),
-        &s2.sig_bytes,
-    )
-    .map_err(|e| format!("s9 write sig: {e}"))?;
+    fs::write(bad_dir.join("release-manifest.v1.toml.sig"), &s2.sig_bytes)
+        .map_err(|e| format!("s9 write sig: {e}"))?;
 
     // …but write WRONG content to the artifact file.
     fs::write(bad_dir.join("legion-test.bin"), b"WRONG BYTES")
@@ -459,8 +454,17 @@ fn run_s9(s2: &S2Result, seed: &[u8; 32], scratch_dir: &Path) -> Result<(), Stri
         .map_err(|e| format!("s9 check_for_update: {e}"))?;
 
     match check {
-        UpdateCheck::Available { manifest, signer_status, previous_version } => {
-            match Updater::new().stage_update(manifest, &bad_dir, signer_status, Some(previous_version)) {
+        UpdateCheck::Available {
+            manifest,
+            signer_status,
+            previous_version,
+        } => {
+            match Updater::new().stage_update(
+                manifest,
+                &bad_dir,
+                signer_status,
+                Some(previous_version),
+            ) {
                 Err(UpdateError::HashMismatch { .. }) => Ok(()),
                 other => Err(format!("expected HashMismatch, got {other:?}")),
             }
@@ -480,8 +484,8 @@ fn run_s10(scratch_dir: &Path) -> Result<(), String> {
     // Preview-channel manifest.
     let artifact_bytes: &[u8] = b"preview artifact";
     let manifest = make_manifest("preview", "0.2.0", "legion-test", artifact_bytes, None);
-    let manifest_toml = toml::to_string_pretty(&manifest)
-        .map_err(|e| format!("s10 serialize: {e}"))?;
+    let manifest_toml =
+        toml::to_string_pretty(&manifest).map_err(|e| format!("s10 serialize: {e}"))?;
     fs::write(
         bad_dir.join("release-manifest.v1.toml"),
         manifest_toml.as_bytes(),
@@ -514,8 +518,8 @@ fn run_s11(scratch_dir: &Path) -> Result<(), String> {
     // Manifest at v0.1.0 but policy says we're already at v0.2.0.
     let artifact_bytes: &[u8] = b"old artifact";
     let manifest = make_manifest("stable", "0.1.0", "legion-test", artifact_bytes, None);
-    let manifest_toml = toml::to_string_pretty(&manifest)
-        .map_err(|e| format!("s11 serialize: {e}"))?;
+    let manifest_toml =
+        toml::to_string_pretty(&manifest).map_err(|e| format!("s11 serialize: {e}"))?;
     fs::write(
         bad_dir.join("release-manifest.v1.toml"),
         manifest_toml.as_bytes(),
@@ -620,9 +624,7 @@ fn resolve_git_sha() -> String {
         .args(["rev-parse", "--short", "HEAD"])
         .output();
     match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -658,8 +660,8 @@ fn main() {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    let scratch_root = std::env::temp_dir()
-        .join(format!("legion-update-drill-{}-{nanos}", process::id()));
+    let scratch_root =
+        std::env::temp_dir().join(format!("legion-update-drill-{}-{nanos}", process::id()));
 
     // ── s1: generate ephemeral keypair ──────────────────────────────────────
     let s1_start = utc_now();
@@ -671,8 +673,13 @@ fn main() {
             record_step!(
                 "s1",
                 StepStatus::Passed,
-                format!("ephemeral Ed25519 keypair generated in-memory ({}ms)", s1_ms),
-                s1_ms, s1_start, s1_end
+                format!(
+                    "ephemeral Ed25519 keypair generated in-memory ({}ms)",
+                    s1_ms
+                ),
+                s1_ms,
+                s1_start,
+                s1_end
             );
             (r.seed, r.verifying_key)
         }
@@ -691,7 +698,10 @@ fn main() {
     let s2_end = utc_now();
     let s2 = match s2_result {
         Ok(r) => {
-            eprintln!("[s2] passed ({}ms): artifacts + signed manifest ready", s2_ms);
+            eprintln!(
+                "[s2] passed ({}ms): artifacts + signed manifest ready",
+                s2_ms
+            );
             record_step!(
                 "s2",
                 StepStatus::Passed,
@@ -699,7 +709,9 @@ fn main() {
                     "v0.2.0 artifact + manifest fabricated; manifest signed with ephemeral key ({}ms)",
                     s2_ms
                 ),
-                s2_ms, s2_start, s2_end
+                s2_ms,
+                s2_start,
+                s2_end
             );
             r
         }
@@ -715,7 +727,8 @@ fn main() {
     let s3_start = utc_now();
     let (s3_result, s3_ms) = run_timer(|| run_s3(&s2.temp_dir, &verifying_key));
     let s3_end = utc_now();
-    let (manifest_for_stage, signer_status_for_stage, previous_version_for_stage) = match s3_result {
+    let (manifest_for_stage, signer_status_for_stage, previous_version_for_stage) = match s3_result
+    {
         Ok(r) => {
             eprintln!("[s3] passed ({}ms): Available v0.2.0 signed/ed25519", s3_ms);
             record_step!(
@@ -725,7 +738,9 @@ fn main() {
                     "check_for_update: v0.1.0 → v0.2.0 Available; signer_status=signed/ed25519 ({}ms)",
                     s3_ms
                 ),
-                s3_ms, s3_start, s3_end
+                s3_ms,
+                s3_start,
+                s3_end
             );
             (r.manifest, r.signer_status, r.previous_version)
         }
@@ -740,7 +755,12 @@ fn main() {
     // ── s4: stage_update ─────────────────────────────────────────────────────
     let s4_start = utc_now();
     let (s4_result, s4_ms) = run_timer(|| {
-        run_s4(manifest_for_stage, &s2.temp_dir, signer_status_for_stage, previous_version_for_stage)
+        run_s4(
+            manifest_for_stage,
+            &s2.temp_dir,
+            signer_status_for_stage,
+            previous_version_for_stage,
+        )
     });
     let s4_end = utc_now();
     let staged = match s4_result {
@@ -749,8 +769,13 @@ fn main() {
             record_step!(
                 "s4",
                 StepStatus::Passed,
-                format!("stage_update: SHA-256 verified; artifact copied to staged/ ({}ms)", s4_ms),
-                s4_ms, s4_start, s4_end
+                format!(
+                    "stage_update: SHA-256 verified; artifact copied to staged/ ({}ms)",
+                    s4_ms
+                ),
+                s4_ms,
+                s4_start,
+                s4_end
             );
             s
         }
@@ -790,7 +815,9 @@ fn main() {
                     "apply_update: journal current=0.2.0 previous=0.1.0 signer_status=signed/ed25519 ({}ms)",
                     s5_ms
                 ),
-                s5_ms, s5_start, s5_end
+                s5_ms,
+                s5_start,
+                s5_end
             );
             j
         }
@@ -808,8 +835,7 @@ fn main() {
     let s6_end = utc_now();
     match s6_result {
         Ok(j) => {
-            let ok = j.current_version == "0.1.0"
-                && j.previous_version.as_deref() == Some("0.2.0");
+            let ok = j.current_version == "0.1.0" && j.previous_version.as_deref() == Some("0.2.0");
             if !ok {
                 let e = format!("rollback journal assertion failed: {j:?}");
                 eprintln!("[s6] FAILED: {e}");
@@ -823,7 +849,9 @@ fn main() {
                         "rollback: journal current=0.1.0 previous=0.2.0 ({}ms)",
                         s6_ms
                     ),
-                    s6_ms, s6_start, s6_end
+                    s6_ms,
+                    s6_start,
+                    s6_end
                 );
             }
         }
@@ -843,8 +871,13 @@ fn main() {
             record_step!(
                 "s7",
                 StepStatus::Passed,
-                format!("double rollback: back to current=0.2.0 previous=0.1.0 ({}ms)", s7_ms),
-                s7_ms, s7_start, s7_end
+                format!(
+                    "double rollback: back to current=0.2.0 previous=0.1.0 ({}ms)",
+                    s7_ms
+                ),
+                s7_ms,
+                s7_start,
+                s7_end
             );
         }
         Err(e) => {
@@ -864,7 +897,9 @@ fn main() {
                 "s8",
                 StepStatus::Passed,
                 format!("negative: bad signature → SignatureInvalid ({}ms)", s8_ms),
-                s8_ms, s8_start, s8_end
+                s8_ms,
+                s8_start,
+                s8_end
             );
         }
         Err(e) => {
@@ -884,7 +919,9 @@ fn main() {
                 "s9",
                 StepStatus::Passed,
                 format!("negative: bad artifact hash → HashMismatch ({}ms)", s9_ms),
-                s9_ms, s9_start, s9_end
+                s9_ms,
+                s9_start,
+                s9_end
             );
         }
         Err(e) => {
@@ -899,12 +936,20 @@ fn main() {
     let s10_end = utc_now();
     match s10_result {
         Ok(()) => {
-            eprintln!("[s10] passed ({}ms): cross-channel correctly rejected", s10_ms);
+            eprintln!(
+                "[s10] passed ({}ms): cross-channel correctly rejected",
+                s10_ms
+            );
             record_step!(
                 "s10",
                 StepStatus::Passed,
-                format!("negative: preview manifest + stable policy → ChannelMismatch ({}ms)", s10_ms),
-                s10_ms, s10_start, s10_end
+                format!(
+                    "negative: preview manifest + stable policy → ChannelMismatch ({}ms)",
+                    s10_ms
+                ),
+                s10_ms,
+                s10_start,
+                s10_end
             );
         }
         Err(e) => {
@@ -919,12 +964,20 @@ fn main() {
     let s11_end = utc_now();
     match s11_result {
         Ok(()) => {
-            eprintln!("[s11] passed ({}ms): downgrade correctly returned NoUpdate", s11_ms);
+            eprintln!(
+                "[s11] passed ({}ms): downgrade correctly returned NoUpdate",
+                s11_ms
+            );
             record_step!(
                 "s11",
                 StepStatus::Passed,
-                format!("negative: downgrade v0.2.0 → v0.1.0 → NoUpdate ({}ms)", s11_ms),
-                s11_ms, s11_start, s11_end
+                format!(
+                    "negative: downgrade v0.2.0 → v0.1.0 → NoUpdate ({}ms)",
+                    s11_ms
+                ),
+                s11_ms,
+                s11_start,
+                s11_end
             );
         }
         Err(e) => {
@@ -935,13 +988,7 @@ fn main() {
 
     // ── s12: write report ────────────────────────────────────────────────────
     let finished_utc = utc_now();
-    let report_result = write_report(
-        &args.out_dir,
-        &git_sha,
-        &started_utc,
-        &finished_utc,
-        &steps,
-    );
+    let report_result = write_report(&args.out_dir, &git_sha, &started_utc, &finished_utc, &steps);
 
     eprintln!("\n[update-drill] SUMMARY");
     for step in &steps {

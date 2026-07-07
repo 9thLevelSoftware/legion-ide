@@ -21,8 +21,8 @@ use std::{
 };
 
 use legion_app::updater::{
-    compare_versions, version_is_newer, LocalDirManifestSource, UpdateError,
-    UpdateJournal, UpdatePolicy, Updater, verify_ed25519_signature,
+    LocalDirManifestSource, UpdateError, UpdateJournal, UpdatePolicy, Updater, compare_versions,
+    verify_ed25519_signature, version_is_newer,
 };
 use legion_protocol::{ReleaseArtifact, ReleaseManifestV1};
 
@@ -127,7 +127,11 @@ fn write_manifest_dir(
     fs::create_dir_all(&dir).unwrap();
 
     let manifest_toml = toml::to_string_pretty(manifest).unwrap();
-    fs::write(dir.join("release-manifest.v1.toml"), manifest_toml.as_bytes()).unwrap();
+    fs::write(
+        dir.join("release-manifest.v1.toml"),
+        manifest_toml.as_bytes(),
+    )
+    .unwrap();
 
     if let Some(sig_bytes) = sig {
         fs::write(dir.join("release-manifest.v1.toml.sig"), sig_bytes).unwrap();
@@ -155,27 +159,39 @@ fn now_utc() -> String {
 
 #[test]
 fn version_compare_basic_minor_bump() {
-    assert_eq!(compare_versions("0.2.0", "0.1.0"), std::cmp::Ordering::Greater);
+    assert_eq!(
+        compare_versions("0.2.0", "0.1.0"),
+        std::cmp::Ordering::Greater
+    );
     assert!(version_is_newer("0.2.0", "0.1.0"));
 }
 
 #[test]
 fn version_compare_patch_bump() {
-    assert_eq!(compare_versions("0.1.1", "0.1.0"), std::cmp::Ordering::Greater);
+    assert_eq!(
+        compare_versions("0.1.1", "0.1.0"),
+        std::cmp::Ordering::Greater
+    );
     assert!(version_is_newer("0.1.1", "0.1.0"));
 }
 
 #[test]
 fn version_compare_major_wins_over_minor() {
     // 1.0.0 > 0.99.99 — major takes precedence.
-    assert_eq!(compare_versions("1.0.0", "0.99.99"), std::cmp::Ordering::Greater);
+    assert_eq!(
+        compare_versions("1.0.0", "0.99.99"),
+        std::cmp::Ordering::Greater
+    );
     assert!(version_is_newer("1.0.0", "0.99.99"));
 }
 
 #[test]
 fn version_compare_preview_is_lower_than_release() {
     // 0.1.0-preview < 0.1.0 — preview suffix makes version lower.
-    assert_eq!(compare_versions("0.1.0-preview", "0.1.0"), std::cmp::Ordering::Less);
+    assert_eq!(
+        compare_versions("0.1.0-preview", "0.1.0"),
+        std::cmp::Ordering::Less
+    );
     assert!(!version_is_newer("0.1.0-preview", "0.1.0"));
 }
 
@@ -192,7 +208,10 @@ fn version_compare_preview_vs_preview() {
 
 #[test]
 fn version_compare_equal() {
-    assert_eq!(compare_versions("0.1.0", "0.1.0"), std::cmp::Ordering::Equal);
+    assert_eq!(
+        compare_versions("0.1.0", "0.1.0"),
+        std::cmp::Ordering::Equal
+    );
     assert!(!version_is_newer("0.1.0", "0.1.0"));
 }
 
@@ -207,7 +226,10 @@ fn version_compare_equal_preview_vs_preview() {
 
 #[test]
 fn version_compare_release_is_higher_than_preview_same_version() {
-    assert_eq!(compare_versions("0.1.0", "0.1.0-preview"), std::cmp::Ordering::Greater);
+    assert_eq!(
+        compare_versions("0.1.0", "0.1.0-preview"),
+        std::cmp::Ordering::Greater
+    );
     assert!(version_is_newer("0.1.0", "0.1.0-preview"));
 }
 
@@ -232,7 +254,10 @@ fn verify_ed25519_tampered_bytes_rejected_before_parse() {
 
     // Verification must fail on the tampered bytes.
     let result = verify_ed25519_signature(&tampered, &sig, &vk);
-    assert!(result.is_err(), "tampered manifest should fail verification");
+    assert!(
+        result.is_err(),
+        "tampered manifest should fail verification"
+    );
 }
 
 #[test]
@@ -247,7 +272,11 @@ fn check_for_upd_bad_sig_rejected() {
     let mut bad_sig = sign_bytes(&seed, &manifest_bytes);
     bad_sig[0] ^= 0xff;
 
-    let dir = write_manifest_dir(&manifest, Some(&bad_sig), &[("legion-test.bin", artifact_bytes)]);
+    let dir = write_manifest_dir(
+        &manifest,
+        Some(&bad_sig),
+        &[("legion-test.bin", artifact_bytes)],
+    );
 
     let source = LocalDirManifestSource::new(&dir);
     let policy = UpdatePolicy {
@@ -357,12 +386,7 @@ fn stage_rejects_artifact_with_wrong_hash() {
     let wrong_bytes = b"WRONG content";
     let dir = write_manifest_dir(&manifest, None, &[("legion-test.bin", wrong_bytes)]);
 
-    let result = Updater::new().stage_update(
-        manifest,
-        &dir,
-        "unsigned-beta".to_string(),
-        None,
-    );
+    let result = Updater::new().stage_update(manifest, &dir, "unsigned-beta".to_string(), None);
     assert!(
         matches!(result, Err(UpdateError::HashMismatch { .. })),
         "expected HashMismatch, got {result:?}"
@@ -380,7 +404,11 @@ fn run_full_pipeline(dir: &Path) -> (UpdateJournal, UpdateJournal, UpdateJournal
 
     // Write manifest (unsigned) and artifact.
     let manifest_toml = toml::to_string_pretty(&manifest).unwrap();
-    fs::write(dir.join("release-manifest.v1.toml"), manifest_toml.as_bytes()).unwrap();
+    fs::write(
+        dir.join("release-manifest.v1.toml"),
+        manifest_toml.as_bytes(),
+    )
+    .unwrap();
     fs::write(dir.join("legion-test.bin"), artifact_bytes).unwrap();
 
     let updater = Updater::new();
@@ -393,16 +421,23 @@ fn run_full_pipeline(dir: &Path) -> (UpdateJournal, UpdateJournal, UpdateJournal
 
     let check = updater.check_for_update(&source, &policy, None).unwrap();
     let (manifest_from_check, signer_status, previous_version) = match check {
-        legion_app::updater::UpdateCheck::Available { manifest, signer_status, previous_version } => {
-            (manifest, signer_status, previous_version)
-        }
+        legion_app::updater::UpdateCheck::Available {
+            manifest,
+            signer_status,
+            previous_version,
+        } => (manifest, signer_status, previous_version),
         legion_app::updater::UpdateCheck::NoUpdate => {
             panic!("expected Available but got NoUpdate");
         }
     };
 
     let staged = updater
-        .stage_update(manifest_from_check, dir, signer_status, Some(previous_version))
+        .stage_update(
+            manifest_from_check,
+            dir,
+            signer_status,
+            Some(previous_version),
+        )
         .unwrap();
 
     let journal_path = dir.join("upd_journal.toml");
@@ -471,7 +506,9 @@ fn check_for_upd_downgrade_returns_no_upd() {
         allow_unsigned_beta: true,
     };
 
-    let result = Updater::new().check_for_update(&source, &policy, None).unwrap();
+    let result = Updater::new()
+        .check_for_update(&source, &policy, None)
+        .unwrap();
     assert!(
         matches!(result, legion_app::updater::UpdateCheck::NoUpdate),
         "expected NoUpdate for downgrade, got {result:?}"

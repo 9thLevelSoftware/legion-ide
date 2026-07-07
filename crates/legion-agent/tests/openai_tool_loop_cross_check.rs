@@ -14,13 +14,13 @@ use legion_agent::agent_loop::{
     DelegatedTaskAuditSink, DelegatedTaskCancellationProbe, DelegatedTaskLoopConfig,
     DelegatedTaskLoopResult, DelegatedToolHost, run_delegated_task_loop,
 };
-use legion_ai_providers::{OpenAiCompatibleProvider, ProviderHttpTransport};
 use legion_ai::ProviderError;
+use legion_ai_providers::{OpenAiCompatibleProvider, ProviderHttpTransport};
 use legion_protocol::{
     CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
     CapabilityResponse, DelegatedTaskLoopBudget, DelegatedTaskLoopStepRecord,
-    DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind,
-    LegionToolKind, ProtocolResult,
+    DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind, LegionToolKind,
+    ProtocolResult,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -227,12 +227,19 @@ fn openai_provider_compatible_with_agent_loop_read_then_end() {
         "expected Completed, got {result:?}"
     );
 
-    if let DelegatedTaskLoopResult::Completed { final_message, proposals } = &result {
+    if let DelegatedTaskLoopResult::Completed {
+        final_message,
+        proposals,
+    } = &result
+    {
         assert!(
             final_message.contains("Hello"),
             "final message should reference the file content: {final_message}"
         );
-        assert!(proposals.is_empty(), "no proposals expected for a read-only task");
+        assert!(
+            proposals.is_empty(),
+            "no proposals expected for a read-only task"
+        );
     }
 
     // Audit pairing invariant: every ToolCallRequest has a paired ToolCallResult.

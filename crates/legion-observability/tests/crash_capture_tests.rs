@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use legion_observability::crash_capture::{CrashCaptureConfig, install_panic_hook, uninstall_panic_hook};
+use legion_observability::crash_capture::{
+    CrashCaptureConfig, install_panic_hook, uninstall_panic_hook,
+};
 use legion_observability::export::{DiagnosticsExportBuilder, ExportError};
 use legion_protocol::WorkbenchTelemetryConsent;
 
@@ -73,10 +75,8 @@ fn consent_disabled_installs_no_hook() {
     let _guard = HOOK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     // Use a directory path that does NOT exist yet — if the hook touches it we'll know.
-    let bundle_dir = std::env::temp_dir().join(format!(
-        "legion_crash_consent_off_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let bundle_dir =
+        std::env::temp_dir().join(format!("legion_crash_consent_off_{}", uuid::Uuid::new_v4()));
     assert!(!bundle_dir.exists(), "dir should not exist before test");
 
     let config = CrashCaptureConfig {
@@ -170,7 +170,10 @@ fn induced_panic_produces_bundle() {
 
     let crash_dir = dirs[0].path();
     assert!(crash_dir.join("panic.txt").exists(), "panic.txt must exist");
-    assert!(crash_dir.join("summary.toml").exists(), "summary.toml must exist");
+    assert!(
+        crash_dir.join("summary.toml").exists(),
+        "summary.toml must exist"
+    );
 }
 
 /// `panic.txt` must contain "stack backtrace" or individual frame markers
@@ -197,8 +200,8 @@ fn panic_txt_contains_backtrace() {
         .expect("at least one crash dir")
         .path();
 
-    let panic_txt = std::fs::read_to_string(crash_dir.join("panic.txt"))
-        .expect("panic.txt should be readable");
+    let panic_txt =
+        std::fs::read_to_string(crash_dir.join("panic.txt")).expect("panic.txt should be readable");
 
     assert!(
         panic_txt.contains("stack backtrace") || panic_txt.contains("backtrace"),
@@ -234,15 +237,36 @@ fn summary_toml_is_metadata_only() {
         .expect("summary.toml should be readable");
 
     // Required fields must be present.
-    assert!(summary.contains("crash_id"), "summary must contain crash_id; got:\n{summary}");
-    assert!(summary.contains("timestamp"), "summary must contain timestamp; got:\n{summary}");
-    assert!(summary.contains("os ="), "summary must contain os; got:\n{summary}");
-    assert!(summary.contains("arch ="), "summary must contain arch; got:\n{summary}");
-    assert!(summary.contains("version ="), "summary must contain version; got:\n{summary}");
-    assert!(summary.contains("signer_status"), "summary must contain signer_status; got:\n{summary}");
+    assert!(
+        summary.contains("crash_id"),
+        "summary must contain crash_id; got:\n{summary}"
+    );
+    assert!(
+        summary.contains("timestamp"),
+        "summary must contain timestamp; got:\n{summary}"
+    );
+    assert!(
+        summary.contains("os ="),
+        "summary must contain os; got:\n{summary}"
+    );
+    assert!(
+        summary.contains("arch ="),
+        "summary must contain arch; got:\n{summary}"
+    );
+    assert!(
+        summary.contains("version ="),
+        "summary must contain version; got:\n{summary}"
+    );
+    assert!(
+        summary.contains("signer_status"),
+        "summary must contain signer_status; got:\n{summary}"
+    );
 
     // Must NOT contain raw source code or full paths.
-    assert!(!summary.contains("fn main"), "summary must not contain source code");
+    assert!(
+        !summary.contains("fn main"),
+        "summary must not contain source code"
+    );
     // Must not contain absolute path components (C:\ or /home etc.)
     let lower = summary.to_ascii_lowercase();
     assert!(
@@ -265,7 +289,11 @@ fn export_default_is_metadata_only() {
     let crash_id = uuid::Uuid::new_v4().to_string();
     let crash_dir = bundle_dir.join(&crash_id);
     std::fs::create_dir_all(&crash_dir).unwrap();
-    std::fs::write(crash_dir.join("summary.toml"), format!("crash_id = \"{crash_id}\"\n")).unwrap();
+    std::fs::write(
+        crash_dir.join("summary.toml"),
+        format!("crash_id = \"{crash_id}\"\n"),
+    )
+    .unwrap();
     std::fs::write(crash_dir.join("panic.txt"), "stack backtrace:\n").unwrap();
 
     let bundle = DiagnosticsExportBuilder::new(bundle_dir, consent_on())
@@ -303,7 +331,11 @@ fn export_raw_allowed_when_both_set() {
     let crash_id = uuid::Uuid::new_v4().to_string();
     let crash_dir = bundle_dir.join(&crash_id);
     std::fs::create_dir_all(&crash_dir).unwrap();
-    std::fs::write(crash_dir.join("summary.toml"), format!("crash_id = \"{crash_id}\"\n")).unwrap();
+    std::fs::write(
+        crash_dir.join("summary.toml"),
+        format!("crash_id = \"{crash_id}\"\n"),
+    )
+    .unwrap();
     std::fs::write(crash_dir.join("panic.txt"), "stack backtrace:\n").unwrap();
 
     let bundle = DiagnosticsExportBuilder::new(bundle_dir, consent_raw())
@@ -311,7 +343,10 @@ fn export_raw_allowed_when_both_set() {
         .build()
         .expect("raw build with consent should succeed");
 
-    assert!(!bundle.metadata_only, "must NOT be metadata_only when raw allowed");
+    assert!(
+        !bundle.metadata_only,
+        "must NOT be metadata_only when raw allowed"
+    );
     assert!(
         bundle.entries.iter().any(|e| !e.raw_paths.is_empty()),
         "at least one entry must have raw_paths"

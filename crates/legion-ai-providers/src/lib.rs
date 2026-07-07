@@ -1104,11 +1104,9 @@ where
             payload["tools"] = json!(tools);
         }
 
-        let response = self.transport.post_json(
-            &self.endpoint("/chat/completions"),
-            bearer_token,
-            payload,
-        )?;
+        let response =
+            self.transport
+                .post_json(&self.endpoint("/chat/completions"), bearer_token, payload)?;
 
         // Navigate to choices[0].
         let choice = response
@@ -1144,12 +1142,12 @@ where
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let func =
-                    call.get("function")
-                        .ok_or_else(|| ProviderError::RequestFailed {
-                            provider: self.id.clone(),
-                            message: "OpenAI tool_call missing function object".to_string(),
-                        })?;
+                let func = call
+                    .get("function")
+                    .ok_or_else(|| ProviderError::RequestFailed {
+                        provider: self.id.clone(),
+                        message: "OpenAI tool_call missing function object".to_string(),
+                    })?;
                 let name = func
                     .get("name")
                     .and_then(Value::as_str)
@@ -5016,7 +5014,9 @@ mod tests {
             system: "You are a helpful assistant.".to_string(),
             turns: vec![ToolConversationTurn {
                 role: "user".to_string(),
-                blocks: vec![ToolTurnBlock::Text("What is the weather in London?".to_string())],
+                blocks: vec![ToolTurnBlock::Text(
+                    "What is the weather in London?".to_string(),
+                )],
             }],
             tools: vec![ToolDefinition {
                 name: "get_weather".to_string(),

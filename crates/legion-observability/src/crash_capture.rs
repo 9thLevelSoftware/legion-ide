@@ -90,7 +90,11 @@ pub fn uninstall_panic_hook() {
 // Internal implementation — not part of the public API
 // ---------------------------------------------------------------------------
 
-fn write_crash_bundle(bundle_dir: &Path, info: &std::panic::PanicHookInfo<'_>, consent: &WorkbenchTelemetryConsent) {
+fn write_crash_bundle(
+    bundle_dir: &Path,
+    info: &std::panic::PanicHookInfo<'_>,
+    consent: &WorkbenchTelemetryConsent,
+) {
     let crash_id = uuid::Uuid::new_v4().to_string();
     let crash_dir = bundle_dir.join(&crash_id);
 
@@ -116,9 +120,8 @@ fn write_crash_bundle(bundle_dir: &Path, info: &std::panic::PanicHookInfo<'_>, c
         .unwrap_or_else(|| "unknown:0".to_string());
 
     // --- panic.txt: full local detail for offline debugging ---
-    let panic_txt = format!(
-        "panic: {message}\nlocation: {location}\n\nstack backtrace:\n{backtrace}"
-    );
+    let panic_txt =
+        format!("panic: {message}\nlocation: {location}\n\nstack backtrace:\n{backtrace}");
     let _ = std::fs::write(crash_dir.join("panic.txt"), panic_txt);
 
     // --- summary.toml: metadata-only, no raw source ---
@@ -219,11 +222,7 @@ fn redact_path(path: &str) -> String {
     }
 
     // Fallback: just the filename.
-    components
-        .last()
-        .copied()
-        .unwrap_or(path)
-        .to_string()
+    components.last().copied().unwrap_or(path).to_string()
 }
 
 /// Strip absolute-path-looking tokens from a panic message.

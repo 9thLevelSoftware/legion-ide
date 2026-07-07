@@ -147,15 +147,19 @@ pub struct DiagnosticEntry {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use std::fs;
     use legion_protocol::WorkbenchTelemetryConsent;
+    use std::fs;
 
     fn consent_with_raw(raw: bool) -> WorkbenchTelemetryConsent {
         WorkbenchTelemetryConsent {
             enabled: true,
             crash_reports_enabled: true,
             raw_source_allowed: raw,
-            consent_label: if raw { "raw-allowed".to_string() } else { "crash-reports".to_string() },
+            consent_label: if raw {
+                "raw-allowed".to_string()
+            } else {
+                "crash-reports".to_string()
+            },
             schema_version: 1,
         }
     }
@@ -174,8 +178,16 @@ mod unit_tests {
         let crash_id = uuid::Uuid::new_v4().to_string();
         let crash_dir = bundle_dir.join(&crash_id);
         fs::create_dir_all(&crash_dir).unwrap();
-        fs::write(crash_dir.join("summary.toml"), format!("crash_id = \"{crash_id}\"\n")).unwrap();
-        fs::write(crash_dir.join("panic.txt"), "panic: test\n\nstack backtrace:\n").unwrap();
+        fs::write(
+            crash_dir.join("summary.toml"),
+            format!("crash_id = \"{crash_id}\"\n"),
+        )
+        .unwrap();
+        fs::write(
+            crash_dir.join("panic.txt"),
+            "panic: test\n\nstack backtrace:\n",
+        )
+        .unwrap();
         crash_id
     }
 

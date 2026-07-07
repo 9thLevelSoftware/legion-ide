@@ -906,14 +906,30 @@ fn validate_and_execute(
 
     // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
     match tool {
-        LegionToolKind::Read => execute_read(input, &config.worktree_root)
-            .map(|content| ToolExecutionOutput { content, proposal: None }),
-        LegionToolKind::Grep => execute_grep(input, &config.worktree_root)
-            .map(|content| ToolExecutionOutput { content, proposal: None }),
-        LegionToolKind::Glob => execute_glob(input, &config.worktree_root)
-            .map(|content| ToolExecutionOutput { content, proposal: None }),
-        LegionToolKind::Outline => execute_outline(input, &config.worktree_root)
-            .map(|content| ToolExecutionOutput { content, proposal: None }),
+        LegionToolKind::Read => {
+            execute_read(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+                content,
+                proposal: None,
+            })
+        }
+        LegionToolKind::Grep => {
+            execute_grep(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+                content,
+                proposal: None,
+            })
+        }
+        LegionToolKind::Glob => {
+            execute_glob(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+                content,
+                proposal: None,
+            })
+        }
+        LegionToolKind::Outline => {
+            execute_outline(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+                content,
+                proposal: None,
+            })
+        }
         LegionToolKind::EditAsProposal => execute_edit_as_proposal(
             input,
             &config.worktree_root,
@@ -921,11 +937,19 @@ fn validate_and_execute(
             causality_id,
         ),
         LegionToolKind::TerminalCommand => {
-            execute_terminal_command(input, &config.worktree_root, tool_host)
-                .map(|content| ToolExecutionOutput { content, proposal: None })
+            execute_terminal_command(input, &config.worktree_root, tool_host).map(|content| {
+                ToolExecutionOutput {
+                    content,
+                    proposal: None,
+                }
+            })
         }
-        LegionToolKind::McpPassthrough => execute_mcp_passthrough(input, tool_host)
-            .map(|content| ToolExecutionOutput { content, proposal: None }),
+        LegionToolKind::McpPassthrough => {
+            execute_mcp_passthrough(input, tool_host).map(|content| ToolExecutionOutput {
+                content,
+                proposal: None,
+            })
+        }
     }
 }
 

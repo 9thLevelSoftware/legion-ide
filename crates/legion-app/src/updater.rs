@@ -27,7 +27,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use legion_protocol::{ReleaseManifestV1};
+use legion_protocol::ReleaseManifestV1;
 
 // ---------------------------------------------------------------------------
 // UpdateError
@@ -45,9 +45,7 @@ pub enum UpdateError {
     UnsignedNotAllowed,
 
     /// The manifest channel does not match the policy channel.
-    #[error(
-        "channel mismatch: manifest channel is `{manifest}`, policy channel is `{policy}`"
-    )]
+    #[error("channel mismatch: manifest channel is `{manifest}`, policy channel is `{policy}`")]
     ChannelMismatch {
         /// Channel name from the manifest.
         manifest: String,
@@ -60,9 +58,7 @@ pub enum UpdateError {
     ManifestInvalid(String),
 
     /// An artifact's SHA-256 digest did not match the manifest entry.
-    #[error(
-        "artifact hash mismatch for `{name}`: expected {expected}, got {actual}"
-    )]
+    #[error("artifact hash mismatch for `{name}`: expected {expected}, got {actual}")]
     HashMismatch {
         /// Artifact name from the manifest.
         name: String,
@@ -326,9 +322,7 @@ impl Updater {
             toml::from_str(&manifest_str).map_err(|e| UpdateError::Toml(e.to_string()))?;
 
         // Step 5: Validate.
-        manifest
-            .validate()
-            .map_err(UpdateError::ManifestInvalid)?;
+        manifest.validate().map_err(UpdateError::ManifestInvalid)?;
 
         // Step 6: Channel check.
         if manifest.channel != policy.current_channel {
@@ -570,12 +564,11 @@ pub fn verify_ed25519_signature(
             verifying_key.len()
         )
     })?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
-        .map_err(|err| err.to_string())?;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(key_bytes).map_err(|err| err.to_string())?;
 
-    let sig_bytes: &[u8; 64] = signature.try_into().map_err(|_| {
-        format!("signature must be 64 bytes, got {}", signature.len())
-    })?;
+    let sig_bytes: &[u8; 64] = signature
+        .try_into()
+        .map_err(|_| format!("signature must be 64 bytes, got {}", signature.len()))?;
     let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
 
     vk.verify_strict(data, &sig).map_err(|err| err.to_string())

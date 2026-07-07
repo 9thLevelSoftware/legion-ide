@@ -458,11 +458,7 @@ fn run_s3(
                 hunk_id.clone(),
                 DelegatedTaskProposalHunkDisposition::Accepted,
             )
-            .map_err(|e| {
-                format!(
-                    "s3: review_delegate_proposal_hunk({hunk_id}) failed: {e:?}"
-                )
-            })?;
+            .map_err(|e| format!("s3: review_delegate_proposal_hunk({hunk_id}) failed: {e:?}"))?;
 
             eprintln!(
                 "[s3] Completed: {} audit steps, 1 proposal targeting src/main.rs \

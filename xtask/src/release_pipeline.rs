@@ -256,8 +256,7 @@ pub fn plan_release_pipeline(
                 (
                     DRY_RUN_SIGNER_STATUS.to_string(),
                     "pending".to_string(),
-                    "dry-run descriptor only; artifact hash is unavailable until build"
-                        .to_string(),
+                    "dry-run descriptor only; artifact hash is unavailable until build".to_string(),
                 )
             } else {
                 // from-artifacts mode
@@ -449,13 +448,12 @@ pub fn verify_descriptors(
                     art_dir.join(format!("{}.{}", descriptor.name, descriptor.artifact));
                 if artifact_file.is_file() {
                     match compute_sha256_file(&artifact_file) {
-                        Ok(computed) if !descriptor.sha256.is_empty() && computed == descriptor.sha256 => {
+                        Ok(computed)
+                            if !descriptor.sha256.is_empty() && computed == descriptor.sha256 =>
+                        {
                             (
                                 "passed/sha256-verified".to_string(),
-                                format!(
-                                    "artifact `{}` sha256 verified",
-                                    artifact_file.display()
-                                ),
+                                format!("artifact `{}` sha256 verified", artifact_file.display()),
                             )
                         }
                         Ok(computed) if descriptor.sha256.is_empty() => {
@@ -610,9 +608,9 @@ pub fn write_release_manifest(
         signer_reference,
     );
 
-    manifest.validate().map_err(|err| {
-        format!("release manifest validation failed: {err}")
-    })?;
+    manifest
+        .validate()
+        .map_err(|err| format!("release manifest validation failed: {err}"))?;
 
     // Serialize the manifest to TOML.
     let manifest_toml = toml::to_string_pretty(&manifest)
@@ -697,11 +695,13 @@ fn verify_manifest_signature(out_dir: &Path, vk_bytes: &[u8]) -> Result<(), Stri
     }
 
     let manifest_bytes = fs::read(&manifest_path).map_err(|err| {
-        format!("unable to read manifest `{}`: {err}", manifest_path.display())
+        format!(
+            "unable to read manifest `{}`: {err}",
+            manifest_path.display()
+        )
     })?;
-    let sig_bytes = fs::read(&sig_path).map_err(|err| {
-        format!("unable to read signature `{}`: {err}", sig_path.display())
-    })?;
+    let sig_bytes = fs::read(&sig_path)
+        .map_err(|err| format!("unable to read signature `{}`: {err}", sig_path.display()))?;
 
     verify_ed25519_signature(&manifest_bytes, &sig_bytes, vk_bytes)
         .map_err(|err| format!("manifest signature verification failed: {err}"))
@@ -709,9 +709,8 @@ fn verify_manifest_signature(out_dir: &Path, vk_bytes: &[u8]) -> Result<(), Stri
 
 pub fn compute_sha256_file(path: &Path) -> Result<String, String> {
     use sha2::Digest as _;
-    let bytes = fs::read(path).map_err(|err| {
-        format!("unable to read `{}` for sha256: {err}", path.display())
-    })?;
+    let bytes = fs::read(path)
+        .map_err(|err| format!("unable to read `{}` for sha256: {err}", path.display()))?;
     let hash = sha2::Sha256::digest(&bytes);
     Ok(hex::encode(hash))
 }

@@ -48,15 +48,13 @@ impl SupportBundleAssembler {
     /// Reads each `summary.toml` and extracts `crash_id`, `timestamp`, and `os`.
     /// Does NOT return raw file contents.
     pub fn list_crash_reports(&self) -> Vec<CrashReportRow> {
-        let bundle = match DiagnosticsExportBuilder::new(
-            self.bundle_dir.clone(),
-            self.consent.clone(),
-        )
-        .build()
-        {
-            Ok(b) => b,
-            Err(_) => return Vec::new(),
-        };
+        let bundle =
+            match DiagnosticsExportBuilder::new(self.bundle_dir.clone(), self.consent.clone())
+                .build()
+            {
+                Ok(b) => b,
+                Err(_) => return Vec::new(),
+            };
 
         bundle
             .entries
@@ -122,7 +120,11 @@ fn extract_toml_value(line: &str, key: &str) -> Option<String> {
     let raw = &line[prefix.len()..];
     // Strip surrounding quotes if present.
     if raw.starts_with('"') && raw.ends_with('"') {
-        Some(raw[1..raw.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\"))
+        Some(
+            raw[1..raw.len() - 1]
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\"),
+        )
     } else {
         Some(raw.to_string())
     }
@@ -131,8 +133,8 @@ fn extract_toml_value(line: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use legion_protocol::WorkbenchTelemetryConsent;
+    use std::fs;
 
     fn disabled_consent() -> WorkbenchTelemetryConsent {
         WorkbenchTelemetryConsent {
@@ -200,7 +202,9 @@ mod tests {
         write_crash(&dir, "crash-bbb", 1_700_000_001, "linux");
 
         let assembler = SupportBundleAssembler::new(dir, crash_consent());
-        let bundle = assembler.build_metadata_bundle().expect("build should succeed");
+        let bundle = assembler
+            .build_metadata_bundle()
+            .expect("build should succeed");
 
         assert!(bundle.metadata_only);
         assert!(bundle.entries.iter().all(|e| e.raw_paths.is_empty()));
