@@ -379,6 +379,42 @@ pub fn validate_tool_schema_definition(tool: &LegionToolSchemaDefinition) -> Res
     Ok(())
 }
 
+/// A tool call invocation request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegionToolCallInvocation {
+    /// Which tool is being called.
+    pub tool: LegionToolKind,
+    /// The tool's input arguments (JSON).
+    pub input: serde_json::Value,
+    /// Unique ID for this invocation (from the model's tool_use block).
+    pub tool_use_id: String,
+}
+
+/// Outcome of executing a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LegionToolCallOutcome {
+    /// Tool executed successfully.
+    Success {
+        /// Tool output content.
+        content: String,
+        /// Whether the output was truncated to fit budget.
+        truncated: bool,
+        /// Whether redaction was applied.
+        redaction_applied: bool,
+    },
+    /// Tool call was rejected before execution.
+    Rejected(LegionToolCallFeedback),
+}
+
+/// Complete result of a tool call attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegionToolCallResult {
+    /// The original invocation.
+    pub invocation: LegionToolCallInvocation,
+    /// What happened.
+    pub outcome: LegionToolCallOutcome,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +444,59 @@ mod tests {
             .expect("required array");
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].as_str(), Some("path"));
+    }
+
+    #[test]
+    fn tool_call_invocation_serde_round_trip() {
+        let inv = LegionToolCallInvocation {
+            tool: LegionToolKind::Read,
+            input: serde_json::json!({"path": "src/main.rs"}),
+            tool_use_id: "tuid-1".to_string(),
+        };
+        let json = serde_json::to_string(&inv).unwrap();
+        let decoded: LegionToolCallInvocation = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tool, LegionToolKind::Read);
+        assert_eq!(decoded.tool_use_id, "tuid-1");
+    }
+
+    #[test]
+    fn tool_call_result_success_and_rejected_variants_are_serializable() {
+        let inv = LegionToolCallInvocation {
+            tool: LegionToolKind::Grep,
+            input: serde_json::json!({"pattern": "fn main"}),
+            tool_use_id: "tuid-2".to_string(),
+        };
+        let success = LegionToolCallResult {
+            invocation: inv.clone(),
+            outcome: LegionToolCallOutcome::Success {
+                content: "found 3 matches".to_string(),
+                truncated: false,
+                redaction_applied: false,
+            },
+        };
+        let json = serde_json::to_string(&success).unwrap();
+        let decoded: LegionToolCallResult = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded.outcome,
+            LegionToolCallOutcome::Success { .. }
+        ));
+
+        let feedback = LegionToolCallFeedback::new(
+            LegionToolKind::Grep,
+            LegionToolCallFeedbackKind::ScopeDenied,
+            "scope_denied",
+            None,
+        );
+        let rejected = LegionToolCallResult {
+            invocation: inv,
+            outcome: LegionToolCallOutcome::Rejected(feedback),
+        };
+        let json = serde_json::to_string(&rejected).unwrap();
+        let decoded: LegionToolCallResult = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded.outcome,
+            LegionToolCallOutcome::Rejected(_)
+        ));
     }
 
     #[test]

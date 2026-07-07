@@ -3757,12 +3757,16 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 name = "legion-agent"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "legion-ai",
  "legion-debug",
  "legion-platform",
  "legion-protocol",
  "legion-tracker",
+ "regex",
+ "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]

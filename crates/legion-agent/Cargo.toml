@@ -14,5 +14,9 @@ legion-debug = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }

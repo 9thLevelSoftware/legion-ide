@@ -49,7 +49,7 @@ clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tracing = "0.1"
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 hex = "0.4"
 sha2 = "0.10"
 toml = "0.8"

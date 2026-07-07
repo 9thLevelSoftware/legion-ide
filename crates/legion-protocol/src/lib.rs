@@ -26,6 +26,8 @@ pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 
 /// Structured context manifest assembly helpers.
 pub mod capability;
+/// Budget caps and audit-step DTOs for the delegated task execution loop.
+pub mod delegate_loop;
 /// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
@@ -34,13 +36,19 @@ pub mod scope;
 pub mod tools;
 
 pub use capability::AssistedAiCapabilityMatrix;
+pub use delegate_loop::{
+    DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind, DelegatedTaskLoopStepRecord,
+};
 pub use manifest::{ContextManifestAssembly, ContextManifestSources};
 pub use plan::{
     EditablePlanArtifact, EditablePlanRevisionArtifact, EditablePlanRevisionAuditRow,
     EditablePlanSection, EditablePlanSectionKind,
 };
 pub use scope::{DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind};
-pub use tools::LegionToolKind;
+pub use tools::{
+    LegionToolCallFeedback, LegionToolCallFeedbackKind, LegionToolCallInvocation,
+    LegionToolCallOutcome, LegionToolCallResult, LegionToolKind,
+};
 
 // -----------------------------------------------------------------------------
 // Core identifiers and shared primitives
