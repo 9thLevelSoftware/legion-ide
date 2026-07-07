@@ -123,6 +123,7 @@ Renderer crates are adapter-only. They must not appear in `legion-ui`, app/edito
   - `legion-project`
   - `legion-protocol`
   - `legion-remote`
+  - `legion-sandbox`
   - `legion-security`
   - `legion-storage`
   - `legion-terminal`
@@ -169,6 +170,7 @@ Phase 3 semantic fabric activation for `crates/legion-index/Cargo.toml` is limit
 
 - `legion-agent` may depend on:
   - `legion-ai`
+  - `legion-debug`
   - `legion-platform`
   - `legion-protocol`
   - `legion-tracker`
