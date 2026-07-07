@@ -906,6 +906,7 @@ cargo run -p xtask -- golden-path-2
 cargo run -p xtask -- golden-path-3
 cargo run -p xtask -- perf-harness
 cargo run -p xtask -- verify-perf-harness
+cargo run -p xtask -- update-drill
 ```
 
 ### Docs-only gate

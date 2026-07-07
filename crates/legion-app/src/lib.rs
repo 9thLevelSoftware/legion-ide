@@ -33,6 +33,9 @@ pub mod language;
 
 pub mod terminal_policy;
 
+/// Auto-updater client: manifest source, version compare, staging, journal, rollback (ADR-0042).
+pub mod updater;
+
 /// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
 pub mod proposal;
 

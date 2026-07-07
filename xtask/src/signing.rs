@@ -128,8 +128,6 @@ pub fn verify_ed25519_signature(
     signature: &[u8],
     verifying_key: &[u8],
 ) -> Result<(), SigningError> {
-    use ed25519_dalek::Verifier as _;
-
     let key_bytes: &[u8; 32] = verifying_key.try_into().map_err(|_| {
         SigningError::InvalidKey(format!(
             "verifying key must be 32 bytes, got {}",
@@ -147,7 +145,7 @@ pub fn verify_ed25519_signature(
     })?;
     let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
 
-    vk.verify(data, &sig)
+    vk.verify_strict(data, &sig)
         .map_err(|err| SigningError::VerifyFailed(err.to_string()))
 }
 

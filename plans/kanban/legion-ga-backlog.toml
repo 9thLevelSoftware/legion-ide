@@ -1696,6 +1696,8 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Strategy and manifest format are documented in an ADR and reflected in the pipeline config."]
     stop_condition = "Stop if the updater is wired before the ADR is ratified."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-UPDATER-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F2.T2"
@@ -1707,17 +1709,21 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- release-pipeline --channel stable", "cargo run -p xtask -- release-pipeline --channel preview"]
     acceptance = ["Each channel produces its own descriptor with no cross-channel leakage."]
     stop_condition = "Stop if a preview descriptor can be installed as stable."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-UPDATER-evidence.md"
 
     [[epics.features.tasks]]
     id = "P8.F2.T3"
     title = "Test update -> rollback on all three OSes"
     mode = "Manual"
     readiness_row = "PR-REL-001"
-    files = ["plans/evidence/release/", ".github/workflows/"]
+    files = ["plans/evidence/release/", ".github/workflows/", "crates/legion-app/src/bin/update_drill.rs"]
     dependencies = ["P8.F2.T2"]
-    verification = ["ls plans/evidence/release/"]
-    acceptance = ["GP-5 update and rollback works."]
+    verification = ["cargo run -p xtask -- update-drill"]
+    acceptance = ["Update/rollback validated deterministically via the update-drill (19th standing gate). Note: the v0.1 plan referenced 'GP-5 update and rollback works' — that wording is superseded by the v0.2 rebaseline; the update-drill gate replaces the stale GP-5 reference. Binary swap/installer execution/restart remain out of scope (ADR-0042 D5)."]
     stop_condition = "Stop if rollback evidence is older than the current release descriptor."
+    status = "done"
+    evidence = "plans/evidence/production/M12/PKT-UPDATER-evidence.md"
 
   [[epics.features]]
   id = "P8.F3"

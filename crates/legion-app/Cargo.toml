@@ -51,10 +51,21 @@ legion-plugin = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+# PKT-UPDATER: Ed25519 verify (duplicated in updater module — xtask cannot be a dep).
+ed25519-dalek = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
 hex = { workspace = true }
+
+# PKT-UPDATER: rename the binary so Windows installer-detection heuristic
+# (which auto-elevates any exe containing "update" in its name) does not
+# prevent the update-drill subprocess from running without elevation.
+[[bin]]
+name = "upd-drill"
+path = "src/bin/update_drill.rs"
 
 [dev-dependencies]
 tempfile = "3"

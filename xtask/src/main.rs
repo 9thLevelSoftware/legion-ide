@@ -747,6 +747,19 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
     },
+    /// Run the deterministic update/rollback drill and write a report (19th standing gate).
+    ///
+    /// Generates an ephemeral Ed25519 keypair, fabricates v0.1.0 and v0.2.0
+    /// artifacts, signs the v0.2.0 manifest, then exercises `Updater`
+    /// (check → stage → apply → rollback) plus four negative cases (bad sig,
+    /// bad hash, cross-channel, downgrade).  All operations are local —
+    /// zero egress.  Writes `target/update-drill/update_drill_report.toml`.
+    #[command(name = "update-drill")]
+    UpdateDrill {
+        /// Output directory for the drill report.
+        #[arg(long, default_value = "target/update-drill")]
+        out: String,
+    },
 }
 
 fn main() {
@@ -834,6 +847,7 @@ fn main() {
         } => run_golden_path_3_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
         Commands::HostileEvals { out } => run_hostile_evals_command(&out),
         Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
+        Commands::UpdateDrill { out } => run_update_drill_command(&out),
     };
 
     process::exit(code);
@@ -1884,6 +1898,32 @@ fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBen
             "unknown legion-bench mode `{other}`; expected recorded or live"
         )),
     }
+}
+
+fn run_update_drill_command(out: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("update-drill failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::update_drill::UpdateDrillOptions {
+        out_dir: out.to_string(),
+    };
+    let code = xtask::update_drill::run_update_drill(&workspace_root, &opts);
+    if code == 0 {
+        println!(
+            "update-drill: drill passed; report written to {}/update_drill_report.toml",
+            out
+        );
+    } else {
+        eprintln!(
+            "update-drill: drill exited with code {code}; check {}/update_drill_report.toml",
+            out
+        );
+    }
+    code
 }
 
 fn run_check_deps(policy_path: &str) -> Result<(), String> {

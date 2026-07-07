@@ -216,9 +216,27 @@ pub struct DelegatedTaskSandboxOrchestrator {
 }
 
 impl DelegatedTaskSandboxOrchestrator {
-    /// Creates a new orchestrator under `target/delegated-tasks`.
+    /// Creates a new orchestrator under `target/delegated-tasks` (CWD-relative).
     pub fn new(run_id: &str) -> Self {
         let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{run_id}"));
+        Self {
+            sandbox_path,
+            is_worktree: false,
+            lease: None,
+        }
+    }
+
+    /// Creates a new orchestrator whose sandbox lives under
+    /// `source_root/target/delegated-tasks/task-<run_id>`.
+    ///
+    /// Mirrors the production implementation in `legion-agent`.  In offline
+    /// builds the workspace root is used to anchor the path just as in the
+    /// real orchestrator, keeping `lib.rs` call-sites compatible without
+    /// needing the `ai` feature flag to be active.
+    pub fn with_workspace_root(source_root: &Path, run_id: &str) -> Self {
+        let sandbox_path = source_root
+            .join("target/delegated-tasks")
+            .join(format!("task-{run_id}"));
         Self {
             sandbox_path,
             is_worktree: false,

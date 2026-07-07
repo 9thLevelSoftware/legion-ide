@@ -3883,6 +3883,7 @@ name = "legion-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
  "globset",
  "hex",
  "legion-agent",
@@ -3908,6 +3909,7 @@ dependencies = [
  "legion-tracker",
  "legion-ui",
  "regex",
+ "serde",
  "serde_json",
  "sha2",
  "syntect",

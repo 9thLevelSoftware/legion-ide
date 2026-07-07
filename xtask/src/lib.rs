@@ -9,3 +9,4 @@ pub mod no_egui_textedit;
 pub mod perf_harness;
 pub mod release_pipeline;
 pub mod signing;
+pub mod update_drill;
