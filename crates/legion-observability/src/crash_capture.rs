@@ -213,12 +213,12 @@ fn redact_path(path: &str) -> String {
     let components: Vec<&str> = path.split(['/', '\\']).collect();
 
     // Look for a "src" component: keep everything from the crate name before it.
-    if let Some(src_idx) = components.iter().rposition(|&c| c == "src") {
-        if src_idx >= 1 {
-            let crate_name = components[src_idx - 1];
-            let rest = &components[src_idx..];
-            return format!("{}/{}", crate_name, rest.join("/"));
-        }
+    if let Some(src_idx) = components.iter().rposition(|&c| c == "src")
+        && src_idx >= 1
+    {
+        let crate_name = components[src_idx - 1];
+        let rest = &components[src_idx..];
+        return format!("{}/{}", crate_name, rest.join("/"));
     }
 
     // Fallback: just the filename.

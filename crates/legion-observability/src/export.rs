@@ -149,6 +149,7 @@ mod unit_tests {
     use super::*;
     use legion_protocol::WorkbenchTelemetryConsent;
     use std::fs;
+    use std::path::Path;
 
     fn consent_with_raw(raw: bool) -> WorkbenchTelemetryConsent {
         WorkbenchTelemetryConsent {
@@ -174,7 +175,7 @@ mod unit_tests {
         dir
     }
 
-    fn populate_crash(bundle_dir: &PathBuf) -> String {
+    fn populate_crash(bundle_dir: &Path) -> String {
         let crash_id = uuid::Uuid::new_v4().to_string();
         let crash_dir = bundle_dir.join(&crash_id);
         fs::create_dir_all(&crash_dir).unwrap();
