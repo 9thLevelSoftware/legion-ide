@@ -13,6 +13,10 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use legion_ai::tool_calls::{
+    ToolCallingProvider, ToolCompletionRequest, ToolCompletionResponse, ToolCompletionStopReason,
+    ToolConversationTurn, ToolDefinition, ToolTurnBlock,
+};
 use legion_ai::{
     BatchJobRequest, BatchJobResponse, ChatCompletionRequest, ChatCompletionResponse, ChatRole,
     EmbeddingRequest, EmbeddingResponse, InlinePredictionRequest, InlinePredictionResponse,
@@ -252,6 +256,7 @@ impl ModelProvider for DeterministicLocalProvider {
             embedding: true,
             batch: true,
             inline_prediction: true,
+            tool_use: false,
         }
     }
 
@@ -526,6 +531,7 @@ where
             embedding: true,
             batch: false,
             inline_prediction: false,
+            tool_use: false,
         }
     }
 
@@ -786,6 +792,7 @@ where
             embedding: false,
             batch: true,
             inline_prediction: false,
+            tool_use: false,
         }
     }
 
@@ -965,6 +972,7 @@ where
             embedding: true,
             batch: false,
             inline_prediction: false,
+            tool_use: false,
         }
     }
 
@@ -1615,6 +1623,56 @@ where
         Ok(text)
     }
 
+    fn extract_assistant_blocks(
+        response: &Value,
+    ) -> Result<(Vec<ToolTurnBlock>, ToolCompletionStopReason), ProviderError> {
+        let content = response
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ProviderError::RequestFailed {
+                provider: "anthropic".to_string(),
+                message: "response missing content blocks".to_string(),
+            })?;
+
+        let mut blocks = Vec::new();
+        for block in content {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        blocks.push(ToolTurnBlock::Text(text.to_string()));
+                    }
+                }
+                Some("tool_use") => {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let input = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
+                    blocks.push(ToolTurnBlock::ToolUse { id, name, input });
+                }
+                _ => {} // skip thinking blocks and other unknown types
+            }
+        }
+
+        let stop_reason = match response.get("stop_reason").and_then(Value::as_str) {
+            Some("tool_use") => ToolCompletionStopReason::ToolUse,
+            Some("end_turn") => ToolCompletionStopReason::EndTurn,
+            Some("max_tokens") => ToolCompletionStopReason::MaxTokens,
+            _ => ToolCompletionStopReason::EndTurn,
+        };
+
+        Ok((blocks, stop_reason))
+    }
+
     fn extract_input_tokens(response: &Value) -> Result<u32, ProviderError> {
         response
             .get("input_tokens")
@@ -1793,6 +1851,7 @@ where
             embedding: false,
             batch: true,
             inline_prediction: false,
+            tool_use: true,
         }
     }
 
@@ -1845,6 +1904,97 @@ where
             request.provider,
             "predict_inline",
         ))
+    }
+}
+
+/// Serialize a `ToolConversationTurn` into the Anthropic Messages API wire format.
+fn serialize_tool_turn(turn: &ToolConversationTurn) -> Value {
+    let content: Vec<Value> = turn
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ToolTurnBlock::Text(text) => json!({
+                "type": "text",
+                "text": text,
+            }),
+            ToolTurnBlock::ToolUse { id, name, input } => json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            }),
+            ToolTurnBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            }),
+        })
+        .collect();
+    json!({
+        "role": turn.role,
+        "content": content,
+    })
+}
+
+impl<T> ToolCallingProvider for AnthropicMessagesClient<T>
+where
+    T: AnthropicMessagesTransport,
+{
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        let credential = self.credential()?;
+
+        let messages: Vec<Value> = request.turns.iter().map(serialize_tool_turn).collect();
+
+        let tools: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t: &ToolDefinition| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect();
+
+        let mut payload = json!({
+            "model": request.model,
+            "max_tokens": request.max_tokens,
+            "messages": messages,
+            "stream": false,
+        });
+
+        if !request.system.is_empty() {
+            payload["system"] = json!(request.system);
+        }
+
+        if !tools.is_empty() {
+            payload["tools"] = json!(tools);
+        }
+
+        let response = self.transport.post_json(
+            &self.endpoint("/v1/messages"),
+            Some(credential),
+            None,
+            payload,
+        )?;
+
+        let (blocks, stop_reason) = Self::extract_assistant_blocks(&response)?;
+
+        Ok(ToolCompletionResponse {
+            provider: self.id.clone(),
+            model: request.model,
+            blocks,
+            stop_reason,
+        })
     }
 }
 
@@ -1956,6 +2106,7 @@ impl ModelProvider for UnavailableInlineProvider {
             embedding: false,
             batch: false,
             inline_prediction: true,
+            tool_use: false,
         }
     }
 
@@ -4315,5 +4466,252 @@ mod tests {
             )
             .expect("resources/list reload succeeds");
         assert!(reloaded.resources[0].subscribable);
+    }
+
+    // ---- D3 Anthropic tool-calling tests ----
+
+    /// A fixed-response Anthropic transport for tool-calling tests.
+    #[derive(Debug, Clone)]
+    struct FixedAnthropicTransport {
+        response: Value,
+        calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    impl FixedAnthropicTransport {
+        fn new(response: Value) -> Self {
+            Self {
+                response,
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Vec<Value> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl AnthropicMessagesTransport for FixedAnthropicTransport {
+        fn post_json(
+            &self,
+            _endpoint: &str,
+            _credential: Option<AnthropicCredential<'_>>,
+            _beta_header: Option<&str>,
+            payload: Value,
+        ) -> Result<Value, ProviderError> {
+            self.calls.lock().expect("calls lock").push(payload);
+            Ok(self.response.clone())
+        }
+
+        fn post_text(
+            &self,
+            _endpoint: &str,
+            _credential: Option<AnthropicCredential<'_>>,
+            _beta_header: Option<&str>,
+            payload: Value,
+        ) -> Result<String, ProviderError> {
+            self.calls.lock().expect("calls lock").push(payload);
+            Err(ProviderError::RequestFailed {
+                provider: "fixed".to_string(),
+                message: "streaming not supported in FixedAnthropicTransport".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn extract_assistant_blocks_parses_tool_use_response() {
+        let response = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tool-abc",
+                    "name": "Read",
+                    "input": { "path": "src/main.rs" }
+                }
+            ],
+            "stop_reason": "tool_use"
+        });
+        let (blocks, stop_reason) =
+            AnthropicMessagesClient::<FixedAnthropicTransport>::extract_assistant_blocks(&response)
+                .expect("parsing succeeds");
+        assert_eq!(stop_reason, ToolCompletionStopReason::ToolUse);
+        assert_eq!(blocks.len(), 1);
+        let ToolTurnBlock::ToolUse { id, name, input } = &blocks[0] else {
+            panic!("expected ToolUse block, got {:?}", blocks[0]);
+        };
+        assert_eq!(id, "tool-abc");
+        assert_eq!(name, "Read");
+        assert_eq!(input, &json!({ "path": "src/main.rs" }));
+    }
+
+    #[test]
+    fn serialize_tool_turn_produces_anthropic_wire_format() {
+        use legion_ai::tool_calls::{ToolConversationTurn, ToolTurnBlock};
+
+        // Assistant turn with ToolUse block.
+        let assistant_turn = ToolConversationTurn {
+            role: "assistant".to_string(),
+            blocks: vec![ToolTurnBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "Read".to_string(),
+                input: json!({ "path": "foo.rs" }),
+            }],
+        };
+        let serialized = serialize_tool_turn(&assistant_turn);
+        assert_eq!(serialized["role"], "assistant");
+        assert_eq!(serialized["content"][0]["type"], "tool_use");
+        assert_eq!(serialized["content"][0]["id"], "tool-1");
+        assert_eq!(serialized["content"][0]["name"], "Read");
+        assert_eq!(serialized["content"][0]["input"]["path"], "foo.rs");
+
+        // User turn with ToolResult block.
+        let user_turn = ToolConversationTurn {
+            role: "user".to_string(),
+            blocks: vec![ToolTurnBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "fn main() {}".to_string(),
+                is_error: false,
+            }],
+        };
+        let serialized = serialize_tool_turn(&user_turn);
+        assert_eq!(serialized["role"], "user");
+        assert_eq!(serialized["content"][0]["type"], "tool_result");
+        assert_eq!(serialized["content"][0]["tool_use_id"], "tool-1");
+        assert_eq!(serialized["content"][0]["content"], "fn main() {}");
+        assert_eq!(serialized["content"][0]["is_error"], false);
+
+        // User turn with Text block.
+        let text_turn = ToolConversationTurn {
+            role: "user".to_string(),
+            blocks: vec![ToolTurnBlock::Text("hello".to_string())],
+        };
+        let serialized = serialize_tool_turn(&text_turn);
+        assert_eq!(serialized["role"], "user");
+        assert_eq!(serialized["content"][0]["type"], "text");
+        assert_eq!(serialized["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn anthropic_complete_with_tools_end_to_end_with_fixed_transport() {
+        use legion_ai::tool_calls::{ToolCallingProvider, ToolCompletionRequest, ToolDefinition};
+
+        let tool_use_response = json!({
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu-001",
+                    "name": "Read",
+                    "input": { "path": "Cargo.toml" }
+                }
+            ],
+            "stop_reason": "tool_use"
+        });
+
+        let transport = FixedAnthropicTransport::new(tool_use_response);
+        let client = AnthropicMessagesClient::with_transport(
+            "anthropic",
+            "https://api.anthropic.com",
+            Some("test-key".to_string()),
+            transport.clone(),
+        );
+
+        let request = ToolCompletionRequest {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-5".to_string(),
+            system: "You are a helpful assistant.".to_string(),
+            turns: vec![],
+            tools: vec![ToolDefinition {
+                name: "Read".to_string(),
+                description: "Read a file".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"]
+                }),
+            }],
+            max_tokens: 1024,
+        };
+
+        let response = client
+            .complete_with_tools(request)
+            .expect("complete_with_tools succeeds");
+
+        assert_eq!(response.stop_reason, ToolCompletionStopReason::ToolUse);
+        assert_eq!(response.blocks.len(), 1);
+        let ToolTurnBlock::ToolUse { id, name, .. } = &response.blocks[0] else {
+            panic!("expected ToolUse block");
+        };
+        assert_eq!(id, "tu-001");
+        assert_eq!(name, "Read");
+
+        // Verify the payload sent to the transport contained the tool definitions.
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        let payload = &calls[0];
+        assert!(payload.get("tools").is_some(), "payload must include tools");
+        assert_eq!(payload["tools"][0]["name"], "Read");
+        assert_eq!(payload["system"], "You are a helpful assistant.");
+    }
+
+    #[test]
+    fn anthropic_tool_calling_live_smoke() {
+        use legion_ai::tool_calls::{ToolCallingProvider, ToolCompletionRequest, ToolDefinition};
+
+        let api_key = match std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+        {
+            Some(key) => key,
+            None => {
+                println!(
+                    "SKIP: ANTHROPIC_API_KEY is not set — skipping live Anthropic tool-calling smoke test"
+                );
+                return;
+            }
+        };
+
+        let client = AnthropicMessagesClient::with_transport(
+            "anthropic-live",
+            "https://api.anthropic.com",
+            Some(api_key),
+            ReqwestProviderHttpTransport,
+        );
+        let request = ToolCompletionRequest {
+            provider: "anthropic-live".to_string(),
+            model: "claude-haiku-4-5".to_string(),
+            system: "Use the get_weather tool to answer the user's question.".to_string(),
+            turns: vec![legion_ai::tool_calls::ToolConversationTurn {
+                role: "user".to_string(),
+                blocks: vec![legion_ai::tool_calls::ToolTurnBlock::Text(
+                    "What is the weather in London?".to_string(),
+                )],
+            }],
+            tools: vec![ToolDefinition {
+                name: "get_weather".to_string(),
+                description: "Get the current weather for a location".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "location": { "type": "string", "description": "City name" }
+                    },
+                    "required": ["location"]
+                }),
+            }],
+            max_tokens: 256,
+        };
+
+        let response = client
+            .complete_with_tools(request)
+            .expect("live tool-calling smoke test succeeds");
+        assert!(
+            !response.blocks.is_empty(),
+            "live response must contain at least one block"
+        );
+        println!(
+            "Live smoke test passed: stop_reason={:?}, blocks={}",
+            response.stop_reason,
+            response.blocks.len()
+        );
     }
 }
