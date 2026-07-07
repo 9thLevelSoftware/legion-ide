@@ -181,6 +181,7 @@ Notes:
 
 - Working branch: `main`
 - Latest pushed opener SHA before this review-fix commit: `7d17d0e` (`docs: record PKT-OPEN M11 evidence`)
+- First repair commit in this fix round: `5b0579a` (`docs: repair PKT-OPEN evidence sequencing`)
 - Corrective hosted smoke dispatch now recorded against that pushed SHA via run `28893658693`
 - This committed evidence repair cannot also include a hosted run for its own future commit SHA without another follow-up commit, because the run ID and target SHA are only knowable after push. No such impossible certainty is claimed here.
 
