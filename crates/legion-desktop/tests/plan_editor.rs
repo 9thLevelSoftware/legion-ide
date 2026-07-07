@@ -82,7 +82,7 @@ fn plan_editor_bridge_submits_revision_with_edited_sections() {
     draft.section_bodies[1].push_str("\nPersist plan revisions");
     let edited_sections = edited_sections_from_plan_editor_draft(&model, &draft);
 
-    let output = DesktopCommandBridge::default().translate(
+    let output = DesktopCommandBridge.translate(
         DesktopAction::SubmitLegionWorkflowPlanRevision {
             plan_id: model.artifact_id.clone(),
             edited_sections: edited_sections.clone(),
@@ -102,7 +102,7 @@ fn plan_editor_bridge_submits_revision_with_edited_sections() {
 #[test]
 fn plan_editor_bridge_approves_and_rejects_plan_review_requests() {
     let snapshot = legion_ui::Shell::empty("Plan editor").projection_snapshot();
-    let bridge = DesktopCommandBridge::default();
+    let bridge = DesktopCommandBridge;
 
     assert_eq!(
         bridge.translate(
