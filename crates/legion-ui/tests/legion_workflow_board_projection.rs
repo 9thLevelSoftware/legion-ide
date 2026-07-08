@@ -44,6 +44,7 @@ fn workflow_board_columns_are_grouped_by_coordinator_state() {
             row("session:executing", LegionWorkflowState::Executing),
             row("session:verifying", LegionWorkflowState::Verifying),
             row("session:waiting", LegionWorkflowState::WaitingForApproval),
+            row("session:human", LegionWorkflowState::WaitingOnHuman),
             row("session:blocked", LegionWorkflowState::Blocked),
             row("session:completed", LegionWorkflowState::Completed),
             row("session:failed", LegionWorkflowState::Failed),
@@ -54,7 +55,7 @@ fn workflow_board_columns_are_grouped_by_coordinator_state() {
         risk_monitors: Vec::new(),
         kill_switches: Vec::new(),
         tool_permission_requests: Vec::new(),
-        total_session_count: 9,
+        total_session_count: 10,
         mcp_registry_count: 0,
         decision_feed_count: 0,
         risk_monitor_count: 0,
@@ -82,7 +83,7 @@ fn workflow_board_columns_are_grouped_by_coordinator_state() {
 
     assert_eq!(columns[0].rows.len(), 2);
     assert_eq!(columns[1].rows.len(), 1);
-    assert_eq!(columns[2].rows.len(), 2);
+    assert_eq!(columns[2].rows.len(), 3);
     assert_eq!(columns[3].rows.len(), 1);
     assert_eq!(columns[4].rows.len(), 3);
 
@@ -98,7 +99,9 @@ fn workflow_board_columns_are_grouped_by_coordinator_state() {
     );
     assert!(columns[2].rows.iter().all(|row| matches!(
         row.state,
-        LegionWorkflowState::WaitingForApproval | LegionWorkflowState::Blocked
+        LegionWorkflowState::WaitingForApproval
+            | LegionWorkflowState::WaitingOnHuman
+            | LegionWorkflowState::Blocked
     )));
     assert!(
         columns[3]

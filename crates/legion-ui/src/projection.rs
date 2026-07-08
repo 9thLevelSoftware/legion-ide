@@ -38,9 +38,9 @@ impl LegionWorkflowBoardColumnKind {
         match state {
             LegionWorkflowState::Draft | LegionWorkflowState::Planning => Self::Assigned,
             LegionWorkflowState::Executing => Self::InProgress,
-            LegionWorkflowState::WaitingForApproval | LegionWorkflowState::Blocked => {
-                Self::WaitingOnHuman
-            }
+            LegionWorkflowState::WaitingForApproval
+            | LegionWorkflowState::WaitingOnHuman
+            | LegionWorkflowState::Blocked => Self::WaitingOnHuman,
             LegionWorkflowState::Verifying => Self::Testing,
             LegionWorkflowState::Completed
             | LegionWorkflowState::Failed
@@ -138,6 +138,7 @@ fn workflow_state_label(state: LegionWorkflowState) -> &'static str {
         LegionWorkflowState::Executing => "Executing",
         LegionWorkflowState::Verifying => "Verifying",
         LegionWorkflowState::WaitingForApproval => "Waiting for approval",
+        LegionWorkflowState::WaitingOnHuman => "Waiting on human",
         LegionWorkflowState::Blocked => "Blocked",
         LegionWorkflowState::Completed => "Completed",
         LegionWorkflowState::Failed => "Failed",
@@ -382,7 +383,9 @@ mod tests {
         );
         assert!(columns[2].rows.iter().all(|row| matches!(
             row.state,
-            LegionWorkflowState::WaitingForApproval | LegionWorkflowState::Blocked
+            LegionWorkflowState::WaitingForApproval
+                | LegionWorkflowState::WaitingOnHuman
+                | LegionWorkflowState::Blocked
         )));
         assert!(
             columns[3]

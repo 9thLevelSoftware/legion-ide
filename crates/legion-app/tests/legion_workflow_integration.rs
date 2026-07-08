@@ -1,15 +1,24 @@
 #![cfg(feature = "ai")]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use legion_agent::LegionWorkflowCoordinatorOutput;
-use legion_ai::tool_calls::{ScriptedToolCallingProviderBuilder, ToolCallingProvider};
+use legion_ai::tool_calls::{
+    ScriptedToolCallingProviderBuilder, ToolCallingProvider, ToolCompletionRequest,
+    ToolCompletionResponse, ToolCompletionStopReason, ToolTurnBlock,
+};
+use legion_ai::{
+    ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest, EmbeddingResponse,
+    ModelProvider, ProviderCapabilities, ProviderError, ProviderId,
+};
 use legion_ai_providers::{McpClient, McpClientError, McpTransport};
 use legion_app::{
     AppAutomateToolCallOutcome, AppComposition, AppCompositionError, AppMcpClientToolRuntime,
-    AppProductMode, LegionWorkerProviderResolver,
+    AppProductMode, LegionWorkerProviderResolver, SharedCancellationFlag,
 };
 use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
@@ -23,7 +32,8 @@ use legion_protocol::{
     LegionEvidenceKind, LegionProviderLocalityPreference, LegionProviderPrivacyPolicy,
     LegionTaskContextRef, LegionTaskContextRefKind, LegionTaskFileScope, LegionTaskOutputContract,
     LegionTaskPacket, LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan,
-    LegionWorkerResultKind, LegionWorkflowConflictState, LegionWorkflowDecisionKind,
+    LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
+    LegionWorkflowConflictKind, LegionWorkflowConflictState, LegionWorkflowDecisionKind,
     LegionWorkflowDependency, LegionWorkflowDependencyId, LegionWorkflowDependencyState,
     LegionWorkflowMergeApproval, LegionWorkflowMergeReadinessBlocker,
     LegionWorkflowMergeReadinessState, LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState,
@@ -336,6 +346,32 @@ impl LegionWorkerProviderResolver for QueueWorkerProviderResolver {
     }
 }
 
+struct NamedWorkerProviderResolver {
+    providers: Mutex<HashMap<String, Box<dyn ToolCallingProvider + Send>>>,
+}
+
+impl NamedWorkerProviderResolver {
+    fn new(
+        providers: impl IntoIterator<Item = (String, Box<dyn ToolCallingProvider + Send>)>,
+    ) -> Self {
+        Self {
+            providers: Mutex::new(providers.into_iter().collect()),
+        }
+    }
+}
+
+impl LegionWorkerProviderResolver for NamedWorkerProviderResolver {
+    fn resolve_worker_provider(
+        &self,
+        assignment: &LegionWorkflowWorkerAssignment,
+    ) -> Option<Box<dyn ToolCallingProvider + Send>> {
+        self.providers
+            .lock()
+            .expect("providers lock")
+            .remove(&assignment.worker_id.0)
+    }
+}
+
 #[derive(Default)]
 struct EmptyWorkerProviderResolver;
 
@@ -345,6 +381,317 @@ impl LegionWorkerProviderResolver for EmptyWorkerProviderResolver {
         _assignment: &LegionWorkflowWorkerAssignment,
     ) -> Option<Box<dyn ToolCallingProvider + Send>> {
         None
+    }
+}
+
+struct BarrierEditProvider {
+    id: ProviderId,
+    worker_id: String,
+    replacement: String,
+    barrier: Arc<Barrier>,
+    timeout: Duration,
+    dispatch_log: Arc<Mutex<Vec<String>>>,
+    cursor: Mutex<usize>,
+}
+
+impl BarrierEditProvider {
+    fn new(
+        worker_id: &str,
+        replacement: &str,
+        barrier: Arc<Barrier>,
+        dispatch_log: Arc<Mutex<Vec<String>>>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            id: format!("provider:{worker_id}"),
+            worker_id: worker_id.to_string(),
+            replacement: replacement.to_string(),
+            barrier,
+            timeout,
+            dispatch_log,
+            cursor: Mutex::new(0),
+        }
+    }
+}
+
+impl ModelProvider for BarrierEditProvider {
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+impl ToolCallingProvider for BarrierEditProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        let mut cursor = self.cursor.lock().expect("cursor lock");
+        let turn = *cursor;
+        *cursor += 1;
+        drop(cursor);
+
+        match turn {
+            0 => {
+                self.dispatch_log
+                    .lock()
+                    .expect("dispatch log lock")
+                    .push(format!("barrier-enter:{}", self.worker_id));
+                let (tx, rx) = mpsc::channel();
+                let barrier = self.barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = tx.send(());
+                });
+                rx.recv_timeout(self.timeout)
+                    .map_err(|_| ProviderError::RequestFailed {
+                        provider: self.id.clone(),
+                        message: format!("lane barrier timeout for {}", self.worker_id),
+                    })?;
+                self.dispatch_log
+                    .lock()
+                    .expect("dispatch log lock")
+                    .push(format!("barrier-pass:{}", self.worker_id));
+                Ok(ToolCompletionResponse {
+                    provider: self.id.clone(),
+                    model: request.model,
+                    blocks: vec![ToolTurnBlock::ToolUse {
+                        id: format!("edit-{}", self.worker_id),
+                        name: "edit-as-proposal".to_string(),
+                        input: json!({
+                            "path": "main.txt",
+                            "replacement": self.replacement,
+                            "proposal_title": format!("Parallel lane {}", self.worker_id),
+                            "proposal_reason": "PKT-LANES concurrency proof",
+                        }),
+                    }],
+                    stop_reason: ToolCompletionStopReason::ToolUse,
+                })
+            }
+            1 => {
+                self.dispatch_log
+                    .lock()
+                    .expect("dispatch log lock")
+                    .push(format!("completed:{}", self.worker_id));
+                Ok(ToolCompletionResponse {
+                    provider: self.id.clone(),
+                    model: request.model,
+                    blocks: vec![ToolTurnBlock::Text(format!(
+                        "{} completed with proposal output.",
+                        self.worker_id
+                    ))],
+                    stop_reason: ToolCompletionStopReason::EndTurn,
+                })
+            }
+            _ => Err(ProviderError::RequestFailed {
+                provider: self.id.clone(),
+                message: format!("provider {} exhausted", self.worker_id),
+            }),
+        }
+    }
+}
+
+struct LoggingEditProvider {
+    id: ProviderId,
+    worker_id: String,
+    replacement: String,
+    dispatch_log: Arc<Mutex<Vec<String>>>,
+    cursor: Mutex<usize>,
+}
+
+impl LoggingEditProvider {
+    fn new(worker_id: &str, replacement: &str, dispatch_log: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            id: format!("provider:{worker_id}"),
+            worker_id: worker_id.to_string(),
+            replacement: replacement.to_string(),
+            dispatch_log,
+            cursor: Mutex::new(0),
+        }
+    }
+}
+
+impl ModelProvider for LoggingEditProvider {
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+impl ToolCallingProvider for LoggingEditProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        let mut cursor = self.cursor.lock().expect("cursor lock");
+        let turn = *cursor;
+        *cursor += 1;
+        drop(cursor);
+
+        match turn {
+            0 => {
+                self.dispatch_log
+                    .lock()
+                    .expect("dispatch log lock")
+                    .push(format!("dispatch:{}", self.worker_id));
+                Ok(ToolCompletionResponse {
+                    provider: self.id.clone(),
+                    model: request.model,
+                    blocks: vec![ToolTurnBlock::ToolUse {
+                        id: format!("edit-{}", self.worker_id),
+                        name: "edit-as-proposal".to_string(),
+                        input: json!({
+                            "path": "main.txt",
+                            "replacement": self.replacement,
+                            "proposal_title": format!("Ordered lane {}", self.worker_id),
+                            "proposal_reason": "PKT-LANES dependency ordering proof",
+                        }),
+                    }],
+                    stop_reason: ToolCompletionStopReason::ToolUse,
+                })
+            }
+            1 => Ok(ToolCompletionResponse {
+                provider: self.id.clone(),
+                model: request.model,
+                blocks: vec![ToolTurnBlock::Text(format!(
+                    "{} completed with proposal output.",
+                    self.worker_id
+                ))],
+                stop_reason: ToolCompletionStopReason::EndTurn,
+            }),
+            _ => Err(ProviderError::RequestFailed {
+                provider: self.id.clone(),
+                message: format!("provider {} exhausted", self.worker_id),
+            }),
+        }
+    }
+}
+
+struct CancelOnSecondTurnProvider {
+    id: ProviderId,
+    flag: SharedCancellationFlag,
+    cancelled_at: Arc<Mutex<Option<Instant>>>,
+    cursor: Mutex<usize>,
+}
+
+impl CancelOnSecondTurnProvider {
+    fn new(flag: SharedCancellationFlag, cancelled_at: Arc<Mutex<Option<Instant>>>) -> Self {
+        Self {
+            id: "provider:cancel-turn-two".to_string(),
+            flag,
+            cancelled_at,
+            cursor: Mutex::new(0),
+        }
+    }
+}
+
+impl ModelProvider for CancelOnSecondTurnProvider {
+    fn provider_id(&self) -> ProviderId {
+        self.id.clone()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+impl ToolCallingProvider for CancelOnSecondTurnProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        let mut cursor = self.cursor.lock().expect("cursor lock");
+        let turn = *cursor;
+        *cursor += 1;
+        drop(cursor);
+
+        match turn {
+            0 => Ok(ToolCompletionResponse {
+                provider: self.id.clone(),
+                model: request.model,
+                blocks: vec![ToolTurnBlock::ToolUse {
+                    id: "read-before-cancel".to_string(),
+                    name: "read".to_string(),
+                    input: json!({ "path": "main.txt" }),
+                }],
+                stop_reason: ToolCompletionStopReason::ToolUse,
+            }),
+            1 => {
+                *self.cancelled_at.lock().expect("cancelled_at lock") = Some(Instant::now());
+                self.flag.cancel();
+                Ok(ToolCompletionResponse {
+                    provider: self.id.clone(),
+                    model: request.model,
+                    blocks: vec![ToolTurnBlock::ToolUse {
+                        id: "read-after-cancel".to_string(),
+                        name: "read".to_string(),
+                        input: json!({ "path": "main.txt" }),
+                    }],
+                    stop_reason: ToolCompletionStopReason::ToolUse,
+                })
+            }
+            _ => Err(ProviderError::RequestFailed {
+                provider: self.id.clone(),
+                message: "cancel-on-second-turn provider exhausted".to_string(),
+            }),
+        }
     }
 }
 
@@ -768,6 +1115,282 @@ fn legion_workflow_real_loop_tool_rejection_blocks_with_evidence() {
 }
 
 #[test]
+fn legion_workflow_parallel_lane_executes_lane_mates_concurrently_and_delays_dependents() {
+    let mut app = automate_app();
+    let root = temp_workspace("parallel-lanes");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:parallel-lanes".to_string()),
+    )
+    .expect("open workspace");
+    let left_plan_id = DelegatedTaskPlanId("plan-parallel-left".to_string());
+    let right_plan_id = DelegatedTaskPlanId("plan-parallel-right".to_string());
+    let dependent_plan_id = DelegatedTaskPlanId("plan-parallel-dependent".to_string());
+    let mut session = workflow_session(
+        "parallel-lanes",
+        vec![
+            worker(
+                "worker:left",
+                LegionWorkflowModelBackend::Local,
+                Some(left_plan_id.clone()),
+                "target:parallel-left",
+                171,
+            ),
+            worker(
+                "worker:right",
+                LegionWorkflowModelBackend::Local,
+                Some(right_plan_id.clone()),
+                "target:parallel-right",
+                172,
+            ),
+            worker(
+                "worker:dependent",
+                LegionWorkflowModelBackend::Local,
+                Some(dependent_plan_id.clone()),
+                "target:parallel-dependent",
+                173,
+            ),
+        ],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    session.dependency_edges = vec![
+        LegionWorkflowDependency {
+            dependency_id: LegionWorkflowDependencyId("dependency:left-dependent".to_string()),
+            predecessor_worker_id: LegionWorkflowWorkerId("worker:left".to_string()),
+            successor_worker_id: LegionWorkflowWorkerId("worker:dependent".to_string()),
+            state: LegionWorkflowDependencyState::Pending,
+            label: "left before dependent".to_string(),
+            schema_version: 1,
+        },
+        LegionWorkflowDependency {
+            dependency_id: LegionWorkflowDependencyId("dependency:right-dependent".to_string()),
+            predecessor_worker_id: LegionWorkflowWorkerId("worker:right".to_string()),
+            successor_worker_id: LegionWorkflowWorkerId("worker:dependent".to_string()),
+            state: LegionWorkflowDependencyState::Pending,
+            label: "right before dependent".to_string(),
+            schema_version: 1,
+        },
+    ];
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![
+        delegated_contract(left_plan_id.clone()),
+        delegated_contract(right_plan_id.clone()),
+        delegated_contract(dependent_plan_id.clone()),
+    ]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let dispatch_log = Arc::new(Mutex::new(Vec::new()));
+    let barrier = Arc::new(Barrier::new(2));
+    let resolver = NamedWorkerProviderResolver::new([
+        (
+            "worker:left".to_string(),
+            Box::new(BarrierEditProvider::new(
+                "worker:left",
+                "resolver payload: left\n",
+                barrier.clone(),
+                dispatch_log.clone(),
+                Duration::from_millis(500),
+            )) as Box<dyn ToolCallingProvider + Send>,
+        ),
+        (
+            "worker:right".to_string(),
+            Box::new(BarrierEditProvider::new(
+                "worker:right",
+                "resolver payload: right\n",
+                barrier.clone(),
+                dispatch_log.clone(),
+                Duration::from_millis(500),
+            )) as Box<dyn ToolCallingProvider + Send>,
+        ),
+        (
+            "worker:dependent".to_string(),
+            Box::new(LoggingEditProvider::new(
+                "worker:dependent",
+                "resolver payload: dependent\n",
+                dispatch_log.clone(),
+            )) as Box<dyn ToolCallingProvider + Send>,
+        ),
+    ]);
+
+    let outcome = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute parallel lane workflow");
+
+    assert_eq!(
+        outcome.merge_readiness.state,
+        LegionWorkflowMergeReadinessState::Ready
+    );
+    assert_eq!(
+        outcome
+            .outputs
+            .iter()
+            .filter(|output| matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)))
+            .count(),
+        3
+    );
+    let dispatch_log = dispatch_log.lock().expect("dispatch log lock").clone();
+    let left_pass = dispatch_log
+        .iter()
+        .position(|entry| entry == "barrier-pass:worker:left")
+        .expect("left barrier pass logged");
+    let right_pass = dispatch_log
+        .iter()
+        .position(|entry| entry == "barrier-pass:worker:right")
+        .expect("right barrier pass logged");
+    let dependent_dispatch = dispatch_log
+        .iter()
+        .position(|entry| entry == "dispatch:worker:dependent")
+        .expect("dependent dispatch logged");
+    assert!(
+        dependent_dispatch > left_pass && dependent_dispatch > right_pass,
+        "dependent worker dispatched before both lane-mates completed barrier: {dispatch_log:?}"
+    );
+}
+
+#[test]
+fn legion_workflow_unresolved_conflict_pauses_dispatch_until_resolved() {
+    let mut app = automate_app();
+    let root = temp_workspace("conflict-pause");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:conflict-pause".to_string()),
+    )
+    .expect("open workspace");
+    let plan_id = DelegatedTaskPlanId("plan-conflict-pause".to_string());
+    let independent_plan_id = DelegatedTaskPlanId("plan-conflict-independent".to_string());
+    let mut session = workflow_session(
+        "conflict-pause",
+        vec![
+            worker(
+                "worker:conflicted",
+                LegionWorkflowModelBackend::Local,
+                Some(plan_id.clone()),
+                "target:conflicted",
+                181,
+            ),
+            worker(
+                "worker:independent",
+                LegionWorkflowModelBackend::Local,
+                Some(independent_plan_id.clone()),
+                "target:independent",
+                182,
+            ),
+        ],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let conflict_id = LegionWorkflowConflictId("conflict:pause-target".to_string());
+    session.conflict_summaries.push(LegionWorkflowConflict {
+        conflict_id: conflict_id.clone(),
+        kind: LegionWorkflowConflictKind::SameTarget,
+        state: LegionWorkflowConflictState::Unresolved,
+        worker_ids: Vec::new(),
+        target_label: "conflict target label".to_string(),
+        target_hash: Some(fingerprint("target:conflicted")),
+        labels: vec!["legion_workflow.same_target_conflict".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    });
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![
+        delegated_contract(plan_id.clone()),
+        delegated_contract(independent_plan_id.clone()),
+    ]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let resolver = NamedWorkerProviderResolver::new([
+        (
+            "worker:conflicted".to_string(),
+            scripted_main_edit_provider(
+                "test-scripted-conflict-pause",
+                "resolver payload: paused\n",
+            ),
+        ),
+        (
+            "worker:independent".to_string(),
+            scripted_main_edit_provider(
+                "test-scripted-conflict-independent",
+                "resolver payload: independent\n",
+            ),
+        ),
+    ]);
+
+    let first = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute paused workflow");
+
+    assert!(first.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason == "legion_workflow.conflict_pause:conflict:pause-target"))
+    }));
+    assert!(
+        !first
+            .outputs
+            .iter()
+            .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)))
+    );
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session after pause")
+            .worker_assignments[0]
+            .state,
+        LegionWorkflowWorkerState::Blocked
+    );
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("stored session after pause")
+            .worker_assignments[1]
+            .state,
+        LegionWorkflowWorkerState::Ready,
+        "independent same-lane worker must not dispatch before explicit conflict resolution"
+    );
+
+    app.resolve_legion_workflow_conflict(&session_id, &conflict_id)
+        .expect("resolve conflict");
+    let second = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute resumed workflow");
+
+    assert_eq!(
+        second
+            .outputs
+            .iter()
+            .filter(|output| {
+                matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_))
+            })
+            .count(),
+        2
+    );
+    let stored = app
+        .legion_workflow_session(&session_id)
+        .expect("stored session after resume");
+    assert!(
+        stored
+            .worker_assignments
+            .iter()
+            .all(|worker| worker.state == LegionWorkflowWorkerState::Completed),
+        "all paused lane workers should complete after explicit resolution: {:?}",
+        stored
+            .worker_assignments
+            .iter()
+            .map(|worker| (&worker.worker_id.0, worker.state))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker() {
     let mut app = automate_app();
     let root = temp_workspace("dependency-chain");
@@ -830,13 +1453,7 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
 
     assert_eq!(
         first.merge_readiness.state,
-        LegionWorkflowMergeReadinessState::Blocked
-    );
-    assert!(
-        first
-            .merge_readiness
-            .blockers
-            .contains(&LegionWorkflowMergeReadinessBlocker::IncompleteWorker)
+        LegionWorkflowMergeReadinessState::Ready
     );
     assert_eq!(
         first
@@ -844,7 +1461,7 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
             .iter()
             .filter(|output| matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)))
             .count(),
-        1
+        2
     );
     let stored = app
         .legion_workflow_session(&session_id)
@@ -855,30 +1472,28 @@ fn legion_workflow_dependency_chain_resumes_without_rerunning_completed_worker()
     );
     assert_eq!(
         stored.worker_assignments[1].state,
-        LegionWorkflowWorkerState::Ready
+        LegionWorkflowWorkerState::Completed
     );
     assert_eq!(
         stored.dependency_edges[0].state,
         LegionWorkflowDependencyState::Satisfied
     );
-    assert_eq!(stored.proposal_ids.len(), 1);
+    assert_eq!(stored.proposal_ids.len(), 2);
 
     let second = app
         .execute_legion_workflow_with_providers(&session_id, &resolver)
-        .expect("execute resumed workflow pass");
+        .expect("execute no-op workflow pass");
 
     assert_eq!(
         second.merge_readiness.state,
         LegionWorkflowMergeReadinessState::Ready
     );
     assert!(second.merge_readiness.blockers.is_empty());
-    assert_eq!(
-        second
+    assert!(
+        !second
             .outputs
             .iter()
-            .filter(|output| matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)))
-            .count(),
-        1
+            .any(|output| matches!(output, LegionWorkflowCoordinatorOutput::ProposalReady(_)))
     );
     let stored = app
         .legion_workflow_session(&session_id)
@@ -1083,6 +1698,49 @@ fn legion_workflow_missing_signoff_blocks_merge_readiness() {
 }
 
 #[test]
+fn legion_workflow_merge_readiness_report_blocks_ready_without_verification_evidence() {
+    let mut app = automate_app();
+    let mut session = workflow_session(
+        "merge-readiness-report",
+        vec![worker(
+            "worker:ready-report",
+            LegionWorkflowModelBackend::Local,
+            Some(DelegatedTaskPlanId("plan-ready-report".to_string())),
+            "target:ready-report",
+            191,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        vec![ProposalId(191)],
+        Some(approval(true)),
+    );
+    session.worker_assignments[0].state = LegionWorkflowWorkerState::Completed;
+    session.verification_gates[0].state = LegionWorkflowVerificationGateState::Pending;
+    session.verification_gates[0].evidence_artifact_id = None;
+    session.sign_off_records[0].reviewer_principal_id = Some(PrincipalId("reviewer".to_string()));
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let report = app
+        .legion_workflow_merge_readiness_report(&session_id)
+        .expect("merge readiness report");
+
+    assert_ne!(
+        report.readiness.state,
+        LegionWorkflowMergeReadinessState::Ready
+    );
+    assert!(
+        report
+            .readiness
+            .blockers
+            .contains(&LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence)
+    );
+}
+
+#[test]
 fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutation() {
     let root = temp_workspace("merge-ready");
     let mut app = automate_app();
@@ -1157,6 +1815,63 @@ fn legion_workflow_approved_evidence_and_signoff_are_merge_ready_without_mutatio
             .lifecycle_state,
         LegionWorkflowState::Completed
     );
+}
+
+#[test]
+fn legion_workflow_evidence_bundle_replays_projection_equal_to_live_projection() {
+    let root = temp_workspace("evidence-bundle");
+    let mut app = automate_app();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:evidence-bundle".to_string()),
+    )
+    .expect("open workspace");
+    let plan_id = DelegatedTaskPlanId("plan-evidence-bundle".to_string());
+    let session = workflow_session(
+        "evidence-bundle",
+        vec![worker(
+            "worker:evidence",
+            LegionWorkflowModelBackend::Local,
+            Some(plan_id.clone()),
+            "target:evidence",
+            192,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id.clone())]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let resolver = QueueWorkerProviderResolver::new(vec![scripted_main_edit_provider(
+        "test-scripted-evidence-bundle",
+        "resolver payload: evidence bundle\n",
+    )]);
+
+    let outcome = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute evidence workflow");
+    assert_eq!(
+        outcome.merge_readiness.state,
+        LegionWorkflowMergeReadinessState::Ready
+    );
+
+    let bundle = app
+        .export_legion_workflow_evidence_bundle(&session_id)
+        .expect("export evidence bundle");
+    let live_projection = app.legion_workflow_projection(bundle.projection_generated_at);
+
+    assert_eq!(bundle.replay_projection(), live_projection);
+    assert_eq!(bundle.session_snapshot.session_id, session_id);
+    assert!(!bundle.task_packets.is_empty());
+    assert!(!bundle.worker_results.is_empty());
+    assert!(!bundle.evidence_records.is_empty());
+    assert!(!bundle.decision_feed_rows.is_empty());
 }
 
 #[test]
@@ -1321,6 +2036,119 @@ fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_pro
         switch.session_id == session_id
             && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Triggered
     }));
+}
+
+#[test]
+fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
+    let mut app = automate_app();
+    let root = temp_workspace("kill-switch-mid-run");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:kill-switch-mid-run".to_string()),
+    )
+    .expect("open workspace");
+    let plan_id = DelegatedTaskPlanId("plan-kill-switch-mid-run".to_string());
+    let sibling_plan_id = DelegatedTaskPlanId("plan-kill-switch-sibling".to_string());
+    let session = workflow_session(
+        "kill-switch-mid-run",
+        vec![
+            worker(
+                "worker:cancelled",
+                LegionWorkflowModelBackend::Local,
+                Some(plan_id.clone()),
+                "target:cancelled",
+                193,
+            ),
+            worker(
+                "worker:sibling",
+                LegionWorkflowModelBackend::Local,
+                Some(sibling_plan_id.clone()),
+                "target:sibling",
+                194,
+            ),
+        ],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![
+        delegated_contract(plan_id.clone()),
+        delegated_contract(sibling_plan_id.clone()),
+    ]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+    let cancellation_flag = SharedCancellationFlag::default();
+    let cancelled_at = Arc::new(Mutex::new(None));
+    let dispatch_log = Arc::new(Mutex::new(Vec::new()));
+    app.inject_cancellation_flag_for_test(cancellation_flag.clone());
+    let resolver = NamedWorkerProviderResolver::new([
+        (
+            "worker:cancelled".to_string(),
+            Box::new(CancelOnSecondTurnProvider::new(
+                cancellation_flag,
+                cancelled_at.clone(),
+            )) as Box<dyn ToolCallingProvider + Send>,
+        ),
+        (
+            "worker:sibling".to_string(),
+            Box::new(LoggingEditProvider::new(
+                "worker:sibling",
+                "resolver payload: sibling should be cancelled\n",
+                dispatch_log.clone(),
+            )) as Box<dyn ToolCallingProvider + Send>,
+        ),
+    ]);
+
+    let started = Instant::now();
+    let outcome = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect("execute cancelled workflow");
+    let finished = Instant::now();
+
+    assert!(outcome.outputs.iter().any(|output| {
+        matches!(output, LegionWorkflowCoordinatorOutput::Blocked { reasons, .. }
+            if reasons.iter().any(|reason| reason == "legion_workflow.worker_cancelled"))
+    }));
+    let stored = app
+        .legion_workflow_session(&session_id)
+        .expect("stored cancelled session");
+    assert!(
+        stored
+            .worker_assignments
+            .iter()
+            .all(|worker| worker.state == LegionWorkflowWorkerState::Cancelled),
+        "all in-flight workers should be cancelled after the shared flag trips: {:?}",
+        stored
+            .worker_assignments
+            .iter()
+            .map(|worker| (&worker.worker_id.0, worker.state))
+            .collect::<Vec<_>>()
+    );
+    let cancelled_at = cancelled_at
+        .lock()
+        .expect("cancelled_at lock")
+        .expect("provider recorded cancellation instant");
+    assert!(
+        finished.duration_since(cancelled_at) < Duration::from_secs(2),
+        "worker cancellation ack exceeded 2s: {:?}",
+        finished.duration_since(cancelled_at)
+    );
+    assert!(
+        started <= cancelled_at && cancelled_at <= finished,
+        "cancellation instant must fall within the workflow execution window"
+    );
+    assert!(
+        outcome
+            .projection
+            .decision_feed
+            .iter()
+            .any(|entry| { entry.kind == LegionWorkflowDecisionKind::KillSwitchTriggered })
+    );
 }
 
 #[test]

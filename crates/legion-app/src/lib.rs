@@ -136,14 +136,15 @@ use legion_protocol::{
     LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
     LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
     LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
-    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
-    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
-    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
-    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
-    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
-    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
-    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
-    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult, LegionWorkflowConflictId,
+    LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
+    LegionWorkflowDecisionKind, LegionWorkflowDependencyState, LegionWorkflowKillSwitch,
+    LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval,
+    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState, LegionWorkflowProjection,
+    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
+    LegionWorkflowRiskMonitorState, LegionWorkflowSession, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
+    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
     LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
     McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
@@ -243,6 +244,7 @@ use offline_ai::{
 use offline_ai::{
     DelegatedTaskProposalGenerator, DelegatedTaskProposalInput, DelegatedTaskSandboxOrchestrator,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use syntect::easy::ScopeRangeIterator;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
@@ -804,6 +806,144 @@ pub struct AppLegionWorkflowExecution {
     pub memory_candidate_proposed: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LegionWorkflowSessionArtifacts {
+    task_packets: Vec<LegionTaskPacket>,
+    worker_results: Vec<LegionWorkerResult>,
+    evidence_records: Vec<LegionEvidenceRecord>,
+}
+
+/// Serializable verification-evidence citation for app-owned workflow exports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppLegionWorkflowVerificationEvidenceRow {
+    /// Stable verification gate id.
+    pub gate_id: LegionWorkflowVerificationGateId,
+    /// Display-safe label for the task or branch being verified.
+    pub task_label: String,
+    /// Evidence artifact id that proves this task or branch, when present.
+    pub evidence_artifact_id: Option<String>,
+    /// Display-safe command class label.
+    pub command_class_label: String,
+    /// Gate state.
+    pub state: LegionWorkflowVerificationGateState,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Row schema version.
+    pub schema_version: u16,
+}
+
+/// Serializable merge-readiness report for app-owned workflow exports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppLegionWorkflowMergeReadinessReport {
+    /// Stable workflow session id.
+    pub session_id: LegionWorkflowSessionId,
+    /// Merge readiness decision.
+    pub readiness: LegionWorkflowMergeReadiness,
+    /// Verification evidence citations by task or branch label.
+    pub verification_evidence_rows: Vec<AppLegionWorkflowVerificationEvidenceRow>,
+    /// Redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Report schema version.
+    pub schema_version: u16,
+}
+
+#[cfg(feature = "ai")]
+impl From<legion_agent::merge_readiness::LegionWorkflowMergeReadinessReport>
+    for AppLegionWorkflowMergeReadinessReport
+{
+    fn from(report: legion_agent::merge_readiness::LegionWorkflowMergeReadinessReport) -> Self {
+        Self {
+            session_id: report.session_id,
+            readiness: report.readiness,
+            verification_evidence_rows: report
+                .verification_evidence_rows
+                .into_iter()
+                .map(|row| AppLegionWorkflowVerificationEvidenceRow {
+                    gate_id: row.gate_id,
+                    task_label: row.task_label,
+                    evidence_artifact_id: row.evidence_artifact_id,
+                    command_class_label: row.command_class_label,
+                    state: row.state,
+                    redaction_hints: row.redaction_hints,
+                    schema_version: row.schema_version,
+                })
+                .collect(),
+            redaction_hints: report.redaction_hints,
+            schema_version: report.schema_version,
+        }
+    }
+}
+
+/// Metadata-only evidence export bundle for one Legion workflow session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowEvidenceBundle {
+    /// Session snapshot at export time.
+    pub session_snapshot: LegionWorkflowSession,
+    /// Canonical task packets emitted for this session.
+    pub task_packets: Vec<LegionTaskPacket>,
+    /// Canonical worker results emitted for this session.
+    pub worker_results: Vec<LegionWorkerResult>,
+    /// Canonical evidence records emitted for this session.
+    pub evidence_records: Vec<LegionEvidenceRecord>,
+    /// Decision-feed rows associated with this session.
+    pub decision_feed_rows: Vec<LegionWorkflowDecisionFeedEntry>,
+    /// Session-scoped merge-readiness report.
+    pub merge_readiness_report: AppLegionWorkflowMergeReadinessReport,
+    /// Projection-time MCP registries required for deterministic replay.
+    pub mcp_registries: Vec<McpRegistrySnapshot>,
+    /// Projection-time risk monitors required for deterministic replay.
+    pub risk_monitors: Vec<LegionWorkflowRiskMonitorSnapshot>,
+    /// Projection-time kill-switch rows required for deterministic replay.
+    pub kill_switches: Vec<LegionWorkflowKillSwitch>,
+    /// Projection-time tool permission requests required for deterministic replay.
+    pub tool_permission_requests: Vec<DelegatedTaskToolPermissionRequest>,
+    /// Generated-at timestamp for projection replay.
+    pub projection_generated_at: TimestampMillis,
+    /// Bundle redaction hints.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Bundle schema version.
+    pub schema_version: u16,
+}
+
+impl LegionWorkflowEvidenceBundle {
+    /// Rebuild the metadata-only workflow projection captured by this bundle.
+    pub fn replay_projection(&self) -> LegionWorkflowProjection {
+        let mut projection = legion_protocol::legion_workflow_projection_from_sessions(
+            "legion-workflow:app-command-center",
+            std::slice::from_ref(&self.session_snapshot),
+            self.projection_generated_at,
+            64,
+            self.schema_version.max(1),
+        );
+        projection.mcp_registries = self.mcp_registries.clone();
+        projection
+            .mcp_registries
+            .sort_by(|left, right| left.registry_id.cmp(&right.registry_id));
+        projection.decision_feed = self.decision_feed_rows.clone();
+        projection
+            .decision_feed
+            .sort_by_key(|entry| entry.event_sequence.0);
+        projection.risk_monitors = self.risk_monitors.clone();
+        projection
+            .risk_monitors
+            .sort_by(|left, right| left.monitor_id.0.cmp(&right.monitor_id.0));
+        projection.kill_switches = self.kill_switches.clone();
+        projection
+            .kill_switches
+            .sort_by(|left, right| left.kill_switch_id.0.cmp(&right.kill_switch_id.0));
+        projection.tool_permission_requests = self.tool_permission_requests.clone();
+        projection
+            .tool_permission_requests
+            .sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        projection.mcp_registry_count = projection.mcp_registries.len() as u32;
+        projection.decision_feed_count = projection.decision_feed.len() as u32;
+        projection.risk_monitor_count = projection.risk_monitors.len() as u32;
+        projection.kill_switch_count = projection.kill_switches.len() as u32;
+        projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
+        projection
+    }
+}
+
 /// Resolves a real tool-calling provider for one Legion workflow worker.
 ///
 /// The resolver returns an owned provider for each assignment because the
@@ -826,6 +966,62 @@ enum LegionWorkflowProviderMode<'a> {
     Resolver(&'a dyn LegionWorkerProviderResolver),
     #[cfg(not(feature = "ai"))]
     _Phantom(std::marker::PhantomData<&'a ()>),
+}
+
+#[cfg(feature = "ai")]
+struct PreparedLegionWorkflowWorkerRun {
+    worker: LegionWorkflowWorkerAssignment,
+    orchestrator: DelegatedTaskSandboxOrchestrator,
+    implicit_permission: DelegatedTaskToolPermissionRequest,
+    config: legion_agent::agent_loop::DelegatedTaskLoopConfig,
+    tool_host: AppDelegatedToolHost,
+    provider: Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>,
+}
+
+#[cfg(feature = "ai")]
+struct InFlightLegionWorkflowWorkerRun {
+    orchestrator: DelegatedTaskSandboxOrchestrator,
+    implicit_permission: DelegatedTaskToolPermissionRequest,
+    join_handle:
+        std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
+}
+
+#[cfg(feature = "ai")]
+struct LegionWorkflowWorkerRunCompletion {
+    worker: LegionWorkflowWorkerAssignment,
+    audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
+}
+
+#[cfg(feature = "ai")]
+struct LegionWorkflowVecAuditSink {
+    steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+}
+
+#[cfg(feature = "ai")]
+impl legion_agent::agent_loop::DelegatedTaskAuditSink for LegionWorkflowVecAuditSink {
+    fn record_step(&mut self, step: legion_protocol::DelegatedTaskLoopStepRecord) {
+        self.steps.push(step);
+    }
+}
+
+#[cfg(feature = "ai")]
+struct LegionWorkflowAllowAllCapabilityBroker;
+
+#[cfg(feature = "ai")]
+impl CapabilityBrokerPort for LegionWorkflowAllowAllCapabilityBroker {
+    fn handle(&self, request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
+        let cap_id = match &request {
+            CapabilityRequest::Request { capability_id, .. } => capability_id.clone(),
+            _ => CapabilityId("unknown".to_string()),
+        };
+        Ok(CapabilityResponse::Decision(CapabilityDecision {
+            decision_id: CapabilityDecisionId(1),
+            granted: true,
+            capability: cap_id,
+            reason: None,
+        }))
+    }
 }
 
 /// App-owned outcome for a delegated task execution attempt.
@@ -1038,6 +1234,7 @@ impl DelegateWorkflowState {
         format!("delegate:{role:?}:{}", self.next_message_sequence)
     }
 
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     fn set_runtime_activation(&mut self, runtime_activation: DelegatedTaskRuntimeActivationState) {
         self.runtime_activation = runtime_activation;
     }
@@ -1443,6 +1640,38 @@ impl AutomateWorkflowState {
         projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
     }
 
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    fn decision_feed_for_session(
+        &self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Vec<LegionWorkflowDecisionFeedEntry> {
+        self.decision_feed
+            .iter()
+            .filter(|entry| &entry.session_id == session_id)
+            .cloned()
+            .collect()
+    }
+
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    fn risk_monitors(&self) -> Vec<LegionWorkflowRiskMonitorSnapshot> {
+        self.risk_monitors.values().cloned().collect()
+    }
+
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    fn kill_switches(&self) -> Vec<LegionWorkflowKillSwitch> {
+        self.kill_switches.values().cloned().collect()
+    }
+
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    fn tool_permission_requests(&self) -> Vec<DelegatedTaskToolPermissionRequest> {
+        self.tool_permission_requests.values().cloned().collect()
+    }
+
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    fn mcp_registries(&self) -> Vec<McpRegistrySnapshot> {
+        self.mcp_registries.values().cloned().collect()
+    }
+
     fn seed_mcp_registry(&mut self, registry: McpRegistrySnapshot) {
         self.mcp_registries
             .insert(registry.server.server_id.0.clone(), registry);
@@ -1756,6 +1985,7 @@ fn delegated_task_proposal_content(
     )
 }
 
+#[cfg_attr(not(feature = "ai"), allow(dead_code))]
 fn safe_path_component(value: &str, fallback: &str) -> String {
     let mut component = value
         .chars()
@@ -13808,6 +14038,8 @@ pub struct AppComposition {
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
     legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
+    legion_workflow_session_artifacts: HashMap<String, LegionWorkflowSessionArtifacts>,
+    legion_workflow_conflict_pauses: HashMap<String, HashMap<String, LegionWorkflowWorkerState>>,
     plan_revision_ledger: PlanRevisionLedger,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
@@ -14056,6 +14288,8 @@ impl AppComposition {
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
             legion_workflow_plan_artifacts: HashMap::new(),
+            legion_workflow_session_artifacts: HashMap::new(),
+            legion_workflow_conflict_pauses: HashMap::new(),
             plan_revision_ledger: PlanRevisionLedger::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
@@ -14514,6 +14748,7 @@ impl AppComposition {
 
     /// Returns the workspace root path, falling back to CWD when no workspace is open.
     /// Used to ensure sandbox paths are anchored to the workspace, not the process CWD.
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     fn workspace_root_path(&self) -> std::path::PathBuf {
         self.active_documents
             .workspace_root_path
@@ -18789,6 +19024,9 @@ impl AppComposition {
             let session = self.legion_workflow_session_mut(session_id)?;
             session.lifecycle_state = LegionWorkflowState::Cancelled;
         }
+        if let Some(flag) = &self.active_cancellation_flag {
+            flag.cancel();
+        }
         let event_context = self.next_event_context();
         self.automate_workflow.trigger_kill_switch(
             session_id,
@@ -18826,6 +19064,62 @@ impl AppComposition {
         self.legion_workflow_sessions
             .iter()
             .find(|session| &session.session_id == session_id)
+    }
+
+    /// Returns merge-readiness metadata with verification evidence citations.
+    #[cfg(feature = "ai")]
+    pub fn legion_workflow_merge_readiness_report(
+        &self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<
+        legion_agent::merge_readiness::LegionWorkflowMergeReadinessReport,
+        AppCompositionError,
+    > {
+        let session = self.legion_workflow_session(session_id).ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            ))
+        })?;
+        Ok(legion_agent::merge_readiness::merge_readiness_report_for_session(session))
+    }
+
+    /// Exports a metadata-only evidence bundle for deterministic projection replay.
+    #[cfg(feature = "ai")]
+    pub fn export_legion_workflow_evidence_bundle(
+        &self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<LegionWorkflowEvidenceBundle, AppCompositionError> {
+        let session = self.legion_workflow_session(session_id).ok_or_else(|| {
+            AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            ))
+        })?;
+        let artifacts = self
+            .legion_workflow_session_artifacts
+            .get(&session_id.0)
+            .cloned()
+            .unwrap_or_default();
+        let projection_generated_at = TimestampMillis::now();
+        let merge_readiness_report = AppLegionWorkflowMergeReadinessReport::from(
+            legion_agent::merge_readiness::merge_readiness_report_for_session(session),
+        );
+        Ok(LegionWorkflowEvidenceBundle {
+            session_snapshot: session.clone(),
+            task_packets: artifacts.task_packets,
+            worker_results: artifacts.worker_results,
+            evidence_records: artifacts.evidence_records,
+            decision_feed_rows: self.automate_workflow.decision_feed_for_session(session_id),
+            merge_readiness_report,
+            mcp_registries: self.automate_workflow.mcp_registries(),
+            risk_monitors: self.automate_workflow.risk_monitors(),
+            kill_switches: self.automate_workflow.kill_switches(),
+            tool_permission_requests: self.automate_workflow.tool_permission_requests(),
+            projection_generated_at,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: session.schema_version.max(1),
+        })
     }
 
     fn block_legion_workflow_worker(
@@ -18956,19 +19250,12 @@ impl AppComposition {
     }
 
     #[cfg(feature = "ai")]
-    fn run_legion_workflow_worker_with_provider(
+    fn prepare_legion_workflow_worker_run(
         &mut self,
-        session: &mut LegionWorkflowSession,
-        coordinator: &mut LegionWorkflowCoordinator,
+        session: &LegionWorkflowSession,
         worker: &LegionWorkflowWorkerAssignment,
-        provider: &dyn legion_ai::tool_calls::ToolCallingProvider,
-        outputs: &mut Vec<LegionWorkflowCoordinatorOutput>,
-    ) -> Result<(), AppCompositionError> {
-        use legion_agent::agent_loop::{
-            DelegatedTaskAuditSink, DelegatedTaskLoopConfig, DelegatedTaskLoopResult,
-            run_delegated_task_loop,
-        };
-
+        provider: Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>,
+    ) -> Result<PreparedLegionWorkflowWorkerRun, AppCompositionError> {
         let task_id = format!(
             "legion-{}-{}",
             safe_path_component(&session.session_id.0, "session"),
@@ -19005,36 +19292,8 @@ impl AppComposition {
             allowed_egress: std::collections::BTreeSet::new(),
         };
 
-        struct VecAuditSink {
-            steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
-        }
-        impl DelegatedTaskAuditSink for VecAuditSink {
-            fn record_step(&mut self, step: legion_protocol::DelegatedTaskLoopStepRecord) {
-                self.steps.push(step);
-            }
-        }
-
-        struct AllowAllCapabilityBroker;
-        impl legion_protocol::CapabilityBrokerPort for AllowAllCapabilityBroker {
-            fn handle(&self, request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
-                let cap_id = match &request {
-                    CapabilityRequest::Request { capability_id, .. } => capability_id.clone(),
-                    _ => CapabilityId("unknown".to_string()),
-                };
-                Ok(CapabilityResponse::Decision(CapabilityDecision {
-                    decision_id: CapabilityDecisionId(1),
-                    granted: true,
-                    capability: cap_id,
-                    reason: None,
-                }))
-            }
-        }
-
-        let mut audit_sink = VecAuditSink { steps: Vec::new() };
-        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
-        self.active_cancellation_flag = Some(cancellation_flag.clone());
         let scope = self.legion_workflow_worker_scope();
-        let config = DelegatedTaskLoopConfig {
+        let config = legion_agent::agent_loop::DelegatedTaskLoopConfig {
             system_prompt: concat!(
                 "You are a focused, proposal-mediated coding agent running inside a sandbox. ",
                 "Use the available tools to read the codebase and emit edit proposals. ",
@@ -19052,31 +19311,87 @@ impl AppComposition {
             forbidden_paths: scope.forbidden_paths.iter().map(|p| p.0.clone()).collect(),
         };
 
+        Ok(PreparedLegionWorkflowWorkerRun {
+            worker: worker.clone(),
+            orchestrator,
+            implicit_permission,
+            config,
+            tool_host,
+            provider,
+        })
+    }
+
+    #[cfg(feature = "ai")]
+    fn spawn_legion_workflow_worker_run(
+        &mut self,
+        prepared: PreparedLegionWorkflowWorkerRun,
+        cancellation_flag: SharedCancellationFlag,
+    ) -> InFlightLegionWorkflowWorkerRun {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
-        let allow_all_broker = AllowAllCapabilityBroker;
-        let loop_result = match run_delegated_task_loop(
+        let worker = prepared.worker.clone();
+        let orchestrator = prepared.orchestrator;
+        let implicit_permission = prepared.implicit_permission;
+        let config = prepared.config;
+        let tool_host = prepared.tool_host;
+        let provider = prepared.provider;
+        let join_handle = std::thread::spawn(move || {
+            Self::run_prepared_legion_workflow_worker(
+                worker,
+                config,
+                tool_host,
+                provider,
+                cancellation_flag,
+            )
+        });
+        InFlightLegionWorkflowWorkerRun {
+            orchestrator,
+            implicit_permission,
+            join_handle,
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn run_prepared_legion_workflow_worker(
+        worker: LegionWorkflowWorkerAssignment,
+        config: legion_agent::agent_loop::DelegatedTaskLoopConfig,
+        tool_host: AppDelegatedToolHost,
+        provider: Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>,
+        cancellation_flag: SharedCancellationFlag,
+    ) -> Result<LegionWorkflowWorkerRunCompletion, AppCompositionError> {
+        use legion_agent::agent_loop::run_delegated_task_loop;
+
+        let mut audit_sink = LegionWorkflowVecAuditSink { steps: Vec::new() };
+        let allow_all_broker = LegionWorkflowAllowAllCapabilityBroker;
+        let loop_result = run_delegated_task_loop(
             &config,
-            provider,
+            provider.as_ref(),
             &tool_host,
             &mut audit_sink,
             &cancellation_flag,
             &allow_all_broker,
-        ) {
-            Ok(result) => {
-                self.active_cancellation_flag = None;
-                result
-            }
-            Err(error) => {
-                self.active_cancellation_flag = None;
-                self.delegate_workflow
-                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {}
-                return Err(AppCompositionError::AiRuntime(format!(
-                    "delegated loop error: {error}"
-                )));
-            }
-        };
+        )
+        .map_err(|error| {
+            AppCompositionError::AiRuntime(format!("delegated loop error: {error}"))
+        })?;
+        Ok(LegionWorkflowWorkerRunCompletion {
+            worker,
+            audit_steps: audit_sink.steps,
+            loop_result,
+        })
+    }
+
+    #[cfg(feature = "ai")]
+    fn finish_legion_workflow_worker_run(
+        &mut self,
+        session: &mut LegionWorkflowSession,
+        coordinator: &mut LegionWorkflowCoordinator,
+        worker: &LegionWorkflowWorkerAssignment,
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+        loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
+        outputs: &mut Vec<LegionWorkflowCoordinatorOutput>,
+    ) -> Result<(), AppCompositionError> {
+        use legion_agent::agent_loop::DelegatedTaskLoopResult;
 
         match &loop_result {
             DelegatedTaskLoopResult::Completed { .. } => {
@@ -19093,9 +19408,7 @@ impl AppComposition {
                     .set_runtime_activation(DelegatedTaskRuntimeActivationState::Blocked);
             }
         }
-        if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {}
 
-        let audit_steps = audit_sink.steps;
         match loop_result {
             DelegatedTaskLoopResult::Completed {
                 proposals: loop_proposals,
@@ -19206,6 +19519,32 @@ impl AppComposition {
                 )?;
             }
             DelegatedTaskLoopResult::Cancelled => {
+                if !self
+                    .automate_workflow
+                    .kill_switch_triggered(&session.session_id)
+                {
+                    let event_context = self.next_event_context();
+                    self.automate_workflow.trigger_kill_switch(
+                        &session.session_id,
+                        PrincipalId("principal:legion-workflow".to_string()),
+                        "worker cancellation observed".to_string(),
+                        event_context.correlation_id,
+                        event_context.causality_id,
+                    )?;
+                    self.automate_workflow
+                        .record_decision(AutomateDecisionInput {
+                            session_id: session.session_id.clone(),
+                            worker_id: Some(worker.worker_id.clone()),
+                            kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
+                            summary_label: "Legion workflow cancellation observed".to_string(),
+                            risk_label: ProposalRiskLabel::High,
+                            mcp_server_id: None,
+                            mcp_primitive_kind: None,
+                            tool_permission_request_id: None,
+                            event_context,
+                            event_sequence: self.event_sequence_generator.next(),
+                        })?;
+                }
                 let output = coordinator
                     .mark_worker_blocked(
                         &worker.worker_id,
@@ -19220,6 +19559,125 @@ impl AppComposition {
                 outputs.push(output);
             }
         }
+        Ok(())
+    }
+
+    fn persist_legion_workflow_output_artifacts(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        outputs: &[LegionWorkflowCoordinatorOutput],
+    ) {
+        let artifacts = self
+            .legion_workflow_session_artifacts
+            .entry(session_id.0.clone())
+            .or_default();
+        for output in outputs {
+            match output {
+                LegionWorkflowCoordinatorOutput::TaskPacketReady(packet)
+                    if artifacts
+                        .task_packets
+                        .iter()
+                        .all(|existing| existing.packet_id != packet.packet_id) =>
+                {
+                    artifacts.task_packets.push((**packet).clone());
+                }
+                LegionWorkflowCoordinatorOutput::WorkerResultReady(result)
+                    if artifacts
+                        .worker_results
+                        .iter()
+                        .all(|existing| existing.result_id != result.result_id) =>
+                {
+                    artifacts.worker_results.push((**result).clone());
+                }
+                LegionWorkflowCoordinatorOutput::EvidenceReady(record)
+                    if artifacts
+                        .evidence_records
+                        .iter()
+                        .all(|existing| existing.evidence_id != record.evidence_id) =>
+                {
+                    artifacts.evidence_records.push((**record).clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn legion_workflow_dependencies_satisfied(
+        session: &LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> bool {
+        session
+            .dependency_edges
+            .iter()
+            .filter(|dependency| &dependency.successor_worker_id == worker_id)
+            .all(|dependency| dependency.state == LegionWorkflowDependencyState::Satisfied)
+    }
+
+    fn current_legion_workflow_worker_state(
+        session: &LegionWorkflowSession,
+        worker_id: &LegionWorkflowWorkerId,
+    ) -> Option<LegionWorkflowWorkerState> {
+        session
+            .worker_assignments
+            .iter()
+            .find(|worker| &worker.worker_id == worker_id)
+            .map(|worker| worker.state)
+    }
+
+    fn legion_workflow_worker_can_dispatch(state: LegionWorkflowWorkerState) -> bool {
+        matches!(
+            state,
+            LegionWorkflowWorkerState::Pending
+                | LegionWorkflowWorkerState::Ready
+                | LegionWorkflowWorkerState::WaitingForDependency
+                | LegionWorkflowWorkerState::ProviderRouteRequired
+        )
+    }
+
+    fn unresolved_conflict_for_legion_workflow_worker(
+        session: &LegionWorkflowSession,
+        worker: &LegionWorkflowWorkerAssignment,
+    ) -> Option<LegionWorkflowConflictId> {
+        session
+            .conflict_summaries
+            .iter()
+            .filter(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+            .find(|conflict| {
+                conflict.worker_ids.contains(&worker.worker_id)
+                    || worker.affected_targets.iter().any(|target| {
+                        conflict.target_hash.as_ref().is_some_and(|hash| {
+                            target.hashes.iter().any(|candidate| candidate == hash)
+                        }) || conflict.target_label.contains(&target.target_id)
+                            || target
+                                .labels
+                                .iter()
+                                .any(|label| conflict.target_label.contains(label))
+                    })
+            })
+            .map(|conflict| conflict.conflict_id.clone())
+    }
+
+    fn pause_legion_workflow_worker_for_conflict(
+        &mut self,
+        session: &mut LegionWorkflowSession,
+        coordinator: &mut LegionWorkflowCoordinator,
+        worker: &LegionWorkflowWorkerAssignment,
+        conflict_id: &LegionWorkflowConflictId,
+        outputs: &mut Vec<LegionWorkflowCoordinatorOutput>,
+    ) -> Result<(), AppCompositionError> {
+        self.legion_workflow_conflict_pauses
+            .entry(session.session_id.0.clone())
+            .or_default()
+            .entry(worker.worker_id.0.clone())
+            .or_insert(worker.state);
+        self.block_legion_workflow_worker(
+            session,
+            coordinator,
+            &worker.worker_id,
+            vec![format!("legion_workflow.conflict_pause:{}", conflict_id.0)],
+            outputs,
+        )?;
+        session.lifecycle_state = LegionWorkflowState::WaitingOnHuman;
         Ok(())
     }
 
@@ -19320,243 +19778,384 @@ impl AppComposition {
             )));
         }
 
-        for worker in coordinator.next_ready_workers() {
-            self.automate_workflow
-                .record_decision(AutomateDecisionInput {
-                    session_id: session.session_id.clone(),
-                    worker_id: Some(worker.worker_id.clone()),
-                    kind: LegionWorkflowDecisionKind::WorkerScheduled,
-                    summary_label: format!(
-                        "Legion workflow worker scheduled: {}",
-                        worker.worker_id.0
-                    ),
-                    risk_label: if worker.risk_labels.iter().any(|risk| {
-                        matches!(
-                            risk,
-                            CommandRiskLabel::Privileged | CommandRiskLabel::Destructive
-                        )
-                    }) {
-                        ProposalRiskLabel::High
-                    } else {
-                        ProposalRiskLabel::Medium
-                    },
-                    mcp_server_id: None,
-                    mcp_primitive_kind: None,
-                    tool_permission_request_id: None,
-                    event_context,
-                    event_sequence: self.event_sequence_generator.next(),
-                })?;
-            if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
-                match self.prepare_legion_workflow_mcp_tool_call(
-                    &session.session_id,
-                    &server_id,
-                    &tool_name,
-                )? {
-                    AppAutomateToolCallOutcome::WaitingForToolPermission { request } => {
-                        let output = coordinator
-                            .mark_worker_blocked(
-                                &worker.worker_id,
-                                vec![format!(
-                                    "legion_workflow.mcp_worker_waiting_for_tool_permission:{}",
-                                    request.request_id
-                                )],
-                            )
-                            .map_err(|error| {
-                                AppCompositionError::LegionWorkflow(error.to_string())
-                            })?;
-                        self.set_legion_workflow_worker_state(
-                            &mut session,
-                            &worker.worker_id,
-                            LegionWorkflowWorkerState::ProviderRouteRequired,
-                        );
-                        outputs.push(output);
-                        continue;
-                    }
-                    AppAutomateToolCallOutcome::Denied { request } => {
-                        let output = coordinator
-                            .mark_worker_blocked(
-                                &worker.worker_id,
-                                vec![format!(
-                                    "legion_workflow.mcp_worker_tool_permission_denied:{}",
-                                    request.request_id
-                                )],
-                            )
-                            .map_err(|error| {
-                                AppCompositionError::LegionWorkflow(error.to_string())
-                            })?;
-                        self.set_legion_workflow_worker_state(
-                            &mut session,
-                            &worker.worker_id,
-                            LegionWorkflowWorkerState::Blocked,
-                        );
-                        outputs.push(output);
-                        continue;
-                    }
-                    AppAutomateToolCallOutcome::Halted { monitor } => {
-                        let output = coordinator
-                            .mark_worker_blocked(
-                                &worker.worker_id,
-                                vec![format!(
-                                    "legion_workflow.mcp_worker_halted:{:?}",
-                                    monitor.halt_reason
-                                )],
-                            )
-                            .map_err(|error| {
-                                AppCompositionError::LegionWorkflow(error.to_string())
-                            })?;
-                        self.set_legion_workflow_worker_state(
-                            &mut session,
-                            &worker.worker_id,
-                            LegionWorkflowWorkerState::Blocked,
-                        );
-                        outputs.push(output);
-                        continue;
-                    }
-                    AppAutomateToolCallOutcome::Ready { request, .. } => {
-                        match self.invoke_legion_workflow_mcp_tool(
-                            &session.session_id,
-                            &worker.worker_id,
-                            &server_id,
-                            &tool_name,
-                            &request,
-                        ) {
-                            Ok(_receipt) => {
-                                coordinator
-                                    .mark_worker_completed(&worker.worker_id)
-                                    .map_err(|error| {
-                                        AppCompositionError::LegionWorkflow(error.to_string())
-                                    })?;
-                                self.set_legion_workflow_worker_state(
-                                    &mut session,
-                                    &worker.worker_id,
-                                    LegionWorkflowWorkerState::Completed,
-                                );
-                                self.satisfy_legion_workflow_dependencies(
-                                    &mut session,
-                                    &worker.worker_id,
-                                );
-                                continue;
-                            }
-                            Err(error) => {
-                                let reason = error.to_string();
-                                let event_context = self.next_event_context();
-                                self.automate_workflow
-                                    .record_decision(AutomateDecisionInput {
-                                        session_id: session.session_id.clone(),
-                                        worker_id: Some(worker.worker_id.clone()),
-                                        kind: LegionWorkflowDecisionKind::ToolCallFailed,
-                                        summary_label: format!("MCP tool call failed: {reason}"),
-                                        risk_label: ProposalRiskLabel::High,
-                                        mcp_server_id: Some(server_id.clone()),
-                                        mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
-                                        tool_permission_request_id: Some(
-                                            request.request_id.clone(),
-                                        ),
-                                        event_context,
-                                        event_sequence: self.event_sequence_generator.next(),
-                                    })?;
-                                let output = coordinator
-                                    .mark_worker_blocked(
-                                        &worker.worker_id,
-                                        vec![format!(
-                                            "legion_workflow.mcp_worker_tool_call_failed:{reason}"
-                                        )],
-                                    )
-                                    .map_err(|error| {
-                                        AppCompositionError::LegionWorkflow(error.to_string())
-                                    })?;
-                                self.set_legion_workflow_worker_state(
-                                    &mut session,
-                                    &worker.worker_id,
-                                    LegionWorkflowWorkerState::Blocked,
-                                );
-                                outputs.push(output);
-                                continue;
-                            }
-                        }
-                    }
+        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
+        self.active_cancellation_flag = Some(cancellation_flag.clone());
+        #[cfg(feature = "ai")]
+        let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+        #[cfg(not(feature = "ai"))]
+        let lanes = vec![coordinator.next_ready_workers()];
+
+        'lane_loop: for lane in lanes {
+            #[cfg(feature = "ai")]
+            let mut in_flight = Vec::new();
+            let mut lane_paused = false;
+
+            if let Some((worker, conflict_id)) = lane.iter().find_map(|worker| {
+                let current_state =
+                    Self::current_legion_workflow_worker_state(&session, &worker.worker_id)?;
+                if !Self::legion_workflow_worker_can_dispatch(current_state)
+                    || !Self::legion_workflow_dependencies_satisfied(&session, &worker.worker_id)
+                {
+                    return None;
                 }
+                Self::unresolved_conflict_for_legion_workflow_worker(&session, worker)
+                    .map(|conflict_id| (worker.clone(), conflict_id))
+            }) {
+                self.pause_legion_workflow_worker_for_conflict(
+                    &mut session,
+                    &mut coordinator,
+                    &worker,
+                    &conflict_id,
+                    &mut outputs,
+                )?;
+                break 'lane_loop;
             }
-            let task_packet_output = coordinator
-                .task_packet_for_worker(&worker.worker_id)
-                .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-            outputs.push(task_packet_output);
-            match worker.model_backend {
-                legion_protocol::LegionWorkflowModelBackend::ProviderBacked => {
-                    let output = coordinator
-                        .provider_route_for_worker(&worker.worker_id)
-                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-                    let metadata_output = coordinator
-                        .provider_route_metadata_for_worker(&worker.worker_id)
-                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-                    outputs.push(output);
-                    outputs.push(metadata_output);
-                    #[cfg(feature = "ai")]
-                    if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                        && let Some(provider) = resolver.resolve_worker_provider(&worker)
-                    {
-                        self.run_legion_workflow_worker_with_provider(
-                            &mut session,
-                            &mut coordinator,
-                            &worker,
-                            provider.as_ref(),
-                            &mut outputs,
-                        )?;
-                        continue;
-                    }
-                    self.block_legion_workflow_worker_provider_unavailable(
+
+            for worker in lane {
+                let Some(current_state) =
+                    Self::current_legion_workflow_worker_state(&session, &worker.worker_id)
+                else {
+                    continue;
+                };
+                if !Self::legion_workflow_worker_can_dispatch(current_state) {
+                    continue;
+                }
+                if !Self::legion_workflow_dependencies_satisfied(&session, &worker.worker_id) {
+                    self.set_legion_workflow_worker_state(
+                        &mut session,
+                        &worker.worker_id,
+                        LegionWorkflowWorkerState::WaitingForDependency,
+                    );
+                    continue;
+                }
+                if let Some(conflict_id) =
+                    Self::unresolved_conflict_for_legion_workflow_worker(&session, &worker)
+                {
+                    self.pause_legion_workflow_worker_for_conflict(
                         &mut session,
                         &mut coordinator,
-                        &worker.worker_id,
+                        &worker,
+                        &conflict_id,
                         &mut outputs,
                     )?;
+                    lane_paused = true;
+                    break;
                 }
-                legion_protocol::LegionWorkflowModelBackend::Local => {
-                    #[cfg(feature = "ai")]
-                    if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                        && let Some(provider) = resolver.resolve_worker_provider(&worker)
-                    {
-                        self.run_legion_workflow_worker_with_provider(
-                            &mut session,
-                            &mut coordinator,
-                            &worker,
-                            provider.as_ref(),
-                            &mut outputs,
-                        )?;
-                        continue;
-                    }
-                    self.block_legion_workflow_worker_provider_unavailable(
-                        &mut session,
-                        &mut coordinator,
-                        &worker.worker_id,
-                        &mut outputs,
-                    )?;
-                }
-                legion_protocol::LegionWorkflowModelBackend::Unavailable => {
+                if cancellation_flag.is_cancelled() {
                     let output = coordinator
                         .mark_worker_blocked(
                             &worker.worker_id,
-                            vec!["legion_workflow.worker_backend_unavailable".to_string()],
+                            vec!["legion_workflow.worker_cancelled".to_string()],
                         )
                         .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
                     self.set_legion_workflow_worker_state(
                         &mut session,
                         &worker.worker_id,
-                        LegionWorkflowWorkerState::Blocked,
+                        LegionWorkflowWorkerState::Cancelled,
                     );
                     outputs.push(output);
+                    continue;
+                }
+
+                self.automate_workflow
+                    .record_decision(AutomateDecisionInput {
+                        session_id: session.session_id.clone(),
+                        worker_id: Some(worker.worker_id.clone()),
+                        kind: LegionWorkflowDecisionKind::WorkerScheduled,
+                        summary_label: format!(
+                            "Legion workflow worker scheduled: {}",
+                            worker.worker_id.0
+                        ),
+                        risk_label: if worker.risk_labels.iter().any(|risk| {
+                            matches!(
+                                risk,
+                                CommandRiskLabel::Privileged | CommandRiskLabel::Destructive
+                            )
+                        }) {
+                            ProposalRiskLabel::High
+                        } else {
+                            ProposalRiskLabel::Medium
+                        },
+                        mcp_server_id: None,
+                        mcp_primitive_kind: None,
+                        tool_permission_request_id: None,
+                        event_context,
+                        event_sequence: self.event_sequence_generator.next(),
+                    })?;
+
+                if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
+                    match self.prepare_legion_workflow_mcp_tool_call(
+                        &session.session_id,
+                        &server_id,
+                        &tool_name,
+                    )? {
+                        AppAutomateToolCallOutcome::WaitingForToolPermission { request } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.mcp_worker_waiting_for_tool_permission:{}",
+                                        request.request_id
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::ProviderRouteRequired,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                        AppAutomateToolCallOutcome::Denied { request } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.mcp_worker_tool_permission_denied:{}",
+                                        request.request_id
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                        AppAutomateToolCallOutcome::Halted { monitor } => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec![format!(
+                                        "legion_workflow.mcp_worker_halted:{:?}",
+                                        monitor.halt_reason
+                                    )],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                            continue;
+                        }
+                        AppAutomateToolCallOutcome::Ready { request, .. } => {
+                            match self.invoke_legion_workflow_mcp_tool(
+                                &session.session_id,
+                                &worker.worker_id,
+                                &server_id,
+                                &tool_name,
+                                &request,
+                            ) {
+                                Ok(_receipt) => {
+                                    coordinator
+                                        .mark_worker_completed(&worker.worker_id)
+                                        .map_err(|error| {
+                                            AppCompositionError::LegionWorkflow(error.to_string())
+                                        })?;
+                                    self.set_legion_workflow_worker_state(
+                                        &mut session,
+                                        &worker.worker_id,
+                                        LegionWorkflowWorkerState::Completed,
+                                    );
+                                    self.satisfy_legion_workflow_dependencies(
+                                        &mut session,
+                                        &worker.worker_id,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let reason = error.to_string();
+                                    let event_context = self.next_event_context();
+                                    self.automate_workflow.record_decision(
+                                        AutomateDecisionInput {
+                                            session_id: session.session_id.clone(),
+                                            worker_id: Some(worker.worker_id.clone()),
+                                            kind: LegionWorkflowDecisionKind::ToolCallFailed,
+                                            summary_label: format!(
+                                                "MCP tool call failed: {reason}"
+                                            ),
+                                            risk_label: ProposalRiskLabel::High,
+                                            mcp_server_id: Some(server_id.clone()),
+                                            mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                                            tool_permission_request_id: Some(
+                                                request.request_id.clone(),
+                                            ),
+                                            event_context,
+                                            event_sequence: self.event_sequence_generator.next(),
+                                        },
+                                    )?;
+                                    let output = coordinator
+                                        .mark_worker_blocked(
+                                            &worker.worker_id,
+                                            vec![format!(
+                                                "legion_workflow.mcp_worker_tool_call_failed:{reason}"
+                                            )],
+                                        )
+                                        .map_err(|error| {
+                                            AppCompositionError::LegionWorkflow(error.to_string())
+                                        })?;
+                                    self.set_legion_workflow_worker_state(
+                                        &mut session,
+                                        &worker.worker_id,
+                                        LegionWorkflowWorkerState::Blocked,
+                                    );
+                                    outputs.push(output);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let task_packet_output = coordinator
+                    .task_packet_for_worker(&worker.worker_id)
+                    .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                outputs.push(task_packet_output);
+                match worker.model_backend {
+                    legion_protocol::LegionWorkflowModelBackend::ProviderBacked => {
+                        let output = coordinator
+                            .provider_route_for_worker(&worker.worker_id)
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        let metadata_output = coordinator
+                            .provider_route_metadata_for_worker(&worker.worker_id)
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        outputs.push(output);
+                        outputs.push(metadata_output);
+                        #[cfg(feature = "ai")]
+                        if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
+                            && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                        {
+                            let prepared = self
+                                .prepare_legion_workflow_worker_run(&session, &worker, provider)?;
+                            in_flight.push(self.spawn_legion_workflow_worker_run(
+                                prepared,
+                                cancellation_flag.clone(),
+                            ));
+                            continue;
+                        }
+                        self.block_legion_workflow_worker_provider_unavailable(
+                            &mut session,
+                            &mut coordinator,
+                            &worker.worker_id,
+                            &mut outputs,
+                        )?;
+                    }
+                    legion_protocol::LegionWorkflowModelBackend::Local => {
+                        #[cfg(feature = "ai")]
+                        if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
+                            && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                        {
+                            let prepared = self
+                                .prepare_legion_workflow_worker_run(&session, &worker, provider)?;
+                            in_flight.push(self.spawn_legion_workflow_worker_run(
+                                prepared,
+                                cancellation_flag.clone(),
+                            ));
+                            continue;
+                        }
+                        self.block_legion_workflow_worker_provider_unavailable(
+                            &mut session,
+                            &mut coordinator,
+                            &worker.worker_id,
+                            &mut outputs,
+                        )?;
+                    }
+                    legion_protocol::LegionWorkflowModelBackend::Unavailable => {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec!["legion_workflow.worker_backend_unavailable".to_string()],
+                            )
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Blocked,
+                        );
+                        outputs.push(output);
+                    }
                 }
             }
+
+            #[cfg(feature = "ai")]
+            for mut worker_run in in_flight {
+                let joined = worker_run.join_handle.join();
+                if let Err(_cleanup_err) = worker_run
+                    .orchestrator
+                    .cleanup(&worker_run.implicit_permission)
+                {}
+                let completion = match joined {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        self.active_cancellation_flag = None;
+                        self.delegate_workflow
+                            .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                        return Err(AppCompositionError::AiRuntime(
+                            "delegated loop worker thread panicked".to_string(),
+                        ));
+                    }
+                };
+                let loop_result = if cancellation_flag.is_cancelled() {
+                    legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled
+                } else {
+                    completion.loop_result
+                };
+                self.finish_legion_workflow_worker_run(
+                    &mut session,
+                    &mut coordinator,
+                    &completion.worker,
+                    completion.audit_steps,
+                    loop_result,
+                    &mut outputs,
+                )?;
+            }
+
+            if lane_paused
+                || session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
+                || cancellation_flag.is_cancelled()
+            {
+                break;
+            }
         }
+        self.active_cancellation_flag = None;
 
         self.apply_legion_workflow_dirty_workspace_gate(&mut session);
         let merge_readiness = legion_protocol::evaluate_legion_workflow_merge_readiness(&session);
-        session.lifecycle_state = match merge_readiness.state {
-            LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
-            LegionWorkflowMergeReadinessState::WaitingForApproval => {
-                LegionWorkflowState::WaitingForApproval
+        session.lifecycle_state = if session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
+        {
+            LegionWorkflowState::WaitingOnHuman
+        } else if session
+            .worker_assignments
+            .iter()
+            .any(|worker| worker.state == LegionWorkflowWorkerState::Cancelled)
+        {
+            LegionWorkflowState::Cancelled
+        } else {
+            match merge_readiness.state {
+                LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
+                LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                    LegionWorkflowState::WaitingForApproval
+                }
+                LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
             }
-            LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
         };
         self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
         let memory_candidate_proposed = self
@@ -19585,6 +20184,7 @@ impl AppComposition {
         outputs.push(LegionWorkflowCoordinatorOutput::MergeReadiness(
             merge_readiness.clone(),
         ));
+        self.persist_legion_workflow_output_artifacts(&session.session_id, &outputs);
         Ok(AppLegionWorkflowExecution {
             session_id: session.session_id.clone(),
             outputs,
@@ -19685,15 +20285,74 @@ impl AppComposition {
         session_id: &LegionWorkflowSessionId,
         conflict_id: &LegionWorkflowConflictId,
     ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
-        let session = self.legion_workflow_session_mut(session_id)?;
-        let conflict = session
-            .conflict_summaries
-            .iter_mut()
-            .find(|conflict| &conflict.conflict_id == conflict_id)
+        let session_index = self
+            .legion_workflow_sessions
+            .iter()
+            .position(|session| &session.session_id == session_id)
             .ok_or_else(|| {
-                AppCompositionError::LegionWorkflow(format!("conflict {} not found", conflict_id.0))
+                AppCompositionError::LegionWorkflow(format!(
+                    "workflow session {} not found",
+                    session_id.0
+                ))
             })?;
-        conflict.state = LegionWorkflowConflictState::Resolved;
+        {
+            let session = &mut self.legion_workflow_sessions[session_index];
+            let conflict = session
+                .conflict_summaries
+                .iter_mut()
+                .find(|conflict| &conflict.conflict_id == conflict_id)
+                .ok_or_else(|| {
+                    AppCompositionError::LegionWorkflow(format!(
+                        "conflict {} not found",
+                        conflict_id.0
+                    ))
+                })?;
+            conflict.state = LegionWorkflowConflictState::Resolved;
+        };
+        let session_snapshot = self.legion_workflow_sessions[session_index].clone();
+        let mut restored = Vec::new();
+        if let Some(paused) = self.legion_workflow_conflict_pauses.get_mut(&session_id.0) {
+            let restorable_worker_ids = paused
+                .iter()
+                .filter_map(|(worker_id, state)| {
+                    let worker = session_snapshot
+                        .worker_assignments
+                        .iter()
+                        .find(|worker| worker.worker_id.0 == *worker_id)?;
+                    Self::unresolved_conflict_for_legion_workflow_worker(&session_snapshot, worker)
+                        .is_none()
+                        .then(|| (worker_id.clone(), *state))
+                })
+                .collect::<Vec<_>>();
+            for (worker_id, state) in restorable_worker_ids {
+                paused.remove(&worker_id);
+                restored.push((LegionWorkflowWorkerId(worker_id), state));
+            }
+            if paused.is_empty() {
+                self.legion_workflow_conflict_pauses.remove(&session_id.0);
+            }
+        }
+        let session = &mut self.legion_workflow_sessions[session_index];
+        for (worker_id, state) in restored {
+            if !session.conflict_summaries.iter().any(|conflict| {
+                conflict.state == LegionWorkflowConflictState::Unresolved
+                    && conflict.worker_ids.contains(&worker_id)
+            }) && let Some(worker) = session
+                .worker_assignments
+                .iter_mut()
+                .find(|worker| worker.worker_id == worker_id)
+            {
+                worker.state = state;
+            }
+        }
+        if session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
+            && !session
+                .conflict_summaries
+                .iter()
+                .any(|conflict| conflict.state == LegionWorkflowConflictState::Unresolved)
+        {
+            session.lifecycle_state = LegionWorkflowState::Executing;
+        }
         Ok(legion_protocol::evaluate_legion_workflow_merge_readiness(
             session,
         ))

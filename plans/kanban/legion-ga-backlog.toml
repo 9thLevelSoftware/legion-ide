@@ -1407,33 +1407,39 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     title = "Schedule dependencies and parallel lanes"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = ["crates/legion-agent/src/scheduler.rs", "crates/legion-agent/src/dag.rs"]
+    files = ["crates/legion-agent/src/scheduler.rs", "crates/legion-app/src/lib.rs", "crates/legion-app/tests/legion_workflow_integration.rs"]
     dependencies = ["P6.F2.T1"]
-    verification = ["cargo test -p legion-agent"]
+    verification = ["cargo test -p legion-app --test legion_workflow_integration"]
     acceptance = ["3-task DAG with one dependency runs with two parallel workers."]
     stop_condition = "Stop if scheduler is allowed to skip a declared dependency."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-LANES-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F2.T3"
     title = "Detect conflicts and pause for human resolution"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = ["crates/legion-agent/src/conflict.rs", "crates/legion-agent/src/coordinator.rs"]
+    files = ["crates/legion-app/src/lib.rs", "crates/legion-protocol/src/lib.rs", "crates/legion-app/tests/legion_workflow_integration.rs"]
     dependencies = ["P6.F2.T2"]
-    verification = ["cargo test -p legion-agent"]
+    verification = ["cargo test -p legion-app --test legion_workflow_integration"]
     acceptance = ["A conflict scenario pauses the workflow and surfaces a human-resolution affordance."]
     stop_condition = "Stop if a conflict can be auto-resolved without an explicit human sign-off."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-LANES-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F2.T4"
     title = "Aggregate verification evidence and merge-readiness"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = ["crates/legion-agent/src/merge_readiness.rs", "crates/legion-agent/src/evidence.rs"]
+    files = ["crates/legion-app/src/lib.rs", "crates/legion-agent/src/merge_readiness.rs", "crates/legion-app/tests/legion_workflow_integration.rs"]
     dependencies = ["P6.F2.T2", "P3.F2.T3"]
-    verification = ["cargo test -p legion-agent"]
+    verification = ["cargo test -p legion-app --test legion_workflow_integration"]
     acceptance = ["Merge-readiness report cites verification evidence per branch/task."]
     stop_condition = "Stop if merge-readiness can be true without an evidence row."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-LANES-evidence.md"
 
   [[epics.features]]
   id = "P6.F3"

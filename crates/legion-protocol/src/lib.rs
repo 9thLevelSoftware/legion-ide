@@ -24775,6 +24775,8 @@ pub enum LegionWorkflowState {
     Verifying,
     /// Session is waiting on explicit approval metadata.
     WaitingForApproval,
+    /// Session is paused until a human resolves a workflow conflict or safety gate.
+    WaitingOnHuman,
     /// Session is blocked by a fail-closed gate.
     Blocked,
     /// Session has completed with required verification and sign-off metadata.
@@ -26304,17 +26306,17 @@ pub fn evaluate_legion_workflow_merge_readiness(
     {
         blockers.push(LegionWorkflowMergeReadinessBlocker::IncompleteWorker);
     }
-    if session.verification_gates.is_empty() {
-        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
-    }
-    if session.verification_gates.iter().any(|gate| {
-        gate.state == LegionWorkflowVerificationGateState::Passed
-            && gate
-                .evidence_artifact_id
-                .as_ref()
-                .map(|id| id.trim().is_empty())
-                .unwrap_or(true)
-    }) {
+    let missing_verification_evidence = session.verification_gates.is_empty()
+        || session.verification_gates.iter().any(|gate| {
+            gate.state == LegionWorkflowVerificationGateState::Pending
+                || (gate.state == LegionWorkflowVerificationGateState::Passed
+                    && gate
+                        .evidence_artifact_id
+                        .as_ref()
+                        .map(|id| id.trim().is_empty())
+                        .unwrap_or(true))
+        });
+    if missing_verification_evidence {
         blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
     }
     if session.sign_off_records.is_empty() {
@@ -26361,13 +26363,6 @@ pub fn evaluate_legion_workflow_merge_readiness(
             || gate.state == LegionWorkflowVerificationGateState::Blocked
     }) {
         blockers.push(LegionWorkflowMergeReadinessBlocker::FailedVerification);
-    }
-    if session.verification_gates.iter().any(|gate| {
-        gate.state == LegionWorkflowVerificationGateState::Pending
-            || (gate.state == LegionWorkflowVerificationGateState::Passed
-                && gate.evidence_artifact_id.is_none())
-    }) {
-        blockers.push(LegionWorkflowMergeReadinessBlocker::MissingVerificationEvidence);
     }
     if session
         .sign_off_records

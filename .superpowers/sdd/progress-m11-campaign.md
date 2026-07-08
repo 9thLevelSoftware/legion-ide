@@ -11,7 +11,7 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 - [x] PKT-OPEN: post-M12 housekeeping (branch m11/opener)
 - [x] PKT-PLAN: plan artifact wiring (branch m11/plan-artifact)
 - [x] PKT-WORKERS: real delegate workers in workflow path (branch m11/real-workers)
-- [ ] PKT-LANES: parallel lanes, conflict pause/resume, merge evidence export (branch m11/parallel-conflict-merge)
+- [x] PKT-LANES: parallel lanes, conflict pause/resume, merge evidence export (branch m11/parallel-conflict-merge)
 - [ ] PKT-CONSOLE: workflow board, fleet cards, comm stream, budget meter (branch m11/fleet-console)
 - [ ] PKT-GP4: GP-4 harness, gate/docs sweep, campaign close (branch m11/gp4-harness)
 
@@ -40,3 +40,9 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 - Notes: PKT-LANES threading/parallelism, PKT-CONSOLE, GP-4, and P6.F4/ACP external-agent work remain untouched.
 
 - SDD Task PKT-WORKERS: complete; final local commit hash is reported by git after commit creation.
+
+### PKT-LANES COMPLETE (2026-07-07)
+- Commits: review-clean content was `6038bf4` (`feat: execute legion workflow lanes concurrently`) before a ledger-only wording amend; read the current packet head from `git log --oneline -1` on `m11/parallel-conflict-merge`.
+- Deliverables: threaded deterministic scheduler-lane workflow execution, same-lane provider concurrency, dependency-gated later lanes, shared per-run cancellation, kill-switch decision-feed recording for cancellation, conflict pause/resume with `WaitingOnHuman`, merge-readiness report API, serializable metadata-only evidence export bundle, deterministic projection replay, session artifact capture, `P6.F2.T2`/`P6.F2.T3`/`P6.F2.T4` kanban completion, and PKT-LANES evidence/report files.
+- Verification: focused workflow, strengthened shared-cancellation regression, delegated-task, manual-zero-egress, agent merge-readiness, UI board projection, offline app, kanban backlog, formatting, and whitespace checks passed. The ignored SDD report at `.superpowers/sdd/task-PKT-LANES-M11-report.md` mirrors the same local history for recovery.
+- Notes: live-provider cancellation remains cooperative at turn/tool boundaries; execution re-run replay, PKT-CONSOLE, PKT-GP4, and P6.F4/ACP external-agent work remain deferred/out of scope.
