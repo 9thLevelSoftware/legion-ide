@@ -8,6 +8,10 @@ pub mod ghost_text;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Projection-backed Legion workflow board.
+pub mod fleet_board;
+/// Projection-backed Legion workflow cards.
+pub mod fleet_card;
 /// Inline edit diff overlay view model and per-hunk accept/reject helpers (PKT-INLINE).
 pub mod inline_edit;
 /// Pre-invocation context manifest panel with per-item exclusion toggles.
@@ -2863,13 +2867,13 @@ fn render_delegated_canvas(
         render_delegated_hunk_review_controls(ui, snapshot, actions);
     });
     ui.separator();
-    render_task_board(ui, snapshot, model, DesktopProductMode::Delegates, actions);
+    render_delegate_task_board(ui, snapshot, model, actions);
 }
 
 fn render_fleet_canvas(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    model: &DesktopProjectionViewModel,
+    _model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
     theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
@@ -2915,20 +2919,13 @@ fn render_fleet_canvas(
             // hard-coded percentage.
         });
     });
-    render_task_board(
-        ui,
-        snapshot,
-        model,
-        DesktopProductMode::LegionWorkflows,
-        actions,
-    );
+    fleet_board::render_fleet_board(ui, &snapshot.legion_workflow_board_columns);
 }
 
-fn render_task_board(
+fn render_delegate_task_board(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
-    level: DesktopProductMode,
     actions: &mut Vec<DesktopAction>,
 ) {
     let board_height = ui.available_height();
@@ -2938,39 +2935,35 @@ fn render_task_board(
         .show(ui, |ui| {
             ui.set_min_height(board_height);
             ui.horizontal_top(|ui| {
-                task_column(
+                delegate_task_column(
                     ui,
                     "ASSIGNED",
                     theme::tokens().text.muted,
                     delegated_plan_rows(snapshot, model, 0),
                     actions,
                 );
-                task_column(
+                delegate_task_column(
                     ui,
                     "IN PROGRESS",
                     theme::tokens().accent.blue,
                     delegated_step_rows(snapshot, model),
                     actions,
                 );
-                task_column(
+                delegate_task_column(
                     ui,
                     "WAITING ON HUMAN",
                     theme::tokens().accent.orange,
                     proposal_board_rows(snapshot, model),
                     actions,
                 );
-                task_column(
+                delegate_task_column(
                     ui,
-                    if level == DesktopProductMode::LegionWorkflows {
-                        "TESTING / REVIEW"
-                    } else {
-                        "TESTING"
-                    },
+                    "TESTING",
                     theme::tokens().accent.violet,
                     model.test_rows.iter().take(4).cloned().collect(),
                     actions,
                 );
-                task_column(
+                delegate_task_column(
                     ui,
                     "DONE",
                     theme::tokens().accent.green,
@@ -2986,7 +2979,7 @@ fn render_task_board(
         });
 }
 
-fn task_column(
+fn delegate_task_column(
     ui: &mut egui::Ui,
     title: &str,
     color: egui::Color32,
@@ -3019,7 +3012,6 @@ fn task_column(
                             ui.label(theme::accent("review", color));
                         });
                     });
-                    progress_bar(ui, 0.35 + (index as f32 * 0.13).min(0.55), color);
                 });
             }
         },
@@ -3494,6 +3486,8 @@ fn render_fleet_console(
     render_delegated_tool_permission_controls(ui, snapshot, actions);
     render_legion_workflow_tool_permission_controls(ui, snapshot, actions);
     render_legion_workflow_kill_switch_controls(ui, snapshot, actions);
+    section_label(ui, "Fleet Cards", Some(theme::tokens().accent.blue));
+    fleet_card::render_fleet_cards(ui, &snapshot.legion_workflow_fleet_card_projections);
     section_label(ui, "Agent Decision Feed", None);
     render_compact_rows(
         ui,
@@ -3501,6 +3495,14 @@ fn render_fleet_console(
         "No agent decisions projected",
         8,
     );
+    section_label(ui, "Agent Comm Stream", Some(theme::tokens().accent.cyan));
+    agent_comm::render_agent_comm_rows(
+        ui,
+        &snapshot.legion_workflow_comm_rows,
+        "No tagged agent communication projected",
+    );
+    section_label(ui, "Budget Meter", Some(theme::tokens().accent.green));
+    render_legion_workflow_budget_rows(ui, &snapshot.legion_workflow_budget_rows);
     section_label(ui, "Risk Monitor", Some(theme::tokens().accent.red));
     theme::small_card_frame().show(ui, |ui| {
         if snapshot.legion_workflow_projection.risk_monitors.is_empty() {
@@ -3531,6 +3533,41 @@ fn render_fleet_console(
             }
         }
     });
+}
+
+fn render_legion_workflow_budget_rows(
+    ui: &mut egui::Ui,
+    rows: &[legion_ui::LegionWorkflowBudgetUsageRowProjection],
+) {
+    if rows.is_empty() {
+        ui.label(theme::muted("No budget rows projected"));
+        return;
+    }
+    for row in rows.iter().take(6) {
+        theme::small_card_frame().show(ui, |ui| {
+            ui.label(theme::body_strong(format!(
+                "{} / {}",
+                row.session_id.0, row.worker_id
+            )));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::muted(&row.budget_label));
+                ui.separator();
+                ui.label(theme::accent(
+                    &row.status_label,
+                    if row.status_label == "within-budget" {
+                        theme::tokens().accent.green
+                    } else {
+                        theme::tokens().accent.orange
+                    },
+                ));
+            });
+            ui.label(theme::muted(&row.model_turns_label));
+            ui.label(theme::muted(&row.tool_calls_label));
+            ui.label(theme::muted(&row.retry_label));
+            ui.label(theme::muted(&row.output_bytes_label));
+            ui.label(theme::muted(&row.wall_clock_label));
+        });
+    }
 }
 
 fn render_proposal_cards(
@@ -6950,6 +6987,8 @@ fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         && workflows.risk_monitors.is_empty()
         && workflows.kill_switches.is_empty()
         && workflows.tool_permission_requests.is_empty()
+        && snapshot.legion_workflow_comm_rows.is_empty()
+        && snapshot.legion_workflow_budget_rows.is_empty()
     {
         return Vec::new();
     }
@@ -7025,6 +7064,24 @@ fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             entry.mcp_primitive_kind,
             entry.tool_permission_request_id,
             entry.summary_label
+        )
+    }));
+    rows.extend(
+        snapshot
+            .legion_workflow_comm_rows
+            .iter()
+            .map(|row| format!("legion workflow comm row: {row}")),
+    );
+    rows.extend(snapshot.legion_workflow_budget_rows.iter().map(|row| {
+        format!(
+            "legion workflow budget session={} worker={} {} {} {} {} status={}",
+            row.session_id.0,
+            row.worker_id,
+            row.model_turns_label,
+            row.tool_calls_label,
+            row.retry_label,
+            row.output_bytes_label,
+            row.status_label
         )
     }));
     rows.extend(workflows.risk_monitors.iter().map(|monitor| {

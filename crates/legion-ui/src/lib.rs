@@ -7,8 +7,9 @@ pub mod ui;
 
 pub use projection::{
     LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
-    LegionWorkflowBoardRowProjection, LegionWorkflowFleetCardProjection,
-    legion_workflow_board_columns, legion_workflow_fleet_card_projections,
+    LegionWorkflowBoardRowProjection, LegionWorkflowBudgetUsageRowProjection,
+    LegionWorkflowFleetCardProjection, legion_workflow_board_columns,
+    legion_workflow_fleet_card_projections,
 };
 
 pub use ui::{

@@ -230,7 +230,8 @@ use legion_ui::ui::{
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
-    GitConflictChoiceProjection, ShellLayoutProjection, ShellProjectionSnapshot,
+    GitConflictChoiceProjection, LegionWorkflowBudgetUsageRowProjection, ShellLayoutProjection,
+    ShellProjectionSnapshot, legion_workflow_board_columns, legion_workflow_fleet_card_projections,
 };
 #[cfg(not(feature = "ai"))]
 use offline_ai::{
@@ -2017,6 +2018,13 @@ fn automate_tool_permission_request_id(
         "automate:permission:{}:{}:{}",
         session_id.0, server_id.0, tool_name.0
     )
+}
+
+fn legion_workflow_budget_key(
+    session_id: &LegionWorkflowSessionId,
+    worker_id: &LegionWorkflowWorkerId,
+) -> String {
+    format!("{}|{}", session_id.0, worker_id.0)
 }
 
 fn legion_workflow_worker_mcp_tool(
@@ -14040,6 +14048,8 @@ pub struct AppComposition {
     legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
     legion_workflow_session_artifacts: HashMap<String, LegionWorkflowSessionArtifacts>,
     legion_workflow_conflict_pauses: HashMap<String, HashMap<String, LegionWorkflowWorkerState>>,
+    legion_workflow_comm_rows: Vec<String>,
+    legion_workflow_budget_rows: HashMap<String, LegionWorkflowBudgetUsageRowProjection>,
     plan_revision_ledger: PlanRevisionLedger,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
@@ -14290,6 +14300,8 @@ impl AppComposition {
             legion_workflow_plan_artifacts: HashMap::new(),
             legion_workflow_session_artifacts: HashMap::new(),
             legion_workflow_conflict_pauses: HashMap::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: HashMap::new(),
             plan_revision_ledger: PlanRevisionLedger::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
@@ -18668,6 +18680,11 @@ impl AppComposition {
         self.legion_workflow_sessions
             .retain(|existing| existing.session_id != session.session_id);
         self.legion_workflow_sessions.push(session.clone());
+        self.record_legion_workflow_comm_row(
+            "PLAN",
+            "workflow:coordinator",
+            format!("Workflow session accepted: {}", session.session_id.0),
+        );
         Ok(session)
     }
 
@@ -18685,6 +18702,123 @@ impl AppComposition {
         );
         self.automate_workflow.apply_to_projection(&mut projection);
         projection
+    }
+
+    fn record_legion_workflow_comm_row(
+        &mut self,
+        tag_label: &'static str,
+        actor: impl AsRef<str>,
+        message: impl AsRef<str>,
+    ) {
+        let actor = if actor.as_ref().trim().is_empty() {
+            "workflow:system"
+        } else {
+            actor.as_ref()
+        };
+        let message = if message.as_ref().trim().is_empty() {
+            "metadata-only event"
+        } else {
+            message.as_ref()
+        };
+        self.legion_workflow_comm_rows.push(format!(
+            "[{}] [{}] {}: {}",
+            TimestampMillis::now().0,
+            tag_label,
+            actor,
+            message
+        ));
+        const MAX_LEGION_WORKFLOW_COMM_ROWS: usize = 128;
+        if self.legion_workflow_comm_rows.len() > MAX_LEGION_WORKFLOW_COMM_ROWS {
+            let excess = self
+                .legion_workflow_comm_rows
+                .len()
+                .saturating_sub(MAX_LEGION_WORKFLOW_COMM_ROWS);
+            self.legion_workflow_comm_rows.drain(0..excess);
+        }
+    }
+
+    fn legion_workflow_comm_rows(&self) -> Vec<String> {
+        self.legion_workflow_comm_rows.clone()
+    }
+
+    fn legion_workflow_budget_rows(&self) -> Vec<LegionWorkflowBudgetUsageRowProjection> {
+        let mut rows = Vec::new();
+        for session in &self.legion_workflow_sessions {
+            for worker in &session.worker_assignments {
+                let key = legion_workflow_budget_key(&session.session_id, &worker.worker_id);
+                rows.push(
+                    self.legion_workflow_budget_rows
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Self::empty_legion_workflow_budget_row(&session.session_id, worker)
+                        }),
+                );
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.session_id
+                .0
+                .cmp(&right.session_id.0)
+                .then_with(|| left.worker_id.cmp(&right.worker_id))
+        });
+        rows
+    }
+
+    fn empty_legion_workflow_budget_row(
+        session_id: &LegionWorkflowSessionId,
+        worker: &LegionWorkflowWorkerAssignment,
+    ) -> LegionWorkflowBudgetUsageRowProjection {
+        let budget = legion_protocol::DelegatedTaskLoopBudget::default();
+        LegionWorkflowBudgetUsageRowProjection {
+            session_id: session_id.clone(),
+            worker_id: worker.worker_id.0.clone(),
+            budget_label: "delegated-loop".to_string(),
+            model_turns_label: format!("model_turns=0/{}", budget.max_model_turns),
+            tool_calls_label: format!("tool_calls=0/{}", budget.max_tool_calls),
+            retry_label: format!("retries=0/{}", budget.max_consecutive_retries),
+            output_bytes_label: format!("output_bytes=0/{}", budget.max_total_tool_output_bytes),
+            wall_clock_label: format!("wall_clock=0/{}ms", budget.wall_clock_limit_ms),
+            status_label: format!("{:?}", worker.state),
+            schema_version: 1,
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn record_legion_workflow_budget_usage(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+        worker_id: &LegionWorkflowWorkerId,
+        usage: &legion_agent::budget::DelegatedTaskBudgetUsage,
+    ) {
+        self.legion_workflow_budget_rows.insert(
+            legion_workflow_budget_key(session_id, worker_id),
+            LegionWorkflowBudgetUsageRowProjection {
+                session_id: session_id.clone(),
+                worker_id: worker_id.0.clone(),
+                budget_label: "delegated-loop".to_string(),
+                model_turns_label: format!(
+                    "model_turns={}/{}",
+                    usage.model_turns_used, usage.model_turn_limit
+                ),
+                tool_calls_label: format!(
+                    "tool_calls={}/{}",
+                    usage.tool_calls_used, usage.tool_call_limit
+                ),
+                retry_label: format!("retries={}/{}", usage.retries_used, usage.retry_limit),
+                output_bytes_label: format!(
+                    "output_bytes={}/{}",
+                    usage.output_bytes_used, usage.output_byte_limit
+                ),
+                wall_clock_label: format!(
+                    "wall_clock={}/{}ms",
+                    usage.wall_clock_ms_used.unwrap_or(0),
+                    usage.wall_clock_ms_limit
+                ),
+                status_label: usage.status_label().to_string(),
+                schema_version: 1,
+            },
+        );
     }
 
     /// Seed app-owned MCP registry metadata for Automate command centers and tool gating.
@@ -19048,6 +19182,11 @@ impl AppComposition {
                 event_context,
                 event_sequence: self.event_sequence_generator.next(),
             })?;
+        self.record_legion_workflow_comm_row(
+            "APPROVAL",
+            "workflow:kill-switch",
+            format!("Kill switch acknowledged for {}", session_id.0),
+        );
         Ok(self.legion_workflow_projection(TimestampMillis::now()))
     }
 
@@ -19393,6 +19532,18 @@ impl AppComposition {
     ) -> Result<(), AppCompositionError> {
         use legion_agent::agent_loop::DelegatedTaskLoopResult;
 
+        let budget_usage = legion_agent::budget::derive_delegated_task_budget_usage(
+            &legion_protocol::DelegatedTaskLoopBudget::default(),
+            &audit_steps,
+            0,
+            None,
+        );
+        self.record_legion_workflow_budget_usage(
+            &session.session_id,
+            &worker.worker_id,
+            &budget_usage,
+        );
+
         match &loop_result {
             DelegatedTaskLoopResult::Completed { .. } => {
                 self.delegate_workflow.set_runtime_activation(
@@ -19483,6 +19634,19 @@ impl AppComposition {
                         evidence.clone(),
                     )));
                 }
+                self.record_legion_workflow_comm_row(
+                    "WRITE",
+                    format!("worker:{}", worker.worker_id.0),
+                    format!(
+                        "Proposal output registered for session {}",
+                        session.session_id.0
+                    ),
+                );
+                self.record_legion_workflow_comm_row(
+                    "COMPLETE",
+                    format!("worker:{}", worker.worker_id.0),
+                    "Worker completed with proposal-mediated output",
+                );
             }
             DelegatedTaskLoopResult::Blocked { reason } => {
                 let evidence =
@@ -19499,6 +19663,11 @@ impl AppComposition {
                     )],
                     outputs,
                 )?;
+                self.record_legion_workflow_comm_row(
+                    "ERROR",
+                    format!("worker:{}", worker.worker_id.0),
+                    format!("Worker blocked: {reason}"),
+                );
             }
             DelegatedTaskLoopResult::BudgetExhausted { reason } => {
                 self.block_legion_workflow_worker(
@@ -19508,6 +19677,11 @@ impl AppComposition {
                     vec![format!("legion_workflow.worker_budget_exhausted:{reason}")],
                     outputs,
                 )?;
+                self.record_legion_workflow_comm_row(
+                    "ERROR",
+                    format!("worker:{}", worker.worker_id.0),
+                    format!("Budget exhausted: {reason}"),
+                );
             }
             DelegatedTaskLoopResult::MaxTokensExhausted => {
                 self.block_legion_workflow_worker(
@@ -19517,6 +19691,11 @@ impl AppComposition {
                     vec!["legion_workflow.worker_max_tokens_exhausted".to_string()],
                     outputs,
                 )?;
+                self.record_legion_workflow_comm_row(
+                    "ERROR",
+                    format!("worker:{}", worker.worker_id.0),
+                    "Max tokens exhausted",
+                );
             }
             DelegatedTaskLoopResult::Cancelled => {
                 if !self
@@ -19557,6 +19736,11 @@ impl AppComposition {
                     LegionWorkflowWorkerState::Cancelled,
                 );
                 outputs.push(output);
+                self.record_legion_workflow_comm_row(
+                    "APPROVAL",
+                    format!("worker:{}", worker.worker_id.0),
+                    "Worker observed kill switch cancellation",
+                );
             }
         }
         Ok(())
@@ -19883,6 +20067,11 @@ impl AppComposition {
                         event_context,
                         event_sequence: self.event_sequence_generator.next(),
                     })?;
+                self.record_legion_workflow_comm_row(
+                    "PLAN",
+                    format!("worker:{}", worker.worker_id.0),
+                    "Scheduled for workflow execution",
+                );
 
                 if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
                     match self.prepare_legion_workflow_mcp_tool_call(
@@ -20203,23 +20392,29 @@ impl AppComposition {
         state: LegionWorkflowVerificationGateState,
         evidence_artifact_id: Option<String>,
     ) -> Result<LegionWorkflowMergeReadiness, AppCompositionError> {
-        let session = self.legion_workflow_session_mut(session_id)?;
-        let gate = session
-            .verification_gates
-            .iter_mut()
-            .find(|gate| &gate.gate_id == gate_id)
-            .ok_or_else(|| {
-                AppCompositionError::LegionWorkflow(format!(
-                    "verification gate {} not found",
-                    gate_id.0
-                ))
-            })?;
-        gate.state = state;
-        gate.evidence_artifact_id = evidence_artifact_id;
-        session.lifecycle_state = LegionWorkflowState::Verifying;
-        Ok(legion_protocol::evaluate_legion_workflow_merge_readiness(
-            session,
-        ))
+        let readiness = {
+            let session = self.legion_workflow_session_mut(session_id)?;
+            let gate = session
+                .verification_gates
+                .iter_mut()
+                .find(|gate| &gate.gate_id == gate_id)
+                .ok_or_else(|| {
+                    AppCompositionError::LegionWorkflow(format!(
+                        "verification gate {} not found",
+                        gate_id.0
+                    ))
+                })?;
+            gate.state = state;
+            gate.evidence_artifact_id = evidence_artifact_id;
+            session.lifecycle_state = LegionWorkflowState::Verifying;
+            legion_protocol::evaluate_legion_workflow_merge_readiness(session)
+        };
+        self.record_legion_workflow_comm_row(
+            "TEST",
+            "workflow:verification",
+            format!("Verification gate {} recorded as {:?}", gate_id.0, state),
+        );
+        Ok(readiness)
     }
 
     /// Records reviewer sign-off metadata for a Legion workflow.
@@ -25096,6 +25291,15 @@ impl AppComposition {
         );
         let verification_run_projection =
             self.verification_run_projection(&delegated_task_projection, generated_at);
+        let legion_workflow_projection = self.legion_workflow_projection(generated_at);
+        let legion_workflow_board_columns =
+            legion_workflow_board_columns(&legion_workflow_projection);
+        let legion_workflow_fleet_card_projections = legion_workflow_fleet_card_projections(
+            &proposal_ledger_projection,
+            &verification_run_projection,
+        );
+        let legion_workflow_comm_rows = self.legion_workflow_comm_rows();
+        let legion_workflow_budget_rows = self.legion_workflow_budget_rows();
         let system_graph_projection = self.system_graph_projection(
             &proposal_ledger_projection,
             &delegated_task_projection,
@@ -25169,7 +25373,11 @@ impl AppComposition {
             assist_inline_prediction_projection: self
                 .assist_inline_prediction_projection(generated_at),
             delegated_task_projection,
-            legion_workflow_projection: self.legion_workflow_projection(generated_at),
+            legion_workflow_projection,
+            legion_workflow_board_columns,
+            legion_workflow_fleet_card_projections,
+            legion_workflow_comm_rows,
+            legion_workflow_budget_rows,
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),

@@ -3,7 +3,8 @@
 use legion_protocol::{
     LegionWorkflowProjection, LegionWorkflowProjectionRow, LegionWorkflowSessionId,
     LegionWorkflowState, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalRiskLabel, VerificationRunProjection, VerificationRunState,
+    ProposalLedgerRow, ProposalRiskLabel, VerificationRunProjection, VerificationRunRow,
+    VerificationRunState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +35,8 @@ impl LegionWorkflowBoardColumnKind {
         }
     }
 
-    fn from_state(state: LegionWorkflowState) -> Self {
+    /// Derive the board column from workflow coordinator state.
+    pub fn from_state(state: LegionWorkflowState) -> Self {
         match state {
             LegionWorkflowState::Draft | LegionWorkflowState::Planning => Self::Assigned,
             LegionWorkflowState::Executing => Self::InProgress,
@@ -47,6 +49,31 @@ impl LegionWorkflowBoardColumnKind {
             | LegionWorkflowState::Cancelled => Self::Done,
         }
     }
+}
+
+/// Metadata-only per-worker delegated-loop budget row for fleet console surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionWorkflowBudgetUsageRowProjection {
+    /// Workflow session that owns the worker.
+    pub session_id: LegionWorkflowSessionId,
+    /// Stable worker identifier rendered as a display-safe label.
+    pub worker_id: String,
+    /// Display-safe budget family label.
+    pub budget_label: String,
+    /// Model-turn usage label.
+    pub model_turns_label: String,
+    /// Tool-call usage label.
+    pub tool_calls_label: String,
+    /// Retry usage label.
+    pub retry_label: String,
+    /// Total tool-output usage label.
+    pub output_bytes_label: String,
+    /// Wall-clock usage label.
+    pub wall_clock_label: String,
+    /// Display-safe budget status label.
+    pub status_label: String,
+    /// Row schema version.
+    pub schema_version: u16,
 }
 
 /// One workflow row projected into the fleet Kanban board.
@@ -200,17 +227,16 @@ pub fn legion_workflow_fleet_card_projections(
     proposal_projection: &ProposalLedgerProjection,
     verification_projection: &VerificationRunProjection,
 ) -> Vec<LegionWorkflowFleetCardProjection> {
-    let test_status_label = verification_status_label(verification_projection);
     proposal_projection
         .rows
         .iter()
-        .map(|row| legion_workflow_fleet_card_projection(row, &test_status_label))
+        .map(|row| legion_workflow_fleet_card_projection(row, verification_projection))
         .collect()
 }
 
 fn legion_workflow_fleet_card_projection(
     row: &ProposalLedgerRow,
-    test_status_label: &str,
+    verification_projection: &VerificationRunProjection,
 ) -> LegionWorkflowFleetCardProjection {
     let represented_targets = row.target_coverage.targets.len() as u32;
     let total_targets =
@@ -232,13 +258,71 @@ fn legion_workflow_fleet_card_projection(
         ),
         files_label,
         risk_label: row.risk_label,
-        test_status_label: test_status_label.to_string(),
+        test_status_label: proposal_verification_status_label(row, verification_projection),
         mini_diff_label: mini_diff_label(&row.diff_summary),
         last_activity_label: format!("updated_at={}", row.updated_at.0),
     }
 }
 
-fn verification_status_label(projection: &VerificationRunProjection) -> String {
+fn proposal_verification_status_label(
+    row: &ProposalLedgerRow,
+    projection: &VerificationRunProjection,
+) -> String {
+    let labels = proposal_verification_target_labels(row);
+    let matching_rows = projection
+        .rows
+        .iter()
+        .filter(|verification| {
+            verification
+                .target_labels
+                .iter()
+                .any(|target_label| labels.iter().any(|label| label == target_label))
+        })
+        .collect::<Vec<_>>();
+    if matching_rows.is_empty() && !projection.rows.is_empty() {
+        format!(
+            "unlinked {}",
+            verification_status_label(projection.rows.iter())
+        )
+    } else {
+        format!(
+            "linked {}",
+            verification_status_label(matching_rows.into_iter())
+        )
+    }
+}
+
+fn proposal_verification_target_labels(row: &ProposalLedgerRow) -> Vec<String> {
+    let mut labels = Vec::new();
+    push_unique_label(&mut labels, format!("proposal:{}", row.proposal_id.0));
+    push_unique_label(&mut labels, format!("proposal_id={}", row.proposal_id.0));
+    for target in &row.target_coverage.targets {
+        push_unique_label(&mut labels, target.target_id.clone());
+        if let Some(path) = &target.path {
+            push_unique_label(&mut labels, path.0.clone());
+        }
+    }
+    for chunk in &row.diff_summary.chunks {
+        if let Some(target_id) = &chunk.target_id {
+            push_unique_label(&mut labels, target_id.clone());
+        }
+    }
+    for warning in &row.preview_warnings {
+        if let Some(target_id) = &warning.target_id {
+            push_unique_label(&mut labels, target_id.clone());
+        }
+    }
+    labels
+}
+
+fn push_unique_label(labels: &mut Vec<String>, label: String) {
+    let label = label.trim().to_string();
+    if !label.is_empty() && !labels.iter().any(|existing| existing == &label) {
+        labels.push(label);
+    }
+}
+
+fn verification_status_label<'a>(rows: impl IntoIterator<Item = &'a VerificationRunRow>) -> String {
     let mut planned = 0u32;
     let mut running = 0u32;
     let mut passed = 0u32;
@@ -246,7 +330,7 @@ fn verification_status_label(projection: &VerificationRunProjection) -> String {
     let mut blocked = 0u32;
     let mut cancelled = 0u32;
 
-    for row in &projection.rows {
+    for row in rows {
         match row.state {
             VerificationRunState::Planned => planned = planned.saturating_add(1),
             VerificationRunState::Running => running = running.saturating_add(1),
@@ -403,7 +487,7 @@ mod tests {
 
     #[test]
     fn projects_fleet_card_fields_from_structured_projections() {
-        let proposal_projection = legion_protocol::ProposalLedgerProjection {
+        let mut proposal_projection = legion_protocol::ProposalLedgerProjection {
             rows: vec![legion_protocol::ProposalLedgerRow {
                 proposal_id: legion_protocol::ProposalId(77),
                 workspace_id: Some(legion_protocol::WorkspaceId(1)),
@@ -496,24 +580,52 @@ mod tests {
             redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
             schema_version: 1,
         };
+        let mut beta_row = proposal_projection.rows[0].clone();
+        beta_row.proposal_id = legion_protocol::ProposalId(78);
+        beta_row.title = "workflow beta card".to_string();
+        beta_row.updated_at = TimestampMillis(9);
+        beta_row.target_coverage.targets[0].target_id = "file:beta".to_string();
+        beta_row.target_coverage.targets[0].path =
+            Some(legion_protocol::CanonicalPath("src/beta.rs".to_string()));
+        beta_row.diff_summary.chunks[0].target_id = Some("file:beta".to_string());
+        beta_row.preview_warnings[0].target_id = Some("file:beta".to_string());
+        proposal_projection.rows.push(beta_row);
         let verification_projection = legion_protocol::VerificationRunProjection {
             projection_id: "verification-runs:77".to_string(),
-            rows: vec![legion_protocol::VerificationRunRow {
-                run_id: "run:77".to_string(),
-                label: "unit tests".to_string(),
-                state: legion_protocol::VerificationRunState::Passed,
-                command_class_label: "test".to_string(),
-                command_body_redacted: true,
-                exit_code: Some(0),
-                target_labels: vec!["file:alpha".to_string()],
-                evidence_artifact_id: Some("artifact:verification:77".to_string()),
-                started_at: Some(TimestampMillis(4)),
-                completed_at: Some(TimestampMillis(5)),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-                redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }],
+            rows: vec![
+                legion_protocol::VerificationRunRow {
+                    run_id: "run:77".to_string(),
+                    label: "unit tests".to_string(),
+                    state: legion_protocol::VerificationRunState::Passed,
+                    command_class_label: "test".to_string(),
+                    command_body_redacted: true,
+                    exit_code: Some(0),
+                    target_labels: vec!["file:alpha".to_string()],
+                    evidence_artifact_id: Some("artifact:verification:77".to_string()),
+                    started_at: Some(TimestampMillis(4)),
+                    completed_at: Some(TimestampMillis(5)),
+                    risk_label: legion_protocol::ProposalRiskLabel::Low,
+                    privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                    redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                },
+                legion_protocol::VerificationRunRow {
+                    run_id: "run:78".to_string(),
+                    label: "beta tests".to_string(),
+                    state: legion_protocol::VerificationRunState::Failed,
+                    command_class_label: "test".to_string(),
+                    command_body_redacted: true,
+                    exit_code: Some(1),
+                    target_labels: vec!["file:beta".to_string()],
+                    evidence_artifact_id: Some("artifact:verification:78".to_string()),
+                    started_at: Some(TimestampMillis(7)),
+                    completed_at: Some(TimestampMillis(8)),
+                    risk_label: legion_protocol::ProposalRiskLabel::Low,
+                    privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                    redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                },
+            ],
             omitted_row_count: 0,
             generated_at: TimestampMillis(6),
             redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
@@ -523,7 +635,7 @@ mod tests {
         let cards =
             legion_workflow_fleet_card_projections(&proposal_projection, &verification_projection);
 
-        assert_eq!(cards.len(), 1);
+        assert_eq!(cards.len(), 2);
         let card = &cards[0];
         assert_eq!(card.proposal_id, legion_protocol::ProposalId(77));
         assert_eq!(card.owner_label, "owner:alice");
@@ -534,9 +646,30 @@ mod tests {
         assert_eq!(card.risk_label, legion_protocol::ProposalRiskLabel::Medium);
         assert_eq!(
             card.test_status_label,
-            "passed=1 failed=0 blocked=0 running=0 planned=0 cancelled=0"
+            "linked passed=1 failed=0 blocked=0 running=0 planned=0 cancelled=0"
         );
         assert_eq!(card.mini_diff_label, "text · targets=1 · hunks=2 · +5/-1");
         assert_eq!(card.last_activity_label, "updated_at=2");
+        assert_eq!(cards[1].proposal_id, legion_protocol::ProposalId(78));
+        assert_eq!(
+            cards[1].test_status_label,
+            "linked passed=0 failed=1 blocked=0 running=0 planned=0 cancelled=0"
+        );
+
+        let mut unlinked_verification_projection = verification_projection.clone();
+        let mut unlinked_row = unlinked_verification_projection.rows[0].clone();
+        unlinked_row.run_id = "run:delegated-plan".to_string();
+        unlinked_row.state = legion_protocol::VerificationRunState::Planned;
+        unlinked_row.target_labels = vec!["delegated_task.plan_row.metadata_only".to_string()];
+        unlinked_verification_projection.rows = vec![unlinked_row];
+
+        let unlinked_cards = legion_workflow_fleet_card_projections(
+            &proposal_projection,
+            &unlinked_verification_projection,
+        );
+        assert!(unlinked_cards.iter().all(|card| {
+            card.test_status_label
+                == "unlinked passed=0 failed=0 blocked=0 running=0 planned=1 cancelled=0"
+        }));
     }
 }

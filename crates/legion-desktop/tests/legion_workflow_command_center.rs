@@ -1,10 +1,11 @@
+use legion_agent::comm::{AgentCommTag, format_agent_comm_line};
 use legion_desktop::{
     bridge::{
         DesktopAction, DesktopAppRequest, DesktopBridgeError, DesktopBridgeOutput,
         DesktopCommandBridge,
     },
     health::DesktopOperationalHealthSnapshot,
-    view::DesktopProjectionViewModel,
+    view::{DesktopProjectionViewModel, agent_comm, fleet_board, fleet_card},
 };
 use legion_protocol::{
     CapabilityId, CausalityId, CorrelationId, DelegatedTaskRuntimeActivationState,
@@ -25,7 +26,10 @@ use legion_protocol::{
     ProposalTargetKind, RedactionHint, TimestampMillis, WorkspaceId,
     delegated_task_tool_permission_request,
 };
-use legion_ui::{DockMode, Shell};
+use legion_ui::{
+    DockMode, LegionWorkflowBoardColumnKind, LegionWorkflowBudgetUsageRowProjection, Shell,
+    legion_workflow_board_columns, legion_workflow_fleet_card_projections,
+};
 
 fn fingerprint(value: &str) -> FileFingerprint {
     FileFingerprint {
@@ -302,6 +306,12 @@ fn legion_snapshot(state: LegionWorkflowMergeReadinessState) -> legion_ui::Shell
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     };
+    snapshot.legion_workflow_board_columns =
+        legion_workflow_board_columns(&snapshot.legion_workflow_projection);
+    snapshot.legion_workflow_fleet_card_projections = legion_workflow_fleet_card_projections(
+        &snapshot.proposal_ledger_projection,
+        &snapshot.verification_run_projection,
+    );
     snapshot
 }
 
@@ -327,6 +337,152 @@ fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     assert!(model.product_mode_rows.iter().any(|row| {
         row.contains("Legion Workflow")
             && row.contains("Autonomous merge unsupported until approval")
+    }));
+}
+
+#[test]
+fn legion_workflow_board_columns_match_coordinator_state_mapping() {
+    let mut projection = legion_projection(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    let template = projection.rows[0].clone();
+    let states = [
+        LegionWorkflowState::Draft,
+        LegionWorkflowState::Planning,
+        LegionWorkflowState::Executing,
+        LegionWorkflowState::WaitingForApproval,
+        LegionWorkflowState::WaitingOnHuman,
+        LegionWorkflowState::Blocked,
+        LegionWorkflowState::Verifying,
+        LegionWorkflowState::Completed,
+        LegionWorkflowState::Failed,
+        LegionWorkflowState::Cancelled,
+    ];
+    projection.rows = states
+        .iter()
+        .enumerate()
+        .map(|(index, state)| {
+            let mut row = template.clone();
+            row.session_id = LegionWorkflowSessionId(format!("session:state:{index}"));
+            row.lifecycle_state = *state;
+            row
+        })
+        .collect();
+    projection.total_session_count = projection.rows.len() as u32;
+
+    let columns = legion_workflow_board_columns(&projection);
+    let view_models = fleet_board::fleet_board_column_view_models(&columns);
+
+    assert_eq!(view_models.len(), 5);
+    for column in &columns {
+        for row in &column.rows {
+            assert_eq!(
+                column.kind,
+                LegionWorkflowBoardColumnKind::from_state(row.state)
+            );
+        }
+    }
+}
+
+#[test]
+fn legion_workflow_fleet_cards_use_projection_fields_without_log_parsing() {
+    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    let cards =
+        fleet_card::fleet_card_view_models(&snapshot.legion_workflow_fleet_card_projections);
+    let source = &snapshot.legion_workflow_fleet_card_projections[0];
+    let card = &cards[0];
+
+    assert_eq!(card.proposal_id, source.proposal_id.0.to_string());
+    assert_eq!(card.title, source.title);
+    assert_eq!(card.owner_label, source.owner_label);
+    assert_eq!(card.model_label, source.model_label);
+    assert_eq!(card.status_label, source.status_label);
+    assert_eq!(card.progress_label, source.progress_label);
+    assert_eq!(card.files_label, source.files_label);
+    assert_eq!(card.risk_label, source.risk_label);
+    assert_eq!(card.test_status_label, source.test_status_label);
+    assert_eq!(card.mini_diff_label, source.mini_diff_label);
+    assert_eq!(card.last_activity_label, source.last_activity_label);
+}
+
+#[test]
+fn legion_workflow_comm_stream_handles_every_documented_tag() {
+    let rows: Vec<String> = AgentCommTag::ALL
+        .iter()
+        .map(|tag| {
+            format_agent_comm_line(
+                "2026-07-08T12:00:00Z",
+                *tag,
+                "worker:console",
+                "metadata-only event",
+            )
+        })
+        .collect();
+
+    let parsed = agent_comm::agent_comm_rows(&rows);
+    let parsed_tags: Vec<_> = parsed.iter().map(|row| row.tag).collect();
+
+    assert_eq!(parsed.len(), AgentCommTag::ALL.len());
+    assert_eq!(parsed_tags, AgentCommTag::ALL);
+    assert!(parsed.iter().all(|row| !row.tag_label.is_empty()));
+}
+
+#[test]
+fn legion_workflow_kill_switch_acknowledgement_surfaces_in_decision_feed() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    snapshot
+        .legion_workflow_projection
+        .decision_feed
+        .push(LegionWorkflowDecisionFeedEntry {
+            decision_id: LegionWorkflowDecisionId("decision:kill".to_string()),
+            session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+            worker_id: None,
+            kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
+            summary_label: "Automate kill switch triggered".to_string(),
+            rationale_labels: vec!["operator_ack".to_string()],
+            risk_label: ProposalRiskLabel::High,
+            mcp_server_id: None,
+            mcp_primitive_kind: None,
+            tool_permission_request_id: None,
+            correlation_id: CorrelationId(7),
+            causality_id: causality("00000000-0000-0000-0000-000000000007"),
+            event_sequence: EventSequence(7),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    snapshot.legion_workflow_projection.decision_feed_count =
+        snapshot.legion_workflow_projection.decision_feed.len() as u32;
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.legion_workflow_rows.iter().any(|row| {
+        row.contains("KillSwitchTriggered") && row.contains("Automate kill switch triggered")
+    }));
+}
+
+#[test]
+fn legion_workflow_budget_rows_surface_per_worker_usage() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    snapshot.legion_workflow_budget_rows = vec![LegionWorkflowBudgetUsageRowProjection {
+        session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+        worker_id: "worker:console".to_string(),
+        budget_label: "delegated-loop".to_string(),
+        model_turns_label: "model_turns=1/5".to_string(),
+        tool_calls_label: "tool_calls=2/8".to_string(),
+        retry_label: "retries=0/3".to_string(),
+        output_bytes_label: "output_bytes=128/4096".to_string(),
+        wall_clock_label: "wall_clock=10/1000ms".to_string(),
+        status_label: "within-budget".to_string(),
+        schema_version: 1,
+    }];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(model.legion_workflow_rows.iter().any(|row| {
+        row.contains("legion workflow budget")
+            && row.contains("worker=worker:console")
+            && row.contains("model_turns=1/5")
+            && row.contains("tool_calls=2/8")
+            && row.contains("within-budget")
     }));
 }
 

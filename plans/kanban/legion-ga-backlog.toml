@@ -1455,6 +1455,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
     acceptance = ["Board columns are driven by coordinator state, not by hand-edited state."]
     stop_condition = "Stop if a column is computed outside the coordinator."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-CONSOLE-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F3.T2"
@@ -1466,6 +1468,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
     acceptance = ["Each field is sourced from a structured coordinator projection, not a freeform string."]
     stop_condition = "Stop if a card field is computed by parsing log text."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-CONSOLE-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F3.T3"
@@ -1477,6 +1481,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-desktop"]
     acceptance = ["Each tag is enumerated and the stream renderer handles each one explicitly."]
     stop_condition = "Stop if a freeform message can render in the comm stream without a tag."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-CONSOLE-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F3.T4"

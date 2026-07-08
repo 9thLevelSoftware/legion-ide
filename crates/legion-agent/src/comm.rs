@@ -30,6 +30,19 @@ impl AgentCommTag {
         Self::Approval,
         Self::Complete,
     ];
+
+    /// Stable uppercase tag label used in persisted communication rows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Plan => "PLAN",
+            Self::Write => "WRITE",
+            Self::Test => "TEST",
+            Self::Review => "REVIEW",
+            Self::Error => "ERROR",
+            Self::Approval => "APPROVAL",
+            Self::Complete => "COMPLETE",
+        }
+    }
 }
 
 /// Parsed `[timestamp] [TAG] actor: message` line.
@@ -72,4 +85,43 @@ pub fn parse_agent_comm_line(input: &str) -> Option<ParsedAgentCommLine> {
         actor: actor.to_string(),
         message: message.to_string(),
     })
+}
+
+/// Formats a documented metadata-only communication row.
+pub fn format_agent_comm_line(
+    timestamp: impl AsRef<str>,
+    tag: AgentCommTag,
+    actor: impl AsRef<str>,
+    message: impl AsRef<str>,
+) -> String {
+    format!(
+        "[{}] [{}] {}: {}",
+        timestamp.as_ref(),
+        tag.label(),
+        actor.as_ref(),
+        message.as_ref()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentCommTag, format_agent_comm_line, parse_agent_comm_line};
+
+    #[test]
+    fn documented_comm_line_round_trips_all_tags() {
+        for tag in AgentCommTag::ALL {
+            let line = format_agent_comm_line(
+                "2026-07-08T12:00:00Z",
+                tag,
+                "worker:console",
+                "metadata-only event",
+            );
+            let parsed = parse_agent_comm_line(&line).expect("formatted line must parse");
+
+            assert_eq!(parsed.timestamp, "2026-07-08T12:00:00Z");
+            assert_eq!(parsed.tag, tag);
+            assert_eq!(parsed.actor, "worker:console");
+            assert_eq!(parsed.message, "metadata-only event");
+        }
+    }
 }

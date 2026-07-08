@@ -4,6 +4,8 @@
 
 /// Native synchronous delegated task execution loop.
 pub mod agent_loop;
+/// Metadata-only delegated-loop budget usage summaries.
+pub mod budget;
 /// Parsed communication log lines for agent workflows.
 pub mod comm;
 /// Approved-plan workflow-session construction.

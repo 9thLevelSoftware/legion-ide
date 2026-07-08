@@ -23,6 +23,11 @@ use legion_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::projection::{
+    LegionWorkflowBoardColumnProjection, LegionWorkflowBudgetUsageRowProjection,
+    LegionWorkflowFleetCardProjection,
+};
+
 /// Dock-panel capability contract used for mode filtering.
 ///
 /// The UI layer intentionally aliases the shared protocol runtime-surface
@@ -3302,6 +3307,14 @@ pub struct ShellProjectionSnapshot {
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Legion workflow projection supplied by the application layer.
     pub legion_workflow_projection: LegionWorkflowProjection,
+    /// Legion workflow board columns supplied by the application layer.
+    pub legion_workflow_board_columns: Vec<LegionWorkflowBoardColumnProjection>,
+    /// Legion workflow fleet-card projections supplied by the application layer.
+    pub legion_workflow_fleet_card_projections: Vec<LegionWorkflowFleetCardProjection>,
+    /// Tagged Legion workflow communication rows supplied by the application layer.
+    pub legion_workflow_comm_rows: Vec<String>,
+    /// Per-worker Legion workflow budget rows supplied by the application layer.
+    pub legion_workflow_budget_rows: Vec<LegionWorkflowBudgetUsageRowProjection>,
     /// Plugin contribution projections supplied by the application layer.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Collaboration presence projections supplied by the application layer.
@@ -3397,6 +3410,14 @@ pub struct Shell {
     pub delegated_task_projection: DelegatedTaskProjection,
     /// Static Legion workflow projection.
     pub legion_workflow_projection: LegionWorkflowProjection,
+    /// Static Legion workflow board columns.
+    pub legion_workflow_board_columns: Vec<LegionWorkflowBoardColumnProjection>,
+    /// Static Legion workflow fleet cards.
+    pub legion_workflow_fleet_card_projections: Vec<LegionWorkflowFleetCardProjection>,
+    /// Static tagged Legion workflow communication rows.
+    pub legion_workflow_comm_rows: Vec<String>,
+    /// Static per-worker Legion workflow budget rows.
+    pub legion_workflow_budget_rows: Vec<LegionWorkflowBudgetUsageRowProjection>,
     /// Static plugin contribution projections.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Static collaboration presence projections.
@@ -3450,6 +3471,10 @@ impl Shell {
             assist_inline_prediction_projection: snapshot.assist_inline_prediction_projection,
             delegated_task_projection: snapshot.delegated_task_projection,
             legion_workflow_projection: snapshot.legion_workflow_projection,
+            legion_workflow_board_columns: snapshot.legion_workflow_board_columns,
+            legion_workflow_fleet_card_projections: snapshot.legion_workflow_fleet_card_projections,
+            legion_workflow_comm_rows: snapshot.legion_workflow_comm_rows,
+            legion_workflow_budget_rows: snapshot.legion_workflow_budget_rows,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             collaboration_gui_projection: snapshot.collaboration_gui_projection,
@@ -3493,6 +3518,10 @@ impl Shell {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -3532,6 +3561,12 @@ impl Shell {
             assist_inline_prediction_projection: self.assist_inline_prediction_projection.clone(),
             delegated_task_projection: self.delegated_task_projection.clone(),
             legion_workflow_projection: self.legion_workflow_projection.clone(),
+            legion_workflow_board_columns: self.legion_workflow_board_columns.clone(),
+            legion_workflow_fleet_card_projections: self
+                .legion_workflow_fleet_card_projections
+                .clone(),
+            legion_workflow_comm_rows: self.legion_workflow_comm_rows.clone(),
+            legion_workflow_budget_rows: self.legion_workflow_budget_rows.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             collaboration_gui_projection: self.collaboration_gui_projection.clone(),
@@ -3570,6 +3605,11 @@ impl Shell {
         self.assist_inline_prediction_projection = snapshot.assist_inline_prediction_projection;
         self.delegated_task_projection = snapshot.delegated_task_projection;
         self.legion_workflow_projection = snapshot.legion_workflow_projection;
+        self.legion_workflow_board_columns = snapshot.legion_workflow_board_columns;
+        self.legion_workflow_fleet_card_projections =
+            snapshot.legion_workflow_fleet_card_projections;
+        self.legion_workflow_comm_rows = snapshot.legion_workflow_comm_rows;
+        self.legion_workflow_budget_rows = snapshot.legion_workflow_budget_rows;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
         self.collaboration_gui_projection = snapshot.collaboration_gui_projection;
@@ -5468,19 +5508,24 @@ fn parse_collaboration_session_id(payload: Option<&str>) -> Option<Collaboration
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::{
+        LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
+        LegionWorkflowBoardRowProjection, LegionWorkflowBudgetUsageRowProjection,
+        LegionWorkflowFleetCardProjection,
+    };
     use legion_protocol::{
         BufferId, BufferVersion, ByteRange, CanonicalPath, CapabilityId, FileFingerprint, FileId,
-        LargeFileStatus, PermissionBudgetActionClass, PermissionBudgetConsentRequirementLabel,
-        PermissionBudgetContract, PermissionBudgetResetPolicyLabel, PermissionBudgetState,
-        PermissionBudgetUsageSummary, PrincipalId, ProposalContextManifestEntrySummary,
-        ProposalContextManifestSummary, ProposalDiffChunkDescriptor, ProposalDiffSummary,
-        ProposalDiffSummaryKind, ProposalLedgerRow, ProposalLifecycleState,
-        ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel,
-        ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
-        ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SnapshotId, Utf16Position,
-        Utf16Range, ViewportDimensions, ViewportLineMetric, ViewportLineSlice,
-        ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
-        WorkspaceId,
+        LargeFileStatus, LegionWorkflowState, PermissionBudgetActionClass,
+        PermissionBudgetConsentRequirementLabel, PermissionBudgetContract,
+        PermissionBudgetResetPolicyLabel, PermissionBudgetState, PermissionBudgetUsageSummary,
+        PrincipalId, ProposalContextManifestEntrySummary, ProposalContextManifestSummary,
+        ProposalDiffChunkDescriptor, ProposalDiffSummary, ProposalDiffSummaryKind,
+        ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay,
+        ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability,
+        ProposalTargetCoverage, ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint,
+        SnapshotId, Utf16Position, Utf16Range, ViewportDimensions, ViewportLineMetric,
+        ViewportLineSlice, ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
+        ViewportScroll, WorkspaceId,
     };
 
     #[test]
@@ -6148,6 +6193,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6262,6 +6311,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6435,6 +6488,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6508,6 +6565,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6575,6 +6636,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6813,6 +6878,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -6905,6 +6974,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -7032,6 +7105,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -7121,6 +7198,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -7274,6 +7355,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: empty_delegated_task_projection(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -7375,6 +7460,10 @@ mod tests {
             assist_inline_prediction_projection: AssistInlinePredictionProjection::empty(),
             delegated_task_projection: delegated.clone(),
             legion_workflow_projection: empty_legion_workflow_projection(),
+            legion_workflow_board_columns: Vec::new(),
+            legion_workflow_fleet_card_projections: Vec::new(),
+            legion_workflow_comm_rows: Vec::new(),
+            legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
@@ -7431,6 +7520,70 @@ mod tests {
                 .merge_readiness
                 .state,
             legion_protocol::LegionWorkflowMergeReadinessState::WaitingForApproval
+        );
+        assert!(shell.command_dispatch_intents.is_empty());
+    }
+
+    #[test]
+    fn legion_workflow_command_center_fields_roundtrip_without_ui_authority() {
+        let mut snapshot = Shell::empty("legion console").projection_snapshot();
+        snapshot.legion_workflow_board_columns = vec![LegionWorkflowBoardColumnProjection {
+            kind: LegionWorkflowBoardColumnKind::InProgress,
+            title: "In Progress".to_string(),
+            rows: vec![LegionWorkflowBoardRowProjection {
+                session_id: LegionWorkflowSessionId("session:console".to_string()),
+                state: LegionWorkflowState::Executing,
+                state_label: "Executing".to_string(),
+                summary_label: "session:console workers=1".to_string(),
+            }],
+        }];
+        snapshot.legion_workflow_fleet_card_projections = vec![LegionWorkflowFleetCardProjection {
+            proposal_id: ProposalId(99),
+            title: "Console proposal".to_string(),
+            owner_label: "owner:console".to_string(),
+            model_label: "model:local".to_string(),
+            status_label: "previewed".to_string(),
+            progress_label: "projection-progress=1/1".to_string(),
+            files_label: "manifest:console files=1".to_string(),
+            risk_label: ProposalRiskLabel::Low,
+            test_status_label: "passed=1 failed=0".to_string(),
+            mini_diff_label: "metadata-only".to_string(),
+            last_activity_label: "updated_at=7".to_string(),
+        }];
+        snapshot.legion_workflow_comm_rows =
+            vec!["[2026-07-08T12:00:00Z] [PLAN] worker:console: metadata-only event".to_string()];
+        snapshot.legion_workflow_budget_rows = vec![LegionWorkflowBudgetUsageRowProjection {
+            session_id: LegionWorkflowSessionId("session:console".to_string()),
+            worker_id: "worker:console".to_string(),
+            budget_label: "loop".to_string(),
+            model_turns_label: "model_turns=1/5".to_string(),
+            tool_calls_label: "tool_calls=2/8".to_string(),
+            retry_label: "retries=0/3".to_string(),
+            output_bytes_label: "output_bytes=128/4096".to_string(),
+            wall_clock_label: "wall_clock=10/1000ms".to_string(),
+            status_label: "within-budget".to_string(),
+            schema_version: 1,
+        }];
+
+        let mut shell = Shell::empty("legion console");
+        shell.replace_projection_snapshot(snapshot.clone());
+        let roundtrip = shell.projection_snapshot();
+
+        assert_eq!(
+            roundtrip.legion_workflow_board_columns,
+            snapshot.legion_workflow_board_columns
+        );
+        assert_eq!(
+            roundtrip.legion_workflow_fleet_card_projections,
+            snapshot.legion_workflow_fleet_card_projections
+        );
+        assert_eq!(
+            roundtrip.legion_workflow_comm_rows,
+            snapshot.legion_workflow_comm_rows
+        );
+        assert_eq!(
+            roundtrip.legion_workflow_budget_rows,
+            snapshot.legion_workflow_budget_rows
         );
         assert!(shell.command_dispatch_intents.is_empty());
     }
