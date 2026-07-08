@@ -96,6 +96,33 @@ impl DelegatedToolHost for NoOpToolHost {
     }
 }
 
+/// Tool host that spends enough real time for wall-clock budget tests.
+struct DelayedToolHost {
+    delay: std::time::Duration,
+}
+
+impl DelegatedToolHost for DelayedToolHost {
+    fn run_terminal_command(
+        &self,
+        _command: &str,
+        _workdir: Option<&Path>,
+        _timeout_seconds: Option<u32>,
+    ) -> Result<String, String> {
+        std::thread::sleep(self.delay);
+        Ok(String::new())
+    }
+
+    fn call_mcp_tool(
+        &self,
+        _server_id: &str,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        std::thread::sleep(self.delay);
+        Ok(String::new())
+    }
+}
+
 /// Always-allow capability broker.
 struct AllowAllBroker;
 
@@ -701,18 +728,24 @@ fn max_model_turns_budget_exhausted_event_sequence_is_monotonic() {
 }
 
 /// 9. wall_clock_limit_ms: BudgetExhausted with wall-clock reason fires before the loop completes.
-///    Uses a 1 ms limit — after one full model-turn + tool-execution cycle (file I/O + UUIDs)
-///    at least 1 ms has elapsed, so the check at the top of the second iteration always fires.
+///    The delayed tool host makes the elapsed time deterministic before the
+///    check at the top of the second loop iteration.
 #[test]
 fn wall_clock_limit_fires_budget_exhausted() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("file.txt"), "content").unwrap();
 
-    // Script a tool-use turn so the loop does real work before the second iteration.
+    // Script a tool-use turn so the loop spends real time before the second iteration.
     let provider = ScriptedToolCallingProviderBuilder::new()
-        .tool_use("t1", "read", serde_json::json!({"path": "file.txt"}))
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "noop"}),
+        )
         .end_turn("done") // never reached — wall clock fires first
         .build("test");
+    let tool_host = DelayedToolHost {
+        delay: std::time::Duration::from_millis(20),
+    };
 
     let root = dir.path().to_path_buf();
     let config = DelegatedTaskLoopConfig {
@@ -738,7 +771,7 @@ fn wall_clock_limit_fires_budget_exhausted() {
     let result = run_delegated_task_loop(
         &config,
         &provider,
-        &NoOpToolHost,
+        &tool_host,
         &mut sink,
         &NeverCancelled,
         &AllowAllBroker,
