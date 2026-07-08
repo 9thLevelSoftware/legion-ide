@@ -144,13 +144,14 @@ pub fn spawn_sandboxed(spec: &SandboxSpawnSpec) -> Result<SandboxedCommandOutput
 mod linux {
     use super::*;
     use landlock::{
-        ABI, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        ABI, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+        RulesetAttr, RulesetCreatedAttr,
     };
     use std::io::{self, Read};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    const WRITE_POLICY_ABI: ABI = ABI::V3;
+    const WRITE_POLICY_ABI: ABI = ABI::V5;
 
     fn write_access_rights() -> BitFlags<AccessFs> {
         AccessFs::from_write(WRITE_POLICY_ABI)
@@ -162,16 +163,17 @@ mod linux {
         let abi = WRITE_POLICY_ABI;
         let abi_version = abi as u32;
 
-        // ABI v3 adds AccessFs::Truncate, which is required to report write
-        // enforcement honestly on Linux 6.2+ kernels.
+        // ABI v3 adds AccessFs::Truncate and ABI v5 adds AccessFs::IoctlDev;
+        // both are required to report filesystem write enforcement honestly.
         let write_access = write_access_rights();
 
         // Probe Landlock availability in the parent process before spawning.
         Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(write_access)
             .map_err(|e| SandboxError::PlatformUnavailable {
                 platform: "linux".to_string(),
-                reason: format!("Landlock handle_access failed: {e}"),
+                reason: format!("Landlock required write rights unavailable: {e}"),
             })?
             .create()
             .map_err(|e| SandboxError::PlatformUnavailable {
@@ -201,13 +203,11 @@ mod linux {
                 let path_fd =
                     PathFd::new(&writable_root).map_err(|e| io::Error::other(format!("{e}")))?;
 
-                // restrict_self() returns RestrictionStatus (FullyEnforced or
-                // PartiallyEnforced) on success.  We intentionally discard it: we are
-                // executing inside the child process (post-fork, pre-exec) and have no
-                // practical way to propagate status back to the parent.
-                // PartiallyEnforced means the kernel applied whatever rules it could
-                // (older ABI), which is still preferable to no enforcement.
+                // HardRequirement keeps the enforcement report honest: if the
+                // kernel cannot handle the requested write rights, spawning fails
+                // instead of silently applying a weaker ruleset.
                 let _ = Ruleset::default()
+                    .set_compatibility(CompatLevel::HardRequirement)
                     .handle_access(write_access_child)
                     .map_err(|e| io::Error::other(format!("{e}")))?
                     .create()
@@ -300,6 +300,7 @@ mod linux {
 
             assert!(rights.contains(AccessFs::WriteFile));
             assert!(rights.contains(AccessFs::Truncate));
+            assert!(rights.contains(AccessFs::IoctlDev));
         }
     }
 }
