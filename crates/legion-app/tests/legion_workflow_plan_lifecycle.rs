@@ -90,6 +90,7 @@ fn builder_config() -> LegionWorkflowSessionBuilderConfig {
         generated_at: TimestampMillis(30),
         correlation_id: CorrelationId(31),
         causality_id: CausalityId(Uuid::from_u128(32)),
+        workspace_id: Some(WorkspaceId(7)),
     }
 }
 

@@ -28,7 +28,7 @@ use legion_protocol::{
     PrivacyClassification, ProductMode, ProposalAffectedTarget, ProposalId, ProposalPayload,
     ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetCoverage,
     ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
-    SpecArtifact, TaskGraphArtifact, TaskNode, TimestampMillis, WorkspaceTrustState,
+    SpecArtifact, TaskGraphArtifact, TaskNode, TimestampMillis, WorkspaceId, WorkspaceTrustState,
     evaluate_legion_workflow_merge_readiness, validate_legion_evidence_record,
     validate_legion_provider_route_metadata, validate_legion_task_packet,
     validate_legion_worker_result, validate_legion_workflow_session,
@@ -98,6 +98,8 @@ pub struct LegionWorkflowSessionBuilderConfig {
     pub correlation_id: CorrelationId,
     /// Audit causality id.
     pub causality_id: CausalityId,
+    /// Workspace id assigned to generated worker target metadata, when known.
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 /// Deterministic provider id used by existing app projections in offline builds.
@@ -281,7 +283,7 @@ fn offline_worker_assignment(
             .map(|(target_index, label)| DelegatedTaskAffectedTargetSummary {
                 target_id: format!("{}/targets/{}", task.task_id, target_index),
                 kind: ProposalTargetKind::MetadataOnly,
-                workspace_id: None,
+                workspace_id: config.workspace_id,
                 file_id: None,
                 buffer_id: None,
                 ranges: Vec::new(),

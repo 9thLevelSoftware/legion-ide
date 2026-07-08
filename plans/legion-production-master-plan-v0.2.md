@@ -883,7 +883,7 @@ Exit:
 
 ## 10. Acceptance Gates
 
-### Standing gates
+### Standing gates (20)
 
 Run for every implementation packet unless the packet is docs-only and explicitly scoped:
 
@@ -904,6 +904,7 @@ cargo run -p xtask -- rust-analyzer-smoke
 cargo run -p xtask -- golden-path-1
 cargo run -p xtask -- golden-path-2
 cargo run -p xtask -- golden-path-3
+cargo run -p xtask -- golden-path-4
 cargo run -p xtask -- perf-harness
 cargo run -p xtask -- verify-perf-harness
 cargo run -p xtask -- update-drill

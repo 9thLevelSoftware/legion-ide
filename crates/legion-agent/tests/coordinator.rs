@@ -5,7 +5,7 @@ use legion_agent::dag::workflow_dag_from_approved_plan;
 use legion_protocol::{
     CausalityId, CorrelationId, DelegatedTaskStepState, EditablePlanArtifact, EditablePlanSection,
     EditablePlanSectionKind, ProductMode, ProposalPrivacyLabel, ProposalRiskLabel, RedactionHint,
-    TaskGraphArtifact, TaskNode, TimestampMillis,
+    TaskGraphArtifact, TaskNode, TimestampMillis, WorkspaceId,
 };
 use uuid::Uuid;
 
@@ -71,6 +71,7 @@ fn config() -> LegionWorkflowSessionBuilderConfig {
         generated_at: TimestampMillis(9),
         correlation_id: CorrelationId(10),
         causality_id: CausalityId(Uuid::from_u128(11)),
+        workspace_id: Some(WorkspaceId(7)),
     }
 }
 
@@ -96,6 +97,10 @@ fn approved_plan_session_builder_creates_one_worker_per_task_with_stable_ids() {
     assert_eq!(
         session.worker_assignments[1].worker_id.0,
         "plan:alpha/tasks/1"
+    );
+    assert_eq!(
+        session.worker_assignments[0].affected_targets[0].workspace_id,
+        Some(WorkspaceId(7))
     );
     assert!(session.dependency_edges.is_empty());
     assert_eq!(

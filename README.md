@@ -40,7 +40,7 @@ Use these docs first:
 
 ## Required Local Gates
 
-Run these before claiming code work is complete:
+Run these 20 standing gates before claiming code work is complete:
 
 ```bash
 cargo run -p xtask -- check-deps
@@ -59,6 +59,7 @@ cargo run -p xtask -- rust-analyzer-smoke
 cargo run -p xtask -- golden-path-1
 cargo run -p xtask -- golden-path-2
 cargo run -p xtask -- golden-path-3
+cargo run -p xtask -- golden-path-4
 cargo run -p xtask -- perf-harness
 cargo run -p xtask -- verify-perf-harness
 cargo run -p xtask -- update-drill
@@ -83,7 +84,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-Two GitHub Actions workflows exist: `.github/workflows/legion-gates.yml` runs the standing gate set (xtask gates, fmt/check/test/clippy, cargo-deny, report-only perf-harness, and the real rust-analyzer smoke) across Linux, Windows, and macOS runners on every push to main and every pull request, and `.github/workflows/legion-bench.yml` runs the legion-bench in recorded mode (fixture scoring) weekly (and on manual dispatch) and uploads the report artifact. Live provider calls are not performed; real live mode is a future M13 Legion-Bench scope. Local developer machines must still install the CLI before using `scripts/run-phase-gates.*`; those local gates remain the primary verification source (they additionally run the evals/training pytest suite and strict perf budgets) until the hosted gate history is proven stable.
+GitHub Actions workflows include `.github/workflows/legion-gates.yml` (standing gate set: xtask gates, fmt/check/test/clippy, cargo-deny, report-only perf-harness, and the real rust-analyzer smoke across Linux, Windows, and macOS runners on every push to main and every pull request), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring), and `.github/workflows/legion-smoke.yml` (GP-1/2/3/4 golden-path smokes plus the update-drill on dispatch and weekly). Live provider calls are not performed; real live mode is a future M13 Legion-Bench scope. Local developer machines must still install the CLI before using `scripts/run-phase-gates.*`; those local gates remain the primary verification source (they additionally run the evals/training pytest suite and strict perf budgets) until the hosted gate history is proven stable.
 
 ## CLI Proof
 

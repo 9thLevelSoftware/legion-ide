@@ -14116,6 +14116,7 @@ struct AppDocumentResolver {
 #[derive(Debug, Clone)]
 struct LegionWorkflowPlanArtifacts {
     task_graph: Option<TaskGraphArtifact>,
+    workspace_id: Option<WorkspaceId>,
 }
 
 impl AppDocumentResolver {
@@ -18553,7 +18554,10 @@ impl AppComposition {
         );
         self.legion_workflow_plan_artifacts.insert(
             plan.artifact_id.clone(),
-            LegionWorkflowPlanArtifacts { task_graph },
+            LegionWorkflowPlanArtifacts {
+                task_graph,
+                workspace_id: directive.workspace_id,
+            },
         );
         let revision = self.audited_plan_revision(plan.clone(), None);
         self.record_plan_revision(revision)
@@ -18674,6 +18678,10 @@ impl AppComposition {
                 "workflow plan {plan_artifact_id} has no task graph"
             ))
         })?;
+        let mut builder_config = builder_config;
+        if builder_config.workspace_id.is_none() {
+            builder_config.workspace_id = artifacts.workspace_id;
+        }
         let session =
             legion_workflow_session_from_approved_plan(&plan, &dag, task_graph, builder_config)
                 .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
@@ -19252,9 +19260,29 @@ impl AppComposition {
             decision_feed_rows: self.automate_workflow.decision_feed_for_session(session_id),
             merge_readiness_report,
             mcp_registries: self.automate_workflow.mcp_registries(),
-            risk_monitors: self.automate_workflow.risk_monitors(),
-            kill_switches: self.automate_workflow.kill_switches(),
-            tool_permission_requests: self.automate_workflow.tool_permission_requests(),
+            risk_monitors: self
+                .automate_workflow
+                .risk_monitors()
+                .into_iter()
+                .filter(|monitor| &monitor.session_id == session_id)
+                .collect(),
+            kill_switches: self
+                .automate_workflow
+                .kill_switches()
+                .into_iter()
+                .filter(|kill_switch| &kill_switch.session_id == session_id)
+                .collect(),
+            tool_permission_requests: self
+                .automate_workflow
+                .tool_permission_requests()
+                .into_iter()
+                .filter(|request| {
+                    request
+                        .labels
+                        .iter()
+                        .any(|label| label == &format!("legion.session:{}", session_id.0))
+                })
+                .collect(),
             projection_generated_at,
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: session.schema_version.max(1),
@@ -20442,9 +20470,13 @@ impl AppComposition {
             state
         };
         signoff.reviewer_principal_id = reviewer_principal_id;
-        Ok(legion_protocol::evaluate_legion_workflow_merge_readiness(
-            session,
-        ))
+        let readiness = legion_protocol::evaluate_legion_workflow_merge_readiness(session);
+        self.record_legion_workflow_comm_row(
+            "REVIEW",
+            "workflow:review",
+            format!("Sign-off {} recorded as {:?}", sign_off_id.0, state),
+        );
+        Ok(readiness)
     }
 
     /// Records merge approval metadata without applying or merging the workflow proposal.
@@ -20469,9 +20501,13 @@ impl AppComposition {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         });
-        Ok(legion_protocol::evaluate_legion_workflow_merge_readiness(
-            session,
-        ))
+        let readiness = legion_protocol::evaluate_legion_workflow_merge_readiness(session);
+        self.record_legion_workflow_comm_row(
+            "APPROVAL",
+            "workflow:approval",
+            format!("Merge approval recorded: granted={approval_granted}"),
+        );
+        Ok(readiness)
     }
 
     /// Resolves a Legion workflow conflict by metadata id.
@@ -20548,9 +20584,13 @@ impl AppComposition {
         {
             session.lifecycle_state = LegionWorkflowState::Executing;
         }
-        Ok(legion_protocol::evaluate_legion_workflow_merge_readiness(
-            session,
-        ))
+        let readiness = legion_protocol::evaluate_legion_workflow_merge_readiness(session);
+        self.record_legion_workflow_comm_row(
+            "APPROVAL",
+            "workflow:operator",
+            format!("Conflict {} resolved", conflict_id.0),
+        );
+        Ok(readiness)
     }
 
     fn legion_workflow_session_mut(

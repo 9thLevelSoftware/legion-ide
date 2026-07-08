@@ -1,6 +1,5 @@
 #!/usr/bin/env sh
-# Plan Phase 0: governance and local gate truth lock.
-# Runs the documented repository gate sequence from AGENTS.md and plans/dependency-policy.md.
+# Runs the documented 20-gate repository sequence from AGENTS.md.
 
 set -eu
 
@@ -10,28 +9,33 @@ if ! command -v cargo-deny >/dev/null 2>&1 && ! cargo deny --version >/dev/null 
   exit 127
 fi
 
-printf '%s\n' '[1/8] Dependency policy gate'
-cargo run -p xtask -- check-deps
+gate() {
+  index="$1"
+  name="$2"
+  shift 2
+  printf '[%s/20] %s\n' "$index" "$name"
+  "$@"
+}
 
-printf '%s\n' '[2/8] Documentation hygiene gate'
-cargo run -p xtask -- docs-hygiene
-
-printf '%s\n' '[3/8] Claim-audit gate'
-cargo run -p xtask -- claim-audit
-
-printf '%s\n' '[4/8] Formatting gate'
-cargo fmt --all --check
-
-printf '%s\n' '[5/8] Workspace check gate'
-cargo check --workspace --all-targets
-
-printf '%s\n' '[6/8] Workspace test gate'
-cargo test --workspace --all-targets
-
-printf '%s\n' '[7/8] Clippy gate'
-cargo clippy --workspace --all-targets -- -D warnings
-
-printf '%s\n' '[8/8] Supply-chain policy gate'
-cargo deny check
+gate 1 'Dependency policy gate' cargo run -p xtask -- check-deps
+gate 2 'Documentation hygiene gate' cargo run -p xtask -- docs-hygiene
+gate 3 'Claim-audit gate' cargo run -p xtask -- claim-audit
+gate 4 'egui TextEdit boundary gate' cargo run -p xtask -- no-egui-textedit
+gate 5 'Kanban backlog gate' cargo run -p xtask -- verify-kanban-backlog
+gate 6 'Release pipeline dry-run gate' cargo run -p xtask -- release-pipeline --dry-run
+gate 7 'Release pipeline verification gate' cargo run -p xtask -- verify-release-pipeline
+gate 8 'Formatting gate' cargo fmt --all --check
+gate 9 'Workspace check gate' cargo check --workspace --all-targets
+gate 10 'Workspace test gate' cargo test --workspace --all-targets
+gate 11 'Clippy gate' cargo clippy --workspace --all-targets -- -D warnings
+gate 12 'Supply-chain policy gate' cargo deny check
+gate 13 'Rust analyzer smoke gate' cargo run -p xtask -- rust-analyzer-smoke
+gate 14 'Golden Path 1 gate' cargo run -p xtask -- golden-path-1
+gate 15 'Golden Path 2 gate' cargo run -p xtask -- golden-path-2
+gate 16 'Golden Path 3 gate' cargo run -p xtask -- golden-path-3
+gate 17 'Golden Path 4 gate' cargo run -p xtask -- golden-path-4
+gate 18 'Performance harness gate' cargo run -p xtask -- perf-harness
+gate 19 'Performance harness verification gate' cargo run -p xtask -- verify-perf-harness
+gate 20 'Update drill gate' cargo run -p xtask -- update-drill
 
 printf '%s\n' 'All Legion IDE phase gates passed.'

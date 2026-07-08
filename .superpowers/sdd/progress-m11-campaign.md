@@ -12,8 +12,8 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 - [x] PKT-PLAN: plan artifact wiring (branch m11/plan-artifact)
 - [x] PKT-WORKERS: real delegate workers in workflow path (branch m11/real-workers)
 - [x] PKT-LANES: parallel lanes, conflict pause/resume, merge evidence export (branch m11/parallel-conflict-merge)
-- [ ] PKT-CONSOLE: workflow board, fleet cards, comm stream, budget meter (branch m11/fleet-console)
-- [ ] PKT-GP4: GP-4 harness, gate/docs sweep, campaign close (branch m11/gp4-harness)
+- [x] PKT-CONSOLE: workflow board, fleet cards, comm stream, budget meter (branch m11/fleet-console)
+- [x] PKT-GP4: GP-4 harness, gate/docs sweep, campaign close (branch m11/gp4-harness)
 
 ## Completion log
 
@@ -46,3 +46,15 @@ Explicit deferral: P6.F4 / ACP interop remains deferred by user decision on 2026
 - Deliverables: threaded deterministic scheduler-lane workflow execution, same-lane provider concurrency, dependency-gated later lanes, shared per-run cancellation, kill-switch decision-feed recording for cancellation, conflict pause/resume with `WaitingOnHuman`, merge-readiness report API, serializable metadata-only evidence export bundle, deterministic projection replay, session artifact capture, `P6.F2.T2`/`P6.F2.T3`/`P6.F2.T4` kanban completion, and PKT-LANES evidence/report files.
 - Verification: focused workflow, strengthened shared-cancellation regression, delegated-task, manual-zero-egress, agent merge-readiness, UI board projection, offline app, kanban backlog, formatting, and whitespace checks passed. The ignored SDD report at `.superpowers/sdd/task-PKT-LANES-M11-report.md` mirrors the same local history for recovery.
 - Notes: live-provider cancellation remains cooperative at turn/tool boundaries; execution re-run replay, PKT-CONSOLE, PKT-GP4, and P6.F4/ACP external-agent work remain deferred/out of scope.
+
+### PKT-CONSOLE COMPLETE (2026-07-08)
+- Commits: `883c3f6` (`feat: build legion workflow fleet console`) merged to `main` and pushed to `origin/main`.
+- Deliverables: five-column workflow board projection/rendering, structured fleet-card projection/rendering, tagged comm stream contract and app-owned comm rows, budget meter projection/rendering, P6.F3.T1/T2/T3 kanban completion, and PKT-CONSOLE evidence file.
+- Verification: focused agent/UI/app/desktop checks passed; full local 19-gate chain passed in `target/m11-pkt-console-full-gates.log`.
+- Notes: P6.F3.T4 and P6.F4/ACP remained out of scope for this packet.
+
+### PKT-GP4 COMPLETE (2026-07-08)
+- Commits: final packet commit is created after this ledger entry; use `git log --oneline -1` on `m11/gp4-harness` for the exact hash.
+- Deliverables: `golden_path_4` app harness, `xtask golden-path-4`, GP-4 CI smoke job, approved-plan workspace-id propagation, REVIEW/APPROVAL comm rows, session-scoped evidence bundle replay, P6.F3.T4 kanban completion, readiness ledger updates, and PKT-GP4 evidence file.
+- Verification: `cargo run -p xtask -- golden-path-4` passed 13/13 steps; focused coordinator, plan-lifecycle, xtask, and workflow integration checks passed. Full 20-gate result is recorded in `plans/evidence/production/M11/PKT-GP4-evidence.md` after the final gate chain.
+- Notes: P6.F4 / ACP external-agent interoperability remains explicitly deferred and unclaimed.

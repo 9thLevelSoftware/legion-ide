@@ -1188,6 +1188,7 @@ fn legion_workflow_parallel_lane_executes_lane_mates_concurrently_and_delays_dep
 
     let dispatch_log = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(Barrier::new(2));
+    let lane_barrier_timeout = Duration::from_secs(2);
     let resolver = NamedWorkerProviderResolver::new([
         (
             "worker:left".to_string(),
@@ -1196,7 +1197,7 @@ fn legion_workflow_parallel_lane_executes_lane_mates_concurrently_and_delays_dep
                 "resolver payload: left\n",
                 barrier.clone(),
                 dispatch_log.clone(),
-                Duration::from_millis(500),
+                lane_barrier_timeout,
             )) as Box<dyn ToolCallingProvider + Send>,
         ),
         (
@@ -1206,7 +1207,7 @@ fn legion_workflow_parallel_lane_executes_lane_mates_concurrently_and_delays_dep
                 "resolver payload: right\n",
                 barrier.clone(),
                 dispatch_log.clone(),
-                Duration::from_millis(500),
+                lane_barrier_timeout,
             )) as Box<dyn ToolCallingProvider + Send>,
         ),
         (
@@ -1872,6 +1873,146 @@ fn legion_workflow_evidence_bundle_replays_projection_equal_to_live_projection()
     assert!(!bundle.worker_results.is_empty());
     assert!(!bundle.evidence_records.is_empty());
     assert!(!bundle.decision_feed_rows.is_empty());
+}
+
+#[test]
+fn legion_workflow_review_and_approval_events_project_comm_rows() {
+    let root = temp_workspace("comm-rows");
+    let mut app = automate_app();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:comm-rows".to_string()),
+    )
+    .expect("open workspace");
+    let plan_id = DelegatedTaskPlanId("plan-comm-rows".to_string());
+    let mut session = workflow_session(
+        "comm-rows",
+        vec![worker(
+            "worker:comm",
+            LegionWorkflowModelBackend::Local,
+            Some(plan_id.clone()),
+            "target:comm",
+            196,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Pending,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::Pending)],
+        vec![ProposalId(196)],
+        None,
+    );
+    session.worker_assignments[0].state = LegionWorkflowWorkerState::Completed;
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![delegated_contract(plan_id)]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    app.record_legion_workflow_verification(
+        &session_id,
+        &LegionWorkflowVerificationGateId("verification:unit".to_string()),
+        LegionWorkflowVerificationGateState::Passed,
+        Some("evidence:comm".to_string()),
+    )
+    .expect("record verification");
+    app.record_legion_workflow_sign_off(
+        &session_id,
+        &LegionWorkflowSignOffId("signoff:reviewer".to_string()),
+        LegionWorkflowSignOffState::SignedOff,
+        Some(PrincipalId("reviewer:comm".to_string())),
+    )
+    .expect("record signoff");
+    app.record_legion_workflow_merge_approval(&session_id, true, true, true, false)
+        .expect("record approval");
+
+    let snapshot = app
+        .shell_projection_snapshot("comm rows")
+        .expect("shell projection");
+    assert!(
+        snapshot
+            .legion_workflow_comm_rows
+            .iter()
+            .any(|row| row.contains("] [REVIEW] "))
+    );
+    assert!(
+        snapshot
+            .legion_workflow_comm_rows
+            .iter()
+            .any(|row| row.contains("] [APPROVAL] "))
+    );
+}
+
+#[test]
+fn legion_workflow_evidence_bundle_excludes_unrelated_kill_switch_rows() {
+    let mut app = automate_app();
+    let server_id = McpServerId("mcp:bundle-other".to_string());
+    let tool_name = McpToolName("write_file".to_string());
+    let main = workflow_session(
+        "bundle-main",
+        vec![worker(
+            "worker:bundle-main",
+            LegionWorkflowModelBackend::Local,
+            Some(DelegatedTaskPlanId("plan-bundle-main".to_string())),
+            "target:bundle-main",
+            197,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        vec![ProposalId(197)],
+        Some(approval(true)),
+    );
+    let main_id = main.session_id.clone();
+    let other = workflow_session(
+        "bundle-other",
+        vec![worker(
+            "worker:bundle-other",
+            LegionWorkflowModelBackend::Local,
+            Some(DelegatedTaskPlanId("plan-bundle-other".to_string())),
+            "target:bundle-other",
+            198,
+        )],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        vec![ProposalId(198)],
+        Some(approval(true)),
+    );
+    let other_id = other.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![main, other])
+        .expect("seed workflows");
+    app.seed_legion_workflow_mcp_registry(test_mcp_registry(&server_id, &tool_name))
+        .expect("seed mcp registry");
+
+    let waiting = app
+        .prepare_legion_workflow_mcp_tool_call(&other_id, &server_id, &tool_name)
+        .expect("prepare other permission request");
+    assert!(matches!(
+        waiting,
+        AppAutomateToolCallOutcome::WaitingForToolPermission { .. }
+    ));
+    app.trigger_legion_workflow_kill_switch(
+        &other_id,
+        PrincipalId("principal:operator".to_string()),
+        "unrelated stop".to_string(),
+    )
+    .expect("trigger other kill switch");
+
+    let bundle = app
+        .export_legion_workflow_evidence_bundle(&main_id)
+        .expect("export bundle");
+
+    assert!(bundle.kill_switches.is_empty());
+    assert!(bundle.tool_permission_requests.is_empty());
+    assert!(bundle.replay_projection().kill_switches.is_empty());
+    assert!(
+        bundle
+            .replay_projection()
+            .tool_permission_requests
+            .is_empty()
+    );
 }
 
 #[test]

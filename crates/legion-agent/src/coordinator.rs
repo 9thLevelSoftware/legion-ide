@@ -9,7 +9,8 @@ use legion_protocol::{
     LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerRole,
     LegionWorkflowWorkerState, PrivacyClassification, ProductMode, ProposalTargetKind,
-    RedactionHint, TaskGraphArtifact, TaskNode, TimestampMillis, validate_legion_workflow_session,
+    RedactionHint, TaskGraphArtifact, TaskNode, TimestampMillis, WorkspaceId,
+    validate_legion_workflow_session,
 };
 
 use crate::{AgentError, dag::WorkflowDag};
@@ -25,6 +26,8 @@ pub struct LegionWorkflowSessionBuilderConfig {
     pub correlation_id: CorrelationId,
     /// Audit causality id.
     pub causality_id: CausalityId,
+    /// Workspace id assigned to generated worker target metadata, when known.
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 fn stable_task_worker_id(plan_id: &str, task_index: usize) -> LegionWorkflowWorkerId {
@@ -58,7 +61,7 @@ fn worker_assignment(
             .map(|(target_index, label)| DelegatedTaskAffectedTargetSummary {
                 target_id: format!("{}/targets/{}", task.task_id, target_index),
                 kind: ProposalTargetKind::MetadataOnly,
-                workspace_id: None,
+                workspace_id: config.workspace_id,
                 file_id: None,
                 buffer_id: None,
                 ranges: Vec::new(),

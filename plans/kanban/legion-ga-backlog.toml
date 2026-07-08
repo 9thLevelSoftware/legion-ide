@@ -1489,11 +1489,13 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     title = "Risk monitor, approval queue, kill switch, budget meter"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = ["crates/legion-desktop/src/view/risk_monitor.rs", "crates/legion-agent/src/budget.rs", "crates/legion-agent/src/kill.rs"]
+    files = ["crates/legion-app/src/bin/golden_path_4.rs", "crates/legion-app/src/lib.rs", "crates/legion-agent/src/coordinator.rs", "xtask/src/golden_path_4.rs"]
     dependencies = ["P3.F4.T3", "P6.F3.T1"]
-    verification = ["cargo test -p legion-desktop", "cargo test -p legion-agent"]
-    acceptance = ["GP-4 works end-to-end from UI."]
+    verification = ["cargo run -p xtask -- golden-path-4", "cargo test -p legion-app --test legion_workflow_integration", "cargo test -p legion-agent --test coordinator"]
+    acceptance = ["GP-4 works end-to-end through the app-owned workflow command-center projection, with desktop-rendered command-center rows consuming that projection."]
     stop_condition = "Stop if the kill switch can be silently ignored by a worker."
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-GP4-evidence.md"
 
   [[epics.features]]
   id = "P6.F4"

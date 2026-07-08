@@ -114,7 +114,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring; live provider calls are a future M13 scope), and `.github/workflows/legion-smoke.yml` (GP-1/2/3 golden-path smokes and the update-drill 19th standing gate on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring; live provider calls are a future M13 scope), and `.github/workflows/legion-smoke.yml` (GP-1 through GP-4 golden-path smokes and the update-drill, completing the 20 standing gates on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 
