@@ -143,9 +143,7 @@ pub fn spawn_sandboxed(spec: &SandboxSpawnSpec) -> Result<SandboxedCommandOutput
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use landlock::{
-        ABI, Access, AccessFs, PathBeneathBuilder, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    };
+    use landlock::{ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
     use std::io::{self, Read};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -153,14 +151,14 @@ mod linux {
     pub fn spawn_sandboxed_linux(
         spec: &SandboxSpawnSpec,
     ) -> Result<SandboxedCommandOutput, SandboxError> {
-        let abi = ABI::new_current();
+        let abi = ABI::V1;
         let abi_version = abi as u32;
 
         // Write-focused access flags supported by all Landlock ABI versions.
         let write_access = AccessFs::WriteFile
             | AccessFs::MakeDir
             | AccessFs::MakeSym
-            | AccessFs::MakeIreg
+            | AccessFs::MakeReg
             | AccessFs::MakeFifo
             | AccessFs::MakeBlock
             | AccessFs::MakeChar
@@ -201,7 +199,7 @@ mod linux {
                 let write_access_child = AccessFs::WriteFile
                     | AccessFs::MakeDir
                     | AccessFs::MakeSym
-                    | AccessFs::MakeIreg
+                    | AccessFs::MakeReg
                     | AccessFs::MakeFifo
                     | AccessFs::MakeBlock
                     | AccessFs::MakeChar
@@ -209,8 +207,8 @@ mod linux {
                     | AccessFs::RemoveDir
                     | AccessFs::RemoveFile;
 
-                let path_fd = PathFd::new(&writable_root)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?;
+                let path_fd =
+                    PathFd::new(&writable_root).map_err(|e| io::Error::other(format!("{e}")))?;
 
                 // restrict_self() returns RestrictionStatus (FullyEnforced or
                 // PartiallyEnforced) on success.  We intentionally discard it: we are
@@ -220,13 +218,13 @@ mod linux {
                 // (older ABI), which is still preferable to no enforcement.
                 let _ = Ruleset::default()
                     .handle_access(write_access_child)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?
+                    .map_err(|e| io::Error::other(format!("{e}")))?
                     .create()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?
-                    .add_rule(PathBeneathBuilder::new(&path_fd, write_access_child))
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?
+                    .map_err(|e| io::Error::other(format!("{e}")))?
+                    .add_rule(PathBeneath::new(path_fd, write_access_child))
+                    .map_err(|e| io::Error::other(format!("{e}")))?
                     .restrict_self()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?;
+                    .map_err(|e| io::Error::other(format!("{e}")))?;
 
                 Ok(())
             });
