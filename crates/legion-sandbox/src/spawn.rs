@@ -143,28 +143,28 @@ pub fn spawn_sandboxed(spec: &SandboxSpawnSpec) -> Result<SandboxedCommandOutput
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use landlock::{ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+    use landlock::{
+        ABI, AccessFs, BitFlags, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    };
     use std::io::{self, Read};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    const WRITE_POLICY_ABI: ABI = ABI::V3;
+
+    fn write_access_rights() -> BitFlags<AccessFs> {
+        AccessFs::from_write(WRITE_POLICY_ABI)
+    }
+
     pub fn spawn_sandboxed_linux(
         spec: &SandboxSpawnSpec,
     ) -> Result<SandboxedCommandOutput, SandboxError> {
-        let abi = ABI::V1;
+        let abi = WRITE_POLICY_ABI;
         let abi_version = abi as u32;
 
-        // Write-focused access flags supported by all Landlock ABI versions.
-        let write_access = AccessFs::WriteFile
-            | AccessFs::MakeDir
-            | AccessFs::MakeSym
-            | AccessFs::MakeReg
-            | AccessFs::MakeFifo
-            | AccessFs::MakeBlock
-            | AccessFs::MakeChar
-            | AccessFs::MakeSock
-            | AccessFs::RemoveDir
-            | AccessFs::RemoveFile;
+        // ABI v3 adds AccessFs::Truncate, which is required to report write
+        // enforcement honestly on Linux 6.2+ kernels.
+        let write_access = write_access_rights();
 
         // Probe Landlock availability in the parent process before spawning.
         Ruleset::default()
@@ -196,16 +196,7 @@ mod linux {
         // Landlock syscalls are async-signal-safe.
         unsafe {
             cmd.pre_exec(move || {
-                let write_access_child = AccessFs::WriteFile
-                    | AccessFs::MakeDir
-                    | AccessFs::MakeSym
-                    | AccessFs::MakeReg
-                    | AccessFs::MakeFifo
-                    | AccessFs::MakeBlock
-                    | AccessFs::MakeChar
-                    | AccessFs::MakeSock
-                    | AccessFs::RemoveDir
-                    | AccessFs::RemoveFile;
+                let write_access_child = write_access_rights();
 
                 let path_fd =
                     PathFd::new(&writable_root).map_err(|e| io::Error::other(format!("{e}")))?;
@@ -297,6 +288,19 @@ mod linux {
             },
             timed_out,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn write_access_rights_cover_truncation() {
+            let rights = write_access_rights();
+
+            assert!(rights.contains(AccessFs::WriteFile));
+            assert!(rights.contains(AccessFs::Truncate));
+        }
     }
 }
 
