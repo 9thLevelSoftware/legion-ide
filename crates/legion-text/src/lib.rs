@@ -725,14 +725,11 @@ impl LineIndex {
         let utf16_delta = replacement_utf16_len as isize - removed_utf16_len as isize;
 
         let mut lines = self.inner.lines.clone();
-        if let Some(line) = lines.get_mut(edit_line_index) {
-            line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
-            line.end_byte = shift_usize(line.end_byte, byte_delta);
-            line.byte_len = shift_usize(line.byte_len, byte_delta);
-            line.utf16_len = shift_usize(line.utf16_len, utf16_delta);
-        } else {
-            return None;
-        }
+        let line = lines.get_mut(edit_line_index)?;
+        line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
+        line.end_byte = shift_usize(line.end_byte, byte_delta);
+        line.byte_len = shift_usize(line.byte_len, byte_delta);
+        line.utf16_len = shift_usize(line.utf16_len, utf16_delta);
 
         for line in lines.iter_mut().skip(edit_line_index + 1) {
             line.start_byte = shift_usize(line.start_byte, byte_delta);
@@ -741,19 +738,16 @@ impl LineIndex {
         }
 
         let mut chunks = self.inner.chunks.clone();
-        if let Some(chunk) = chunks.get_mut(edit_chunk_index) {
-            chunk.end_byte = shift_usize(chunk.end_byte, byte_delta);
-            chunk.byte_len = shift_usize(chunk.byte_len, byte_delta);
-            // Repeated same-line edits can grow the edited chunk past the advertised bound while
-            // staying on the simple-edit fast path. Bail out so the caller falls back to a full
-            // chunk rebuild, restoring the bounded-chunk invariant.
-            if chunk.byte_len > DEFAULT_CHUNK_FORCE_MAX_BYTES {
-                return None;
-            }
-            chunk.hash = chunk_hash_for_byte_range(rope.as_ref(), chunk.start_byte, chunk.end_byte);
-        } else {
+        let chunk = chunks.get_mut(edit_chunk_index)?;
+        chunk.end_byte = shift_usize(chunk.end_byte, byte_delta);
+        chunk.byte_len = shift_usize(chunk.byte_len, byte_delta);
+        // Repeated same-line edits can grow the edited chunk past the advertised bound while
+        // staying on the simple-edit fast path. Bail out so the caller falls back to a full
+        // chunk rebuild, restoring the bounded-chunk invariant.
+        if chunk.byte_len > DEFAULT_CHUNK_FORCE_MAX_BYTES {
             return None;
         }
+        chunk.hash = chunk_hash_for_byte_range(rope.as_ref(), chunk.start_byte, chunk.end_byte);
 
         for chunk in chunks.iter_mut().skip(edit_chunk_index + 1) {
             chunk.start_byte = shift_usize(chunk.start_byte, byte_delta);
