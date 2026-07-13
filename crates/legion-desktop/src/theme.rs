@@ -409,21 +409,21 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
     visuals.extreme_bg_color = theme.bg.code;
     visuals.faint_bg_color = theme.bg.card;
     visuals.selection.bg_fill = theme.bg.active;
-    visuals.selection.stroke = Stroke::new(1.0, theme.accent.cyan);
+    visuals.selection.stroke = Stroke::new(1.0_f32, theme.accent.cyan);
     visuals.warn_fg_color = theme.accent.amber;
     visuals.error_fg_color = theme.accent.red;
     visuals.widgets.noninteractive.bg_fill = theme.bg.panel;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, theme.text.secondary);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, theme.text.secondary);
     visuals.widgets.inactive.bg_fill = theme.bg.card;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, theme.text.secondary);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, theme.text.secondary);
     visuals.widgets.hovered.bg_fill = theme.bg.hover;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, theme.border.strong);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, theme.text.primary);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, theme.border.strong);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, theme.text.primary);
     visuals.widgets.active.bg_fill = theme.bg.active;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, theme.border.strong);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, theme.text.primary);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, theme.border.strong);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, theme.text.primary);
     visuals.widgets.open.bg_fill = theme.bg.active;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, theme.border.focus);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, theme.border.focus);
     visuals.window_corner_radius = CornerRadius::same(theme.radius.md);
     visuals.menu_corner_radius = CornerRadius::same(theme.radius.md);
     ctx.set_visuals(visuals);
@@ -432,21 +432,21 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
 pub(crate) fn panel_frame(fill: Color32) -> Frame {
     Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, tokens().border.subtle))
+        .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::same(tokens().spacing.md))
 }
 
 pub(crate) fn pane_frame(fill: Color32) -> Frame {
     Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, tokens().border.subtle))
+        .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::same(0))
 }
 
 pub(crate) fn toolbar_frame() -> Frame {
     Frame::NONE
         .fill(tokens().bg.toolbar)
-        .stroke(Stroke::new(1.0, tokens().border.subtle))
+        .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::symmetric(
             tokens().spacing.lg,
             tokens().spacing.sm + tokens().spacing.xs,
@@ -456,7 +456,7 @@ pub(crate) fn toolbar_frame() -> Frame {
 pub(crate) fn card_frame_tinted(fill: Color32, stroke: Color32) -> Frame {
     Frame::NONE
         .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
+        .stroke(Stroke::new(1.0_f32, stroke))
         .corner_radius(CornerRadius::same(tokens().radius.md))
         .inner_margin(Margin::same(tokens().spacing.md))
 }
@@ -464,7 +464,7 @@ pub(crate) fn card_frame_tinted(fill: Color32, stroke: Color32) -> Frame {
 pub(crate) fn small_card_frame() -> Frame {
     Frame::NONE
         .fill(tokens().bg.card)
-        .stroke(Stroke::new(1.0, tokens().border.default))
+        .stroke(Stroke::new(1.0_f32, tokens().border.default))
         .corner_radius(CornerRadius::same(tokens().radius.sm))
         .inner_margin(Margin::symmetric(
             tokens().spacing.md,
@@ -475,14 +475,14 @@ pub(crate) fn small_card_frame() -> Frame {
 pub(crate) fn code_frame() -> Frame {
     Frame::NONE
         .fill(tokens().bg.code)
-        .stroke(Stroke::new(1.0, tokens().border.subtle))
+        .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::same(0))
 }
 
 pub(crate) fn ghost_frame() -> Frame {
     Frame::NONE
         .fill(tokens().bg.ghost)
-        .stroke(Stroke::new(1.0, tokens().border.default))
+        .stroke(Stroke::new(1.0_f32, tokens().border.default))
         .corner_radius(CornerRadius::same(tokens().radius.sm))
         .inner_margin(Margin::symmetric(tokens().spacing.md, tokens().spacing.sm))
 }

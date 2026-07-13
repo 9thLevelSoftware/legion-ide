@@ -3470,7 +3470,7 @@ impl DesktopEframeApp {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(tokens.bg.overlay)
-                    .stroke(egui::Stroke::new(1.0, tokens.border.strong))
+                    .stroke(egui::Stroke::new(1.0_f32, tokens.border.strong))
                     .corner_radius(egui::CornerRadius::same(8))
                     .inner_margin(egui::Margin::same(14))
                     .show(ui, |ui| {

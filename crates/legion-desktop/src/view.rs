@@ -1270,7 +1270,7 @@ fn render_toast_overlay(
                     let accent = toast_accent_color(toast.severity);
                     egui::Frame::new()
                         .fill(tokens.bg.panel)
-                        .stroke(egui::Stroke::new(1.0, accent))
+                        .stroke(egui::Stroke::new(1.0_f32, accent))
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
@@ -1362,7 +1362,7 @@ fn render_completion_popup(
             ui.set_min_width(300.0);
             egui::Frame::new()
                 .fill(tokens.bg.panel)
-                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::same(4))
                 .show(ui, |ui| {
@@ -1386,7 +1386,7 @@ fn render_completion_popup(
                                         ui.horizontal(|ui| {
                                             ui.label(theme::muted(format!(
                                                 "[{}]",
-                                                &completion.kind_label
+                                                completion.kind_label
                                             )));
                                             ui.add_space(4.0);
                                             ui.label(if selected {
@@ -1453,7 +1453,7 @@ fn render_hover_tooltip(
             ui.set_max_width(400.0);
             egui::Frame::new()
                 .fill(tokens.bg.panel)
-                .stroke(egui::Stroke::new(1.0, tokens.border.default))
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
@@ -1567,7 +1567,7 @@ fn render_excerpt_surface(
                             theme::tokens().bg.panel
                         })
                         .stroke(egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             if is_active {
                                 theme::tokens().border.default
                             } else {
@@ -1918,7 +1918,7 @@ fn render_tab_strip(
                             theme::tokens().bg.panel
                         })
                         .stroke(egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             if tab.active {
                                 theme::tokens().border.default
                             } else {
@@ -2406,7 +2406,7 @@ fn paint_code_cursor(
             egui::pos2(x, response.rect.top()),
             egui::pos2(x, response.rect.bottom()),
         ],
-        egui::Stroke::new(1.0, theme::tokens().accent.cyan),
+        egui::Stroke::new(1.0_f32, theme::tokens().accent.cyan),
     );
 }
 
@@ -2446,7 +2446,7 @@ fn paint_ime_composition(
             egui::pos2(ime_rect.left(), ime_rect.bottom() - 1.0),
             egui::pos2(ime_rect.right(), ime_rect.bottom() - 1.0),
         ],
-        egui::Stroke::new(1.0, theme::tokens().accent.orange),
+        egui::Stroke::new(1.0_f32, theme::tokens().accent.orange),
     );
 }
 
@@ -4216,7 +4216,7 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
     egui::Frame::NONE
         .fill(fill)
         .stroke(egui::Stroke::new(
-            1.0,
+            1.0_f32,
             if active {
                 theme::dim(color, 90)
             } else {
@@ -4254,7 +4254,7 @@ fn level_pill(
 fn avatar(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::NONE
         .fill(theme::dim(color, 30))
-        .stroke(egui::Stroke::new(1.0, theme::dim(color, 90)))
+        .stroke(egui::Stroke::new(1.0_f32, theme::dim(color, 90)))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(6, 4))
         .show(ui, |ui| {
@@ -4266,7 +4266,7 @@ fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(theme::label(label))
             .fill(theme::tokens().bg.card)
-            .stroke(egui::Stroke::new(1.0, theme::tokens().border.default))
+            .stroke(egui::Stroke::new(1.0_f32, theme::tokens().border.default))
             .corner_radius(egui::CornerRadius::same(6)),
     )
 }
@@ -4275,7 +4275,7 @@ fn primary_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui:
     ui.add(
         egui::Button::new(theme::inverse(label))
             .fill(color)
-            .stroke(egui::Stroke::new(1.0, theme::dim(color, 180)))
+            .stroke(egui::Stroke::new(1.0_f32, theme::dim(color, 180)))
             .corner_radius(egui::CornerRadius::same(6)),
     )
 }
