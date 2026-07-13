@@ -28,7 +28,7 @@ Below these are a debugger that runs no debugger, a terminal that can launch but
 | --- | --- |
 | **Complete** | `legion-text` |
 | **Mostly complete** (real, wired, minor gaps) | `legion-editor`, `legion-index`, `legion-lsp`, `legion-platform`, `legion-project`, `legion-protocol`, `legion-security`, `legion-storage`, `legion-ui`, `legion-agent`, `xtask` |
-| **Partial** (real code, but key paths simulated or unwired) | `legion-app`, `legion-desktop`, `legion-ai`, `legion-ai-providers`, `legion-cli`, `legion-collaboration`, `legion-memory`, `legion-observability`, `legion-plugin`, `legion-sandbox`, `legion-telemetry`, `legion-terminal`, `legion-tracker`, `legion-vscode-compat`, `legion-remote-transport` |
+| **Partial** (real code, but key paths simulated or unwired) | `legion-app`, `legion-desktop`, `legion-ai`, `legion-ai-providers`, `legion-cli`, `legion-collaboration`, `legion-memory`, `legion-observability`, `legion-plugin`, `legion-sandbox`, `legion-telemetry`, `legion-retention`, `legion-terminal`, `legion-tracker`, `legion-vscode-compat`, `legion-remote-transport` |
 | **Skeleton** (metadata simulation, no real behavior) | `legion-debug`, `legion-remote` |
 
 Note that "mostly complete" describes the *crate*, not the *feature*: several mostly-complete crates (`legion-index`, `legion-lsp`, `legion-editor`) have their best machinery unwired from the product, so the user-visible feature is far less complete than the crate.
