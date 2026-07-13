@@ -50,7 +50,7 @@ Severity: **Blocker** = a public GA IDE cannot ship without it. **Major** = a pl
 
 ## 3. Release blockers (confirmed)
 
-These 25 items were confirmed by adversarial verification. They are grouped by theme. Every one is reachable (or conspicuously *unreachable*) in the shipped `legion-desktop` binary.
+The blockers below are grouped by theme as **B1–B21**. They consolidate the **25 confirmed blocker-severity findings**: several crates independently reported the same user-facing defect (e.g. inline prediction is flagged in `legion-ai`, `legion-ai-providers`, and `legion-app`; the DAP simulation in two crates; missing installers/signing in three), and one confirmed blocker — remote sessions never connect — is a planned-feature deferral relocated to §4. Every entry was confirmed by adversarial verification, **except B21**, which verification downgraded blocker→major (kept here for continuity and labeled as such). Each is reachable — or conspicuously *unreachable* — in the shipped `legion-desktop` binary.
 
 ### 3.1 Core editing is broken in the GUI
 
@@ -245,6 +245,8 @@ Ordered by "cannot ship without" first. This mirrors the repo's own doctrine (tr
 ## 9. Coverage & confidence
 
 - **Coverage:** all 29 crates + `xtask`, the Python/model harness, packaging/CI, and 5 documentation sets were audited. 32 area reports + 5 doc reports + a 20-point IDE baseline check were produced.
-- **Findings:** 29 blockers, 146 majors, 107 minors after cross-crate dedupe.
-- **Verification:** the 40 highest-severity findings were re-checked by independent adversarial verifiers (blocker items with an "implementation-hunt" lens explicitly trying to *refute* by finding a real, wired implementation elsewhere). Result: **0 refuted, 33 confirmed, 7 partial** (all 7 partials were real but had severity or scope adjusted — e.g. same-file go-to-def works, or a gap is a documented deferral rather than a silent break). The remaining ~135 majors are reported unverified; they carry `file:line` evidence but were not independently re-checked, so treat their exact severity as provisional.
+- **Findings (raw, per-crate, after cross-crate dedupe):** 29 blocker-severity, 146 major-severity, 107 minor-severity. This count tallies each crate's report separately, so it is *higher* than the number of distinct defects — the same user-facing defect is often reported by several crates (inline prediction is flagged in three).
+- **Verification:** the 40 highest-severity findings were re-checked by independent adversarial verifiers (blocker items used an "implementation-hunt" lens explicitly trying to *refute* by finding a real, wired implementation elsewhere). Result: **0 refuted, 33 confirmed, 7 partial** (all 7 partials were real but had severity or scope adjusted — e.g. same-file go-to-def works, or a gap is a documented deferral rather than a silent break). Of the 33 confirmed, **25 are blocker-severity and 8 are major-severity**.
+- **Reconciling the blocker counts** (so this document agrees with itself): **29** blocker-severity findings were flagged raw; verification **confirmed 25** of them; those 25 are written up in §3 as **21 thematic entries (B1–B21)** because cross-crate duplicates are consolidated, one confirmed blocker (remote sessions never connect) is relocated to §4 as a planned-feature deferral, and B21 was downgraded blocker→major on verification. The PR description's "25 confirmed release blockers" refers to the same 25.
+- **Unverified remainder:** the ~135 major-severity findings not sent to verification carry `file:line` evidence but were not independently re-checked, so treat their exact severity as provisional.
 - **Not done:** tests were not executed (environment `libdbus` build failure), so this is a static + wiring audit. Runtime behavior claims are inferred from source; the Windows ConPTY path in particular cannot be compiled/verified on the Linux checkout.
