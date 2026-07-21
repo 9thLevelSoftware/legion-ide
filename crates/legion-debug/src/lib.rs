@@ -20,6 +20,7 @@ pub use evidence::{
 };
 pub use framing::{DapFrameError, DapFramer, DapJsonRpc};
 pub use live_session::{
-    LiveDapHandshakeOutcome, LiveDapSession, LiveDapSessionError, fake_dap_adapter_path,
+    LiveBreakpoint, LiveDapHandshakeOutcome, LiveDapSession, LiveDapSessionError,
+    LiveDapStopOutcome, LiveStackFrame, LiveVariable, fake_dap_adapter_path,
 };
 pub use state::DapLifecycleState;
