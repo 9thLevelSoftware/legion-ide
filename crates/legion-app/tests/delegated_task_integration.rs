@@ -418,6 +418,8 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     .expect("workspace should open");
     app.open_file("lib.rs").expect("fixture file should open");
     app.set_product_mode(AppProductMode::Delegate);
+    // Fixture path: live providers register Assist proposals asynchronously on poll.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
     let proposal_id = app
         .start_ai_proposal("add delegated guard")
         .expect("proposal run should complete")

@@ -2724,6 +2724,12 @@ impl DesktopRuntime {
                     outcome.run_id.0, proposal_id.0
                 ),
             )
+        } else if self.product_ai_stream_in_flight() {
+            // Live Assist proposal streams on a worker; proposal_id appears after poll.
+            (
+                StatusSeverity::Info,
+                format!("Assisted AI proposal run {} streaming…", outcome.run_id.0),
+            )
         } else {
             (
                 StatusSeverity::Info,

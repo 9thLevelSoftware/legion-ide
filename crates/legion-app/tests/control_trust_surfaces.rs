@@ -897,6 +897,8 @@ fn assisted_ai_propose_is_proposal_only() {
 
     let mut app = AppComposition::new();
     app.set_product_mode(AppProductMode::Assist);
+    // Fixture path: live Ollama/Anthropic would stream async and register on poll.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
     let (_opened, _file_id, buffer_id, _node, _preconditions) =
         opened_text_file(&mut app, &root, "propose.rs");
     let before_editor = app

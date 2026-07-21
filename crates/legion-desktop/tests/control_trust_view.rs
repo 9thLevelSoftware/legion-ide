@@ -70,6 +70,8 @@ fn start_proposal(app: &mut AppComposition) {
         mode,
         AppCommandOutcome::ProductModeChanged(legion_app::AppProductMode::Assist)
     ));
+    // Fixture path: live providers stream Assist proposals asynchronously.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
             instruction_label: "add control trust guard".to_string(),

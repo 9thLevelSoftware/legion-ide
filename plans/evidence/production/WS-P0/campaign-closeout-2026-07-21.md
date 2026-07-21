@@ -29,7 +29,7 @@
 | --- | --- |
 | Real DAP adapter process / wire protocol | Large product surface; simulated cut line shipped |
 | Windows FS/network sandbox isolation; Linux network Landlock | OS enforcement work beyond honesty labels |
-| Assist proposal fully off UI thread | Proposal registration stays sync for safety/tests |
+| Assist proposal fully off UI thread | **Shipped** as polish follow-on: live Assist streams on a worker; proposal registers on `poll_product_ai_stream` (fixture/Deterministic stays sync for tests) |
 | Signed installers / cargo-dist / update server | WS17 release track |
 | VSIX runtime, collab transport, SSH remote UX | Ledger deferred rows |
 
