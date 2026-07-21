@@ -2,6 +2,8 @@
 
 Weekly Legion-on-Legion dogfood journals live here.
 
+**Active program:** Phase 1 of [WS-A-D](../production/WS-A-D/campaign-charter.md) (dogfood → DAP → sandbox → release).
+
 ## Naming
 
 Copy the template from `plans/dogfood/legion-on-legion-weekly-journal-template.md` to:
