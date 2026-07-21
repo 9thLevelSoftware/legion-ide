@@ -2,8 +2,8 @@
 
 ## Status
 
-**Proposed** — WS-A-D Phase 2 B0 (2026-07-21).  
-Implementation must not proceed beyond fixture dual-path until this ADR is accepted and dependency-policy edges for process/spawn are updated.
+**Accepted** — WS-A-D Phase 2 B0–B3 (2026-07-21).  
+B1–B2 landed live framing + fake adapter; B3 lands resolution/trust/dual-mode. Dependency-policy authorizes `serde`/`serde_json` + std process (no `legion-platform` edge yet).
 
 ## Context
 

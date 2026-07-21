@@ -1834,6 +1834,8 @@ pub struct DebugProjection {
     pub active_session_id: Option<DebugSessionId>,
     /// Active session state.
     pub session_state: Option<DebugSessionState>,
+    /// True when the last successful session used a live adapter process (not fixture).
+    pub live_adapter: bool,
     /// Discovered launch configurations.
     pub configurations: Vec<DebugConfigurationProjection>,
     /// Persisted breakpoints.
@@ -1863,6 +1865,7 @@ impl DebugProjection {
             status: DebugStatusProjection::idle(),
             active_session_id: None,
             session_state: None,
+            live_adapter: false,
             configurations: Vec::new(),
             breakpoints: Vec::new(),
             variables: Vec::new(),

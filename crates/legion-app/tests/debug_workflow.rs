@@ -59,6 +59,7 @@ fn debug_workflow_persists_breakpoints_launches_runtime_and_projects_docks() {
         .text(buffer_id)
         .expect("active text")
         .to_string();
+    // Fixture path (default): simulated DAP without requiring an adapter binary.
     app.enable_debug_runtime_for_tests();
 
     let configs = app
@@ -308,4 +309,124 @@ fn debug_workflow_resets_state_on_workspace_switch() {
 
     fs::remove_dir_all(first_root).ok();
     fs::remove_dir_all(second_root).ok();
+}
+
+#[test]
+fn debug_workflow_denies_launch_on_untrusted_workspace() {
+    let root = create_root();
+    let source = root.join("src/main.rs");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Untrusted,
+        PrincipalId("principal-debug-untrusted".to_string()),
+    )
+    .expect("open untrusted workspace");
+    app.open_file(source.to_string_lossy())
+        .expect("open source");
+    app.enable_debug_runtime_for_tests();
+
+    let configs = match app
+        .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)
+        .expect("refresh configs")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+    let configuration_id = configs
+        .configurations
+        .first()
+        .expect("config")
+        .configuration_id
+        .clone();
+
+    let projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::LaunchDebugSession { configuration_id })
+        .expect("launch should return projection")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+    assert_eq!(projection.status.kind, DebugStatusKindProjection::Denied);
+    assert!(
+        projection.status.message.contains("trusted")
+            || projection.status.message.contains("debug.adapter.launch")
+    );
+    assert!(!projection.live_adapter);
+    assert!(projection.active_session_id.is_none());
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn debug_workflow_live_fake_adapter_sets_live_projection_flag() {
+    let root = create_root();
+    let source = root.join("src/main.rs");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-debug-live".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(source.to_string_lossy())
+        .expect("open source");
+    let buffer_id = app.active_buffer_id().expect("buffer");
+    app.enable_debug_live_fake_for_tests();
+
+    let configs = match app
+        .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)
+        .expect("refresh")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+    let configuration_id = configs
+        .configurations
+        .first()
+        .expect("config")
+        .configuration_id
+        .clone();
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleDebugBreakpoint {
+        buffer_id,
+        line: 1,
+        condition: None,
+        hit_condition: None,
+        log_message: None,
+    })
+    .expect("breakpoint");
+
+    let projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::LaunchDebugSession { configuration_id })
+        .expect("live launch")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+
+    assert!(
+        projection.live_adapter,
+        "live fake path should set live_adapter=true: {}",
+        projection.status.message
+    );
+    assert_eq!(projection.status.kind, DebugStatusKindProjection::Paused);
+    assert!(projection.status.message.contains("Live DAP"));
+    assert!(
+        projection
+            .stack_frames
+            .iter()
+            .any(|frame| frame.name == "main"),
+        "live stop should project stack: {:?}",
+        projection.stack_frames
+    );
+    assert!(
+        projection
+            .console
+            .iter()
+            .any(|entry| entry.message_label.contains("LIVE DAP")),
+        "console should note live path"
+    );
+
+    fs::remove_dir_all(root).ok();
 }

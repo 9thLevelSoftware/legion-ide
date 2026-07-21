@@ -55,7 +55,9 @@ pub use legion_storage::checkpoint::DurableCheckpointSummary;
 pub use proposal::proposal_risk_rule_ids_from_coverage;
 
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
-use legion_debug::{DapClientConfig, DapClientOutcome, DapClientRuntime};
+use legion_debug::{
+    DapClientConfig, DapClientOutcome, DapClientRuntime, LiveDapSession, resolve_live_adapter,
+};
 use legion_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
     TextEdit, TextPosition, TextRange as EditorTextRange,
@@ -7723,6 +7725,8 @@ struct DebugWorkflow {
     last_audit: Option<DebugAdapterAuditRecord>,
     next_sequence: u64,
     next_watch: u64,
+    /// Test seam: force live path via in-tree fake adapter when set.
+    prefer_live_fake_for_tests: bool,
 }
 
 #[derive(Debug)]
@@ -7748,6 +7752,7 @@ impl Default for DebugWorkflow {
             last_audit: None,
             next_sequence: 0,
             next_watch: 0,
+            prefer_live_fake_for_tests: false,
         }
     }
 }
@@ -7760,12 +7765,19 @@ impl DebugWorkflow {
     fn enable_runtime(&mut self) {
         self.runtime_enabled = true;
         self.runtime = DapClientRuntime::new(DapClientConfig::enabled());
+        self.projection.live_adapter = false;
         self.projection.status = DebugStatusProjection {
             kind: DebugStatusKindProjection::Idle,
-            message: "Simulated DAP runtime enabled (no adapter process; fixture stack/variables)"
-                .to_string(),
+            message:
+                "Debug runtime enabled (auto: live adapter if resolved, else simulated fixture)"
+                    .to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
+    }
+
+    fn enable_live_fake_for_tests(&mut self) {
+        self.enable_runtime();
+        self.prefer_live_fake_for_tests = true;
     }
 
     fn clear_workspace_state(&mut self) {
@@ -7897,8 +7909,12 @@ impl DebugWorkflow {
         configuration_id: DebugConfigurationId,
         event_context: EventContext,
     ) -> DebugProjection {
+        // Trust gate (B3): untrusted workspaces never spawn adapters.
         if context.trust != WorkspaceTrustState::Trusted {
-            return self.deny("debug launch requires a trusted workspace".to_string());
+            return self.deny(
+                "debug.adapter.launch denied: requires a trusted workspace (capability debug.adapter.launch)"
+                    .to_string(),
+            );
         }
         if !self.runtime_enabled {
             return self.deny("Debug runtime is disabled".to_string());
@@ -7917,6 +7933,20 @@ impl DebugWorkflow {
                 configuration_id.0
             ));
         };
+
+        // Live path when an adapter resolves (or tests force fake).
+        if let Some(resolved) = self.resolve_adapter_for_launch(&config.adapter_type) {
+            match self.launch_live(&context, &config, &resolved, event_context) {
+                Ok(projection) => return projection,
+                Err(message) => {
+                    self.projection.diagnostics.push(bounded_label(
+                        format!("live DAP unavailable, falling back to fixture: {message}"),
+                        160,
+                    ));
+                }
+            }
+        }
+
         let breakpoints = self
             .breakpoints
             .iter()
@@ -7937,6 +7967,7 @@ impl DebugWorkflow {
         match self.runtime.launch(request) {
             Ok(outcome) => {
                 self.apply_runtime_outcome(outcome);
+                self.projection.live_adapter = false;
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
                     message: "Simulated DAP paused (fixture; no real adapter process)".to_string(),
@@ -7957,6 +7988,132 @@ impl DebugWorkflow {
             }
             Err(error) => self.fail(format!("debug launch denied: {error}")),
         }
+    }
+
+    fn resolve_adapter_for_launch(
+        &self,
+        preferred_type: &str,
+    ) -> Option<legion_debug::ResolvedAdapter> {
+        if self.prefer_live_fake_for_tests {
+            return legion_debug::fake_dap_adapter_path().map(|program| {
+                legion_debug::ResolvedAdapter {
+                    program,
+                    args: Vec::new(),
+                    adapter_type: "legion-fake".to_string(),
+                    is_fake: true,
+                }
+            });
+        }
+        resolve_live_adapter(preferred_type)
+    }
+
+    fn launch_live(
+        &mut self,
+        context: &ActiveWorkspaceContext,
+        config: &DebugLaunchConfiguration,
+        resolved: &legion_debug::ResolvedAdapter,
+        event_context: EventContext,
+    ) -> Result<DebugProjection, String> {
+        use std::time::Duration;
+
+        let mut session = LiveDapSession::spawn(
+            &resolved.program,
+            &resolved.args,
+            resolved.adapter_type.as_str(),
+        )
+        .map_err(|err| err.to_string())?;
+        let handshake = session
+            .initialize_handshake(Duration::from_secs(5))
+            .map_err(|err| err.to_string())?;
+        let lines: Vec<u64> = self
+            .breakpoints
+            .iter()
+            .filter(|bp| bp.workspace_id == context.workspace_id)
+            .map(|bp| u64::from(bp.range.start.line.saturating_add(1)))
+            .collect();
+        if !lines.is_empty() {
+            let path = self
+                .breakpoints
+                .iter()
+                .find(|bp| bp.workspace_id == context.workspace_id)
+                .map(|bp| bp.path.0.clone())
+                .unwrap_or_else(|| "src/main.rs".to_string());
+            let verified = session
+                .set_breakpoints(&path, &lines, Duration::from_secs(3))
+                .map_err(|err| err.to_string())?;
+            for (bp, verified_bp) in self
+                .breakpoints
+                .iter_mut()
+                .filter(|bp| bp.workspace_id == context.workspace_id)
+                .zip(verified.iter())
+            {
+                bp.verified = verified_bp.verified;
+                bp.message = verified_bp.message.clone();
+            }
+            self.sync_breakpoint_projection();
+        }
+        let program = config.program_label.clone();
+        let stop = session
+            .launch_until_stopped(&program, Duration::from_secs(5))
+            .map_err(|err| err.to_string())?;
+        let _ = session.disconnect_and_wait(Duration::from_secs(2));
+
+        let session_id = DebugSessionId(format!(
+            "dap-live:{}:{}",
+            context.workspace_id.0, config.configuration_id.0
+        ));
+        self.projection.active_session_id = Some(session_id.clone());
+        self.projection.session_state = Some(DebugSessionState::Paused);
+        self.projection.live_adapter = true;
+        self.projection.stack_frames = stop
+            .stack_frames
+            .iter()
+            .map(|frame| DebugStackFrameProjection {
+                session_id: session_id.clone(),
+                frame_id: frame.id,
+                name: frame.name.clone(),
+                path: frame.path.as_ref().map(|p| CanonicalPath(p.clone())),
+                line: Some(frame.line as u32),
+            })
+            .collect();
+        self.projection.variables = stop
+            .variables
+            .iter()
+            .map(|var| DebugVariableProjection {
+                session_id: session_id.clone(),
+                name: var.name.clone(),
+                value_label: var.value.clone(),
+                type_label: var.type_label.clone(),
+                has_children: false,
+            })
+            .collect();
+        self.projection.console.push(DebugConsoleProjection {
+            session_id: session_id.clone(),
+            category_label: "adapter".to_string(),
+            message_label: bounded_label(
+                format!(
+                    "LIVE DAP: initialize adapter={} fake={} • {}",
+                    resolved.adapter_type, resolved.is_fake, handshake.metadata_summary
+                ),
+                160,
+            ),
+        });
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Paused,
+            message: format!(
+                "Live DAP paused (adapter={} fake={} reason={})",
+                resolved.adapter_type, resolved.is_fake, stop.reason
+            ),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            DebugSessionState::Paused,
+            resolved.adapter_type.clone(),
+            event_context,
+            stop.metadata_summary,
+        );
+        Ok(self.projection())
     }
 
     fn step(
@@ -8052,6 +8209,7 @@ impl DebugWorkflow {
 
     fn apply_runtime_outcome(&mut self, outcome: DapClientOutcome) {
         self.last_audit = Some(outcome.audit.clone());
+        self.projection.live_adapter = false;
         self.projection.active_session_id = Some(outcome.audit.session_id.clone());
         for verified in outcome.breakpoints {
             if let Some(existing) = self
@@ -24320,6 +24478,11 @@ impl AppComposition {
     /// Compatibility alias for older debug integration tests.
     pub fn enable_debug_fixture_for_tests(&mut self) {
         self.enable_debug_runtime_for_tests();
+    }
+
+    /// Prefer live DAP via the in-tree fake adapter (WS-A-D B3 tests).
+    pub fn enable_debug_live_fake_for_tests(&mut self) {
+        self.debug_workflow.enable_live_fake_for_tests();
     }
 
     /// Return the current app-owned language tooling projection.
