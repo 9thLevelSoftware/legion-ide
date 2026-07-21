@@ -228,10 +228,11 @@ WS03.T1 activates `legion-lsp` only for hand-rolled LSP JSON-RPC framing, reques
 
 - `legion-debug` may depend on:
   - `legion-protocol`
+  - `serde` / `serde_json` (DAP JSON-RPC framing for live path)
 
-P2.F3.T1 activates `legion-debug` only for metadata-only DAP client lifecycle state and protocol projection contracts. It may not depend on app, UI, editor, project, terminal, platform/process, storage, security policy, provider, worker, or desktop internals until later debug-adapter resolution gates add explicit policy, sandbox/process evidence, and contract tests. Adapter stdout/stderr/source payloads remain outside this crate by default; the app composes `legion-debug` through protocol DTOs and app-owned trust checks.
+P2.F3.T1 activates `legion-debug` for metadata-only DAP client lifecycle state and protocol projection contracts, plus **WS-A-D B1** live stdio framing and supervised `std::process` spawn of an adapter binary (see `ADR-0044-dap-client-architecture.md`). It may not depend on app, UI, editor, project, terminal, `legion-platform`, storage, security policy, provider, worker, or desktop internals. App-owned trust/capability checks remain outside this crate. Adapter stdout/stderr/source payloads stay metadata-bounded; the app composes `legion-debug` through protocol DTOs.
 
-**WS-A-D Phase 2 (planned, not yet authorized):** `ADR-0044-dap-client-architecture.md` proposes a live DAP path with supervised process spawn and a CI fake adapter. Before B1 code lands, a dedicated dependency-policy PR must explicitly allow the minimal process edge (likely `legion-debug` → `legion-platform` or an approved spawn surface) with contract tests and evidence under `plans/evidence/production/WS-A-D/phase-2-dap/`. Until that PR merges, the P2.F3.T1 restriction above remains binding.
+**WS-A-D B1 authorization:** process spawn uses Rust `std::process` only (no `legion-platform` edge yet). CI uses the in-tree `fake_dap_adapter` binary. Real CodeLLDB resolution and security-policy broker checks are B3. Optional sandbox wrap is B3.5 / Phase 3.
 
 - `legion-remote-transport` may depend on:
   - `legion-observability`
