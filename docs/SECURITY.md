@@ -42,9 +42,9 @@ Legion’s sandbox story is policy-backed and OS-assisted where the platform sup
 |---|---|---|---|
 | Filesystem write isolation | **Enforced** — Landlock `AccessFs::WriteFile` | **Enforced** — SBPL `(deny default)` + selective `file-write*` | **Not enforced** — job object does not restrict paths |
 | Filesystem read isolation | Partial (Landlock write, not read) | **Not enforced** — SBPL `(allow file-read* (subpath "/"))` grants unrestricted filesystem reads | **Not enforced** |
-| Network egress isolation | **Not enforced** — AccessNet rules not implemented (always false regardless of ABI level) | **Enforced** — SBPL `(deny network*)` + per-host allows | **Not enforced** |
+| Network egress isolation | **Enforced when bubblewrap is available** — `bwrap --unshare-net` for deny-all egress (empty allowlist); selective host allowlists not implemented on Linux (caveat reported). If `bwrap` is missing, `network_enforced=false` with honest caveat | **Enforced** — SBPL `(deny network*)` + per-host allows | **Not enforced** |
 | Process kill on timeout | Yes — `child.kill()` via SIGKILL | Yes — `child.kill()` via SIGKILL | **Yes** — `KILL_ON_JOB_CLOSE` kills the entire process group |
-| Backend identifier | `landlock` | `seatbelt-sbpl` | `job-object-kill-on-close` |
+| Backend identifier | `landlock-vN` or `landlock-vN+bwrap-unshare-net` | `seatbelt-sbpl` | `job-object-kill-on-close` |
 
 **Windows note:** The Windows implementation uses a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.  This enforces process lifetime (all child processes are killed when the job handle closes, including on timeout) but does **not** restrict filesystem or network access.  The `SandboxEnforcementReport` returned on Windows always has `filesystem_write_enforced: false` and `network_enforced: false` with corresponding caveat labels.  This is an intentional, documented limitation of the current implementation — the enforcement report is honest rather than aspirational.
 

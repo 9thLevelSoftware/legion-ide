@@ -137,7 +137,7 @@ pub fn spawn_sandboxed(spec: &SandboxSpawnSpec) -> Result<SandboxedCommandOutput
 }
 
 // ---------------------------------------------------------------------------
-// Linux — Landlock enforcement
+// Linux — Landlock FS write + optional bubblewrap network namespace
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -155,6 +155,36 @@ mod linux {
 
     fn write_access_rights() -> BitFlags<AccessFs> {
         AccessFs::from_write(WRITE_POLICY_ABI)
+    }
+
+    fn bwrap_path() -> Option<PathBuf> {
+        let candidates = [
+            PathBuf::from("/usr/bin/bwrap"),
+            PathBuf::from("/bin/bwrap"),
+            PathBuf::from("bwrap"),
+        ];
+        for path in candidates {
+            if path.file_name().is_some_and(|n| n == "bwrap") {
+                // PATH lookup for bare name
+                if path.components().count() == 1 {
+                    if std::process::Command::new("bwrap")
+                        .arg("--version")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                    {
+                        return Some(PathBuf::from("bwrap"));
+                    }
+                    continue;
+                }
+            }
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     pub fn spawn_sandboxed_linux(
@@ -183,11 +213,41 @@ mod linux {
 
         let writable_root = spec.writable_root.clone();
 
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args)
-            .current_dir(&spec.working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        // Network: when no egress is allowed, wrap with bubblewrap --unshare-net
+        // so the child has an empty network namespace (connect fails). Selective
+        // egress allowlists are not implemented on Linux yet (macOS Seatbelt).
+        let deny_all_network = spec.allowed_egress.is_empty();
+        let bwrap = if deny_all_network { bwrap_path() } else { None };
+        let network_enforced = deny_all_network && bwrap.is_some();
+
+        let mut cmd = if let Some(ref bwrap_bin) = bwrap {
+            // bwrap --unshare-net --die-with-parent \
+            //   --bind / / --dev /dev --proc /proc \
+            //   --chdir <wd> -- <program> <args...>
+            // Landlock still applied in pre_exec for FS write isolation.
+            let mut c = Command::new(bwrap_bin);
+            c.arg("--unshare-net")
+                .arg("--die-with-parent")
+                .arg("--bind")
+                .arg("/")
+                .arg("/")
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--proc")
+                .arg("/proc")
+                .arg("--chdir")
+                .arg(&spec.working_dir)
+                .arg("--")
+                .arg(&spec.program)
+                .args(&spec.args);
+            c
+        } else {
+            let mut c = Command::new(&spec.program);
+            c.args(&spec.args).current_dir(&spec.working_dir);
+            c
+        };
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         for (k, v) in &spec.env {
             cmd.env(k, v);
@@ -269,11 +329,19 @@ mod linux {
         let stdout = stdout_thread.join().unwrap_or_default();
         let stderr = stderr_thread.join().unwrap_or_default();
 
-        // AccessNet rules (ConnectTcp / BindTcp) are not implemented in this
-        // build — the Landlock ruleset only covers AccessFs write rules.
-        // Claiming network_enforced: true would be dishonest even on ABI ≥ 4.
-        let network_enforced = false;
-        let caveat_labels = vec!["landlock-network-not-implemented".to_string()];
+        let mut caveat_labels = Vec::new();
+        if !network_enforced {
+            if deny_all_network {
+                caveat_labels.push("bwrap-unshare-net-unavailable".to_string());
+            } else {
+                caveat_labels.push("linux-egress-allowlist-not-implemented".to_string());
+            }
+        }
+        let backend = if network_enforced {
+            format!("landlock-v{abi_version}+bwrap-unshare-net")
+        } else {
+            format!("landlock-v{abi_version}")
+        };
 
         Ok(SandboxedCommandOutput {
             exit_code,
@@ -284,7 +352,7 @@ mod linux {
                 filesystem_read_enforced: false,
                 network_enforced,
                 caveat_labels,
-                backend_used: format!("landlock-v{abi_version}"),
+                backend_used: backend,
             },
             timed_out,
         })
