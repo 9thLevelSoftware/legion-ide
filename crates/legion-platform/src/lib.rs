@@ -28,9 +28,10 @@ use thiserror::Error;
 /// Maximum event count accepted from one watcher snapshot.
 /// Soft cap for precise per-path events in one recursive snapshot.
 ///
-/// Recursive monorepo walks can exceed this; when they do we return a bounded
-/// truncated snapshot rather than permanent `WatcherOverflow` (which never
-/// recovers for large trees). Callers still get nested coverage up to the cap.
+/// Recursive monorepo walks can exceed this; when they do we return
+/// `WatcherOverflow` so callers do **not** treat a partial walk as a complete
+/// snapshot (which would invent deletions). `WorkspaceActor` recovery then
+/// rebuilds via shallow rescan rather than re-diffing the truncated set.
 const WATCHER_OVERFLOW_THRESHOLD: usize = 65_536;
 
 /// Maximum directory nesting depth for recursive watcher snapshots (Tier 1 A11).
@@ -2093,9 +2094,16 @@ fn walk_watcher_tree(
         .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
 
     for entry in entries {
-        // Soft truncate: keep a usable nested snapshot instead of permanent overflow.
+        // Incomplete snapshots must not be diffed as complete: signal overflow so
+        // WorkspaceActor enters recovery (shallow rescan) instead of treating
+        // paths beyond the cutoff as deleted.
         if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
-            return Ok(());
+            return Err(PlatformError::WatcherOverflow {
+                path: path.to_path_buf(),
+                context: format!(
+                    "recursive watcher snapshot exceeded soft cap of {WATCHER_OVERFLOW_THRESHOLD} entries"
+                ),
+            });
         }
 
         let child = entry
