@@ -359,6 +359,91 @@ fn debug_workflow_denies_launch_on_untrusted_workspace() {
 }
 
 #[test]
+fn debug_workflow_live_mode_fails_closed_without_adapter() {
+    let root = create_root();
+    let source = root.join("src/main.rs");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-debug-live-mode".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(source.to_string_lossy())
+        .expect("open source");
+    app.enable_debug_runtime_for_tests();
+
+    // Force live mode with no LEGION_DAP_ADAPTER / USE_FAKE / test fake.
+    // SAFETY: process-wide env; this test suite is single-threaded for debug.
+    // Restore after assertion so later tests are not polluted.
+    let prev_mode = std::env::var("LEGION_DAP_MODE").ok();
+    let prev_adapter = std::env::var("LEGION_DAP_ADAPTER").ok();
+    let prev_fake = std::env::var("LEGION_DAP_USE_FAKE").ok();
+    unsafe {
+        std::env::set_var("LEGION_DAP_MODE", "live");
+        std::env::remove_var("LEGION_DAP_ADAPTER");
+        std::env::remove_var("LEGION_DAP_USE_FAKE");
+    }
+
+    let configs = match app
+        .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)
+        .expect("refresh")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+    let configuration_id = configs
+        .configurations
+        .first()
+        .expect("config")
+        .configuration_id
+        .clone();
+
+    let projection = match app
+        .dispatch_ui_intent(CommandDispatchIntent::LaunchDebugSession { configuration_id })
+        .expect("launch should return projection")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection, got {other:?}"),
+    };
+
+    unsafe {
+        match prev_mode {
+            Some(v) => std::env::set_var("LEGION_DAP_MODE", v),
+            None => std::env::remove_var("LEGION_DAP_MODE"),
+        }
+        match prev_adapter {
+            Some(v) => std::env::set_var("LEGION_DAP_ADAPTER", v),
+            None => std::env::remove_var("LEGION_DAP_ADAPTER"),
+        }
+        match prev_fake {
+            Some(v) => std::env::set_var("LEGION_DAP_USE_FAKE", v),
+            None => std::env::remove_var("LEGION_DAP_USE_FAKE"),
+        }
+    }
+
+    assert_eq!(
+        projection.status.kind,
+        DebugStatusKindProjection::Failed,
+        "live mode must not fall back to fixture: {}",
+        projection.status.message
+    );
+    assert!(!projection.live_adapter);
+    assert!(
+        projection.status.message.contains("live DAP required")
+            || projection.status.message.contains("LEGION_DAP_MODE=live"),
+        "message should explain fail-closed live mode: {}",
+        projection.status.message
+    );
+    assert!(
+        projection.stack_frames.is_empty(),
+        "must not project fixture stack frames after live failure"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn debug_workflow_live_fake_adapter_sets_live_projection_flag() {
     let root = create_root();
     let source = root.join("src/main.rs");

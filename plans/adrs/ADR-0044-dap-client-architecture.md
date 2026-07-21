@@ -81,8 +81,9 @@ Inspired by `ADR-0018`:
 
 Recommended (names illustrative):
 
-- Default product: try live if binary resolves **and** trust allows; else fixture.
-- Env override: `LEGION_DAP_MODE=fixture|live|auto` for operators and tests.
+- Default product: try live if a **Legion-compatible** adapter resolves **and** trust allows; else fixture.
+- Env override: `LEGION_DAP_MODE=fixture|live|auto` for operators and tests (`live` fails closed — no fixture stack after a live request).
+- Wire note (B3 honesty): live substrate currently uses Legion provisional JSON-RPC envelopes, not Microsoft DAP `seq`/`type`/`command`. Do **not** PATH-auto-resolve CodeLLDB / `lldb-dap` until a standards-compliant codec and contract test land.
 - Desktop banner:
   - Fixture / simulated: keep **SIMULATED DAP** (or equivalent honesty).
   - Live connected: clear “live adapter” status (no simulated claim).

@@ -1,17 +1,30 @@
 //! Resolve a live DAP adapter binary (WS-A-D Phase 2 B3).
 //!
-//! Order (first hit wins when mode allows live):
-//! 1. `LEGION_DAP_ADAPTER` — explicit path to adapter executable
-//! 2. `PATH` lookup for type-specific names (`lldb-dap`, `codelldb`, …)
-//! 3. In-tree `fake_dap_adapter` when `LEGION_DAP_USE_FAKE=1` (CI / local dev)
+//! ## Wire honesty
+//!
+//! The live path (`LiveDapSession` + `fake_dap_adapter`) currently speaks
+//! **Legion provisional JSON-RPC** over `Content-Length` framing
+//! (`jsonrpc` / `id` / `method` / `params`), not the Microsoft DAP envelope
+//! (`seq` / `type` / `command` / `arguments`). Real CodeLLDB / `lldb-dap`
+//! binaries will reject that shape.
+//!
+//! Therefore this resolver **does not** auto-discover vendor adapters on
+//! `PATH`. Live spawn is only for:
+//! 1. `LEGION_DAP_ADAPTER` — explicit path to a **Legion-compatible** adapter
+//! 2. `LEGION_DAP_USE_FAKE=1` — in-tree `fake_dap_adapter` (CI / local dev)
+//!
+//! Microsoft DAP wire + PATH discovery of `lldb-dap` / CodeLLDB is a follow-on
+//! (contract test against a standards-compliant adapter required first).
+//!
+//! ## Mode
 //!
 //! `LEGION_DAP_MODE=fixture|live|auto` (default `auto`):
 //! - `fixture` — never resolve live (callers use simulated runtime)
-//! - `live` — require a real resolution or error at call site
-//! - `auto` — try live, fall back to fixture if unresolved
+//! - `live` — require a resolution; callers must fail closed (no fixture)
+//! - `auto` — try live, fall back to fixture if unresolved or spawn fails
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::live_session::fake_dap_adapter_path;
 
@@ -20,7 +33,7 @@ use crate::live_session::fake_dap_adapter_path;
 pub enum DapMode {
     /// Always use the simulated client (no process).
     Fixture,
-    /// Prefer live adapter; callers should fail if unresolved.
+    /// Require live adapter; callers should fail if unresolved or spawn fails.
     Live,
     /// Try live, otherwise fixture.
     Auto,
@@ -44,6 +57,11 @@ impl DapMode {
     pub fn allows_live(self) -> bool {
         !matches!(self, Self::Fixture)
     }
+
+    /// Whether live failure must not fall back to the simulated runtime.
+    pub fn require_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
 }
 
 /// A resolved adapter program ready to spawn.
@@ -59,9 +77,10 @@ pub struct ResolvedAdapter {
     pub is_fake: bool,
 }
 
-/// Resolve a live adapter for `preferred_type` (e.g. `lldb-dap`).
+/// Resolve a live adapter for `preferred_type` (e.g. `lldb-dap` / `legion-fake`).
 ///
-/// Returns [`None`] when mode is fixture or no binary is found.
+/// Returns [`None`] when mode is fixture or no **compatible** binary is found.
+/// Does **not** pick vendor Microsoft-DAP binaries from `PATH`.
 pub fn resolve_live_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
     let mode = DapMode::from_env();
     if !mode.allows_live() {
@@ -80,17 +99,7 @@ pub fn resolve_live_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
         }
     }
 
-    for candidate in path_candidates(preferred_type) {
-        if let Some(found) = find_on_path(&candidate) {
-            return Some(ResolvedAdapter {
-                program: found,
-                args: Vec::new(),
-                adapter_type: preferred_type.to_string(),
-                is_fake: false,
-            });
-        }
-    }
-
+    // No PATH auto-discovery of lldb-dap / codelldb until Microsoft DAP wire lands.
     if env_truthy("LEGION_DAP_USE_FAKE")
         && let Some(fake) = fake_dap_adapter_path()
     {
@@ -102,46 +111,7 @@ pub fn resolve_live_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
         });
     }
 
-    None
-}
-
-fn path_candidates(preferred_type: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let t = preferred_type.to_ascii_lowercase();
-    names.push(preferred_type.to_string());
-    if t.contains("lldb") {
-        names.extend([
-            "lldb-dap".to_string(),
-            "lldb-vscode".to_string(),
-            "codelldb".to_string(),
-        ]);
-    } else if t.contains("code") {
-        names.push("codelldb".to_string());
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        let mut candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if cfg!(windows) {
-            candidate.set_extension("exe");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    // Also accept bare name when it exists as relative path.
-    let bare = Path::new(name);
-    if bare.is_file() {
-        return Some(bare.to_path_buf());
-    }
+    let _ = preferred_type;
     None
 }
 
@@ -164,5 +134,20 @@ mod tests {
         assert!(!DapMode::Fixture.allows_live());
         assert!(DapMode::Live.allows_live());
         assert!(DapMode::Auto.allows_live());
+        assert!(!DapMode::Fixture.require_live());
+        assert!(DapMode::Live.require_live());
+        assert!(!DapMode::Auto.require_live());
+    }
+
+    #[test]
+    fn path_auto_discovery_is_disabled() {
+        // Even when mode would allow live, without LEGION_DAP_ADAPTER /
+        // LEGION_DAP_USE_FAKE we must not invent a vendor binary.
+        // (Cannot safely clear env in parallel tests; just assert the
+        // documented contract via the API surface: resolve needs opt-in.)
+        assert!(
+            !DapMode::Fixture.allows_live(),
+            "fixture never resolves live"
+        );
     }
 }

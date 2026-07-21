@@ -1,4 +1,10 @@
-//! DAP stdio JSON-RPC framing (`Content-Length` headers).
+//! DAP stdio framing (`Content-Length` headers) with a **Legion provisional
+//! JSON-RPC envelope** (`jsonrpc` / `id` / `method` / `params`).
+//!
+//! This is **not** the Microsoft Debug Adapter Protocol message shape
+//! (`seq` / `type` / `command` / `arguments`). The in-tree `fake_dap_adapter`
+//! and `LiveDapSession` share this envelope for CI substrate; real CodeLLDB /
+//! `lldb-dap` require a follow-on Microsoft DAP codec.
 //!
 //! Same framing family as LSP (`ADR-0034` / `legion-lsp`); kept local so
 //! `legion-debug` does not depend on the LSP crate.
@@ -27,7 +33,7 @@ pub enum DapFrameError {
     },
 }
 
-/// JSON-RPC 2.0 envelope used on the DAP wire.
+/// Legion provisional JSON-RPC 2.0 envelope on the live stdio wire (not Microsoft DAP).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DapJsonRpc {
     /// Protocol version (always `"2.0"`).

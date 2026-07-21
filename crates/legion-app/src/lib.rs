@@ -7935,15 +7935,38 @@ impl DebugWorkflow {
         };
 
         // Live path when an adapter resolves (or tests force fake).
-        if let Some(resolved) = self.resolve_adapter_for_launch(&config.adapter_type) {
-            match self.launch_live(&context, &config, &resolved, event_context) {
-                Ok(projection) => return projection,
-                Err(message) => {
-                    self.projection.diagnostics.push(bounded_label(
-                        format!("live DAP unavailable, falling back to fixture: {message}"),
-                        160,
-                    ));
+        // Wire is Legion provisional JSON-RPC (not Microsoft DAP); resolution
+        // only opts into LEGION_DAP_ADAPTER / LEGION_DAP_USE_FAKE / test fake.
+        let mode = legion_debug::DapMode::from_env();
+        if mode.allows_live() {
+            match self.resolve_adapter_for_launch(&config.adapter_type) {
+                Some(resolved) => {
+                    match self.launch_live(&context, &config, &resolved, event_context) {
+                        Ok(projection) => return projection,
+                        Err(message) => {
+                            if mode.require_live() {
+                                return self.fail(format!(
+                                    "live DAP required (LEGION_DAP_MODE=live) but launch failed: {message}"
+                                ));
+                            }
+                            self.projection.diagnostics.push(bounded_label(
+                                format!(
+                                    "live DAP unavailable, falling back to fixture: {message}"
+                                ),
+                                160,
+                            ));
+                        }
+                    }
                 }
+                None if mode.require_live() => {
+                    return self.fail(
+                        "live DAP required (LEGION_DAP_MODE=live) but no compatible adapter resolved \
+                         (set LEGION_DAP_ADAPTER or LEGION_DAP_USE_FAKE=1; PATH auto-discovery of \
+                         Microsoft DAP adapters is deferred until standard wire lands)"
+                            .to_string(),
+                    );
+                }
+                None => {}
             }
         }
 
@@ -8025,34 +8048,49 @@ impl DebugWorkflow {
         let handshake = session
             .initialize_handshake(Duration::from_secs(5))
             .map_err(|err| err.to_string())?;
-        let lines: Vec<u64> = self
-            .breakpoints
-            .iter()
-            .filter(|bp| bp.workspace_id == context.workspace_id)
-            .map(|bp| u64::from(bp.range.start.line.saturating_add(1)))
-            .collect();
-        if !lines.is_empty() {
-            let path = self
-                .breakpoints
+
+        // DAP setBreakpoints is per-source: group by path, then map responses.
+        let mut by_path: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, bp) in self.breakpoints.iter().enumerate() {
+            if bp.workspace_id == context.workspace_id {
+                by_path.entry(bp.path.0.clone()).or_default().push(index);
+            }
+        }
+        for (path, indices) in by_path {
+            let lines: Vec<u64> = indices
                 .iter()
-                .find(|bp| bp.workspace_id == context.workspace_id)
-                .map(|bp| bp.path.0.clone())
-                .unwrap_or_else(|| "src/main.rs".to_string());
+                .map(|&i| u64::from(self.breakpoints[i].range.start.line.saturating_add(1)))
+                .collect();
             let verified = session
                 .set_breakpoints(&path, &lines, Duration::from_secs(3))
                 .map_err(|err| err.to_string())?;
-            for (bp, verified_bp) in self
-                .breakpoints
-                .iter_mut()
-                .filter(|bp| bp.workspace_id == context.workspace_id)
-                .zip(verified.iter())
-            {
-                bp.verified = verified_bp.verified;
-                bp.message = verified_bp.message.clone();
+            for (idx, verified_bp) in indices.into_iter().zip(verified.into_iter()) {
+                if let Some(bp) = self.breakpoints.get_mut(idx) {
+                    bp.verified = verified_bp.verified;
+                    bp.message = verified_bp.message.clone();
+                }
             }
+        }
+        if !self.breakpoints.is_empty() {
             self.sync_breakpoint_projection();
         }
-        let program = config.program_label.clone();
+
+        // Resolve relative program labels against configuration cwd (workspace root).
+        // Pre-launch `cargo build` from cargo_args is still a follow-on (fixture/fake
+        // path does not need a real binary; Microsoft DAP product launch will).
+        let program = {
+            let label = config.program_label.clone();
+            let candidate = Path::new(&label);
+            if candidate.is_absolute() {
+                label
+            } else {
+                Path::new(config.cwd.0.as_str())
+                    .join(candidate)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            }
+        };
         let stop = session
             .launch_until_stopped(&program, Duration::from_secs(5))
             .map_err(|err| err.to_string())?;
