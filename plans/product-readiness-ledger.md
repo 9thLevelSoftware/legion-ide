@@ -65,3 +65,5 @@ The beta loop is not accepted until a user can open a large repository, install 
 ## Dogfood Evidence
 
 Weekly Legion-on-Legion dogfood runs should use `plans/dogfood/legion-on-legion-weekly-journal-template.md`. Save completed journals under `plans/evidence/dogfood/YYYY-MM-DD-dogfood-journal.md` (see `plans/evidence/dogfood/README.md`). A journal entry is evidence only when it names the branch, commit, OS, workflow attempted, evidence path, result, and product-readiness impact. First bootstrap entry: `plans/evidence/dogfood/2026-07-21-dogfood-journal.md` (partial/blocked; M8 one-week loop still open).
+
+**Next wave (WS-A-D):** After WS-P0 product-wiring closeout (`plans/evidence/production/WS-P0/campaign-closeout-2026-07-21.md`), the active multi-phase program is **dogfood → real DAP → sandbox isolation → WS17 release** (no VSIX). Charter and phase gates: `plans/evidence/production/WS-A-D/campaign-charter.md`. Phase 1 requires interactive GUI journals on post-#66 main; PR-LANG-002 (real DAP), sandbox residual gaps, and PR-REL-001 (signed installers) remain open cut lines until their phase evidence lands.

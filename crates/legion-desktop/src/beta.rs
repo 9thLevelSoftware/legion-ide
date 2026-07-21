@@ -743,6 +743,12 @@ fn run_terminal_actions(runtime: &mut DesktopRuntime) -> (String, BetaTerminalPo
 }
 
 fn run_proposal_actions(runtime: &mut DesktopRuntime) -> (String, BetaProposalMode) {
+    // Beta acceptance proves proposal-mediated AI apply gates, not live-provider
+    // latency. Force Deterministic so Assist registers proposal_id synchronously
+    // (live Auto/Ollama streams on a worker and would return proposal_id=None).
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
     let outcome = runtime.handle_action(DesktopAction::StartAiProposal {
         instruction_label: "beta fixture proposal".to_string(),
     });
@@ -751,6 +757,50 @@ fn run_proposal_actions(runtime: &mut DesktopRuntime) -> (String, BetaProposalMo
             proposal_id: Some(proposal_id),
             ..
         }) => proposal_id,
+        Ok(DesktopWorkflowOutcome::AssistedAiUpdated {
+            proposal_id: None,
+            run_id,
+            status,
+            ..
+        }) => {
+            // Live stream path (if preference could not be forced): poll until the
+            // worker registers a proposal, then continue the beta preview path.
+            let mut registered = None;
+            for _ in 0..300 {
+                let _ = runtime.poll_product_ai_stream();
+                let snapshot = runtime.projection_snapshot();
+                if let Some(row) =
+                    snapshot
+                        .proposal_ledger_projection
+                        .rows
+                        .iter()
+                        .rev()
+                        .find(|row| {
+                            row.lifecycle.state == ProposalLifecycleState::Created
+                                || row.lifecycle.state == ProposalLifecycleState::Previewed
+                        })
+                {
+                    registered = Some(row.proposal_id);
+                    break;
+                }
+                if !runtime.product_ai_stream_in_flight() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            match registered {
+                Some(proposal_id) => proposal_id,
+                None => {
+                    return (
+                        format!(
+                            "unexpected proposal start streaming without ledger row run={} status={}",
+                            run_id.0, status
+                        ),
+                        BetaProposalMode::Blocked,
+                    );
+                }
+            }
+        }
         Ok(other) => {
             return (
                 format!("unexpected proposal start {other:?}"),
