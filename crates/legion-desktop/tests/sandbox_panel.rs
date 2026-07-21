@@ -43,7 +43,7 @@ fn sandbox_panel_surfaces_active_backend_and_caveats() {
     );
 }
 
-/// Strength labels must be honest post-PKT-SANDBOX: "os-enforced", "process-isolated", or "fallback".
+/// Strength labels must be honest: os-enforced*, process-lifetime-only / process-isolated, or fallback.
 #[test]
 fn sandbox_panel_shows_honest_strength_label_not_descriptor_only() {
     let snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
@@ -51,7 +51,11 @@ fn sandbox_panel_shows_honest_strength_label_not_descriptor_only() {
     let all = model.sandbox_rows.join("\n");
 
     assert!(
-        all.contains("os-enforced") || all.contains("process-isolated") || all.contains("fallback"),
+        all.contains("os-enforced")
+            || all.contains("process-isolated")
+            || all.contains("process-lifetime-only")
+            || all.contains("fs-write-only")
+            || all.contains("fallback"),
         "sandbox rows must contain an honest enforcement label, got: {all}"
     );
     assert!(

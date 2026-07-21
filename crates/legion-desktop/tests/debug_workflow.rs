@@ -98,6 +98,13 @@ fn desktop_debug_workflow_projects_right_and_bottom_debug_rows() {
         model
             .debug_rows
             .iter()
+            .any(|row| row.contains("Debugger is simulated in this build")),
+        "debug panel must show simulated DAP cut line"
+    );
+    assert!(
+        model
+            .debug_rows
+            .iter()
             .any(|row| row.contains("debug config"))
     );
     assert!(

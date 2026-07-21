@@ -10,7 +10,13 @@ use serde::{Deserialize, Serialize};
 pub const BENCH_REPORT_FILE: &str = "legion_bench_report.toml";
 pub const HOSTILE_EVAL_REPORT_FILE: &str = "hostile_eval_report.toml";
 pub const DEFAULT_BENCH_OUTPUT_PATH: &str = "target/legion-bench";
-const BENCH_SCHEMA_VERSION: u32 = 1;
+/// Schema v2 adds `scoring_mode` so reports self-identify synthetic budget arithmetic
+/// (recorded mode does not open fixture repos or run agents until M13 live mode).
+const BENCH_SCHEMA_VERSION: u32 = 2;
+/// Recorded/offline scoring fabricates pass/diff/turns/cost from gate budgets.
+pub const SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC: &str = "synthetic_budget_arithmetic";
+/// Hostile eval report scoring is scripted (integration tests own security assertions).
+pub const SCORING_MODE_SCRIPTED_HOSTILE: &str = "scripted_hostile";
 const DEFAULT_RECORDING_PROFILE: &str = "recorded:gpt-5.5";
 const DEFAULT_LIVE_PROFILE: &str = "live:weekly";
 const DEFAULT_SUITE_NAME: &str = "legion-bench-v0";
@@ -130,6 +136,9 @@ pub struct LegionBenchReport {
     pub git_sha: String,
     pub mode: LegionBenchRunMode,
     pub provider_profile: String,
+    /// How task scores were produced. Recorded mode uses synthetic budget arithmetic
+    /// until live agent execution is implemented (M13). Not a product-behavior proof.
+    pub scoring_mode: String,
     pub suite_name: String,
     pub suite_fingerprint: String,
     pub summary: LegionBenchSummary,
@@ -220,6 +229,7 @@ pub fn plan_legion_bench_report(
         git_sha: git_sha.to_string(),
         mode,
         provider_profile,
+        scoring_mode: SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC.to_string(),
         suite_name: suite.suite_name.clone(),
         suite_fingerprint: suite.suite_fingerprint.clone(),
         summary,
@@ -235,6 +245,14 @@ pub fn verify_legion_bench_report(
         return Err(format!(
             "unsupported bench report schema version: {}",
             report.schema_version
+        ));
+    }
+    if report.scoring_mode != SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
+        && report.scoring_mode != SCORING_MODE_SCRIPTED_HOSTILE
+    {
+        return Err(format!(
+            "unsupported bench scoring_mode: {} (expected synthetic or scripted hostile)",
+            report.scoring_mode
         ));
     }
     if report.suite_name != suite.suite_name {
@@ -392,7 +410,9 @@ fn score_task(
         LegionBenchTaskStatus::Failed
     };
     let notes = format!(
-        "mode={} provider={} fixture={} kind={} tests_passed={} diff_files={} turns={} cost_cents={}",
+        "synthetic=true scoring_mode={} mode={} provider={} fixture={} kind={} tests_passed={} diff_files={} turns={} cost_cents={} \
+         (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)",
+        SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC,
         mode.as_str(),
         provider_profile,
         task.fixture_repo,
@@ -584,8 +604,9 @@ fn score_hostile_task(task: &LegionBenchTask) -> LegionBenchTaskResult {
             score: 100,
             status: LegionBenchTaskStatus::Passed,
             notes: format!(
-                "hostile eval {} passed (scripted provider, integration test verified); \
+                "synthetic=true scoring_mode={} hostile eval {} passed (scripted provider, integration test verified); \
                  required_cargo_test=cargo test -p legion-app --test hostile_eval_integration",
+                SCORING_MODE_SCRIPTED_HOSTILE,
                 task.id
             ),
         },
@@ -609,6 +630,7 @@ pub fn plan_hostile_eval_report(package_name: &str, git_sha: &str) -> LegionBenc
         git_sha: git_sha.to_string(),
         mode: LegionBenchRunMode::RecordedOffline,
         provider_profile: "scripted:hostile".to_string(),
+        scoring_mode: SCORING_MODE_SCRIPTED_HOSTILE.to_string(),
         suite_name: suite.suite_name.clone(),
         suite_fingerprint: suite.suite_fingerprint.clone(),
         summary,

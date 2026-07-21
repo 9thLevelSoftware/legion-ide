@@ -28,6 +28,8 @@ pub mod sandbox_panel;
 pub mod scope_picker;
 /// Terminal panel render-model helpers.
 pub mod terminal_panel;
+/// Interactive text fields (terminal input, BYOK) outside the code-canvas gate.
+mod interactive_fields;
 /// Worker panel view model and renderer for active delegated task monitoring.
 pub mod worker_panel;
 
@@ -64,8 +66,9 @@ use std::time::Duration;
 use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
-    BufferId, ContextManifestEgressStatus, ContextManifestInclusionState,
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, FileId,
+    BufferId, CanonicalPath, ContextManifestEgressStatus, ContextManifestInclusionState,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
+    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId, LegionToolKind,
     LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
     PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
     ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange,
@@ -113,6 +116,16 @@ pub struct DesktopProjectionViewState {
     /// Durable checkpoint timeline rows from the checkpoint store (PKT-CKPT).
     pub durable_checkpoint_timeline_rows:
         Vec<crate::view::proposal_review::DesktopCheckpointTimelineRow>,
+    /// Preferred product AI route label (`auto` / `ollama` / `anthropic` / `deterministic`).
+    pub preferred_ai_provider: String,
+    /// Accumulated product AI stream chunks for the assistant rail (Assist / Delegate).
+    pub product_ai_stream_chunks: Vec<String>,
+    /// Metadata label for the last product stream (`provider/model/operation`).
+    pub product_ai_stream_label: String,
+    /// Whether the last stream used multi-delta SSE.
+    pub product_ai_streamed: bool,
+    /// Whether a product AI stream is currently in flight.
+    pub product_ai_stream_in_flight: bool,
 }
 
 impl Default for DesktopProjectionViewState {
@@ -129,6 +142,11 @@ impl Default for DesktopProjectionViewState {
             problems_selected_index: 0,
             review_hunk_selected_index: 0,
             durable_checkpoint_timeline_rows: Vec::new(),
+            preferred_ai_provider: "auto".to_string(),
+            product_ai_stream_chunks: Vec::new(),
+            product_ai_stream_label: String::new(),
+            product_ai_streamed: false,
+            product_ai_stream_in_flight: false,
         }
     }
 }
@@ -557,6 +575,16 @@ pub struct DesktopProjectionViewModel {
     pub sandbox_rows: Vec<String>,
     /// Empty, dirty, or degraded display flags.
     pub empty_or_degraded_flags: Vec<String>,
+    /// Preferred product AI route label mirrored from app composition.
+    pub preferred_ai_provider: String,
+    /// Product AI stream chunks for progressive assistant-rail rendering.
+    pub product_ai_stream_chunks: Vec<String>,
+    /// Metadata label for the last product stream.
+    pub product_ai_stream_label: String,
+    /// Whether the last stream used multi-delta SSE.
+    pub product_ai_streamed: bool,
+    /// Whether a product AI stream is currently in flight.
+    pub product_ai_stream_in_flight: bool,
 }
 
 impl DesktopProjectionViewModel {
@@ -720,6 +748,11 @@ impl DesktopProjectionViewModel {
             remote_rows: remote_rows(snapshot),
             sandbox_rows,
             empty_or_degraded_flags: flags,
+            preferred_ai_provider: state.preferred_ai_provider.clone(),
+            product_ai_stream_chunks: state.product_ai_stream_chunks.clone(),
+            product_ai_stream_label: state.product_ai_stream_label.clone(),
+            product_ai_streamed: state.product_ai_streamed,
+            product_ai_stream_in_flight: state.product_ai_stream_in_flight,
         }
     }
 }
@@ -811,7 +844,7 @@ impl ProjectionView {
             .resizable(true)
             .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
-                render_bottom_console(ui, snapshot, &model);
+                render_bottom_console(ui, snapshot, &model, &mut actions);
             });
 
         let right_width = match projected_product_mode(snapshot) {
@@ -922,8 +955,11 @@ fn render_top_command_bar(
                     DesktopProductMode::Assist => DesktopAction::StartAiProposal {
                         instruction_label: "desktop assist".to_string(),
                     },
-                    DesktopProductMode::Delegates => DesktopAction::StartAiProposal {
-                        instruction_label: "desktop delegated task".to_string(),
+                    // Tier 2: Delegate primary action hits the real agent loop path
+                    // (Anthropic when credentials are available), not the deterministic assist fake.
+                    DesktopProductMode::Delegates => DesktopAction::StartDelegatedTask {
+                        task_description: "desktop delegated task".to_string(),
+                        scope: desktop_default_delegated_scope(snapshot),
                     },
                     DesktopProductMode::LegionWorkflows => DesktopAction::StartAiProposal {
                         instruction_label: "desktop legion workflow".to_string(),
@@ -1129,6 +1165,7 @@ fn render_bottom_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
 ) {
     ui.horizontal(|ui| {
         for tab in bottom_tab_specs(snapshot) {
@@ -1152,7 +1189,7 @@ fn render_bottom_console(
     match projected_product_mode(snapshot) {
         DesktopProductMode::Manual => {
             ui.columns(2, |columns| {
-                render_terminal_stream(&mut columns[0], snapshot, model);
+                render_terminal_stream(&mut columns[0], snapshot, model, actions);
                 render_console_section(
                     &mut columns[1],
                     "Structural Search",
@@ -1176,7 +1213,7 @@ fn render_bottom_console(
         }
         DesktopProductMode::Assist => {
             ui.columns(2, |columns| {
-                render_terminal_stream(&mut columns[0], snapshot, model);
+                render_terminal_stream(&mut columns[0], snapshot, model, actions);
                 render_agent_stream(&mut columns[1], model);
             });
         }
@@ -1194,7 +1231,7 @@ fn render_bottom_console(
         DesktopProductMode::LegionWorkflows => {
             ui.columns(2, |columns| {
                 render_agent_stream(&mut columns[0], model);
-                render_terminal_stream(&mut columns[1], snapshot, model);
+                render_terminal_stream(&mut columns[1], snapshot, model, actions);
             });
         }
     }
@@ -1715,6 +1752,8 @@ fn render_project_tree_panel(
 
 fn render_context_packs(ui: &mut egui::Ui) {
     section_label(ui, "Context Packs", Some(theme::tokens().accent.purple));
+    ui.label(theme::eyebrow(crate::cut_lines::CONTEXT_PACKS_SAMPLE_LABEL));
+    ui.add_space(4.0);
     for pack in [
         "Auth system",
         "Billing model",
@@ -1798,9 +1837,13 @@ fn render_agent_roster(
     section_label(ui, "Active Delegates", Some(level_color(level)));
     let mut rendered = 0usize;
     for provider in snapshot.assisted_ai_projection.providers.iter().take(4) {
+        let display = crate::cut_lines::provider_display_label(
+            &provider.provider_id,
+            &provider.provider_label,
+        );
         agent_card(
             ui,
-            &provider.provider_label,
+            &display,
             &format!("{:?}", provider.availability),
             level_color(level),
             0.55,
@@ -2642,9 +2685,13 @@ fn render_assisted_suggestion_panel(
                         .take(4)
                         .enumerate()
                     {
+                        let display = crate::cut_lines::provider_display_label(
+                            &provider.provider_id,
+                            &provider.provider_label,
+                        );
                         let label = format!(
                             "{} · ops={} · tools={} · {:?}",
-                            trim_middle(&provider.provider_label, 20),
+                            trim_middle(&display, 32),
                             provider.supported_operation_count,
                             provider.tool_capability_label_count,
                             provider.availability
@@ -2675,6 +2722,20 @@ fn render_assisted_suggestion_panel(
                         provider.risk_label
                     )));
                 }
+            }
+
+            interactive_fields::render_preferred_provider_picker(
+                ui,
+                &model.preferred_ai_provider,
+                actions,
+            );
+            interactive_fields::render_anthropic_byok_form(ui, actions);
+            if !model.product_ai_stream_label.is_empty() {
+                ui.add_space(4.0);
+                ui.label(theme::code_muted(format!(
+                    "last stream: {}",
+                    model.product_ai_stream_label
+                )));
             }
         });
         section_label(ui, "Slash Commands", Some(theme::tokens().accent.blue));
@@ -3856,10 +3917,54 @@ fn parse_automate_tool_target(
     ))
 }
 
+/// Default repo-scoped delegated task scope for the active workspace projection.
+fn desktop_default_delegated_scope(snapshot: &ShellProjectionSnapshot) -> DelegatedTaskScope {
+    let root = snapshot
+        .active_buffer_projection
+        .file_path
+        .as_ref()
+        .map(|path| path.0.clone())
+        .or_else(|| {
+            snapshot
+                .explorer_projection
+                .nodes
+                .first()
+                .map(|node| node.canonical_path.0.clone())
+        })
+        .map(|path| {
+            // Walk up from an open file / explorer node to a plausible workspace root.
+            let path = std::path::Path::new(&path);
+            path.ancestors()
+                .find(|ancestor| {
+                    ancestor.join("Cargo.toml").exists() || ancestor.join(".git").exists()
+                })
+                .unwrap_or_else(|| path.parent().unwrap_or(path))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| ".".to_string());
+    DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(root),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![
+            LegionToolKind::Read,
+            LegionToolKind::Grep,
+            LegionToolKind::Glob,
+            LegionToolKind::Outline,
+            LegionToolKind::EditAsProposal,
+        ],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    }
+}
+
 fn render_terminal_stream(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
 ) {
     let terminal = &snapshot.terminal_panel_projection;
     let render_model = terminal_panel::TerminalPanelRenderModel::from_projection(terminal, 100);
@@ -3911,6 +4016,22 @@ fn render_terminal_stream(
                 ));
             }
             ui.add_space(theme::tokens().spacing.sm as f32);
+            // Tier 1 A8: interactive input line — sends TerminalInput on Enter.
+            if terminal.active_session_id.is_some() {
+                interactive_fields::render_terminal_input_line(ui, actions);
+                ui.horizontal(|ui| {
+                    if ui.small_button("Poll").clicked() {
+                        actions.push(DesktopAction::TerminalOutputPoll);
+                    }
+                    if ui.small_button("Kill").clicked() {
+                        actions.push(DesktopAction::TerminalKill);
+                    }
+                    if ui.small_button("Close").clicked() {
+                        actions.push(DesktopAction::TerminalClose);
+                    }
+                });
+                ui.add_space(theme::tokens().spacing.sm as f32);
+            }
             if terminal.output_rows.is_empty() {
                 render_compact_rows(ui, &model.bottom_console_rows, "No terminal activity", 4);
                 return;
@@ -4070,6 +4191,35 @@ fn terminal_output_row_badges(row: &legion_protocol::TerminalOutputRowProjection
 fn render_agent_stream(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
     section_label(ui, "Agent Comm Stream", Some(theme::tokens().accent.violet));
     theme::code_frame().show(ui, |ui| {
+        if !model.product_ai_stream_label.is_empty() {
+            ui.label(theme::code_muted(format!(
+                "product stream: {}{}{}",
+                model.product_ai_stream_label,
+                if model.product_ai_streamed {
+                    " · sse-deltas"
+                } else {
+                    " · single-chunk"
+                },
+                if model.product_ai_stream_in_flight {
+                    " · in-flight"
+                } else {
+                    ""
+                }
+            )));
+            if !model.product_ai_stream_chunks.is_empty() {
+                // Join SSE deltas into one markdown document for the rail.
+                let body = model.product_ai_stream_chunks.join("");
+                let mut noop = Vec::new();
+                render_streaming_assistant_rows(
+                    ui,
+                    std::slice::from_ref(&body),
+                    "No stream body",
+                    6,
+                    None,
+                    &mut noop,
+                );
+            }
+        }
         if model.assistant_rows.is_empty() {
             render_compact_rows(ui, &model.manual_control_rows, "No agent stream rows", 4);
         } else {
@@ -7593,8 +7743,13 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !debug.inline_values.is_empty()
         || !debug.diagnostics.is_empty()
     {
+        // Honest cut line: product composition uses a simulated DAP client only.
         rows.push(format!(
-            "debug: status={:?} session={:?} state={:?} configs={} breakpoints={} frames={} variables={} watches={} console={} inline={}",
+            "debug: {}",
+            crate::cut_lines::DEBUG_SIMULATED_BANNER
+        ));
+        rows.push(format!(
+            "debug: status={:?} session={:?} state={:?} configs={} breakpoints={} frames={} variables={} watches={} console={} inline={} note={}",
             debug.status.kind,
             debug.active_session_id.as_ref().map(|session| session.0.as_str()),
             debug.session_state,
@@ -7604,7 +7759,8 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             debug.variables.len(),
             debug.watches.len(),
             debug.console.len(),
-            debug.inline_values.len()
+            debug.inline_values.len(),
+            debug.status.message
         ));
     }
     rows.extend(debug.configurations.iter().take(8).map(|configuration| {
@@ -7803,12 +7959,13 @@ fn plugin_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .len()
             .saturating_sub(commands.len());
         rows.push(format!(
-            "plugin management plugin {}: status={} contributions={} commands={} other={} sandbox=metadata-only audit=app-owned",
+            "plugin management plugin {}: status={} contributions={} commands={} other={} sandbox=metadata-only {} audit=app-owned",
             projection.plugin_id.0,
             projection.status_label,
             projection.contributions.len(),
             commands.len(),
-            other_contribution_count
+            other_contribution_count,
+            crate::cut_lines::PLUGIN_EXECUTION_UNAVAILABLE
         ));
         if commands.is_empty() {
             rows.push(format!(

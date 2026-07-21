@@ -133,6 +133,23 @@ fn legion_bench_report_tracks_run_mode_profile() {
 
     assert_eq!(recorded.provider_profile, suite.recorded_provider_profile);
     assert_eq!(live.provider_profile, suite.live_provider_profile);
+    assert_eq!(recorded.schema_version, 2);
+    assert_eq!(
+        recorded.scoring_mode,
+        xtask::legion_bench::SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
+    );
+    assert!(
+        recorded.tasks[0]
+            .score
+            .notes
+            .contains("synthetic=true")
+            && recorded.tasks[0]
+                .score
+                .notes
+                .contains("budget-derived placeholders"),
+        "recorded task notes must self-identify synthetic scoring, got: {}",
+        recorded.tasks[0].score.notes
+    );
 }
 
 fn tempfile_dir(name: &str) -> std::path::PathBuf {

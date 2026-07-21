@@ -28,7 +28,9 @@ use legion_protocol::{
     WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
-use legion_storage::{OsKeyringSecretStore, SecretStore, provider_secret_reference};
+use legion_storage::{
+    OsKeyringSecretStore, SecretStore, provider_api_key_reference, provider_secret_reference,
+};
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
     SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
@@ -603,10 +605,10 @@ impl DesktopRuntime {
             config.principal.clone(),
         )?;
 
-        // Palette usage persistence is app-composition work: the app owns the
-        // storage wiring (workspace-local `.legion/` state dir); the renderer
-        // edge only asks for it, keeping legion-desktop free of storage deps.
-        app.enable_palette_usage_persistence(&config.workspace_root);
+        // Workspace-local durability under `.legion/`: palette usage, checkpoints,
+        // and proposal audit blobs. The renderer edge only requests enablement;
+        // storage paths stay owned by app composition (Tier 1 A10).
+        app.enable_workspace_state_persistence(&config.workspace_root);
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
@@ -970,12 +972,25 @@ impl DesktopRuntime {
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
             }
+            // Product AI route preference (local-first Auto / Ollama / Anthropic / fixture).
+            DesktopAction::SetPreferredAiProvider { provider_id } => {
+                self.app.set_preferred_ai_provider_label(&provider_id);
+                let active = self.app.preferred_ai_provider().as_str();
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Preferred AI provider set to: {active}"),
+                );
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                self.persist_diagnostics_if_configured();
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
             // PKT-PROV: store a BYOK API key in the OS keyring.
             DesktopAction::SetProviderApiKey {
                 provider_id,
                 api_key,
             } => {
-                let reference = provider_secret_reference(&provider_id, "api_key");
+                let reference = provider_api_key_reference(&provider_id);
                 match OsKeyringSecretStore.store(&reference, &api_key) {
                     Ok(()) => {
                         // SensitiveString::drop() zeroizes the key bytes before deallocation.
@@ -1000,25 +1015,33 @@ impl DesktopRuntime {
             }
             // PKT-PROV: delete a BYOK API key from the OS keyring.
             DesktopAction::DeleteProviderApiKey { provider_id } => {
-                let reference = provider_secret_reference(&provider_id, "api_key");
-                match OsKeyringSecretStore.delete(&reference) {
-                    Ok(()) => {
-                        self.set_status(
-                            StatusSeverity::Info,
-                            format!("API key deleted for provider: {provider_id}"),
-                        );
-                        self.refresh_projection()?;
-                        self.last_outcome = DesktopWorkflowOutcome::Noop;
-                        self.persist_diagnostics_if_configured();
-                        Ok(DesktopWorkflowOutcome::Noop)
+                // Delete both the canonical store name and env-style aliases.
+                let mut last_err = None;
+                let mut deleted_any = false;
+                for secret_name in legion_storage::provider_api_key_secret_names(&provider_id) {
+                    let reference = provider_secret_reference(&provider_id, secret_name);
+                    match OsKeyringSecretStore.delete(&reference) {
+                        Ok(()) => deleted_any = true,
+                        Err(err) => last_err = Some(err),
                     }
-                    Err(err) => {
-                        let message = err.to_string();
-                        self.set_status(StatusSeverity::Error, message.clone());
-                        self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
-                        self.persist_diagnostics_if_configured();
-                        Ok(DesktopWorkflowOutcome::Error(message))
-                    }
+                }
+                if deleted_any || last_err.is_none() {
+                    self.set_status(
+                        StatusSeverity::Info,
+                        format!("API key deleted for provider: {provider_id}"),
+                    );
+                    self.refresh_projection()?;
+                    self.last_outcome = DesktopWorkflowOutcome::Noop;
+                    self.persist_diagnostics_if_configured();
+                    Ok(DesktopWorkflowOutcome::Noop)
+                } else {
+                    let message = last_err
+                        .map(|err| err.to_string())
+                        .unwrap_or_else(|| "keyring delete failed".to_string());
+                    self.set_status(StatusSeverity::Error, message.clone());
+                    self.last_outcome = DesktopWorkflowOutcome::Error(message.clone());
+                    self.persist_diagnostics_if_configured();
+                    Ok(DesktopWorkflowOutcome::Error(message))
                 }
             }
             // PKT-CKPT: restore a durable checkpoint through app authority.
@@ -1132,6 +1155,17 @@ impl DesktopRuntime {
     }
 
     /// Return the latest shell projection snapshot.
+    /// Poll progressive product AI stream state into the app projection cache.
+    pub fn poll_product_ai_stream(&mut self) -> bool {
+        self.app.poll_product_ai_stream()
+    }
+
+    /// Whether a product AI stream is currently receiving deltas.
+    pub fn product_ai_stream_in_flight(&self) -> bool {
+        self.app.product_ai_stream_in_flight()
+    }
+
+    /// Current shell projection snapshot for rendering and tests.
     pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
         self.shell.projection_snapshot()
     }
@@ -1195,7 +1229,7 @@ impl DesktopRuntime {
         let plugin_id = self.app.load_plugin_manifest(manifest)?;
         self.set_status(
             StatusSeverity::Info,
-            format!("Plugin {} loaded", plugin_id.0),
+            crate::cut_lines::plugin_registered_status(plugin_id.0),
         );
         self.refresh_projection()?;
         Ok(plugin_id)
@@ -1216,7 +1250,7 @@ impl DesktopRuntime {
         self.app.enable_remote_development_runtime();
         self.set_status(
             StatusSeverity::Info,
-            "Remote workspace runtime enabled by app policy",
+            crate::cut_lines::REMOTE_RUNTIME_ENABLED,
         );
         self.refresh_projection()
     }
@@ -1317,7 +1351,10 @@ impl DesktopRuntime {
     /// Enable the app-owned deterministic debug fixture for test harnesses.
     pub fn enable_debug_fixture_for_tests(&mut self) {
         self.app.enable_debug_fixture_for_tests();
-        self.set_status(StatusSeverity::Info, "Debug fixture enabled by app policy");
+        self.set_status(
+            StatusSeverity::Info,
+            crate::cut_lines::DEBUG_FIXTURE_ENABLED,
+        );
         self.refresh_projection()
             .expect("debug fixture projection refresh should succeed");
     }
@@ -1455,6 +1492,37 @@ impl DesktopRuntime {
             problems_selected_index: self.problems_selected_index,
             review_hunk_selected_index: self.review_hunk_selected_index,
             durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
+            preferred_ai_provider: self.app.preferred_ai_provider().as_str().to_string(),
+            product_ai_stream_chunks: self
+                .app
+                .last_product_ai_stream()
+                .map(|s| s.chunks.clone())
+                .unwrap_or_default(),
+            product_ai_stream_label: self
+                .app
+                .last_product_ai_stream()
+                .map(|s| {
+                    format!(
+                        "{} · {} · {} · streamed={} chunks={}",
+                        s.operation,
+                        s.provider_id,
+                        s.model,
+                        s.streamed,
+                        s.chunks.len()
+                    )
+                })
+                .unwrap_or_default(),
+            product_ai_streamed: self
+                .app
+                .last_product_ai_stream()
+                .map(|s| s.streamed)
+                .unwrap_or(false),
+            product_ai_stream_in_flight: self.app.product_ai_stream_in_flight()
+                || self
+                    .app
+                    .last_product_ai_stream()
+                    .map(|s| s.in_flight)
+                    .unwrap_or(false),
         }
     }
 
@@ -1646,6 +1714,54 @@ impl DesktopRuntime {
         self.completion_popup_open
     }
 
+    /// Selected text for writing the OS clipboard before copy/cut dispatch.
+    pub fn selected_text_for_os_clipboard(&self) -> Option<String> {
+        let buffer_id = self
+            .shell
+            .projection_snapshot()
+            .active_buffer_projection
+            .buffer_id?;
+        self.app
+            .selected_text_for_clipboard(buffer_id)
+            .ok()
+            .flatten()
+            .map(|(text, _)| text)
+    }
+
+    /// Resolve a Backspace delete range from app-owned buffer text.
+    pub fn backspace_delete_range(&self) -> Option<ProtocolTextRange> {
+        let snapshot = self.shell.projection_snapshot();
+        if let Some(selection) = projected_primary_selection(&snapshot) {
+            return Some(selection);
+        }
+        let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+        let text = self.app.buffer_text_for_input(buffer_id).ok()?;
+        let cursor = projected_cursor(&snapshot);
+        let end = line_char_to_byte(&text, cursor.line, cursor.character)?;
+        if end == 0 {
+            return None;
+        }
+        let start = previous_char_boundary(&text, end);
+        Some(byte_range_to_protocol(&text, start, end))
+    }
+
+    /// Resolve a Delete (forward) range from app-owned buffer text.
+    pub fn forward_delete_range(&self) -> Option<ProtocolTextRange> {
+        let snapshot = self.shell.projection_snapshot();
+        if let Some(selection) = projected_primary_selection(&snapshot) {
+            return Some(selection);
+        }
+        let buffer_id = snapshot.active_buffer_projection.buffer_id?;
+        let text = self.app.buffer_text_for_input(buffer_id).ok()?;
+        let cursor = projected_cursor(&snapshot);
+        let start = line_char_to_byte(&text, cursor.line, cursor.character)?;
+        if start >= text.len() {
+            return None;
+        }
+        let end = next_char_boundary(&text, start);
+        Some(byte_range_to_protocol(&text, start, end))
+    }
+
     /// Expose selected index for assertion in tests.
     pub fn completion_selected_index_for_test(&self) -> usize {
         self.completion_selected_index
@@ -1757,9 +1873,9 @@ impl DesktopRuntime {
                 .connect_remote_workspace_session(session_id, authority_label.clone())
             {
                 Ok(_) => {
-                    let message = format!(
-                        "Remote workspace connected {} authority={authority_label}",
-                        session_id.0
+                    let message = crate::cut_lines::remote_fixture_session_active(
+                        session_id.0,
+                        &authority_label,
                     );
                     self.set_status(StatusSeverity::Info, message.clone());
                     Ok(DesktopWorkflowOutcome::RemoteUpdated {
@@ -3198,6 +3314,22 @@ impl DesktopEframeApp {
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
         self.handle_keyboard(ui);
+        // Tier 1 A8: poll active terminal every frame so output streams without
+        // requiring another user gesture after launch.
+        {
+            let snapshot = self.runtime.projection_snapshot();
+            if snapshot.terminal_panel_projection.active_session_id.is_some() {
+                self.runtime
+                    .dispatch_ui_action(DesktopAction::TerminalOutputPoll);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        // Progressive product AI stream: merge live SSE sink into projection and
+        // keep repainting while deltas are in flight.
+        if self.runtime.poll_product_ai_stream() || self.runtime.product_ai_stream_in_flight() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
         let snapshot = self.runtime.projection_snapshot();
         let view_state = self.runtime.projection_view_state();
         let output = self
@@ -3343,6 +3475,8 @@ impl DesktopEframeApp {
             // Focus scope: fires only when the problems list is non-empty
             // AND the completion popup is not open (completion popup already
             // owns ArrowUp / ArrowDown / Enter through its own handler).
+            // Enter activates a problem only when the editor is not accepting
+            // text (Tier 1: plain Enter must insert a newline in the buffer).
             {
                 let view_state = self.runtime.projection_view_state();
                 let problems_non_empty = !snapshot.language_tooling_projection.problems.is_empty();
@@ -3353,7 +3487,7 @@ impl DesktopEframeApp {
                     if input.key_pressed(egui::Key::ArrowUp) {
                         actions.push(DesktopAction::ProblemPrev);
                     }
-                    if input.key_pressed(egui::Key::Enter) {
+                    if input.key_pressed(egui::Key::Enter) && !editor_input_enabled {
                         actions.push(DesktopAction::ProblemActivate);
                     }
                 }
@@ -3432,15 +3566,54 @@ impl DesktopEframeApp {
                 .buffer_id
                 .and_then(|buffer_id| ime_composition_state(ui, buffer_id))
                 .is_some_and(|composition| composition.active);
-            actions.extend(editor_keyboard_control_actions(
-                &input,
-                &snapshot,
-                editor_input_enabled,
-                ime_composition_active,
-            ));
+            let view_state = self.runtime.projection_view_state();
+            // Tier 1 (A1): synthesize Backspace/Delete/Enter using app buffer text
+            // so ranges are byte-accurate (including cross-line backspace).
+            if editor_input_enabled
+                && !ime_composition_active
+                && !view_state.completion_popup_open
+                && !input.modifiers.command
+            {
+                if input.key_pressed(egui::Key::Backspace) {
+                    if let Some(range) = self.runtime.backspace_delete_range() {
+                        actions.push(DesktopAction::DeleteRange { range });
+                    }
+                } else if input.key_pressed(egui::Key::Delete) {
+                    if let Some(range) = self.runtime.forward_delete_range() {
+                        actions.push(DesktopAction::DeleteRange { range });
+                    }
+                } else if input.key_pressed(egui::Key::Enter) && !input.modifiers.alt {
+                    actions.push(insert_or_replace_with_newline(&snapshot));
+                } else {
+                    actions.extend(editor_keyboard_control_actions(
+                        &input,
+                        &snapshot,
+                        editor_input_enabled,
+                        ime_composition_active,
+                        view_state.completion_popup_open,
+                    ));
+                }
+            } else {
+                actions.extend(editor_keyboard_control_actions(
+                    &input,
+                    &snapshot,
+                    editor_input_enabled,
+                    ime_composition_active,
+                    view_state.completion_popup_open,
+                ));
+            }
         }
 
         for action in actions {
+            // Write OS clipboard before app copy/cut so cut still has the
+            // selection text available; app outcomes remain metadata-only.
+            if matches!(
+                action,
+                DesktopAction::ClipboardCopy | DesktopAction::ClipboardCut
+            ) && let Some(text) = self.runtime.selected_text_for_os_clipboard()
+            {
+                ui.ctx().copy_text(text);
+            }
             self.runtime.dispatch_ui_action(action);
         }
     }
@@ -3862,6 +4035,7 @@ fn editor_keyboard_control_actions(
     snapshot: &ShellProjectionSnapshot,
     editor_input_enabled: bool,
     ime_composition_active: bool,
+    completion_popup_open: bool,
 ) -> Vec<DesktopAction> {
     // Local workaround for upstream IME issues in egui/winit:
     // - egui#248 tracks composition events and candidate positioning
@@ -3911,6 +4085,30 @@ fn editor_keyboard_control_actions(
             return actions;
         }
     }
+
+    // Backspace/Delete/Enter for the live frame path are synthesized in
+    // `handle_keyboard` with app buffer text. This pure helper still handles
+    // them for unit/conformance tests that only pass a snapshot: use projected
+    // coordinates (ASCII-safe mid-line) when no app text is available.
+    if !completion_popup_open {
+        if input.key_pressed(egui::Key::Backspace) {
+            if let Some(range) = delete_range_for_backspace(snapshot) {
+                actions.push(DesktopAction::DeleteRange { range });
+            }
+            return actions;
+        }
+        if input.key_pressed(egui::Key::Delete) {
+            if let Some(range) = delete_range_for_forward_delete(snapshot) {
+                actions.push(DesktopAction::DeleteRange { range });
+            }
+            return actions;
+        }
+        if input.key_pressed(egui::Key::Enter) && !input.modifiers.alt {
+            actions.push(insert_or_replace_with_newline(snapshot));
+            return actions;
+        }
+    }
+
     if input.key_pressed(egui::Key::ArrowLeft) {
         actions.push(cursor_or_selection_action(
             buffer_id,
@@ -3983,7 +4181,160 @@ pub fn test_editor_keyboard_control_actions(
         snapshot,
         editor_input_enabled,
         ime_composition_active,
+        false,
     )
+}
+
+/// Test seam that also controls completion-popup ownership of Enter.
+pub fn test_editor_keyboard_control_actions_with_completion(
+    input: &egui::InputState,
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+    ime_composition_active: bool,
+    completion_popup_open: bool,
+) -> Vec<DesktopAction> {
+    editor_keyboard_control_actions(
+        input,
+        snapshot,
+        editor_input_enabled,
+        ime_composition_active,
+        completion_popup_open,
+    )
+}
+
+fn projected_primary_selection(snapshot: &ShellProjectionSnapshot) -> Option<ProtocolTextRange> {
+    let viewport = snapshot.active_buffer_projection.viewport.as_ref()?;
+    viewport
+        .selections
+        .iter()
+        .find(|range| {
+            (range.start.line, range.start.character) != (range.end.line, range.end.character)
+        })
+        .cloned()
+}
+
+fn delete_range_for_backspace(snapshot: &ShellProjectionSnapshot) -> Option<ProtocolTextRange> {
+    if let Some(selection) = projected_primary_selection(snapshot) {
+        return Some(selection);
+    }
+    let cursor = projected_cursor(snapshot);
+    if cursor.line == 0 && cursor.character == 0 {
+        return None;
+    }
+    if let Some(text) = snapshot.active_buffer_projection.small_buffer_text() {
+        let end = line_char_to_byte(text, cursor.line, cursor.character)?;
+        if end == 0 {
+            return None;
+        }
+        let start = previous_char_boundary(text, end);
+        return Some(byte_range_to_protocol(text, start, end));
+    }
+    // Mid-line fallback without text (ASCII-oriented).
+    if cursor.character == 0 {
+        return None;
+    }
+    Some(ProtocolTextRange {
+        start: moved_coordinate(cursor, 0, -1),
+        end: cursor,
+    })
+}
+
+fn delete_range_for_forward_delete(snapshot: &ShellProjectionSnapshot) -> Option<ProtocolTextRange> {
+    if let Some(selection) = projected_primary_selection(snapshot) {
+        return Some(selection);
+    }
+    let cursor = projected_cursor(snapshot);
+    if let Some(text) = snapshot.active_buffer_projection.small_buffer_text() {
+        let start = line_char_to_byte(text, cursor.line, cursor.character)?;
+        if start >= text.len() {
+            return None;
+        }
+        let end = next_char_boundary(text, start);
+        return Some(byte_range_to_protocol(text, start, end));
+    }
+    Some(ProtocolTextRange {
+        start: cursor,
+        end: moved_coordinate(cursor, 0, 1),
+    })
+}
+
+fn insert_or_replace_with_newline(snapshot: &ShellProjectionSnapshot) -> DesktopAction {
+    if let Some(range) = projected_primary_selection(snapshot) {
+        DesktopAction::ReplaceRange {
+            range,
+            replacement: "\n".to_string(),
+        }
+    } else {
+        DesktopAction::InsertText {
+            text: "\n".to_string(),
+            at: projected_cursor(snapshot),
+        }
+    }
+}
+
+fn line_char_to_byte(text: &str, line: u32, character: u32) -> Option<usize> {
+    let mut current_line = 0u32;
+    let mut col = 0u32;
+    for (byte_idx, ch) in text.char_indices() {
+        if current_line == line && col == character {
+            return Some(byte_idx);
+        }
+        if ch == '\n' {
+            if current_line == line {
+                return Some(byte_idx);
+            }
+            current_line = current_line.saturating_add(1);
+            col = 0;
+        } else if current_line == line {
+            col = col.saturating_add(1);
+        }
+    }
+    if current_line == line {
+        return Some(text.len());
+    }
+    None
+}
+
+fn previous_char_boundary(text: &str, end: usize) -> usize {
+    let mut idx = end.saturating_sub(1);
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn next_char_boundary(text: &str, start: usize) -> usize {
+    if start >= text.len() {
+        return text.len();
+    }
+    let mut idx = start.saturating_add(1);
+    while idx < text.len() && !text.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+fn byte_range_to_protocol(text: &str, start: usize, end: usize) -> ProtocolTextRange {
+    ProtocolTextRange {
+        start: byte_to_coordinate(text, start),
+        end: byte_to_coordinate(text, end),
+    }
+}
+
+fn byte_to_coordinate(text: &str, byte: usize) -> TextCoordinate {
+    let byte = byte.min(text.len());
+    let prefix = &text[..byte];
+    let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
+    let character = prefix
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.chars().count() as u32)
+        .unwrap_or_else(|| prefix.chars().count() as u32);
+    TextCoordinate {
+        line,
+        character,
+        byte_offset: Some(byte as u64),
+        utf16_offset: Some(prefix.encode_utf16().count() as u64),
+    }
 }
 
 fn cursor_or_selection_action(
@@ -4383,7 +4734,7 @@ mod tests {
 
         let move_left = input_state_for_key(egui::Key::ArrowLeft, egui::Modifiers::default());
         assert_eq!(
-            editor_keyboard_control_actions(&move_left, &snapshot, true, false),
+            editor_keyboard_control_actions(&move_left, &snapshot, true, false, false),
             vec![DesktopAction::SetCursor {
                 buffer_id: Some(BufferId(1)),
                 cursor: coordinate(7, 5),
@@ -4398,7 +4749,7 @@ mod tests {
             },
         );
         assert_eq!(
-            editor_keyboard_control_actions(&shift_left, &snapshot, true, false),
+            editor_keyboard_control_actions(&shift_left, &snapshot, true, false, false),
             vec![DesktopAction::SetSelection {
                 buffer_id: Some(BufferId(1)),
                 range: ProtocolTextRange {
@@ -4421,7 +4772,7 @@ mod tests {
         );
 
         assert_eq!(
-            editor_keyboard_control_actions(&command_a, &snapshot, true, false),
+            editor_keyboard_control_actions(&command_a, &snapshot, true, false, false),
             vec![DesktopAction::SelectAll {
                 buffer_id: Some(BufferId(1)),
             }]
@@ -4434,7 +4785,7 @@ mod tests {
 
         let page_up = input_state_for_key(egui::Key::PageUp, egui::Modifiers::default());
         assert_eq!(
-            editor_keyboard_control_actions(&page_up, &snapshot, true, false),
+            editor_keyboard_control_actions(&page_up, &snapshot, true, false, false),
             vec![DesktopAction::SetViewportScroll {
                 buffer_id: Some(BufferId(1)),
                 scroll: ViewportScroll {
@@ -4446,7 +4797,7 @@ mod tests {
 
         let page_down = input_state_for_key(egui::Key::PageDown, egui::Modifiers::default());
         assert_eq!(
-            editor_keyboard_control_actions(&page_down, &snapshot, true, false),
+            editor_keyboard_control_actions(&page_down, &snapshot, true, false, false),
             vec![DesktopAction::SetViewportScroll {
                 buffer_id: Some(BufferId(1)),
                 scroll: ViewportScroll {
@@ -4454,6 +4805,82 @@ mod tests {
                     left_column: 0,
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn editor_keyboard_control_actions_synthesizes_backspace_delete_and_enter() {
+        let mut snapshot = snapshot_with_active_buffer();
+        snapshot.active_buffer_projection.small_buffer_preview = Some("ab\nc".to_string());
+        snapshot.active_buffer_projection.viewport = Some(legion_protocol::ViewportProjection {
+            workspace_id: legion_protocol::WorkspaceId(1),
+            buffer_id: BufferId(1),
+            file_id: Some(FileId(1)),
+            snapshot_id: legion_protocol::SnapshotId(1),
+            buffer_version: legion_protocol::BufferVersion(1),
+            visible_range: ProtocolTextRange {
+                start: coordinate(0, 0),
+                end: coordinate(1, 1),
+            },
+            selections: vec![],
+            cursor: TextCoordinate {
+                line: 0,
+                character: 2,
+                byte_offset: Some(2),
+                utf16_offset: Some(2),
+            },
+            cursors: vec![],
+            scroll: ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: legion_protocol::ViewportDimensions {
+                width_px: 800,
+                height_px: 600,
+            },
+            line_wrapping_policy: legion_protocol::LineWrappingPolicy::Off,
+            wrap_column: None,
+            mode: legion_protocol::ViewportProjectionMode::default(),
+            line_slices: vec![],
+            line_metrics: vec![],
+            decoration_spans: vec![],
+            fold_ranges: vec![],
+            semantic_token_overlays: vec![],
+            large_file_status: None,
+            schema_version: 1,
+        });
+
+        let backspace = input_state_for_key(egui::Key::Backspace, egui::Modifiers::default());
+        assert!(matches!(
+            editor_keyboard_control_actions(&backspace, &snapshot, true, false, false).as_slice(),
+            [DesktopAction::DeleteRange { range }]
+                if range.end.byte_offset == Some(2) && range.start.byte_offset == Some(1)
+        ));
+
+        let delete = input_state_for_key(egui::Key::Delete, egui::Modifiers::default());
+        assert!(matches!(
+            editor_keyboard_control_actions(&delete, &snapshot, true, false, false).as_slice(),
+            [DesktopAction::DeleteRange { range }]
+                if range.start.byte_offset == Some(2) && range.end.byte_offset == Some(3)
+        ));
+
+        let enter = input_state_for_key(egui::Key::Enter, egui::Modifiers::default());
+        assert_eq!(
+            editor_keyboard_control_actions(&enter, &snapshot, true, false, false),
+            vec![DesktopAction::InsertText {
+                text: "\n".to_string(),
+                at: TextCoordinate {
+                    line: 0,
+                    character: 2,
+                    byte_offset: Some(2),
+                    utf16_offset: Some(2),
+                },
+            }]
+        );
+
+        // Completion popup owns Enter.
+        assert!(
+            editor_keyboard_control_actions(&enter, &snapshot, true, false, true).is_empty()
         );
     }
 

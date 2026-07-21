@@ -123,6 +123,48 @@ pub fn provider_secret_reference(provider_id: &str, secret_name: &str) -> Secret
     )
 }
 
+/// Canonical secret name used when **storing** a BYOK API key for a provider.
+///
+/// Desktop `SetProviderApiKey` writes this name; loaders should also accept
+/// env-style aliases via [`provider_api_key_secret_names`].
+pub fn provider_api_key_secret_name(_provider_id: &str) -> &'static str {
+    "api_key"
+}
+
+/// Secret names to try when **loading** a BYOK API key for a provider.
+///
+/// Includes the store name (`api_key`) plus common env-style aliases so keys
+/// written by older builds or operator docs still resolve.
+pub fn provider_api_key_secret_names(provider_id: &str) -> &'static [&'static str] {
+    match provider_id {
+        "anthropic" => &["api_key", "ANTHROPIC_API_KEY"],
+        "openai" => &["api_key", "OPENAI_API_KEY"],
+        "ollama" => &["api_key", "OLLAMA_API_KEY"],
+        _ => &["api_key"],
+    }
+}
+
+/// Primary keyring reference used when storing a provider API key.
+pub fn provider_api_key_reference(provider_id: &str) -> SecretReference {
+    provider_secret_reference(provider_id, provider_api_key_secret_name(provider_id))
+}
+
+/// Load a provider API key from a secret store, trying store + env-style aliases.
+pub fn load_provider_api_key(
+    store: &dyn SecretStore,
+    provider_id: &str,
+) -> Result<Option<String>, SecretStoreError> {
+    for secret_name in provider_api_key_secret_names(provider_id) {
+        let reference = provider_secret_reference(provider_id, secret_name);
+        if let Some(value) = store.load(&reference)?
+            && !value.trim().is_empty()
+        {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 fn keyring_error(error: keyring::Error) -> SecretStoreError {
     SecretStoreError::KeyringFailure {
         message: error.to_string(),
@@ -162,5 +204,31 @@ mod tests {
         );
         store.delete(&reference).unwrap();
         assert_eq!(store.load(&reference).unwrap(), None);
+    }
+
+    #[test]
+    fn load_provider_api_key_accepts_store_name_and_env_alias() {
+        let store = InMemorySecretStore::default();
+        // Primary store path used by desktop SetProviderApiKey.
+        store
+            .store(&provider_api_key_reference("anthropic"), "from-api-key")
+            .unwrap();
+        assert_eq!(
+            load_provider_api_key(&store, "anthropic").unwrap().as_deref(),
+            Some("from-api-key")
+        );
+
+        let store = InMemorySecretStore::default();
+        // Legacy / env-style account name still resolves.
+        store
+            .store(
+                &provider_secret_reference("anthropic", "ANTHROPIC_API_KEY"),
+                "from-env-name",
+            )
+            .unwrap();
+        assert_eq!(
+            load_provider_api_key(&store, "anthropic").unwrap().as_deref(),
+            Some("from-env-name")
+        );
     }
 }

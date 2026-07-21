@@ -13,7 +13,8 @@ pub mod secrets;
 
 pub use secrets::{
     InMemorySecretStore, OsKeyringSecretStore, PROVIDER_SECRET_SERVICE, SecretReference,
-    SecretStore, SecretStoreError, provider_secret_reference,
+    SecretStore, SecretStoreError, load_provider_api_key, provider_api_key_reference,
+    provider_api_key_secret_name, provider_api_key_secret_names, provider_secret_reference,
 };
 
 /// Durable checkpoint store for workspace-level file-mutation rollback.
@@ -1030,23 +1031,18 @@ impl Clone for InMemoryStorage {
     }
 }
 
-// TODO(PKT-CKPT I4): `InMemoryStorageRepositoryPort` stores proposal audit records in
-// memory only — they are lost when the process restarts.  Task 4 of PKT-CKPT requires
-// making this storage durable using the same `local_history` pattern as `CheckpointStore`.
-// Concrete follow-up plan:
-//   1. Add `base_dir: Option<PathBuf>` to `InMemoryStorageRepositoryPort`.
-//   2. When set, `SaveProposalAuditRecord` writes blobs to
-//      `.legion/proposal-audit/<id>.json` via the same atomic-write helper used by
-//      `CheckpointStore`.
-//   3. On construction with `base_dir`, replay existing records from that directory.
-//   4. Omitting `base_dir` (current default) leaves behaviour unchanged — no disk I/O,
-//      all tests continue to work without a temp directory.
-// Risk: schema migration when the audit record format evolves; version the blobs.
-#[derive(Debug, Default)]
 /// Mutex-backed protocol repository adapter for [`InMemoryStorage`].
+///
+/// When constructed with [`Self::with_base_dir`] / [`Self::with_event_sink_and_base_dir`],
+/// proposal audit records are also persisted under
+/// `<base_dir>/proposal-audit/<proposal_id>.json` (atomic rename) and reloaded on open.
+/// Omitting `base_dir` keeps purely in-memory behavior for tests.
+#[derive(Debug, Default)]
 pub struct InMemoryStorageRepositoryPort {
     storage: Mutex<InMemoryStorage>,
     event_sink: SharedEventSink,
+    /// Optional workspace-local `.legion/` root for durable proposal audit blobs.
+    base_dir: Option<PathBuf>,
     fail_next_proposal_audit_write: AtomicBool,
     fail_next_event_metadata_write: AtomicBool,
     fail_next_plan_revision_write: AtomicBool,
@@ -1063,6 +1059,7 @@ impl InMemoryStorageRepositoryPort {
         Self {
             storage: Mutex::new(storage),
             event_sink: SharedEventSink::default(),
+            base_dir: None,
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
@@ -1074,6 +1071,7 @@ impl InMemoryStorageRepositoryPort {
         Self {
             storage: Mutex::new(InMemoryStorage::new()),
             event_sink,
+            base_dir: None,
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
@@ -1088,10 +1086,93 @@ impl InMemoryStorageRepositoryPort {
         Self {
             storage: Mutex::new(storage),
             event_sink,
+            base_dir: None,
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
         }
+    }
+
+    /// Construct with workspace-local durability under `base_dir` (typically `.legion/`).
+    ///
+    /// Loads any existing proposal audit JSON blobs from
+    /// `base_dir/proposal-audit/` into the in-memory map.
+    pub fn with_base_dir(base_dir: impl AsRef<Path>) -> Self {
+        Self::with_event_sink_and_base_dir(SharedEventSink::default(), base_dir)
+    }
+
+    /// Construct with an event sink and workspace-local durability directory.
+    pub fn with_event_sink_and_base_dir(
+        event_sink: SharedEventSink,
+        base_dir: impl AsRef<Path>,
+    ) -> Self {
+        let base_dir = base_dir.as_ref().to_path_buf();
+        let mut port = Self {
+            storage: Mutex::new(InMemoryStorage::new()),
+            event_sink,
+            base_dir: Some(base_dir),
+            fail_next_proposal_audit_write: AtomicBool::new(false),
+            fail_next_event_metadata_write: AtomicBool::new(false),
+            fail_next_plan_revision_write: AtomicBool::new(false),
+        };
+        port.load_proposal_audit_from_disk();
+        port
+    }
+
+    /// Enable durability under `base_dir` on an existing port (loads existing blobs).
+    pub fn enable_base_dir(&mut self, base_dir: impl AsRef<Path>) {
+        self.base_dir = Some(base_dir.as_ref().to_path_buf());
+        self.load_proposal_audit_from_disk();
+    }
+
+    fn proposal_audit_dir(&self) -> Option<PathBuf> {
+        self.base_dir
+            .as_ref()
+            .map(|base| base.join("proposal-audit"))
+    }
+
+    fn load_proposal_audit_from_disk(&mut self) {
+        let Some(dir) = self.proposal_audit_dir() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let Ok(mut storage) = self.storage.lock() else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(&path)
+                && let Ok(record) = serde_json::from_slice::<ProposalAuditRecord>(&bytes)
+            {
+                storage
+                    .protocol_proposal_audit
+                    .insert(record.proposal_id, record);
+            }
+        }
+    }
+
+    fn persist_proposal_audit(&self, record: &ProposalAuditRecord) -> Result<(), ProtocolError> {
+        let Some(dir) = self.proposal_audit_dir() else {
+            return Ok(());
+        };
+        fs::create_dir_all(&dir).map_err(|err| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("create proposal-audit directory failed: {err}"),
+        })?;
+        let path = dir.join(format!("{}.json", record.proposal_id.0));
+        let body = serde_json::to_vec_pretty(record).map_err(|err| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize proposal audit failed: {err}"),
+        })?;
+        atomic_write_bytes(&path, &body).map_err(|err| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("write proposal audit failed: {err}"),
+        })
     }
 
     /// Cause the next proposal-audit write to fail for fail-closed integration tests.
@@ -1214,6 +1295,11 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected proposal audit write failure".to_string(),
             });
         }
+        // Capture proposal audit for durable write before moving into the lock path.
+        let durable_audit = match &request {
+            StorageRepositoryRequest::SaveProposalAuditRecord(record) => Some(record.clone()),
+            _ => None,
+        };
         if matches!(request, StorageRepositoryRequest::SaveEventMetadata(_))
             && self
                 .fail_next_event_metadata_write
@@ -1225,10 +1311,46 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
             });
         }
         let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
-        storage
+        let response = storage
             .handle_protocol_request(request)
-            .map_err(InMemoryStorage::protocol_error)
+            .map_err(InMemoryStorage::protocol_error)?;
+        drop(storage);
+        if let Some(record) = durable_audit {
+            self.persist_proposal_audit(&record)?;
+        }
+        Ok(response)
     }
+}
+
+fn atomic_write_bytes(dest: &Path, body: &[u8]) -> Result<(), String> {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| format!("create parent failed: {err}"))?;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = parent.join(format!(
+        ".proposal-audit-tmp-{}-{}.tmp",
+        std::process::id(),
+        suffix
+    ));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|err| format!("create temp failed: {err}"))?;
+        file.write_all(body)
+            .map_err(|err| format!("write temp failed: {err}"))?;
+        file.flush()
+            .map_err(|err| format!("flush temp failed: {err}"))?;
+        drop(file);
+        fs::rename(&temp, dest).map_err(|err| format!("rename temp failed: {err}"))
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result
 }
 
 impl TryFrom<PersistedState> for InMemoryStorage {
@@ -1706,6 +1828,8 @@ impl InMemoryStorage {
             StorageRepositoryRequest::SaveProposalAuditRecord(record) => {
                 Self::validate_audit_record(&record)?;
                 let key = record.proposal_id;
+                // Durability is handled by the port wrapper after this method returns
+                // when `base_dir` is configured (see `InMemoryStorageRepositoryPort::handle`).
                 self.protocol_proposal_audit.insert(key, record);
                 Ok(Self::protocol_saved(format!("proposal_audit:{key:?}")))
             }

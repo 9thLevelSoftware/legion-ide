@@ -101,6 +101,15 @@ pub(crate) fn rows(snapshot: &ShellProjectionSnapshot, state: SandboxPanelState)
                     .into_iter()
                     .map(|caveat| format!("sandbox caveat: {caveat}")),
             );
+            // Surface live spawn enforcement lines if the delegated projection
+            // recorded them (tool host appends "sandbox live enforcement: …").
+            for disclaimer in &snapshot.delegated_task_projection.plan_only_disclaimers {
+                if disclaimer.contains("sandbox live enforcement")
+                    || disclaimer.starts_with("sandbox live enforcement")
+                {
+                    rows.push(format!("sandbox runtime: {disclaimer}"));
+                }
+            }
             rows.push(activation_state_row(activation));
         }
     }
@@ -162,30 +171,40 @@ fn host_profile_summary() -> SandboxProfileSummary {
     #[cfg(target_os = "linux")]
     {
         let profile = LandlockProfile::compile(scope);
+        let mut caveats: Vec<String> = profile
+            .profile
+            .notes
+            .into_iter()
+            .chain(profile.notes)
+            .collect();
+        caveats.push(
+            "network egress not enforced (landlock-network-not-implemented); FS-write rules only"
+                .to_string(),
+        );
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
-            caveats: profile
-                .profile
-                .notes
-                .into_iter()
-                .chain(profile.notes)
-                .collect(),
+            caveats,
         };
     }
 
     #[cfg(target_os = "windows")]
     {
         let profile = WindowsProfile::compile(scope).expect("windows sandbox profile compiles");
+        let mut caveats: Vec<String> = profile
+            .profile
+            .notes
+            .into_iter()
+            .chain(profile.notes)
+            .collect();
+        caveats.push(
+            "Windows sandbox enforces process lifetime (job kill-on-close); filesystem and network scope are not fully enforced"
+                .to_string(),
+        );
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
-            caveats: profile
-                .profile
-                .notes
-                .into_iter()
-                .chain(profile.notes)
-                .collect(),
+            caveats,
         };
     }
 
@@ -214,8 +233,10 @@ fn sandbox_backend_label(backend: &SandboxBackend) -> String {
 fn sandbox_strength_label(backend: &SandboxBackend) -> &'static str {
     match backend {
         SandboxBackend::Seatbelt => "os-enforced",
-        SandboxBackend::BubblewrapLandlock => "os-enforced",
-        SandboxBackend::RestrictedToken => "process-isolated",
+        // Landlock path is FS-write scoped; network egress is not enforced in this build.
+        SandboxBackend::BubblewrapLandlock => "os-enforced-fs-write-only",
+        // Windows RestrictedToken/job path enforces process lifetime; FS/network not fully enforced.
+        SandboxBackend::RestrictedToken => "process-lifetime-only",
         SandboxBackend::AppContainer => "os-enforced",
         SandboxBackend::DocumentedFallback { .. } => "fallback",
     }
@@ -262,8 +283,7 @@ mod tests {
 
     /// Verify that `sandbox_strength_label` never returns "strong" for any
     /// `SandboxBackend` variant — "strong" was dishonest before PKT-SANDBOX
-    /// enforcement landed. Now that enforcement is real the labels must be
-    /// accurate: "os-enforced", "process-isolated", or "fallback".
+    /// enforcement landed. Labels must stay honest about partial enforcement.
     #[test]
     fn sandbox_strength_label_never_returns_strong() {
         let backends = [
@@ -289,7 +309,7 @@ mod tests {
         }
     }
 
-    /// Verify honest labels per backend post-PKT-SANDBOX.
+    /// Verify honest labels per backend (Tier 0: partial-enforcement caveats).
     #[test]
     fn sandbox_strength_label_returns_honest_labels() {
         assert_eq!(
@@ -298,11 +318,11 @@ mod tests {
         );
         assert_eq!(
             sandbox_strength_label(&SandboxBackend::BubblewrapLandlock),
-            "os-enforced"
+            "os-enforced-fs-write-only"
         );
         assert_eq!(
             sandbox_strength_label(&SandboxBackend::RestrictedToken),
-            "process-isolated"
+            "process-lifetime-only"
         );
         assert_eq!(
             sandbox_strength_label(&SandboxBackend::AppContainer),
@@ -374,6 +394,8 @@ mod tests {
         assert!(
             all_output.contains("os-enforced")
                 || all_output.contains("process-isolated")
+                || all_output.contains("process-lifetime-only")
+                || all_output.contains("fs-write-only")
                 || all_output.contains("fallback"),
             "rows() output should contain an honest enforcement label, got: {all_output}",
         );

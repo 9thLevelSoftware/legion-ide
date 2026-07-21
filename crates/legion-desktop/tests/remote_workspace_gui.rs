@@ -356,7 +356,8 @@ fn remote_workspace_gui_workflow_reports_connect_without_local_mutation() {
             session_id: RemoteWorkspaceSessionId(7001),
             status: DesktopRemoteStatus::Connected,
             ref message,
-        } if message.contains("Remote workspace connected")
+        } if message.contains("Remote fixture session active")
+            && message.contains("PR-ENT-001 deferred")
     ));
 
     let snapshot = runtime.projection_snapshot();

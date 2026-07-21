@@ -547,6 +547,14 @@ impl ProviderRegistry {
 }
 
 /// Policy-bound router for Phase 4 provider invocation.
+///
+/// **Honesty note (B6):** [`ProviderRouter::route_completion`] is intentionally
+/// **metadata-only**. It may invoke a registered provider for policy/health
+/// checks, but the public route response carries only fingerprints / byte counts
+/// in `output_labels` — never raw completion text (`AssistedAiProviderRouteResponse`
+/// is redaction-safe by protocol contract). Product surfaces that need model
+/// prose (Assist proposals, Delegate chat, inline ghost text) must call a
+/// concrete provider client and map text at the composition edge.
 pub struct ProviderRouter<'a> {
     registry: &'a ProviderRegistry,
     capability_broker: &'a dyn CapabilityBrokerPort,
@@ -565,6 +573,9 @@ impl<'a> ProviderRouter<'a> {
     }
 
     /// Routes a metadata-only provider request through policy before invoking a provider.
+    ///
+    /// Successful responses do **not** include completion body text — only bounded
+    /// `output_labels` (fingerprint, byte length). See the type-level honesty note.
     pub fn route_completion(
         &self,
         request: AssistedAiProviderRouteRequest,

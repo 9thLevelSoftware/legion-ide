@@ -498,6 +498,8 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     .expect("workspace should open");
     app.open_file("lib.rs").expect("fixture file should open");
     app.set_product_mode(AppProductMode::Delegate);
+    // Keep offline/sync fixture path so CI does not depend on Ollama/BYOK.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
 
     let outcome = app
         .send_delegate_chat("explain delegated_marker")
@@ -732,10 +734,7 @@ fn app_delegated_tool_host_runs_echo_command() {
     use legion_agent::agent_loop::DelegatedToolHost;
 
     let tmp = temp_workspace("tool-host-echo");
-    let host = AppDelegatedToolHost {
-        worktree_root: tmp.root.clone(),
-        allowed_egress: std::collections::BTreeSet::new(),
-    };
+    let host = AppDelegatedToolHost::new(tmp.root.clone(), std::collections::BTreeSet::new());
 
     let output = host
         .run_terminal_command("echo hello", None, None)
@@ -744,6 +743,15 @@ fn app_delegated_tool_host_runs_echo_command() {
     assert!(
         output.contains("hello"),
         "output should contain 'hello'; got: {output}"
+    );
+    assert!(
+        output.contains("sandbox live enforcement:"),
+        "tool host must surface live SandboxEnforcementReport; got: {output}"
+    );
+    assert!(
+        host.last_enforcement_summary()
+            .is_some_and(|s| s.contains("sandbox live enforcement:")),
+        "last_enforcement_summary must be populated after spawn"
     );
 }
 

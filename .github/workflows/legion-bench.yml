@@ -1,5 +1,10 @@
 name: Legion Bench Recorded
 
+# Recorded mode does NOT open fixture repos or run agents. Task scores are
+# synthetic budget arithmetic (scoring_mode=synthetic_budget_arithmetic in the
+# report). This workflow proves report shape + verifier integrity, not product
+# agent quality. Live provider mode is future M13 scope.
+
 on:
   schedule:
     - cron: "0 6 * * 1"
@@ -7,7 +12,7 @@ on:
 
 jobs:
   recorded:
-    name: Legion bench recorded weekly (${{ matrix.os }})
+    name: Legion bench recorded weekly (synthetic scoring) (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -25,10 +30,10 @@ jobs:
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
-      - name: Legion bench recorded mode
+      - name: Legion bench recorded mode (synthetic scores)
         run: cargo run -p xtask -- legion-bench --mode recorded
 
-      - name: Legion bench verify
+      - name: Legion bench verify (report integrity, not agent behavior)
         run: cargo run -p xtask -- verify-legion-bench
 
       - name: Upload legion bench report

@@ -551,6 +551,8 @@ struct RuntimeSession {
     /// Wall-clock deadline derived from the launch policy `timeout_seconds`.
     /// `None` only when the configured timeout would overflow the clock.
     deadline: Option<Instant>,
+    /// Idle window used to refresh [`Self::deadline`] when interactive input arrives.
+    idle_timeout: Duration,
     /// Set under the registry lock before an irreversible close/kill backend
     /// call so concurrent lifecycle operations fail closed instead of acting on
     /// a session that is being torn down.
@@ -626,8 +628,8 @@ impl<P: PtyService> TerminalRuntime<P> {
             .policy
             .output_byte_limit
             .min(self.config.max_output_bytes);
-        let deadline =
-            Instant::now().checked_add(Duration::from_secs(request.policy.timeout_seconds));
+        let idle_timeout = Duration::from_secs(request.policy.timeout_seconds.max(1));
+        let deadline = Instant::now().checked_add(idle_timeout);
         let session = self
             .pty
             .spawn_pty(&PtyRequest {
@@ -670,6 +672,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                         causality_id,
                         output_byte_limit: effective_limit,
                         deadline,
+                        idle_timeout,
                         closing: false,
                         metadata,
                     },
@@ -735,6 +738,14 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
+        // Tier 1 A8: activity extends the wall-clock idle deadline so interactive
+        // sessions are not killed after a single non-refreshed launch window.
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(&input.session_id)
+        {
+            let extend = session.idle_timeout;
+            session.deadline = Instant::now().checked_add(extend);
+        }
         self.audit_record(
             input.session_id,
             TerminalRuntimeState::Running,
