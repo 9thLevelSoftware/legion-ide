@@ -25,6 +25,7 @@ fn shell_carries_debug_projection_and_routes_debug_commands_without_authority() 
         },
         active_session_id: Some(session_id.clone()),
         session_state: Some(DebugSessionState::Paused),
+        live_adapter: false,
         configurations: vec![DebugConfigurationProjection {
             configuration_id: DebugConfigurationId("cargo:sample:bin:sample".to_string()),
             name: "Debug sample".to_string(),

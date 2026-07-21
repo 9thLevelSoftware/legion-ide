@@ -2,17 +2,20 @@
 
 #![warn(missing_docs)]
 
+/// Live adapter binary resolution (env + PATH + optional fake).
+pub mod adapter_resolve;
 /// DAP client runtime and metadata projections (fixture path by default).
 pub mod dap;
 /// Evidence projection helpers for debug adapter and test run artifacts.
 pub mod evidence;
 /// DAP stdio JSON-RPC framing (Content-Length).
 pub mod framing;
-/// Live adapter process session (B1 scaffold; CI fake adapter).
+/// Live adapter process session (B1/B2; CI fake adapter).
 pub mod live_session;
 /// DAP lifecycle state model.
 pub mod state;
 
+pub use adapter_resolve::{DapMode, ResolvedAdapter, resolve_live_adapter};
 pub use dap::{DapClientConfig, DapClientError, DapClientOutcome, DapClientRuntime};
 pub use evidence::{
     EvidenceProjectionError, debug_adapter_audit_evidence, debug_adapter_audit_summary,

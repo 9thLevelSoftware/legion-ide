@@ -80,7 +80,8 @@ required-features = ["ai"]
 [[bin]]
 name = "golden_path_4"
 path = "src/bin/golden_path_4.rs"
-required-features = ["ai"]
+# Needs inject_cancellation_flag_for_test (test-helpers) plus AI composition.
+required-features = ["ai", "test-helpers"]
 
 [dev-dependencies]
 tempfile = "3"

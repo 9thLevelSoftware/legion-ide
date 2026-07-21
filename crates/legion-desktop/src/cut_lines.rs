@@ -31,6 +31,9 @@ pub const DEBUG_FIXTURE_ENABLED: &str =
 /// Short banner for debug panels when only the fixture is available.
 pub const DEBUG_SIMULATED_BANNER: &str = "Debugger is simulated in this build";
 
+/// Banner when a live DAP adapter process is connected (B3 dual-mode honesty).
+pub const DEBUG_LIVE_BANNER: &str = "Debugger connected to a live adapter process";
+
 /// Prefix for plugin management rows that cannot execute WASM in product composition.
 pub const PLUGIN_EXECUTION_UNAVAILABLE: &str = "execution=not-available";
 

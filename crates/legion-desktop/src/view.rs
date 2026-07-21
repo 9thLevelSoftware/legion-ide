@@ -7743,10 +7743,14 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !debug.inline_values.is_empty()
         || !debug.diagnostics.is_empty()
     {
-        // Honest cut line: product composition uses a simulated DAP client only.
+        // Dual-mode honesty: live adapter vs simulated fixture (WS-A-D B3).
         rows.push(format!(
             "debug: {}",
-            crate::cut_lines::DEBUG_SIMULATED_BANNER
+            if debug.live_adapter {
+                crate::cut_lines::DEBUG_LIVE_BANNER
+            } else {
+                crate::cut_lines::DEBUG_SIMULATED_BANNER
+            }
         ));
         rows.push(format!(
             "debug: status={:?} session={:?} state={:?} configs={} breakpoints={} frames={} variables={} watches={} console={} inline={} note={}",

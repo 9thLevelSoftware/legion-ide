@@ -1359,6 +1359,17 @@ impl DesktopRuntime {
             .expect("debug fixture projection refresh should succeed");
     }
 
+    /// Prefer live DAP via in-tree fake adapter (WS-A-D B3 tests).
+    pub fn enable_debug_live_fake_for_tests(&mut self) {
+        self.app.enable_debug_live_fake_for_tests();
+        self.set_status(
+            StatusSeverity::Info,
+            "Debug live fake adapter enabled for tests",
+        );
+        self.refresh_projection()
+            .expect("debug live fake projection refresh should succeed");
+    }
+
     /// Seed delegated task plan contracts for projection-only command-center harnesses.
     pub fn seed_delegated_task_plan_contracts(
         &mut self,
