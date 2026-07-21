@@ -2069,13 +2069,7 @@ impl WatcherService for NativeWatcherService {
         // backend yet); overflow fails closed like the previous shallow path.
         let mut events = Vec::new();
         let mut sequence = 0u64;
-        walk_watcher_tree(
-            workspace_id,
-            path,
-            0,
-            &mut events,
-            &mut sequence,
-        )?;
+        walk_watcher_tree(workspace_id, path, 0, &mut events, &mut sequence)?;
         Ok(events)
     }
 }

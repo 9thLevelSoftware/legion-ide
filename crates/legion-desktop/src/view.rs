@@ -14,6 +14,8 @@ pub mod fleet_board;
 pub mod fleet_card;
 /// Inline edit diff overlay view model and per-hunk accept/reject helpers (PKT-INLINE).
 pub mod inline_edit;
+/// Interactive text fields (terminal input, BYOK) outside the code-canvas gate.
+mod interactive_fields;
 /// Pre-invocation context manifest panel with per-item exclusion toggles.
 pub mod manifest_panel;
 /// Editable plan editor projection.
@@ -28,8 +30,6 @@ pub mod sandbox_panel;
 pub mod scope_picker;
 /// Terminal panel render-model helpers.
 pub mod terminal_panel;
-/// Interactive text fields (terminal input, BYOK) outside the code-canvas gate.
-mod interactive_fields;
 /// Worker panel view model and renderer for active delegated task monitoring.
 pub mod worker_panel;
 

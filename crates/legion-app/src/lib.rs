@@ -125,12 +125,12 @@ use legion_protocol::{
     FileConflictReason, FileConflictState, FileContentVersion, FileFingerprint, FileId,
     FileIdentity, FileKind, FileTreeNode, INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES,
     InlinePredictionAcceptanceId, InlinePredictionDismissalId, InlinePredictionFingerprintMetadata,
-    InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
-    InlinePredictionLifecycleAction, InlinePredictionLifecycleCommand, InlinePredictionProjection,
-    InlinePredictionGhostText, InlinePredictionProviderMetadata, InlinePredictionRequestId,
-    InlinePredictionRequestMetadata, InlinePredictionResult, InlinePredictionResultId,
-    InlinePredictionResultState, InlinePredictionRetention, InlinePredictionStaleReason,
-    InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
+    InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionGhostText,
+    InlinePredictionLatencyMetadata, InlinePredictionLifecycleAction,
+    InlinePredictionLifecycleCommand, InlinePredictionProjection, InlinePredictionProviderMetadata,
+    InlinePredictionRequestId, InlinePredictionRequestMetadata, InlinePredictionResult,
+    InlinePredictionResultId, InlinePredictionResultState, InlinePredictionRetention,
+    InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
     LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
@@ -198,11 +198,12 @@ use legion_security::{
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, OsKeyringSecretStore,
-    PaletteUsageRepository, load_provider_api_key,
+    PaletteUsageRepository,
     checkpoint::{
         CHECKPOINT_SCHEMA_VERSION, CheckpointStore, CheckpointTarget, CheckpointTargetKind,
         DurableCheckpoint,
     },
+    load_provider_api_key,
     plan::PlanRevisionLedger,
 };
 use legion_terminal::{
@@ -1153,8 +1154,8 @@ fn ollama_loopback_reachable() -> bool {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let base = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let base =
+        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
     let trimmed = base
         .trim()
         .trim_start_matches("http://")
@@ -1394,7 +1395,10 @@ fn resolve_assisted_edit_proposal_text(
     buffer_excerpt: &str,
     file_path: &str,
     on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (AssistedEditProposalSource, Option<ProductAiStreamProjection>) {
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
     let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
 Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
 no markdown fences, no explanation.";
@@ -1438,7 +1442,10 @@ fn resolve_assisted_edit_proposal_text(
     _buffer_excerpt: &str,
     _file_path: &str,
     _on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (AssistedEditProposalSource, Option<ProductAiStreamProjection>) {
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
     (deterministic_assisted_edit_proposal(), None)
 }
 
@@ -1814,10 +1821,7 @@ pub struct AppDelegatedToolHost {
 #[cfg(feature = "ai")]
 impl AppDelegatedToolHost {
     /// Construct a tool host with a fresh shared enforcement slot.
-    pub fn new(
-        worktree_root: PathBuf,
-        allowed_egress: std::collections::BTreeSet<String>,
-    ) -> Self {
+    pub fn new(worktree_root: PathBuf, allowed_egress: std::collections::BTreeSet<String>) -> Self {
         Self {
             worktree_root,
             allowed_egress,
@@ -19131,10 +19135,8 @@ impl AppComposition {
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
 
         // Build the tool host backed by `spawn_sandboxed`.
-        let tool_host = AppDelegatedToolHost::new(
-            sandbox_path.clone(),
-            std::collections::BTreeSet::new(),
-        );
+        let tool_host =
+            AppDelegatedToolHost::new(sandbox_path.clone(), std::collections::BTreeSet::new());
 
         // Audit sink that collects step records.
         struct VecAuditSink {
@@ -20332,10 +20334,8 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
-        let tool_host = AppDelegatedToolHost::new(
-            sandbox_path.clone(),
-            std::collections::BTreeSet::new(),
-        );
+        let tool_host =
+            AppDelegatedToolHost::new(sandbox_path.clone(), std::collections::BTreeSet::new());
 
         let scope = self.legion_workflow_worker_scope();
         let config = legion_agent::agent_loop::DelegatedTaskLoopConfig {
@@ -23064,14 +23064,15 @@ impl AppComposition {
         let text = self.editor.text(buffer_id)?;
         let Some((start, end)) = byte_bounds_for_protocol_range(text, selection) else {
             // Fall back to line/character bounds when byte offsets are missing.
-            let start = line_char_to_byte_offset(text, selection.start.line, selection.start.character)
-                .ok_or(EditorError::InvalidEdit(
-                    "clipboard selection requires resolvable coordinates",
-                ))?;
+            let start =
+                line_char_to_byte_offset(text, selection.start.line, selection.start.character)
+                    .ok_or(EditorError::InvalidEdit(
+                        "clipboard selection requires resolvable coordinates",
+                    ))?;
             let end = line_char_to_byte_offset(text, selection.end.line, selection.end.character)
                 .ok_or(EditorError::InvalidEdit(
-                    "clipboard selection requires resolvable coordinates",
-                ))?;
+                "clipboard selection requires resolvable coordinates",
+            ))?;
             if start >= end {
                 return Ok(None);
             }
@@ -23084,7 +23085,10 @@ impl AppComposition {
     }
 
     /// Full buffer text for desktop input synthesis (Backspace/Delete/Enter ranges).
-    pub fn buffer_text_for_input(&self, buffer_id: BufferId) -> Result<String, AppCompositionError> {
+    pub fn buffer_text_for_input(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<String, AppCompositionError> {
         self.active_documents.ensure_active_buffer(buffer_id)?;
         Ok(self.editor.text(buffer_id)?.to_string())
     }
@@ -24921,9 +24925,11 @@ impl AppComposition {
             .chars()
             .take(2_000)
             .collect::<String>();
-        if let Some(live) =
-            try_live_product_inline_prediction(self.preferred_ai_provider, &metadata, &buffer_excerpt)
-        {
+        if let Some(live) = try_live_product_inline_prediction(
+            self.preferred_ai_provider,
+            &metadata,
+            &buffer_excerpt,
+        ) {
             return Ok(live);
         }
 

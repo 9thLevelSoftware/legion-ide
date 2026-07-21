@@ -606,8 +606,7 @@ fn score_hostile_task(task: &LegionBenchTask) -> LegionBenchTaskResult {
             notes: format!(
                 "synthetic=true scoring_mode={} hostile eval {} passed (scripted provider, integration test verified); \
                  required_cargo_test=cargo test -p legion-app --test hostile_eval_integration",
-                SCORING_MODE_SCRIPTED_HOSTILE,
-                task.id
+                SCORING_MODE_SCRIPTED_HOSTILE, task.id
             ),
         },
     }

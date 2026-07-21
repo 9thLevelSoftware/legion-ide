@@ -214,7 +214,9 @@ mod tests {
             .store(&provider_api_key_reference("anthropic"), "from-api-key")
             .unwrap();
         assert_eq!(
-            load_provider_api_key(&store, "anthropic").unwrap().as_deref(),
+            load_provider_api_key(&store, "anthropic")
+                .unwrap()
+                .as_deref(),
             Some("from-api-key")
         );
 
@@ -227,7 +229,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            load_provider_api_key(&store, "anthropic").unwrap().as_deref(),
+            load_provider_api_key(&store, "anthropic")
+                .unwrap()
+                .as_deref(),
             Some("from-env-name")
         );
     }

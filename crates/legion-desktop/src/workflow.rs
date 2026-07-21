@@ -3318,10 +3318,15 @@ impl DesktopEframeApp {
         // requiring another user gesture after launch.
         {
             let snapshot = self.runtime.projection_snapshot();
-            if snapshot.terminal_panel_projection.active_session_id.is_some() {
+            if snapshot
+                .terminal_panel_projection
+                .active_session_id
+                .is_some()
+            {
                 self.runtime
                     .dispatch_ui_action(DesktopAction::TerminalOutputPoll);
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
         // Progressive product AI stream: merge live SSE sink into projection and
@@ -4239,7 +4244,9 @@ fn delete_range_for_backspace(snapshot: &ShellProjectionSnapshot) -> Option<Prot
     })
 }
 
-fn delete_range_for_forward_delete(snapshot: &ShellProjectionSnapshot) -> Option<ProtocolTextRange> {
+fn delete_range_for_forward_delete(
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<ProtocolTextRange> {
     if let Some(selection) = projected_primary_selection(snapshot) {
         return Some(selection);
     }
@@ -4879,9 +4886,7 @@ mod tests {
         );
 
         // Completion popup owns Enter.
-        assert!(
-            editor_keyboard_control_actions(&enter, &snapshot, true, false, true).is_empty()
-        );
+        assert!(editor_keyboard_control_actions(&enter, &snapshot, true, false, true).is_empty());
     }
 
     #[test]

@@ -139,10 +139,7 @@ fn legion_bench_report_tracks_run_mode_profile() {
         xtask::legion_bench::SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
     );
     assert!(
-        recorded.tasks[0]
-            .score
-            .notes
-            .contains("synthetic=true")
+        recorded.tasks[0].score.notes.contains("synthetic=true")
             && recorded.tasks[0]
                 .score
                 .notes

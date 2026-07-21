@@ -12,8 +12,7 @@ pub fn plugin_registered_status(plugin_id: u64) -> String {
 }
 
 /// Status when the remote development runtime is policy-enabled (harness only).
-pub const REMOTE_RUNTIME_ENABLED: &str =
-    "Remote workspace runtime enabled by app policy (fixture/harness; PR-ENT-001 product UX deferred)";
+pub const REMOTE_RUNTIME_ENABLED: &str = "Remote workspace runtime enabled by app policy (fixture/harness; PR-ENT-001 product UX deferred)";
 
 /// Status when a remote workspace session is connected through the fixture harness.
 pub fn remote_fixture_session_active(
@@ -39,8 +38,7 @@ pub const PLUGIN_EXECUTION_UNAVAILABLE: &str = "execution=not-available";
 pub const DETERMINISTIC_LOCAL_PROVIDER_ID: &str = "deterministic-local";
 
 /// Label for the deterministic-local provider in UI copy.
-pub const DETERMINISTIC_PROVIDER_UI_LABEL: &str =
-    "Deterministic fixture (not a live model)";
+pub const DETERMINISTIC_PROVIDER_UI_LABEL: &str = "Deterministic fixture (not a live model)";
 
 /// Section subtitle for hardcoded sample context-pack lists.
 pub const CONTEXT_PACKS_SAMPLE_LABEL: &str = "Sample / not live inventory";
@@ -49,7 +47,9 @@ pub const CONTEXT_PACKS_SAMPLE_LABEL: &str = "Sample / not live inventory";
 pub fn provider_display_label(provider_id: &str, provider_label: &str) -> String {
     if provider_id == DETERMINISTIC_LOCAL_PROVIDER_ID
         || provider_label.eq_ignore_ascii_case("deterministic-local")
-        || provider_label.to_ascii_lowercase().contains("deterministic")
+        || provider_label
+            .to_ascii_lowercase()
+            .contains("deterministic")
     {
         DETERMINISTIC_PROVIDER_UI_LABEL.to_string()
     } else {

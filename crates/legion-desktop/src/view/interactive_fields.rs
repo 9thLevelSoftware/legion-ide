@@ -40,10 +40,7 @@ pub(crate) fn render_preferred_provider_picker(
 }
 
 /// Render the Anthropic BYOK key entry form and push store/delete actions.
-pub(crate) fn render_anthropic_byok_form(
-    ui: &mut egui::Ui,
-    actions: &mut Vec<DesktopAction>,
-) {
+pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
     ui.add_space(6.0);
     ui.label(theme::muted(
         "Anthropic BYOK — key is stored in the OS keyring only (never written to disk)",
@@ -89,10 +86,7 @@ pub(crate) fn render_anthropic_byok_form(
 }
 
 /// Render the active terminal input line; submit sends `TerminalInput`.
-pub(crate) fn render_terminal_input_line(
-    ui: &mut egui::Ui,
-    actions: &mut Vec<DesktopAction>,
-) {
+pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
     let draft_id = egui::Id::new("legion-terminal-input-draft");
     let mut draft = ui
         .ctx()
