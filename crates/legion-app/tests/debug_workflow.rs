@@ -372,18 +372,9 @@ fn debug_workflow_live_mode_fails_closed_without_adapter() {
     app.open_file(source.to_string_lossy())
         .expect("open source");
     app.enable_debug_runtime_for_tests();
-
-    // Force live mode with no LEGION_DAP_ADAPTER / USE_FAKE / test fake.
-    // SAFETY: process-wide env; this test suite is single-threaded for debug.
-    // Restore after assertion so later tests are not polluted.
-    let prev_mode = std::env::var("LEGION_DAP_MODE").ok();
-    let prev_adapter = std::env::var("LEGION_DAP_ADAPTER").ok();
-    let prev_fake = std::env::var("LEGION_DAP_USE_FAKE").ok();
-    unsafe {
-        std::env::set_var("LEGION_DAP_MODE", "live");
-        std::env::remove_var("LEGION_DAP_ADAPTER");
-        std::env::remove_var("LEGION_DAP_USE_FAKE");
-    }
+    // Instance-scoped override (not process env) so parallel cargo test threads
+    // cannot poison sibling debug_workflow cases.
+    app.set_debug_dap_mode_for_tests(legion_debug::DapMode::Live);
 
     let configs = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshDebugConfigurations)
@@ -406,21 +397,6 @@ fn debug_workflow_live_mode_fails_closed_without_adapter() {
         AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
         other => panic!("expected debug projection, got {other:?}"),
     };
-
-    unsafe {
-        match prev_mode {
-            Some(v) => std::env::set_var("LEGION_DAP_MODE", v),
-            None => std::env::remove_var("LEGION_DAP_MODE"),
-        }
-        match prev_adapter {
-            Some(v) => std::env::set_var("LEGION_DAP_ADAPTER", v),
-            None => std::env::remove_var("LEGION_DAP_ADAPTER"),
-        }
-        match prev_fake {
-            Some(v) => std::env::set_var("LEGION_DAP_USE_FAKE", v),
-            None => std::env::remove_var("LEGION_DAP_USE_FAKE"),
-        }
-    }
 
     assert_eq!(
         projection.status.kind,

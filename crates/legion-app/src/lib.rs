@@ -7727,6 +7727,8 @@ struct DebugWorkflow {
     next_watch: u64,
     /// Test seam: force live path via in-tree fake adapter when set.
     prefer_live_fake_for_tests: bool,
+    /// Test seam: override `LEGION_DAP_MODE` without process-wide env (parallel-safe).
+    dap_mode_for_tests: Option<legion_debug::DapMode>,
 }
 
 #[derive(Debug)]
@@ -7753,6 +7755,7 @@ impl Default for DebugWorkflow {
             next_sequence: 0,
             next_watch: 0,
             prefer_live_fake_for_tests: false,
+            dap_mode_for_tests: None,
         }
     }
 }
@@ -7760,6 +7763,11 @@ impl Default for DebugWorkflow {
 impl DebugWorkflow {
     fn projection(&self) -> DebugProjection {
         self.projection.clone()
+    }
+
+    fn effective_dap_mode(&self) -> legion_debug::DapMode {
+        self.dap_mode_for_tests
+            .unwrap_or_else(legion_debug::DapMode::from_env)
     }
 
     fn enable_runtime(&mut self) {
@@ -7778,6 +7786,10 @@ impl DebugWorkflow {
     fn enable_live_fake_for_tests(&mut self) {
         self.enable_runtime();
         self.prefer_live_fake_for_tests = true;
+    }
+
+    fn set_dap_mode_for_tests(&mut self, mode: legion_debug::DapMode) {
+        self.dap_mode_for_tests = Some(mode);
     }
 
     fn clear_workspace_state(&mut self) {
@@ -7937,7 +7949,7 @@ impl DebugWorkflow {
         // Live path when an adapter resolves (or tests force fake).
         // Wire is Legion provisional JSON-RPC (not Microsoft DAP); resolution
         // only opts into LEGION_DAP_ADAPTER / LEGION_DAP_USE_FAKE / test fake.
-        let mode = legion_debug::DapMode::from_env();
+        let mode = self.effective_dap_mode();
         if mode.allows_live() {
             match self.resolve_adapter_for_launch(&config.adapter_type) {
                 Some(resolved) => {
@@ -24519,6 +24531,11 @@ impl AppComposition {
     /// Prefer live DAP via the in-tree fake adapter (WS-A-D B3 tests).
     pub fn enable_debug_live_fake_for_tests(&mut self) {
         self.debug_workflow.enable_live_fake_for_tests();
+    }
+
+    /// Override DAP mode for tests without mutating process environment (parallel-safe).
+    pub fn set_debug_dap_mode_for_tests(&mut self, mode: legion_debug::DapMode) {
+        self.debug_workflow.set_dap_mode_for_tests(mode);
     }
 
     /// Return the current app-owned language tooling projection.
