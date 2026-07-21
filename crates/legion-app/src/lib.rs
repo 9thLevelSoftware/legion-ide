@@ -7950,9 +7950,7 @@ impl DebugWorkflow {
                                 ));
                             }
                             self.projection.diagnostics.push(bounded_label(
-                                format!(
-                                    "live DAP unavailable, falling back to fixture: {message}"
-                                ),
+                                format!("live DAP unavailable, falling back to fixture: {message}"),
                                 160,
                             ));
                         }
