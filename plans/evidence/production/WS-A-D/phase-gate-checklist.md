@@ -11,26 +11,26 @@ Use before starting the next phase. Standing gates remain required for every cod
 
 ## Phase 1 — Dogfood (A)
 
-- [ ] ≥3 template-complete journals under `plans/evidence/dogfood/`
+- [ ] ≥3 template-complete journals under `plans/evidence/dogfood/` (2 recorded; need interactive GUI + optional third)
 - [ ] At least one interactive GUI session (not source-review-only)
-- [ ] Floor-bug queue triaged (fixed or accepted with owner)
-- [ ] Phase 1 closeout written in `phase-1-dogfood/`
-- [ ] Go/no-go for Phase 2 recorded
+- [x] Floor-bug queue triaged (fixed or accepted with owner) — F1 fixed; K1–K3 accepted cut lines
+- [x] Phase 1 interim closeout written in `phase-1-dogfood/`
+- [x] Go/no-go for Phase 2 recorded (**go** for B0 ADR)
 
 ### Session workflow minimum (from charter)
 
 | # | Workflow | Pass? |
 |---|----------|-------|
-| 1 | Open workspace / tree / files | |
-| 2 | Edit + proposal-mediated save | |
-| 3 | Keys do not leak into BYOK/terminal | |
-| 4 | Terminal PTY | |
-| 5 | Assist proposal (fixture and/or live) | |
-| 6 | BYOK store/clear | |
-| 7 | Delegate chat stream | |
-| 8 | Git projection (if used) | |
-| 9 | Debug shows honest simulated banner (until Phase 2) | |
-| 10 | Sandbox panel matches enforcement report | |
+| 1 | Open workspace / tree / files | yes (automated/beta) |
+| 2 | Edit + proposal-mediated save | yes |
+| 3 | Keys do not leak into BYOK/terminal | yes (input_conformance) |
+| 4 | Terminal PTY | yes (app terminal_workflow) |
+| 5 | Assist proposal (fixture and/or live) | yes after F1 fix |
+| 6 | BYOK store/clear | yes (provider_key_entry) |
+| 7 | Delegate chat stream | yes (delegated_task_integration) |
+| 8 | Git projection (if used) | yes |
+| 9 | Debug shows honest simulated banner (until Phase 2) | yes |
+| 10 | Sandbox panel matches enforcement report | yes |
 
 ## Phase 2 — Real DAP (B)
 

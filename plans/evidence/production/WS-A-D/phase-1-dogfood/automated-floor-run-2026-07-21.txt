@@ -1,0 +1,167 @@
+
+=== control_trust_surfaces ===
+cargo test -p legion-app --test control_trust_surfaces -- --nocapture
+
+
+running 8 tests
+test proposal_details_selected_proposal_populates_trust_surfaces ... ok
+test proposal_lifecycle_ui_intents_route_through_app_authority ... ok
+test dirty_text_preserved_on_rejected_stale_and_conflict_outcomes ... ok
+test proposal_states_visible_after_ui_apply_rejections_and_rollback ... ok
+test assisted_ai_refusals_visible_for_untrusted_workspace ... ok
+test assisted_ai_explain_routes_metadata_only_without_proposal ... ok
+test assisted_ai_propose_is_proposal_only ... ok
+test manual_mode_rejects_assisted_ai_dispatch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+
+
+=== input_conformance ===
+cargo test -p legion-desktop --test input_conformance -- --nocapture
+
+
+running 8 tests
+test clipboard_copy_and_cut_write_os_clipboard_and_cut_mutates_buffer ... ok
+test unfocused_input_does_not_dispatch_keyboard_or_text_events ... ok
+test clipboard_input_routes_to_the_buffer_through_the_egui_context ... ok
+test keyboard_input_moves_the_cursor_through_the_real_egui_context ... ok
+test ime_input_routes_commit_text_and_preserves_the_commit_payload ... ok
+test keyboard_selection_input_updates_the_projected_selection_range ... ok
+test mouse_input_does_not_change_the_projected_buffer_text ... ok
+test keyboard_backspace_delete_and_enter_mutate_the_buffer_through_app_authority ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+
+=== sandbox_panel ===
+cargo test -p legion-desktop --test sandbox_panel -- --nocapture
+
+
+running 4 tests
+test sandbox_panel_surfaces_active_backend_and_caveats ... ok
+test sandbox_panel_shows_honest_strength_label_not_descriptor_only ... ok
+test sandbox_panel_active_state_shows_isolation_and_lease ... ok
+test sandbox_panel_no_sandbox_state_shows_not_allocated ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+
+=== debug_workflow ===
+cargo test -p legion-desktop --test debug_workflow -- --nocapture
+
+
+running 2 tests
+test desktop_debug_workflow_projects_right_and_bottom_debug_rows ... ok
+test debug_workflow_protocol_dap_server_validates_launch_step_evaluate_and_errors ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+
+
+=== provider_key_entry ===
+cargo test -p legion-desktop --test provider_key_entry -- --nocapture
+
+
+running 4 tests
+test set_provider_api_key_stores_in_keyring ... ok
+test delete_provider_api_key_removes_from_keyring ... ok
+test set_key_activates_provider ... ok
+test set_key_never_writes_to_disk ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+
+=== language_tooling_workflow ===
+cargo test -p legion-app --test language_tooling_workflow -- --nocapture
+
+
+running 8 tests
+test language_tooling_ingests_lsp_unavailable_projection_and_keeps_workspace_identity ... ok
+test language_tooling_projects_breadcrumbs_and_sticky_scopes_from_symbols ... ok
+test language_tooling_ingests_lsp_read_side_projections_and_preserves_existing_rows ... ok
+test language_tooling_ingests_lsp_diagnostic_projection_and_preserves_lexical_rows ... ok
+test language_tooling_projects_inlay_hints_and_code_lenses_from_symbols ... ok
+test language_tooling_workflow_creates_rename_preview_without_mutating_disk ... ok
+test language_tooling_projects_diagnostic_quick_fixes_and_correlates_code_action_preview ... ok
+test language_tooling_workflow_refreshes_projection_without_ui_text_ownership ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+
+
+=== delegated_task_integration_select ===
+cargo test -p legion-app --test delegated_task_integration -- --nocapture
+
+
+running 15 tests
+test execute_delegated_task_reports_missing_plan_without_error ... ok
+test execute_delegated_task_waits_for_write_permission_before_sandbox_allocation ... ok
+test execute_delegated_task_fails_closed_after_denied_permission ... ok
+test manual_mode_rejects_delegated_task_execution ... ok
+test delegate_chat_projects_rag_citations_without_raw_source_payload ... ok
+test execute_delegated_task_returns_proposal_after_explicit_write_allow ... ok
+test start_delegated_task_rejects_manual_mode ... ok
+test start_delegated_task_completes_with_scripted_end_turn ... ok
+test reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_it ... ok
+test app_delegated_tool_host_runs_echo_command ... ok
+test start_delegated_task_audit_steps_are_paired_for_tool_call ... ok
+test start_delegated_task_rejects_forbidden_path_read ... ok
+test start_delegated_task_surfaces_proposal_and_review_succeeds ... ok
+test delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk ... ok
+test execute_delegated_task_uses_acp_host_command_and_projects_comm_stream ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.83s
+
+
+
+=== workspace_vfs_conflict_sample ===
+cargo test -p legion-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict -- --nocapture
+
+
+running 1 test
+test workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.02s
+
+
+
+=== git_workflow_app ===
+cargo test -p legion-app --test git_workflow -- --nocapture
+
+
+running 7 tests
+test git_workflow_rejects_conflict_resolution_from_subdirectory_when_buffer_dirty ... ok
+test git_workflow_rejects_conflict_resolution_when_buffer_is_dirty ... ok
+test git_workflow_resolves_conflicts_through_app_authority ... ok
+test git_workflow_resolves_conflict_and_syncs_open_buffer ... ok
+test git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer ... ok
+test git_workflow_commits_staged_changes_through_app_authority ... ok
+test git_workflow_refreshes_projection_and_stages_hunks_through_app_authority ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.53s
+
+
+
+=== terminal_workflow_app ===
+cargo test -p legion-app --test terminal_workflow -- --nocapture
+
+
+running 9 tests
+test terminal_denial_is_visible_and_fail_closed ... ok
+test terminal_resize_propagates_to_projection ... ok
+test terminal_product_gate_trusted_workspace_launches_without_test_helper ... ok
+test terminal_failure_ux_distinct_status_kinds ... ok
+test terminal_scrollback_limit_enforced_and_eviction_counted ... ok
+test terminal_workflow_cannot_mutate_editor_or_disk ... ok
+test terminal_fixture_lifecycle_projects_status ... ok
+test terminal_orphan_cleanup_kills_and_records_evidence ... ok
+test terminal_shell_selection_is_projected_in_status ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+
+ALL_OK=True
