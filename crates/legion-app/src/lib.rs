@@ -25190,6 +25190,9 @@ impl AppComposition {
         // Without a live route (CI/offline), keep deterministic fixture.
         //
         // Authorize the concrete backend before any buffer excerpt leaves the process.
+        // DenyByDefaultBroker recognizes `ai.provider.invoke` / `ai.provider.stream`
+        // for provider egress — not the structural `ai.inline_prediction.invoke`
+        // label carried in InlinePredictionRequestMetadata.
         let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
         if let Some(backend) = live_backend {
             let (_provider_id, _model, _class, network_target, _, _, _) =
@@ -25201,7 +25204,7 @@ impl AppComposition {
             let decision = broker
                 .handle(CapabilityRequest::Request {
                     principal_id: metadata.principal_id.clone(),
-                    capability_id: metadata.required_capability.clone(),
+                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
                     workspace_trust_state: metadata.workspace_trust_state.clone(),
                     target_path: None,
                     decision_id: None,
