@@ -43,8 +43,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 
 ## Phase 3 — Sandbox isolation (C)
 
-- [ ] C0 threat model / acceptance matrix
-- [ ] C1 Linux network isolation + escape probe
+- [x] C0 threat model / acceptance matrix (stub: `C0-threat-model-stub.md`)
+- [ ] C1 Linux network isolation + escape probe (`C1-linux-network-isolation.md` — bwrap unshare-net)
 - [ ] C2 Windows FS path (enforced **or** residual cut line still honest)
 - [ ] C3 product spawn integration
 - [ ] `docs/SECURITY.md` matrix updated
