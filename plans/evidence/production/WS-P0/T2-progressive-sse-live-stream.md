@@ -15,7 +15,9 @@
 ## Honest limits
 
 - Assist proposal / Delegate chat still **block the calling thread** until the HTTP stream completes (UI can repaint only if another thread drives frames, or after completion).
-- Fully non-blocking worker-thread generation (UI never waits) is a follow-on.
+- Fully non-blocking worker-thread generation: **shipped** for live Assist proposals
+  (worker + `poll_product_ai_stream` registration) and Delegate chat; Deterministic/fixture
+  remains synchronous so contract tests keep receiving `proposal_id` in-call.
 
 ## Verification
 

@@ -1698,9 +1698,36 @@ fn ollama_model_label_offline_safe() -> String {
 /// Background job result for non-blocking product AI generation.
 #[derive(Debug, Clone)]
 struct ProductAiBackgroundResult {
+    /// Delegate chat assistant message to finalize; empty when this is Assist.
     assistant_message_id: String,
     content_label: String,
     stream: Option<ProductAiStreamProjection>,
+    /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
+    assist_proposal: Option<AssistedEditProposalSource>,
+}
+
+/// Context retained while a live Assist proposal streams on a worker thread.
+///
+/// Authorization and agent Planning→Proposing run on the UI thread; completion
+/// text arrives later so the renderer can poll progressive deltas and remain
+/// responsive. Proposal registration happens on poll after the worker finishes.
+#[derive(Debug, Clone)]
+struct PendingAssistProposalJob {
+    run_id: legion_protocol::AgentRunId,
+    route_id: String,
+    operation_class: legion_protocol::AssistedAiOperationClass,
+    provider_class: legion_protocol::AssistedAiProviderClass,
+    provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
+    route_response: legion_protocol::AssistedAiProviderRouteResponse,
+    context_manifest_projection: legion_protocol::ContextManifestProjection,
+    privacy_inspector_projection: legion_protocol::PrivacyInspectorProjection,
+    permission_budget_projection: legion_protocol::PermissionBudgetProjection,
+    generated_at: TimestampMillis,
+    event_context: EventContext,
+    principal: PrincipalId,
+    file_id: FileId,
+    preconditions: ProposalVersionPreconditions,
+    agent: AgentRuntime,
 }
 
 /// Shared live stream sink updated as SSE deltas arrive (background or progressive).
@@ -14958,6 +14985,8 @@ pub struct AppComposition {
     last_product_ai_stream: Option<ProductAiStreamProjection>,
     /// Live progressive stream sink (updated mid-flight from SSE / background jobs).
     live_product_ai_stream: Arc<LiveProductAiStreamSink>,
+    /// Live Assist proposal awaiting worker completion (registered on poll).
+    pending_assist_proposal: Option<PendingAssistProposalJob>,
     palette: PaletteState,
     settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
@@ -15225,6 +15254,7 @@ impl AppComposition {
             preferred_ai_provider: ProductAiProviderPreference::from_env(),
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
+            pending_assist_proposal: None,
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -15672,7 +15702,8 @@ impl AppComposition {
 
     /// Poll live stream into `last_product_ai_stream` and apply finished background jobs.
     ///
-    /// Returns `true` when the retained stream or chat projection changed (desktop should repaint).
+    /// Returns `true` when the retained stream, chat projection, or Assist proposal
+    /// ledger changed (desktop should repaint).
     pub fn poll_product_ai_stream(&mut self) -> bool {
         let mut changed = false;
         let snap = self.live_product_ai_stream.snapshot();
@@ -15686,14 +15717,29 @@ impl AppComposition {
             if let Some(stream) = result.stream {
                 self.last_product_ai_stream = Some(stream);
             }
-            if let Some(message) = self
-                .delegate_workflow
-                .chat_messages
-                .iter_mut()
-                .find(|m| m.message_id == result.assistant_message_id)
+            if !result.assistant_message_id.is_empty()
+                && let Some(message) = self
+                    .delegate_workflow
+                    .chat_messages
+                    .iter_mut()
+                    .find(|m| m.message_id == result.assistant_message_id)
             {
                 message.content_label = result.content_label;
                 changed = true;
+            }
+            if let Some(proposal_source) = result.assist_proposal
+                && let Some(job) = self.pending_assist_proposal.take()
+            {
+                match self.finish_assisted_edit_proposal_registration(job, proposal_source) {
+                    Ok(_outcome) => {
+                        changed = true;
+                    }
+                    Err(error) => {
+                        // Leave stream projection; surface failure via empty proposal.
+                        let _ = error;
+                        changed = true;
+                    }
+                }
             }
         }
         changed
@@ -22536,9 +22582,6 @@ impl AppComposition {
 
         // Live completion only after the capability/network decision above.
         // Uses the authorized backend only (no silent Ollama→Anthropic fallback).
-        // Progressive deltas update the shared sink; full non-blocking proposal
-        // registration (like Delegate chat) remains a follow-on because Assist
-        // returns a registered proposal_id in the same call.
         let buffer_excerpt = self
             .editor
             .text(context.buffer_id)
@@ -22546,6 +22589,124 @@ impl AppComposition {
             .chars()
             .take(4_000)
             .collect::<String>();
+        let preconditions = ProposalVersionPreconditions {
+            file_version: Some(context.metadata.file_content_version),
+            buffer_version: Some(snapshot.buffer_version),
+            snapshot_id: Some(snapshot.snapshot_id),
+            generation: Some(context.metadata.workspace_generation),
+            file_content_version: Some(context.metadata.file_content_version),
+            workspace_generation: Some(context.metadata.workspace_generation),
+            expected_fingerprint: Some(context.metadata.fingerprint.clone()),
+            expected_file_length: context.metadata.file_length,
+            expected_modified_at: context.metadata.modified_at,
+        };
+        let pending_job = PendingAssistProposalJob {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            operation_class,
+            provider_class,
+            provider_route_request: provider_route_request.clone(),
+            route_response: route_response.clone(),
+            context_manifest_projection: context_manifest_projection.clone(),
+            privacy_inspector_projection: privacy_inspector_projection.clone(),
+            permission_budget_projection: permission_budget_projection.clone(),
+            generated_at,
+            event_context,
+            principal: context.principal.clone(),
+            file_id: context.metadata.identity.file_id,
+            preconditions,
+            agent,
+        };
+
+        // Live path: stream on a worker thread so the UI can poll progressive
+        // deltas; proposal registration runs on poll_product_ai_stream when the
+        // worker finishes (Delegate-chat parity). Offline/fixture stays sync so
+        // tests keep receiving proposal_id in the same call.
+        #[cfg(feature = "ai")]
+        let use_background_live = product_ai_will_attempt_live(self.preferred_ai_provider)
+            && !self.live_product_ai_stream.is_in_flight();
+        #[cfg(not(feature = "ai"))]
+        let use_background_live = false;
+
+        #[cfg(feature = "ai")]
+        if use_background_live {
+            let sink = self.live_product_ai_stream.clone();
+            sink.begin("assist.proposal", "pending", "");
+            let preference = self.preferred_ai_provider;
+            let file_path = context.metadata.identity.canonical_path.0.clone();
+            let instruction_for_worker = instruction_label.clone();
+            let excerpt_for_worker = buffer_excerpt.clone();
+            let streaming_replay = legion_protocol::AgentReplayManifest {
+                run_id: run_id.clone(),
+                transitions: pending_job.agent.transitions().to_vec(),
+                context_manifests: vec![trust_reference(
+                    &context_manifest_projection.manifest.manifest_id,
+                    legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+                )],
+                provider_route_ids: vec![route_id.clone()],
+                proposal_ids: Vec::new(),
+                correlation_id: pending_job.event_context.correlation_id,
+                causality_id: pending_job.event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            self.pending_assist_proposal = Some(pending_job);
+            // Partial phase-4 projections so rails show the in-flight run.
+            self.phase4_projection_state.context_manifest_projection =
+                Some(context_manifest_projection.clone());
+            self.phase4_projection_state.privacy_inspector_projection =
+                Some(privacy_inspector_projection.clone());
+            self.phase4_projection_state.permission_budget_projection =
+                Some(permission_budget_projection.clone());
+            std::thread::spawn(move || {
+                let sink_delta = sink.clone();
+                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
+                    preference,
+                    &instruction_for_worker,
+                    &excerpt_for_worker,
+                    &file_path,
+                    Some(&mut on_delta),
+                );
+                if let Some(ref stream) = stream {
+                    sink.finish(
+                        Some(&ProductChatCompletion {
+                            provider_id: stream.provider_id.clone(),
+                            model: stream.model.clone(),
+                            text: stream.text_preview.clone(),
+                            stream_chunks: stream.chunks.clone(),
+                            streamed: stream.streamed,
+                        }),
+                        "assist.proposal",
+                    );
+                } else {
+                    sink.finish(None, "assist.proposal");
+                }
+                sink.push_background_result(ProductAiBackgroundResult {
+                    assistant_message_id: String::new(),
+                    content_label: String::new(),
+                    stream,
+                    assist_proposal: Some(proposal_source),
+                });
+            });
+            // Streaming outcome: proposal_id arrives on the next poll cycle(s).
+            return Ok(AppAiRunOutcome {
+                run_id,
+                proposal_id: None,
+                proposal_created: None,
+                route_response,
+                context_manifest_projection,
+                privacy_inspector_projection,
+                permission_budget_projection,
+                refusal: None,
+                replay_manifest: streaming_replay,
+            });
+        }
+        // Silence unused when `ai` feature is off (background path is feature-gated).
+        #[cfg(not(feature = "ai"))]
+        let _ = use_background_live;
+
         let sink = self.live_product_ai_stream.clone();
         sink.begin("assist.proposal", "pending", "");
         let sink_delta = sink.clone();
@@ -22573,29 +22734,45 @@ impl AppComposition {
             sink.finish(None, "assist.proposal");
         }
 
+        self.finish_assisted_edit_proposal_registration(pending_job, proposal_source)
+    }
+
+    /// Register the Assist edit proposal after live or fixture text is available.
+    fn finish_assisted_edit_proposal_registration(
+        &mut self,
+        mut job: PendingAssistProposalJob,
+        proposal_source: AssistedEditProposalSource,
+    ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        let PendingAssistProposalJob {
+            run_id,
+            route_id,
+            operation_class,
+            provider_class,
+            provider_route_request,
+            route_response,
+            context_manifest_projection,
+            privacy_inspector_projection,
+            permission_budget_projection,
+            generated_at,
+            event_context,
+            principal,
+            file_id,
+            preconditions,
+            ref mut agent,
+        } = job;
+
         let proposal_id = self.proposal_coordinator.next_id();
-        let preconditions = ProposalVersionPreconditions {
-            file_version: Some(context.metadata.file_content_version),
-            buffer_version: Some(snapshot.buffer_version),
-            snapshot_id: Some(snapshot.snapshot_id),
-            generation: Some(context.metadata.workspace_generation),
-            file_content_version: Some(context.metadata.file_content_version),
-            workspace_generation: Some(context.metadata.workspace_generation),
-            expected_fingerprint: Some(context.metadata.fingerprint.clone()),
-            expected_file_length: context.metadata.file_length,
-            expected_modified_at: context.metadata.modified_at,
-        };
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),
             provider_id: proposal_source.provider_id.clone(),
             proposal_id,
-            principal: context.principal.clone(),
+            principal: principal.clone(),
             capability: CapabilityId("editor.write".to_string()),
             correlation_id: event_context.correlation_id,
             causality_id: event_context.causality_id,
             payload: ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
-                file_id: context.metadata.identity.file_id,
+                file_id,
                 edits: legion_protocol::EditBatch {
                     edits: vec![legion_protocol::TextEdit {
                         range: legion_protocol::TextRange::byte(0, 0),
@@ -24759,6 +24936,7 @@ impl AppComposition {
                     assistant_message_id: assistant_id,
                     content_label: label,
                     stream,
+                    assist_proposal: None,
                 });
             });
             "Streaming response…".to_string()
