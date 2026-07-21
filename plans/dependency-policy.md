@@ -231,6 +231,8 @@ WS03.T1 activates `legion-lsp` only for hand-rolled LSP JSON-RPC framing, reques
 
 P2.F3.T1 activates `legion-debug` only for metadata-only DAP client lifecycle state and protocol projection contracts. It may not depend on app, UI, editor, project, terminal, platform/process, storage, security policy, provider, worker, or desktop internals until later debug-adapter resolution gates add explicit policy, sandbox/process evidence, and contract tests. Adapter stdout/stderr/source payloads remain outside this crate by default; the app composes `legion-debug` through protocol DTOs and app-owned trust checks.
 
+**WS-A-D Phase 2 (planned, not yet authorized):** `ADR-0044-dap-client-architecture.md` proposes a live DAP path with supervised process spawn and a CI fake adapter. Before B1 code lands, a dedicated dependency-policy PR must explicitly allow the minimal process edge (likely `legion-debug` → `legion-platform` or an approved spawn surface) with contract tests and evidence under `plans/evidence/production/WS-A-D/phase-2-dap/`. Until that PR merges, the P2.F3.T1 restriction above remains binding.
+
 - `legion-remote-transport` may depend on:
   - `legion-observability`
   - `legion-platform`

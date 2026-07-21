@@ -34,7 +34,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 
 ## Phase 2 — Real DAP (B)
 
-- [ ] B0 ADR merged
+- [ ] B0 ADR merged (Proposed draft: `plans/adrs/ADR-0044-dap-client-architecture.md`)
 - [ ] B1 fake-adapter CI green
 - [ ] B2 breakpoints / stack / step / disconnect
 - [ ] B3 policy deny untrusted + documented adapter install
