@@ -1942,8 +1942,9 @@ pub fn path_from_file_uri(uri: &str) -> Option<CanonicalPath> {
         } else {
             format!("/{rest}")
         }
-    } else if let Some(rest) = decoded.strip_prefix("file://") {
+    } else {
         // `file://server/share/...` or `file://localhost/path`.
+        let rest = decoded.strip_prefix("file://")?;
         let slash = rest.find('/')?;
         let authority = &rest[..slash];
         let path_part = &rest[slash..];
@@ -1964,8 +1965,6 @@ pub fn path_from_file_uri(uri: &str) -> Option<CanonicalPath> {
             // UNC host (e.g. file://fileserver/share/src/lib.rs).
             format!("//{authority}{path_part}")
         }
-    } else {
-        return None;
     };
     if path.is_empty() || path == "/" {
         return None;

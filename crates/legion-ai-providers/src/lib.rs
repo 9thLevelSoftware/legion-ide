@@ -1558,10 +1558,7 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
             }
             carry_bytes.extend_from_slice(&buf[..n]);
             // Process complete UTF-8 lines; leave incomplete trailing bytes in carry.
-            loop {
-                let Some(nl) = carry_bytes.iter().position(|b| *b == b'\n') else {
-                    break;
-                };
+            while let Some(nl) = carry_bytes.iter().position(|b| *b == b'\n') {
                 let mut line_bytes = carry_bytes.drain(..=nl).collect::<Vec<u8>>();
                 if line_bytes.last() == Some(&b'\n') {
                     line_bytes.pop();

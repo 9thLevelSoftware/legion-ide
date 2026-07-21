@@ -3356,7 +3356,12 @@ impl DesktopEframeApp {
     fn handle_keyboard(&mut self, ui: &egui::Ui) {
         let mut actions = Vec::new();
         let snapshot = self.runtime.projection_snapshot();
-        let editor_input_enabled = self.runtime.editor_input_enabled(&snapshot);
+        // Interactive TextEdit widgets (BYOK, terminal input) keep focus across
+        // frames. While any widget owns keyboard focus, do not also dispatch
+        // typed characters / Backspace into the code canvas (key leakage).
+        let interactive_widget_focused = ui.memory(|mem| mem.focused().is_some());
+        let editor_input_enabled =
+            self.runtime.editor_input_enabled(&snapshot) && !interactive_widget_focused;
 
         // Clone the input state up front and release the context lock before
         // doing anything else. `Context::input` takes the context's write lock
@@ -4303,6 +4308,15 @@ fn line_char_to_byte(text: &str, line: u32, character: u32) -> Option<usize> {
 }
 
 fn previous_char_boundary(text: &str, end: usize) -> usize {
+    if end == 0 {
+        return 0;
+    }
+    // legion-text treats `\r\n` as one line ending; backspace at column 0 of
+    // the next line must delete both bytes, not leave a stray CR.
+    let bytes = text.as_bytes();
+    if end >= 2 && bytes[end - 2] == b'\r' && bytes[end - 1] == b'\n' {
+        return end - 2;
+    }
     let mut idx = end.saturating_sub(1);
     while idx > 0 && !text.is_char_boundary(idx) {
         idx -= 1;
