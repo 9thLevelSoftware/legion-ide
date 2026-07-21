@@ -1,0 +1,537 @@
+//! Live DAP adapter process session (B1/B2).
+//!
+//! Spawns an adapter binary and drives a minimal DAP product loop:
+//! initialize → setBreakpoints → launch/configurationDone → stopped →
+//! stackTrace/variables → step/continue → disconnect.
+//!
+//! CI uses the in-tree `fake_dap_adapter` binary; real CodeLLDB is B3.
+
+use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use thiserror::Error;
+
+use crate::framing::{DapFrameError, DapFramer, DapJsonRpc};
+use crate::state::DapLifecycleState;
+
+/// Errors from a live DAP session.
+#[derive(Debug, Error)]
+pub enum LiveDapSessionError {
+    /// Adapter process could not be started.
+    #[error("DAP adapter spawn failed: {message}")]
+    Spawn {
+        /// Bounded diagnostic.
+        message: String,
+    },
+    /// Wire framing or I/O failed.
+    #[error("DAP session I/O failed: {source}")]
+    Io {
+        /// Framing source.
+        #[from]
+        source: DapFrameError,
+    },
+    /// Protocol sequence unexpected.
+    #[error("DAP protocol error: {message}")]
+    Protocol {
+        /// Bounded diagnostic.
+        message: String,
+    },
+    /// Timed out waiting for adapter.
+    #[error("DAP session timed out: {message}")]
+    Timeout {
+        /// Bounded diagnostic.
+        message: String,
+    },
+}
+
+/// Outcome of a live initialize handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDapHandshakeOutcome {
+    /// Lifecycle after successful initialize.
+    pub lifecycle_state: DapLifecycleState,
+    /// Adapter type label from launch request / binary.
+    pub adapter_type: String,
+    /// Whether `initialized` event was observed.
+    pub initialized_event: bool,
+    /// Metadata-only summary for audit projections.
+    pub metadata_summary: String,
+}
+
+/// One verified breakpoint from `setBreakpoints`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveBreakpoint {
+    /// Adapter breakpoint id when present.
+    pub id: Option<u64>,
+    /// Source line (1-based when adapter uses linesStartAt1).
+    pub line: u64,
+    /// Whether the adapter verified the breakpoint.
+    pub verified: bool,
+    /// Optional adapter message.
+    pub message: Option<String>,
+}
+
+/// One stack frame from `stackTrace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveStackFrame {
+    /// Frame id.
+    pub id: u64,
+    /// Frame name.
+    pub name: String,
+    /// Source path when present.
+    pub path: Option<String>,
+    /// Line number.
+    pub line: u64,
+}
+
+/// One variable from `variables`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveVariable {
+    /// Variable name.
+    pub name: String,
+    /// Display value.
+    pub value: String,
+    /// Type label when present.
+    pub type_label: Option<String>,
+}
+
+/// Outcome of launch through first stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDapStopOutcome {
+    /// Lifecycle after stop.
+    pub lifecycle_state: DapLifecycleState,
+    /// DAP stop reason (`entry`, `step`, `breakpoint`, …).
+    pub reason: String,
+    /// Thread id from the stopped event.
+    pub thread_id: u64,
+    /// Stack frames after stop.
+    pub stack_frames: Vec<LiveStackFrame>,
+    /// Locals from the top frame when available.
+    pub variables: Vec<LiveVariable>,
+    /// Metadata-only summary.
+    pub metadata_summary: String,
+}
+
+/// Supervised live DAP session handle.
+pub struct LiveDapSession {
+    child: Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: BufReader<std::process::ChildStdout>,
+    next_id: u64,
+    adapter_type: String,
+}
+
+impl LiveDapSession {
+    /// Spawn `adapter_program` with optional args (stdio DAP).
+    pub fn spawn(
+        adapter_program: impl AsRef<Path>,
+        args: &[String],
+        adapter_type: impl Into<String>,
+    ) -> Result<Self, LiveDapSessionError> {
+        let program = adapter_program.as_ref();
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().map_err(|err| LiveDapSessionError::Spawn {
+            message: format!("{}: {err}", program.display()),
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| LiveDapSessionError::Spawn {
+                message: "missing stdin pipe".to_string(),
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| LiveDapSessionError::Spawn {
+                message: "missing stdout pipe".to_string(),
+            })?;
+        Ok(Self {
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            adapter_type: adapter_type.into(),
+        })
+    }
+
+    /// Run initialize → wait for initialized event → return handshake outcome.
+    pub fn initialize_handshake(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<LiveDapHandshakeOutcome, LiveDapSessionError> {
+        let id = self.alloc_id();
+        let req = DapJsonRpc::request(
+            id,
+            "initialize",
+            json!({
+                "clientID": "legion",
+                "clientName": "Legion IDE",
+                "adapterID": self.adapter_type,
+                "pathFormat": "path",
+                "linesStartAt1": true,
+                "columnsStartAt1": true,
+            }),
+        );
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| LiveDapSessionError::Protocol {
+                message: "stdin already closed".to_string(),
+            })?;
+        DapFramer::write_to(stdin, &req)?;
+
+        let deadline = Instant::now() + timeout;
+        let mut saw_initialize_response = false;
+        let mut saw_initialized_event = false;
+
+        while Instant::now() < deadline {
+            // Blocking read with overall deadline enforced by outer loop length;
+            // fake adapter is local and fast. For real adapters B2 may add non-block.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let msg = DapFramer::read_from(&mut self.stdout)?;
+            if msg.method.as_deref() == Some("initialized") {
+                saw_initialized_event = true;
+            }
+            if msg.id == Some(serde_json::Value::from(id)) {
+                if msg.error.is_some() {
+                    return Err(LiveDapSessionError::Protocol {
+                        message: format!("initialize error: {:?}", msg.error),
+                    });
+                }
+                saw_initialize_response = true;
+            }
+            if saw_initialize_response && saw_initialized_event {
+                return Ok(LiveDapHandshakeOutcome {
+                    lifecycle_state: DapLifecycleState::Launching,
+                    adapter_type: self.adapter_type.clone(),
+                    initialized_event: true,
+                    metadata_summary: format!(
+                        "action=initialize state=launching adapter={} initialized=true live=true",
+                        self.adapter_type
+                    ),
+                });
+            }
+        }
+
+        Err(LiveDapSessionError::Timeout {
+            message: format!(
+                "initialize response={saw_initialize_response} initialized_event={saw_initialized_event}"
+            ),
+        })
+    }
+
+    /// `setBreakpoints` for one source path and line list.
+    pub fn set_breakpoints(
+        &mut self,
+        path: &str,
+        lines: &[u64],
+        timeout: Duration,
+    ) -> Result<Vec<LiveBreakpoint>, LiveDapSessionError> {
+        let breakpoints: Vec<Value> = lines.iter().map(|line| json!({ "line": line })).collect();
+        let result = self.request(
+            "setBreakpoints",
+            json!({
+                "source": { "path": path, "name": path.rsplit(['/', '\\']).next().unwrap_or(path) },
+                "breakpoints": breakpoints,
+                "sourceModified": false
+            }),
+            timeout,
+        )?;
+        let list = result
+            .get("breakpoints")
+            .and_then(|b| b.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(list
+            .into_iter()
+            .map(|bp| LiveBreakpoint {
+                id: bp.get("id").and_then(|v| v.as_u64()),
+                line: bp.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+                verified: bp
+                    .get("verified")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                message: bp
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+            .collect())
+    }
+
+    /// `launch` + `configurationDone`, then wait for `stopped`.
+    pub fn launch_until_stopped(
+        &mut self,
+        program: &str,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let _ = self.request(
+            "launch",
+            json!({
+                "name": "legion-live",
+                "type": self.adapter_type,
+                "request": "launch",
+                "program": program
+            }),
+            timeout,
+        )?;
+        let _ = self.request("configurationDone", json!({}), timeout)?;
+        self.wait_stopped_and_inspect("entry", timeout)
+    }
+
+    /// `next` (step over), then wait for `stopped` and inspect stack/locals.
+    pub fn step_over_until_stopped(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let _ = self.request("next", json!({ "threadId": thread_id }), timeout)?;
+        self.wait_stopped_and_inspect("step", timeout)
+    }
+
+    /// `continue` and wait for the `continued` event (or response only).
+    pub fn continue_execution(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<(), LiveDapSessionError> {
+        let _ = self.request("continue", json!({ "threadId": thread_id }), timeout)?;
+        // Fake adapter also emits `continued`; drain until deadline or event.
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let msg = DapFramer::read_from(&mut self.stdout)?;
+            if msg.method.as_deref() == Some("continued") {
+                return Ok(());
+            }
+            // Ignore unrelated messages.
+            if msg.id.is_some() {
+                continue;
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_stopped_and_inspect(
+        &mut self,
+        expected_reason_hint: &str,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let deadline = Instant::now() + timeout;
+        let mut reason = expected_reason_hint.to_string();
+        let mut thread_id = 1u64;
+        let mut saw_stopped = false;
+        while Instant::now() < deadline {
+            let msg = DapFramer::read_from(&mut self.stdout)?;
+            if msg.method.as_deref() == Some("stopped") {
+                saw_stopped = true;
+                if let Some(params) = msg.params {
+                    reason = params
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(expected_reason_hint)
+                        .to_string();
+                    thread_id = params.get("threadId").and_then(|v| v.as_u64()).unwrap_or(1);
+                }
+                break;
+            }
+        }
+        if !saw_stopped {
+            return Err(LiveDapSessionError::Timeout {
+                message: format!("waiting for stopped ({expected_reason_hint})"),
+            });
+        }
+
+        let stack = self.request(
+            "stackTrace",
+            json!({ "threadId": thread_id, "startFrame": 0, "levels": 20 }),
+            timeout,
+        )?;
+        let stack_frames = stack
+            .get("stackFrames")
+            .and_then(|f| f.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|frame| LiveStackFrame {
+                id: frame.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                name: frame
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                path: frame
+                    .get("source")
+                    .and_then(|s| s.get("path"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                line: frame.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+            })
+            .collect::<Vec<_>>();
+
+        let mut variables = Vec::new();
+        if let Some(frame_id) = stack_frames.first().map(|f| f.id) {
+            let scopes = self.request("scopes", json!({ "frameId": frame_id }), timeout)?;
+            if let Some(scope_ref) = scopes
+                .get("scopes")
+                .and_then(|s| s.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|s| s.get("variablesReference"))
+                .and_then(|v| v.as_u64())
+            {
+                let vars = self.request(
+                    "variables",
+                    json!({ "variablesReference": scope_ref }),
+                    timeout,
+                )?;
+                variables = vars
+                    .get("variables")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|var| LiveVariable {
+                        name: var
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        value: var
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        type_label: var.get("type").and_then(|v| v.as_str()).map(str::to_string),
+                    })
+                    .collect();
+            }
+        }
+
+        Ok(LiveDapStopOutcome {
+            lifecycle_state: DapLifecycleState::Paused,
+            reason: reason.clone(),
+            thread_id,
+            stack_frames: stack_frames.clone(),
+            variables: variables.clone(),
+            metadata_summary: format!(
+                "action=stopped reason={reason} thread={thread_id} frames={} vars={} live=true",
+                stack_frames.len(),
+                variables.len()
+            ),
+        })
+    }
+
+    fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, LiveDapSessionError> {
+        let id = self.alloc_id();
+        let req = DapJsonRpc::request(id, method, params);
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| LiveDapSessionError::Protocol {
+                message: "stdin already closed".to_string(),
+            })?;
+        DapFramer::write_to(stdin, &req)?;
+
+        let deadline = Instant::now() + timeout;
+        let want = Value::from(id);
+        while Instant::now() < deadline {
+            let msg = DapFramer::read_from(&mut self.stdout)?;
+            if msg.id.as_ref() == Some(&want) {
+                if let Some(err) = msg.error {
+                    return Err(LiveDapSessionError::Protocol {
+                        message: format!("{method} error: {err}"),
+                    });
+                }
+                return Ok(msg.result.unwrap_or(json!({})));
+            }
+            // Events while waiting for this response are ignored here; callers
+            // that need stopped/continued use dedicated wait helpers after.
+        }
+        Err(LiveDapSessionError::Timeout {
+            message: format!("waiting for {method} response id={id}"),
+        })
+    }
+
+    /// Send disconnect and wait for process exit (best-effort).
+    pub fn disconnect_and_wait(mut self, timeout: Duration) -> Result<(), LiveDapSessionError> {
+        let id = self.alloc_id();
+        let req = DapJsonRpc::request(
+            id,
+            "disconnect",
+            json!({ "restart": false, "terminateDebuggee": true }),
+        );
+        if let Some(mut stdin) = self.stdin.take() {
+            let _ = DapFramer::write_to(&mut stdin, &req);
+            let _ = stdin.flush();
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return Ok(());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(err) => {
+                    return Err(LiveDapSessionError::Spawn {
+                        message: format!("wait failed: {err}"),
+                    });
+                }
+            }
+        }
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+}
+
+impl Drop for LiveDapSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Resolve the path to the in-tree fake DAP adapter built by cargo.
+///
+/// Looks next to the current test executable (`CARGO_BIN_EXE_fake_dap_adapter`
+/// when available) or `target/{debug,release}/fake_dap_adapter(.exe)`.
+pub fn fake_dap_adapter_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_fake_dap_adapter") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    for profile in ["debug", "release"] {
+        let mut candidate = target.join(profile).join("fake_dap_adapter");
+        if cfg!(windows) {
+            candidate.set_extension("exe");
+        }
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}

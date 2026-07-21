@@ -38,6 +38,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../ENGINEERING_STATUS.md` and `../audit-reports/` — **historical / supporting.** Prior-cycle engineering and audit snapshots, preserved for traceability. Do not treat their counts, dates, or branch/HEAD values as current; see the "Current Status" section of `../README.md` and `../plans/product-readiness-ledger.md` for the current state.
 - `../plans/legion-production-master-plan-v0.2.md` — the current production master plan: current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, and milestones from accepted substrate evidence to production utility.
 - `../plans/evidence/production/WS-A-D/campaign-charter.md` — **active next-wave campaign** after WS-P0: dogfood → real DAP → sandbox isolation → WS17 release (no VSIX).
+- `../plans/adrs/ADR-0044-dap-client-architecture.md` — **Proposed** real DAP client architecture (Phase 2 B0); fixture dual-path until accepted + dependency-policy activation.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `../audit-reports/` — durable audit artifacts.
