@@ -427,7 +427,14 @@ fn language_tooling_ingests_lsp_read_side_projections_and_preserves_existing_row
         .ingest_lsp_definition_response_for_buffer(buffer_id, &locations_payload, None)
         .expect("ingest definition");
     assert_eq!(projection.definitions.len(), 1);
-    assert!(projection.definitions[0].path.is_none());
+    // Product wiring fills navigable paths from file:// URIs for cross-file go-to-def.
+    assert_eq!(
+        projection.definitions[0]
+            .path
+            .as_ref()
+            .map(|p| p.0.as_str()),
+        Some("/workspace/lib.rs")
+    );
     let projection = app
         .ingest_lsp_references_response_for_buffer(buffer_id, &locations_payload, None)
         .expect("ingest references");

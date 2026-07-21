@@ -15,7 +15,7 @@ use std::{
 use legion_desktop::bridge::DesktopAction;
 use legion_desktop::workflow::{
     DesktopLaunchConfig, DesktopRuntime, test_editor_keyboard_control_actions,
-    test_editor_text_input_actions,
+    test_editor_keyboard_control_actions_with_completion, test_editor_text_input_actions,
 };
 use legion_protocol::{ProtocolTextRange, TextCoordinate};
 
@@ -303,4 +303,118 @@ fn unfocused_input_does_not_dispatch_keyboard_or_text_events() {
 
     assert_eq!(snapshot_text(&runtime), Some(String::new()));
     assert_eq!(snapshot_viewport_cursor(&runtime), coord(0, 0, 0));
+}
+
+#[test]
+fn keyboard_backspace_delete_and_enter_mutate_the_buffer_through_app_authority() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("edit_keys.txt", "ab");
+    let mut runtime = open_runtime(workspace.path(), &file);
+
+    // Move cursor after 'b'.
+    runtime
+        .handle_action(DesktopAction::SetCursor {
+            buffer_id: None,
+            cursor: coord(0, 2, 2),
+        })
+        .expect("set cursor");
+    assert_eq!(snapshot_text(&runtime), Some("ab".to_string()));
+
+    // Backspace deletes 'b' via app-resolved range (same path as live keyboard).
+    let backspace_range = runtime
+        .backspace_delete_range()
+        .expect("backspace range at end of 'ab'");
+    runtime
+        .handle_action(DesktopAction::DeleteRange {
+            range: backspace_range,
+        })
+        .expect("backspace should apply");
+    assert_eq!(snapshot_text(&runtime), Some("a".to_string()));
+
+    // Enter inserts a newline after 'a' (same line 0 path as production InsertText).
+    runtime
+        .handle_action(DesktopAction::InsertText {
+            text: "\n".to_string(),
+            at: coord(0, 1, 1),
+        })
+        .expect("enter should apply");
+    assert_eq!(snapshot_text(&runtime), Some("a\n".to_string()));
+
+    // Forward delete on a single-line buffer (matches proven desktop_workflow range style).
+    runtime
+        .handle_action(DesktopAction::InsertText {
+            text: "z".to_string(),
+            at: coord(0, 1, 1),
+        })
+        .expect("insert z on line 0");
+    // Text is "az\n" or "a\nz" depending on insert position — insert at (0,1) after 'a':
+    // "a" + "z" + "\n" from previous enter already applied => after enter "a\n", insert at
+    // line0 char1 inserts between a and newline => "az\n".
+    assert_eq!(snapshot_text(&runtime), Some("az\n".to_string()));
+    runtime
+        .handle_action(DesktopAction::DeleteRange {
+            range: ProtocolTextRange {
+                start: coord(0, 1, 1),
+                end: coord(0, 2, 2),
+            },
+        })
+        .expect("delete should apply");
+    assert_eq!(snapshot_text(&runtime), Some("a\n".to_string()));
+
+    // Completion popup suppresses Enter synthesis.
+    let snapshot = runtime.projection_snapshot();
+    egui::__run_test_ui(|ui| {
+        ui.ctx().input_mut(|input| {
+            input.events = vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }];
+        });
+        let suppressed = ui.input(|input| {
+            test_editor_keyboard_control_actions_with_completion(
+                input, &snapshot, true, false, true,
+            )
+        });
+        assert!(suppressed.is_empty());
+    });
+}
+
+#[test]
+fn clipboard_copy_and_cut_write_os_clipboard_and_cut_mutates_buffer() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("clip.txt", "hello");
+    let mut runtime = open_runtime(workspace.path(), &file);
+
+    runtime
+        .handle_action(DesktopAction::SetSelection {
+            buffer_id: None,
+            range: ProtocolTextRange {
+                start: coord(0, 0, 0),
+                end: coord(0, 5, 5),
+            },
+        })
+        .expect("select all");
+
+    let selected = runtime
+        .selected_text_for_os_clipboard()
+        .expect("selection text should be available for OS clipboard");
+    assert_eq!(selected, "hello");
+
+    runtime
+        .handle_action(DesktopAction::ClipboardCopy)
+        .expect("copy");
+    // Copy is metadata-only at app layer; selection text still available pre-cut.
+    assert_eq!(
+        runtime.selected_text_for_os_clipboard().as_deref(),
+        Some("hello")
+    );
+
+    runtime
+        .handle_action(DesktopAction::ClipboardCut)
+        .expect("cut");
+    assert_eq!(snapshot_text(&runtime), Some(String::new()));
+    assert!(runtime.selected_text_for_os_clipboard().is_none());
 }

@@ -26,7 +26,16 @@ use legion_protocol::{CanonicalPath, EventSequence, WatcherEvent, WatcherEventKi
 use thiserror::Error;
 
 /// Maximum event count accepted from one watcher snapshot.
-const WATCHER_OVERFLOW_THRESHOLD: usize = 4_096;
+/// Soft cap for precise per-path events in one recursive snapshot.
+///
+/// Recursive monorepo walks can exceed this; when they do we return a bounded
+/// truncated snapshot rather than permanent `WatcherOverflow` (which never
+/// recovers for large trees). Callers still get nested coverage up to the cap.
+const WATCHER_OVERFLOW_THRESHOLD: usize = 65_536;
+
+/// Maximum directory nesting depth for recursive watcher snapshots (Tier 1 A11).
+/// Aligns with the project tree depth cap so nested monorepo files are observed.
+const WATCHER_RECURSIVE_DEPTH_LIMIT: usize = 32;
 
 /// Maximum normalization component count before a path is rejected.
 const NORMALIZATION_DEPTH_LIMIT: usize = 1_024;
@@ -2060,36 +2069,62 @@ impl WatcherService for NativeWatcherService {
         workspace_id: WorkspaceId,
         path: &Path,
     ) -> Result<Vec<WatcherEvent>, PlatformError> {
+        // Tier 1 A11: recursive walk (depth-capped) so nested monorepo files
+        // participate in last_scan fingerprints. Still poll-based (no OS notify
+        // backend yet); overflow fails closed like the previous shallow path.
         let mut events = Vec::new();
         let mut sequence = 0u64;
-
-        let entries = fs::read_dir(path)
-            .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
-
-        for entry in entries {
-            if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
-                return Err(PlatformError::WatcherOverflow {
-                    path: path.to_path_buf(),
-                    context: "overflow threshold exceeded".to_string(),
-                });
-            }
-
-            let path = entry
-                .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?
-                .path();
-
-            sequence = sequence.saturating_add(1);
-            events.push(WatcherEvent {
-                workspace_id,
-                kind: WatcherEventKind::Modified,
-                path: CanonicalPath(path.to_string_lossy().to_string()),
-                old_path: None,
-                sequence: EventSequence(sequence),
-            });
-        }
-
+        walk_watcher_tree(workspace_id, path, 0, &mut events, &mut sequence)?;
         Ok(events)
     }
+}
+
+fn walk_watcher_tree(
+    workspace_id: WorkspaceId,
+    path: &Path,
+    depth: usize,
+    events: &mut Vec<WatcherEvent>,
+    sequence: &mut u64,
+) -> Result<(), PlatformError> {
+    if depth > WATCHER_RECURSIVE_DEPTH_LIMIT {
+        return Ok(());
+    }
+    let entries = fs::read_dir(path)
+        .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
+
+    for entry in entries {
+        // Soft truncate: keep a usable nested snapshot instead of permanent overflow.
+        if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
+            return Ok(());
+        }
+
+        let child = entry
+            .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?
+            .path();
+
+        *sequence = sequence.saturating_add(1);
+        events.push(WatcherEvent {
+            workspace_id,
+            kind: WatcherEventKind::Modified,
+            path: CanonicalPath(child.to_string_lossy().to_string()),
+            old_path: None,
+            sequence: EventSequence(*sequence),
+        });
+
+        if child.is_dir() {
+            // Skip common heavy / generated directories to keep poll cost bounded.
+            if let Some(name) = child.file_name().and_then(|n| n.to_str())
+                && matches!(
+                    name,
+                    "target" | "node_modules" | ".git" | ".legion" | "dist" | "build" | ".cache"
+                )
+            {
+                continue;
+            }
+            walk_watcher_tree(workspace_id, &child, depth + 1, events, sequence)?;
+        }
+    }
+    Ok(())
 }
 
 impl EnvironmentService for NativeEnvironmentService {

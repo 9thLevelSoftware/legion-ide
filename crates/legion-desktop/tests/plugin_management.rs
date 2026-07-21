@@ -206,6 +206,7 @@ fn plugin_management_rows_include_metadata_only_audit_notes() {
             && row.contains("contributions=1")
             && row.contains("commands=1")
             && row.contains("sandbox=metadata-only")
+            && row.contains("execution=not-available")
             && row.contains("audit=app-owned")
     }));
     assert!(model.plugin_rows.iter().any(|row| {

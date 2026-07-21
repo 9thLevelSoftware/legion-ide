@@ -824,6 +824,13 @@ pub enum DesktopAction {
         /// Provider identifier whose key should be removed.
         provider_id: String,
     },
+    /// Select the product AI route preference for Assist / Delegate composition.
+    ///
+    /// Labels: `auto` (local-first), `ollama`, `anthropic`, `deterministic`.
+    SetPreferredAiProvider {
+        /// Preference label (case-insensitive).
+        provider_id: String,
+    },
     /// Accept a ghost text prediction through the proposal pipeline (PKT-RAIL).
     ///
     /// Acceptance is proposal-mediated — this action never causes a direct buffer mutation.
@@ -2145,7 +2152,8 @@ impl DesktopCommandBridge {
             // PKT-PROV: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
             DesktopAction::SetProviderApiKey { .. }
-            | DesktopAction::DeleteProviderApiKey { .. } => DesktopBridgeOutput::Noop,
+            | DesktopAction::DeleteProviderApiKey { .. }
+            | DesktopAction::SetPreferredAiProvider { .. } => DesktopBridgeOutput::Noop,
             // PKT-RAIL: ghost text acceptance goes through the existing inline-prediction
             // acceptance path so no direct buffer mutation occurs.
             DesktopAction::AcceptGhostText { request_id } => {

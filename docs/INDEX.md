@@ -41,6 +41,10 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `../audit-reports/` — durable audit artifacts.
 
+## Forward-looking / non-current release templates
+
+- `releases/v8.0.0/` — **forward-looking GA checklist and migration/rollback templates only.** No v8.0.0 release exists or is scheduled; the workspace is pre-beta (`0.1.0`). Each file under this directory carries a STATUS banner. Do not treat these as current release artifacts. Current readiness is in `../plans/product-readiness-ledger.md`.
+
 ## How to use this index
 
 - When a doc is listed here, treat its rules and definitions as the ones in force for current work.

@@ -125,10 +125,11 @@ use legion_protocol::{
     FileConflictReason, FileConflictState, FileContentVersion, FileFingerprint, FileId,
     FileIdentity, FileKind, FileTreeNode, INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES,
     InlinePredictionAcceptanceId, InlinePredictionDismissalId, InlinePredictionFingerprintMetadata,
-    InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionLatencyMetadata,
-    InlinePredictionLifecycleAction, InlinePredictionLifecycleCommand, InlinePredictionProjection,
-    InlinePredictionProviderMetadata, InlinePredictionRequestId, InlinePredictionRequestMetadata,
-    InlinePredictionResult, InlinePredictionResultState, InlinePredictionRetention,
+    InlinePredictionFreshness, InlinePredictionFreshnessState, InlinePredictionGhostText,
+    InlinePredictionLatencyMetadata, InlinePredictionLifecycleAction,
+    InlinePredictionLifecycleCommand, InlinePredictionProjection, InlinePredictionProviderMetadata,
+    InlinePredictionRequestId, InlinePredictionRequestMetadata, InlinePredictionResult,
+    InlinePredictionResultId, InlinePredictionResultState, InlinePredictionRetention,
     InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
@@ -196,11 +197,13 @@ use legion_security::{
     ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState, mcp_tool_permission_request,
 };
 use legion_storage::{
-    InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, PaletteUsageRepository,
+    InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, OsKeyringSecretStore,
+    PaletteUsageRepository,
     checkpoint::{
         CHECKPOINT_SCHEMA_VERSION, CheckpointStore, CheckpointTarget, CheckpointTargetKind,
         DurableCheckpoint,
     },
+    load_provider_api_key,
     plan::PlanRevisionLedger,
 };
 use legion_terminal::{
@@ -1047,6 +1050,852 @@ pub enum AppDelegatedTaskExecutionOutcome {
     ProposalReady(Box<AssistedAiEditProposalOutput>),
 }
 
+/// Product-facing AI provider preference for Assist / Delegate composition paths.
+///
+/// **Local-first default (`Auto`):** try Ollama loopback when a fast TCP probe
+/// succeeds, else Anthropic BYOK when credentials exist, else deterministic fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProductAiProviderPreference {
+    /// Local-first auto routing (Ollama → Anthropic → fixture).
+    #[default]
+    Auto,
+    /// Force Ollama loopback when reachable; else fixture.
+    Ollama,
+    /// Force Anthropic when credentials exist; else fixture.
+    Anthropic,
+    /// Always use the offline deterministic fixture (CI / zero-egress).
+    Deterministic,
+}
+
+impl ProductAiProviderPreference {
+    /// Parse preference labels used by env (`LEGION_AI_PROVIDER`) and UI.
+    pub fn parse(label: &str) -> Self {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "ollama" | "local" => Self::Ollama,
+            "anthropic" | "byok" | "claude" => Self::Anthropic,
+            "deterministic" | "deterministic-local" | "fixture" | "offline" => Self::Deterministic,
+            "auto" | "" => Self::Auto,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Stable id for UI / status labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ollama => "ollama",
+            Self::Anthropic => "anthropic",
+            Self::Deterministic => "deterministic",
+        }
+    }
+
+    /// Default preference from `LEGION_AI_PROVIDER` when set.
+    pub fn from_env() -> Self {
+        std::env::var("LEGION_AI_PROVIDER")
+            .ok()
+            .map(|v| Self::parse(&v))
+            .unwrap_or_default()
+    }
+}
+
+/// Resolve Anthropic API key from env (preferred) or OS keyring BYOK storage.
+///
+/// Desktop `SetProviderApiKey` writes to the keyring; this path loads that secret
+/// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
+#[cfg(feature = "ai")]
+fn resolve_anthropic_api_key() -> Option<String> {
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("LEGION_ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("DEVIL_ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
+            // legacy `ANTHROPIC_API_KEY` account names.
+            load_provider_api_key(&OsKeyringSecretStore, "anthropic")
+                .ok()
+                .flatten()
+        })
+}
+
+/// Resolve configured Anthropic base URL (proxy / self-hosted / production).
+#[cfg(feature = "ai")]
+fn anthropic_base_url_from_env() -> String {
+    std::env::var("LEGION_ANTHROPIC_BASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("DEVIL_ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string())
+}
+
+/// Build an Anthropic client from env, falling back to OS keyring BYOK storage.
+///
+/// Always honors configured base URL env vars; only the credential may come
+/// from the keyring when process env keys are unset.
+#[cfg(feature = "ai")]
+fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMessagesClient {
+    use legion_ai_providers::{
+        ANTHROPIC_PROVIDER_ID, AnthropicCredentialKind, AnthropicMessagesClient,
+        ReqwestProviderHttpTransport,
+    };
+
+    let base_url = anthropic_base_url_from_env();
+    if let Some(api_key) = resolve_anthropic_api_key() {
+        return AnthropicMessagesClient::with_transport_kind(
+            ANTHROPIC_PROVIDER_ID,
+            base_url,
+            Some(api_key),
+            AnthropicCredentialKind::ApiKey,
+            ReqwestProviderHttpTransport,
+        );
+    }
+    // No explicit key: still use from_env so base URL + any remaining credential
+    // sources stay consistent with the provider adapter.
+    AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
+}
+
+/// Fast TCP probe for Ollama loopback so CI/offline does not pay HTTP timeouts.
+#[cfg(feature = "ai")]
+fn ollama_loopback_reachable() -> bool {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let base =
+        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let trimmed = base
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let host_port = if trimmed.contains(':') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}:11434")
+    };
+    let Ok(mut addrs) = host_port.to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    // Guard against accidental remote probes in product auto mode.
+    match addr {
+        SocketAddr::V4(v4) if v4.ip().is_loopback() => {}
+        SocketAddr::V6(v6) if v6.ip().is_loopback() => {}
+        _ => return false,
+    }
+    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+}
+
+#[cfg(feature = "ai")]
+fn ollama_model_label() -> String {
+    std::env::var("OLLAMA_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "llama3.2".to_string())
+}
+
+/// One successful product chat completion (provider id, model, text, optional stream chunks).
+#[cfg(feature = "ai")]
+struct ProductChatCompletion {
+    provider_id: String,
+    model: String,
+    text: String,
+    /// Ordered text deltas when the provider streamed; otherwise a single full chunk.
+    stream_chunks: Vec<String>,
+    /// True when Anthropic (or another) SSE path produced multiple deltas.
+    streamed: bool,
+}
+
+/// Local-first product completion: Ollama (when preferred/reachable) → Anthropic BYOK → none.
+///
+/// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
+/// chunks arrive). Ollama remains a single-chunk completion. Offline / no-provider
+/// returns `None` for fixture fallbacks.
+#[cfg(feature = "ai")]
+fn complete_product_chat(
+    preference: ProductAiProviderPreference,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    temperature: f32,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> Option<ProductChatCompletion> {
+    use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
+    use legion_ai_providers::OllamaProvider;
+
+    if matches!(preference, ProductAiProviderPreference::Deterministic) {
+        return None;
+    }
+
+    let try_ollama = matches!(
+        preference,
+        ProductAiProviderPreference::Auto | ProductAiProviderPreference::Ollama
+    ) && ollama_loopback_reachable();
+    let try_anthropic = matches!(
+        preference,
+        ProductAiProviderPreference::Auto | ProductAiProviderPreference::Anthropic
+    ) && resolve_anthropic_api_key().is_some();
+
+    // Local-first: Ollama before Anthropic when both are eligible (Auto).
+    let order: &[&str] = match preference {
+        ProductAiProviderPreference::Ollama => &["ollama"],
+        ProductAiProviderPreference::Anthropic => &["anthropic"],
+        ProductAiProviderPreference::Auto => &["ollama", "anthropic"],
+        ProductAiProviderPreference::Deterministic => &[],
+    };
+
+    for provider in order {
+        match *provider {
+            "ollama" if try_ollama => {
+                let model = ollama_model_label();
+                let client = OllamaProvider::default();
+                let request = ChatCompletionRequest {
+                    provider: "ollama".to_string(),
+                    model: model.clone(),
+                    messages: vec![
+                        ChatMessage {
+                            role: ChatRole::System,
+                            content: system.to_string(),
+                        },
+                        ChatMessage {
+                            role: ChatRole::User,
+                            content: user.to_string(),
+                        },
+                    ],
+                    max_tokens: Some(max_tokens),
+                    temperature: Some(temperature),
+                    metadata: Default::default(),
+                };
+                if let Ok(response) = client.complete(request)
+                    && !response.text.trim().is_empty()
+                {
+                    let text = response.text.trim().to_string();
+                    if let Some(cb) = on_delta.as_mut() {
+                        cb(&text);
+                    }
+                    return Some(ProductChatCompletion {
+                        provider_id: "ollama".to_string(),
+                        model: response.model,
+                        stream_chunks: vec![text.clone()],
+                        text,
+                        streamed: false,
+                    });
+                }
+            }
+            "anthropic" if try_anthropic => {
+                let client = anthropic_client_with_keyring_fallback();
+                let request = ChatCompletionRequest {
+                    provider: "anthropic".to_string(),
+                    model: "claude-sonnet-4-20250514".to_string(),
+                    messages: vec![
+                        ChatMessage {
+                            role: ChatRole::System,
+                            content: system.to_string(),
+                        },
+                        ChatMessage {
+                            role: ChatRole::User,
+                            content: user.to_string(),
+                        },
+                    ],
+                    max_tokens: Some(max_tokens),
+                    temperature: Some(temperature),
+                    metadata: Default::default(),
+                };
+                // Progressive SSE: on_delta fires as text deltas arrive on the wire.
+                let mut delta_sink = |text: &str| {
+                    if let Some(cb) = on_delta.as_mut() {
+                        cb(text);
+                    }
+                };
+                if let Ok(chunks) = client.stream_text_deltas_with_callback(
+                    request.clone(),
+                    Default::default(),
+                    &mut delta_sink,
+                ) {
+                    let chunks: Vec<String> =
+                        chunks.into_iter().filter(|d| !d.is_empty()).collect();
+                    let text = chunks.join("");
+                    if !text.trim().is_empty() {
+                        let streamed = chunks.len() > 1;
+                        return Some(ProductChatCompletion {
+                            provider_id: "anthropic".to_string(),
+                            model: request.model.clone(),
+                            stream_chunks: if chunks.is_empty() {
+                                vec![text.clone()]
+                            } else {
+                                chunks
+                            },
+                            text: text.trim().to_string(),
+                            streamed,
+                        });
+                    }
+                }
+                if let Ok(response) = client.complete(request)
+                    && !response.text.trim().is_empty()
+                {
+                    let text = response.text.trim().to_string();
+                    if let Some(cb) = on_delta.as_mut() {
+                        cb(&text);
+                    }
+                    return Some(ProductChatCompletion {
+                        provider_id: "anthropic".to_string(),
+                        model: response.model,
+                        stream_chunks: vec![text.clone()],
+                        text,
+                        streamed: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Result of resolving assist edit proposal body text (live model or fixture).
+#[derive(Debug, Clone)]
+struct AssistedEditProposalSource {
+    provider_id: String,
+    summary: String,
+    details: Vec<String>,
+    replacement: String,
+}
+
+fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
+    AssistedEditProposalSource {
+        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+        summary: "Phase 4 local AI edit proposal".to_string(),
+        details: vec![
+            "Generated by deterministic local provider (no live credentials)".to_string(),
+            "Proposal is registered only; app/editor/workspace own apply".to_string(),
+        ],
+        replacement: "/* phase4 local AI proposal */\n".to_string(),
+    }
+}
+
+/// Display-safe record of the last / live product AI stream for rail projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProductAiStreamProjection {
+    /// Provider that produced the stream (`ollama`, `anthropic`, or empty).
+    pub provider_id: String,
+    /// Model label.
+    pub model: String,
+    /// Operation that produced the stream (`assist.proposal`, `delegate.chat`, …).
+    pub operation: String,
+    /// Ordered stream chunks (SSE deltas or single full response).
+    pub chunks: Vec<String>,
+    /// Whether the provider used multi-delta streaming.
+    pub streamed: bool,
+    /// True while a background or progressive stream is still receiving deltas.
+    pub in_flight: bool,
+    /// Final accumulated text (bounded for projection rows).
+    pub text_preview: String,
+}
+
+/// Resolve assist edit text via product preference routing (Ollama / Anthropic / fixture).
+#[cfg(feature = "ai")]
+fn resolve_assisted_edit_proposal_text(
+    preference: ProductAiProviderPreference,
+    instruction_label: &str,
+    buffer_excerpt: &str,
+    file_path: &str,
+    on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
+    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
+Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
+no markdown fences, no explanation.";
+    let user = format!(
+        "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
+    );
+    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
+        Some(completion) => {
+            let mut text = completion.text.clone();
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            let stream = product_stream_from_completion(&completion, "assist.proposal");
+            (
+                AssistedEditProposalSource {
+                    provider_id: completion.provider_id.clone(),
+                    summary: format!("Assist edit proposal from {}", completion.provider_id),
+                    details: vec![
+                        format!("model={}", completion.model),
+                        format!("preference={}", preference.as_str()),
+                        format!(
+                            "streamed={} chunks={}",
+                            completion.streamed,
+                            completion.stream_chunks.len()
+                        ),
+                        "Proposal is registered only; app/editor/workspace own apply".to_string(),
+                    ],
+                    replacement: text,
+                },
+                Some(stream),
+            )
+        }
+        None => (deterministic_assisted_edit_proposal(), None),
+    }
+}
+
+#[cfg(not(feature = "ai"))]
+fn resolve_assisted_edit_proposal_text(
+    _preference: ProductAiProviderPreference,
+    _instruction_label: &str,
+    _buffer_excerpt: &str,
+    _file_path: &str,
+    _on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
+    (deterministic_assisted_edit_proposal(), None)
+}
+
+/// Resolve Delegate chat assistant body via product preference routing.
+#[cfg(feature = "ai")]
+fn resolve_delegate_chat_reply(
+    preference: ProductAiProviderPreference,
+    prompt_label: &str,
+    buffer_excerpt: &str,
+    file_path: &str,
+    citation_count: usize,
+    route_id: &str,
+    route_labels: &[String],
+    on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (String, Option<ProductAiStreamProjection>) {
+    let system = "You are Legion's Delegate chat assistant. Answer helpfully and concisely \
+about the user's workspace code. Prefer concrete references to the cited file. \
+Do not invent file paths. Keep the reply under ~800 characters.";
+    let user = format!(
+        "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
+    );
+    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
+        Some(completion) => {
+            let stream = product_stream_from_completion(&completion, "delegate.chat");
+            (bounded_label(completion.text, 1_200), Some(stream))
+        }
+        None => (
+            format!(
+                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (preference={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
+                route_labels.join(","),
+                preference.as_str()
+            ),
+            None,
+        ),
+    }
+}
+
+#[cfg(not(feature = "ai"))]
+fn resolve_delegate_chat_reply(
+    _preference: ProductAiProviderPreference,
+    _prompt_label: &str,
+    _buffer_excerpt: &str,
+    _file_path: &str,
+    citation_count: usize,
+    route_id: &str,
+    route_labels: &[String],
+    _on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (String, Option<ProductAiStreamProjection>) {
+    (
+        format!(
+            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={}",
+            route_labels.join(",")
+        ),
+        None,
+    )
+}
+
+#[cfg(feature = "ai")]
+fn product_stream_from_completion(
+    completion: &ProductChatCompletion,
+    operation: &str,
+) -> ProductAiStreamProjection {
+    ProductAiStreamProjection {
+        provider_id: completion.provider_id.clone(),
+        model: completion.model.clone(),
+        operation: operation.to_string(),
+        chunks: completion.stream_chunks.clone(),
+        streamed: completion.streamed,
+        in_flight: false,
+        text_preview: bounded_label(completion.text.as_str(), 480),
+    }
+}
+
+/// Whether product AI will attempt a live (non-fixture) completion for `preference`.
+#[cfg(feature = "ai")]
+fn product_ai_will_attempt_live(preference: ProductAiProviderPreference) -> bool {
+    product_ai_selected_live_backend(preference).is_some()
+}
+
+#[cfg(not(feature = "ai"))]
+fn product_ai_will_attempt_live(_preference: ProductAiProviderPreference) -> bool {
+    false
+}
+
+/// Selected live backend for product composition (policy + routing metadata).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProductAiLiveBackend {
+    Ollama,
+    Anthropic,
+}
+
+#[cfg(feature = "ai")]
+fn product_ai_selected_live_backend(
+    preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    match preference {
+        ProductAiProviderPreference::Deterministic => None,
+        ProductAiProviderPreference::Ollama => {
+            ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
+        }
+        ProductAiProviderPreference::Anthropic => {
+            resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
+        }
+        ProductAiProviderPreference::Auto => {
+            if ollama_loopback_reachable() {
+                Some(ProductAiLiveBackend::Ollama)
+            } else if resolve_anthropic_api_key().is_some() {
+                Some(ProductAiLiveBackend::Anthropic)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "ai"))]
+fn product_ai_selected_live_backend(
+    _preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    None
+}
+
+/// Security policy for product AI routes that may reach local loopback or BYOK remote.
+fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> SecurityPolicy {
+    let mut policy = SecurityPolicy::default();
+    match backend {
+        Some(ProductAiLiveBackend::Ollama) => {
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+        }
+        Some(ProductAiLiveBackend::Anthropic) => {
+            // Trusted-workspace BYOK: allow the configured Anthropic host only.
+            policy.network_policy.air_gap = false;
+            policy.network_policy.local_provider_only = false;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = true;
+            let host = anthropic_route_host();
+            if !policy.network_policy.allowlist.iter().any(|h| h == &host) {
+                policy.network_policy.allowlist.push(host);
+            }
+        }
+        None => {
+            // Deterministic / fixture: no remote egress.
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+        }
+    }
+    policy
+}
+
+fn anthropic_route_host() -> String {
+    #[cfg(feature = "ai")]
+    {
+        let base = anthropic_base_url_from_env();
+        base.trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("api.anthropic.com")
+            .split(':')
+            .next()
+            .unwrap_or("api.anthropic.com")
+            .to_string()
+    }
+    #[cfg(not(feature = "ai"))]
+    {
+        "api.anthropic.com".to_string()
+    }
+}
+
+/// Provider route metadata that matches the backend that will receive workspace text.
+fn product_ai_route_fields(
+    backend: Option<ProductAiLiveBackend>,
+) -> (
+    String,
+    String,
+    AssistedAiProviderClass,
+    Option<legion_protocol::NetworkTarget>,
+    Vec<String>,
+    Vec<String>,
+    legion_protocol::ProposalPrivacyLabel,
+) {
+    match backend {
+        Some(ProductAiLiveBackend::Ollama) => (
+            "ollama".to_string(),
+            ollama_model_label_offline_safe(),
+            AssistedAiProviderClass::LocalLoopback,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            vec!["local.ollama".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+        Some(ProductAiLiveBackend::Anthropic) => (
+            "anthropic".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+            AssistedAiProviderClass::ByokRemote,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "https".to_string(),
+                host: anthropic_route_host(),
+                port: Some(443),
+            }),
+            vec!["byok.anthropic".to_string()],
+            vec!["remote.byok".to_string()],
+            // Buffer excerpts leave the machine under BYOK remote.
+            legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata,
+        ),
+        None => (
+            DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            "deterministic-local".to_string(),
+            AssistedAiProviderClass::Local,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            vec!["local.deterministic".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+    }
+}
+
+fn ollama_model_label_offline_safe() -> String {
+    #[cfg(feature = "ai")]
+    {
+        ollama_model_label()
+    }
+    #[cfg(not(feature = "ai"))]
+    {
+        "llama3.2".to_string()
+    }
+}
+
+/// Background job result for non-blocking product AI generation.
+#[derive(Debug, Clone)]
+struct ProductAiBackgroundResult {
+    assistant_message_id: String,
+    content_label: String,
+    stream: Option<ProductAiStreamProjection>,
+}
+
+/// Shared live stream sink updated as SSE deltas arrive (background or progressive).
+#[derive(Debug, Default)]
+struct LiveProductAiStreamSink {
+    projection: Mutex<ProductAiStreamProjection>,
+    in_flight: std::sync::atomic::AtomicBool,
+    /// Completed background chat results waiting to be applied on the app thread.
+    pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
+}
+
+impl LiveProductAiStreamSink {
+    fn begin(&self, operation: &str, provider_hint: &str, model_hint: &str) {
+        self.in_flight
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut guard) = self.projection.lock() {
+            *guard = ProductAiStreamProjection {
+                provider_id: provider_hint.to_string(),
+                model: model_hint.to_string(),
+                operation: operation.to_string(),
+                chunks: Vec::new(),
+                streamed: false,
+                in_flight: true,
+                text_preview: String::new(),
+            };
+        }
+    }
+
+    fn push_delta(&self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.projection.lock() {
+            guard.chunks.push(delta.to_string());
+            guard.streamed = guard.chunks.len() > 1 || guard.streamed;
+            guard.in_flight = true;
+            let joined = guard.chunks.join("");
+            guard.text_preview = joined.chars().take(480).collect();
+        }
+    }
+
+    fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
+        if let Ok(mut guard) = self.projection.lock() {
+            if let Some(completion) = completion {
+                *guard = product_stream_from_completion(completion, operation);
+            } else {
+                guard.in_flight = false;
+            }
+        }
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn snapshot(&self) -> ProductAiStreamProjection {
+        self.projection
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    fn is_in_flight(&self) -> bool {
+        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn push_background_result(&self, result: ProductAiBackgroundResult) {
+        if let Ok(mut queue) = self.pending_results.lock() {
+            queue.push_back(result);
+        }
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
+        self.pending_results
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Bound ghost-text bytes for live inline predictions (matches protocol max).
+#[cfg(feature = "ai")]
+fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
+    let mut end = text.len().min(max_bytes as usize);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Build an `InlinePredictionResult` from a live product completion when available.
+///
+/// Real adapters often lack `predict_inline`; we map a short chat completion into
+/// the ghost-text result shape. Falls back to `None` for deterministic offline.
+#[cfg(feature = "ai")]
+fn try_live_product_inline_prediction(
+    preference: ProductAiProviderPreference,
+    metadata: &InlinePredictionRequestMetadata,
+    buffer_excerpt: &str,
+) -> Option<InlinePredictionResult> {
+    let max_bytes = metadata
+        .max_prediction_bytes
+        .min(INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES)
+        .max(1);
+    let system = format!(
+        "You are Legion Assist inline prediction. Reply with ONLY the short text to insert at the cursor (ghost text). \
+No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_bytes} bytes."
+    );
+    let user = format!(
+        "Language: {}\nCursor line {} character {}\nBuffer excerpt:\n{buffer_excerpt}",
+        metadata.language_id.0, metadata.cursor.line, metadata.cursor.character
+    );
+    let completion = complete_product_chat(preference, &system, &user, 128, 0.1, None)?;
+    let text = bound_inline_prediction_text(completion.text.trim(), max_bytes);
+    if text.is_empty() {
+        return None;
+    }
+    let byte_len = text.len() as u32;
+    let line_count = text.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+    let mut provider = metadata.provider.clone();
+    provider.provider_id = completion.provider_id.clone();
+    provider.model_label = completion.model.clone();
+    provider.provider_class = if completion.provider_id == "ollama" {
+        AssistedAiProviderClass::LocalLoopback
+    } else {
+        AssistedAiProviderClass::ByokRemote
+    };
+    provider.operation_class = AssistedAiOperationClass::InlinePrediction;
+    provider.invocation_state = AssistedAiProviderInvocationState::Completed;
+    provider.health_labels = vec![
+        if completion.provider_id == "ollama" {
+            "local".to_string()
+        } else {
+            "byok".to_string()
+        },
+        completion.provider_id.clone(),
+    ];
+    provider.cost_labels = vec![if completion.provider_id == "ollama" {
+        "local".to_string()
+    } else {
+        "remote".to_string()
+    }];
+    provider.latency = InlinePredictionLatencyMetadata {
+        queued_ms: 0,
+        inference_ms: 0,
+        total_ms: 0,
+        timed_out: false,
+    };
+    Some(InlinePredictionResult {
+        result_id: InlinePredictionResultId(format!("{}:result", metadata.request_id.0)),
+        request_id: metadata.request_id.clone(),
+        state: InlinePredictionResultState::Available,
+        retention: InlinePredictionRetention::EphemeralDisplay,
+        insert_range: ProtocolTextRange {
+            start: metadata.cursor,
+            end: metadata.cursor,
+        },
+        ghost_text: Some(InlinePredictionGhostText {
+            text: text.clone(),
+            byte_len,
+            line_count,
+            text_fingerprint: FileFingerprint {
+                algorithm: format!("{}-inline-v1", completion.provider_id),
+                value: format!(
+                    "{}:{}:{}",
+                    metadata.language_id.0, metadata.cursor.line, byte_len
+                ),
+            },
+        }),
+        fingerprint: metadata.fingerprint.clone(),
+        freshness: InlinePredictionFreshness::fresh(metadata.schema_version),
+        provider,
+        refusal: None,
+        generated_at: metadata.requested_at,
+        expires_at: None,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: metadata.schema_version,
+    })
+}
+
 /// App-owned outcome for a delegated task loop run started via `StartDelegatedTask`.
 #[derive(Debug, Clone)]
 pub enum AppDelegatedTaskOutcome {
@@ -1129,12 +1978,67 @@ impl legion_agent::agent_loop::DelegatedTaskCancellationProbe for SharedCancella
 /// `TerminalCommand` calls are forwarded to an OS-sandboxed child process;
 /// `McpPassthrough` calls return an error — MCP integration is wired in a
 /// later packet.
+///
+/// Each successful spawn records a [`SandboxEnforcementReport`] so product UI
+/// can show what the OS actually enforced (not only compile-time profile notes).
 #[cfg(feature = "ai")]
 pub struct AppDelegatedToolHost {
     /// Worktree root for spawned commands (writable root for the sandbox).
     pub worktree_root: PathBuf,
     /// Allowed network egress destinations (empty = no network).
     pub allowed_egress: std::collections::BTreeSet<String>,
+    /// Last live enforcement report from `spawn_sandboxed` (shared with app projection).
+    pub last_enforcement: Arc<Mutex<Option<legion_sandbox::spawn::SandboxEnforcementReport>>>,
+}
+
+#[cfg(feature = "ai")]
+impl AppDelegatedToolHost {
+    /// Construct a tool host with a fresh shared enforcement slot.
+    pub fn new(worktree_root: PathBuf, allowed_egress: std::collections::BTreeSet<String>) -> Self {
+        Self {
+            worktree_root,
+            allowed_egress,
+            last_enforcement: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Construct a tool host that writes enforcement into an existing shared slot.
+    pub fn with_enforcement_slot(
+        worktree_root: PathBuf,
+        allowed_egress: std::collections::BTreeSet<String>,
+        last_enforcement: Arc<Mutex<Option<legion_sandbox::spawn::SandboxEnforcementReport>>>,
+    ) -> Self {
+        Self {
+            worktree_root,
+            allowed_egress,
+            last_enforcement,
+        }
+    }
+
+    /// Format the last recorded enforcement report for projection rows.
+    pub fn last_enforcement_summary(&self) -> Option<String> {
+        let guard = self.last_enforcement.lock().ok()?;
+        let report = guard.as_ref()?;
+        Some(format_sandbox_enforcement_summary(report))
+    }
+}
+
+#[cfg(feature = "ai")]
+fn format_sandbox_enforcement_summary(
+    report: &legion_sandbox::spawn::SandboxEnforcementReport,
+) -> String {
+    format!(
+        "sandbox live enforcement: backend={} fs_write={} fs_read={} network={} caveats={}",
+        report.backend_used,
+        report.filesystem_write_enforced,
+        report.filesystem_read_enforced,
+        report.network_enforced,
+        if report.caveat_labels.is_empty() {
+            "none".to_string()
+        } else {
+            report.caveat_labels.join("; ")
+        }
+    )
 }
 
 #[cfg(feature = "ai")]
@@ -1171,12 +2075,19 @@ impl legion_agent::agent_loop::DelegatedToolHost for AppDelegatedToolHost {
 
         match spawn_sandboxed(&spec) {
             Ok(output) => {
+                if let Ok(mut slot) = self.last_enforcement.lock() {
+                    *slot = Some(output.enforcement.clone());
+                }
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                let summary = format_sandbox_enforcement_summary(&output.enforcement);
                 if output.timed_out {
-                    Err(format!("command timed out after {}s", timeout.as_secs()))
+                    Err(format!(
+                        "command timed out after {}s ({summary})",
+                        timeout.as_secs()
+                    ))
                 } else {
-                    Ok(format!("{stdout}{stderr}"))
+                    Ok(format!("{stdout}{stderr}\n[{summary}]"))
                 }
             }
             Err(e) => Err(format!("sandbox spawn failed: {e}")),
@@ -1214,6 +2125,8 @@ struct DelegateWorkflowState {
     tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
     runtime_activation: DelegatedTaskRuntimeActivationState,
     next_message_sequence: u64,
+    /// Last live sandbox enforcement summary from tool-host spawns (display-safe).
+    last_sandbox_enforcement_label: Option<String>,
 }
 
 impl Default for DelegateWorkflowState {
@@ -1225,6 +2138,7 @@ impl Default for DelegateWorkflowState {
             tool_permission_requests: HashMap::new(),
             runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
             next_message_sequence: 0,
+            last_sandbox_enforcement_label: None,
         }
     }
 }
@@ -1323,6 +2237,15 @@ impl DelegateWorkflowState {
         projection.context_citation_count = projection.context_citations.len() as u32;
         projection.proposal_review_count = projection.proposal_reviews.len() as u32;
         projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
+        if let Some(label) = &self.last_sandbox_enforcement_label {
+            if !projection
+                .plan_only_disclaimers
+                .iter()
+                .any(|existing| existing == label)
+            {
+                projection.plan_only_disclaimers.push(label.clone());
+            }
+        }
     }
 
     fn review_for_row(&self, row: &ProposalLedgerRow) -> DelegatedTaskProposalReview {
@@ -6012,7 +6935,9 @@ impl TerminalWorkflow {
             capability_id: CapabilityId("terminal.launch".to_string()),
             cwd_policy: "workspace-root".to_string(),
             output_byte_limit: 256 * 1024,
-            timeout_seconds: timeout_secs.unwrap_or(30),
+            // Interactive product default: 1 hour idle window (refreshed on input).
+            // Explicit caller values still win; zero remains denied by validation.
+            timeout_seconds: timeout_secs.unwrap_or(3_600),
             schema_version: 1,
         };
         let runtime_label = std::any::type_name::<
@@ -6827,7 +7752,8 @@ impl DebugWorkflow {
         self.runtime = DapClientRuntime::new(DapClientConfig::enabled());
         self.projection.status = DebugStatusProjection {
             kind: DebugStatusKindProjection::Idle,
-            message: "Debug runtime enabled".to_string(),
+            message: "Simulated DAP runtime enabled (no adapter process; fixture stack/variables)"
+                .to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
     }
@@ -7003,7 +7929,7 @@ impl DebugWorkflow {
                 self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
-                    message: "Debug runtime paused at breakpoint".to_string(),
+                    message: "Simulated DAP paused (fixture; no real adapter process)".to_string(),
                 };
                 self.projection.session_state = Some(DebugSessionState::Paused);
                 self.projection.generated_at = TimestampMillis::now();
@@ -7015,7 +7941,7 @@ impl DebugWorkflow {
                     DebugSessionState::Paused,
                     config.adapter_type,
                     event_context,
-                    "action=launch state=paused".to_string(),
+                    "action=launch state=paused simulated=true".to_string(),
                 );
                 self.projection()
             }
@@ -7037,7 +7963,7 @@ impl DebugWorkflow {
                 self.apply_runtime_outcome(outcome);
                 self.projection.status = DebugStatusProjection {
                     kind: DebugStatusKindProjection::Paused,
-                    message: "Debug step completed".to_string(),
+                    message: "Simulated DAP step completed (fixture)".to_string(),
                 };
                 self.projection.session_state = Some(DebugSessionState::Paused);
                 self.projection.generated_at = TimestampMillis::now();
@@ -7799,6 +8725,31 @@ fn byte_bounds_for_protocol_range(text: &str, range: ProtocolTextRange) -> Optio
         return None;
     }
     Some((start, end))
+}
+
+/// Map `(line, character)` (UTF-8 scalar indices on the line) to a byte offset.
+fn line_char_to_byte_offset(text: &str, line: u32, character: u32) -> Option<usize> {
+    let mut current_line = 0u32;
+    let mut col = 0u32;
+    for (byte_idx, ch) in text.char_indices() {
+        if current_line == line && col == character {
+            return Some(byte_idx);
+        }
+        if ch == '\n' {
+            if current_line == line {
+                // Clamp past EOL to the newline (or end of text if missing).
+                return Some(byte_idx);
+            }
+            current_line = current_line.saturating_add(1);
+            col = 0;
+        } else if current_line == line {
+            col = col.saturating_add(1);
+        }
+    }
+    if current_line == line {
+        return Some(text.len());
+    }
+    None
 }
 
 fn selected_line_count(selected: &str) -> usize {
@@ -14018,6 +14969,12 @@ pub struct AppComposition {
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
     product_mode: AppProductMode,
+    /// Preferred product AI route for Assist / Delegate composition (local-first Auto).
+    preferred_ai_provider: ProductAiProviderPreference,
+    /// Last product AI stream (Assist proposal / Delegate chat) for rail projection.
+    last_product_ai_stream: Option<ProductAiStreamProjection>,
+    /// Live progressive stream sink (updated mid-flight from SSE / background jobs).
+    live_product_ai_stream: Arc<LiveProductAiStreamSink>,
     palette: PaletteState,
     settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
@@ -14251,8 +15208,15 @@ mod app_document_resolver_uri_tests {
 
 impl AppComposition {
     /// Build composition with native platform adapters and default-deny security broker.
+    ///
+    /// Product default uses a redacting in-memory event sink (not a no-op) so
+    /// proposal/security/AI audit events are retained for the process lifetime.
+    /// Call [`Self::enable_workspace_state_persistence`] after opening a workspace
+    /// to also persist proposal audits and checkpoints under `.legion/`.
     pub fn new() -> Self {
-        Self::with_event_sink(SharedEventSink::default())
+        Self::with_event_sink(SharedEventSink::new(
+            legion_observability::RedactingEventSink::new(),
+        ))
     }
 
     /// Build composition with native platform adapters and an injected event sink.
@@ -14275,6 +15239,9 @@ impl AppComposition {
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
             product_mode: AppProductMode::Manual,
+            preferred_ai_provider: ProductAiProviderPreference::from_env(),
+            last_product_ai_stream: None,
+            live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -14424,6 +15391,24 @@ impl AppComposition {
         let legion_dir = workspace_root.join(".legion");
         let _ = std::fs::create_dir_all(&legion_dir);
         self.checkpoint_store = CheckpointStore::with_base_dir(legion_dir);
+    }
+
+    /// Enable durable proposal-audit blobs under `<workspace_root>/.legion/proposal-audit/`.
+    ///
+    /// Complements checkpoint persistence (PKT-CKPT I4). Safe to call after
+    /// [`Self::enable_checkpoint_persistence`]; both share the `.legion/` root.
+    pub fn enable_proposal_audit_persistence(&mut self, workspace_root: &std::path::Path) {
+        let legion_dir = workspace_root.join(".legion");
+        let _ = std::fs::create_dir_all(&legion_dir);
+        self.storage.enable_base_dir(legion_dir);
+    }
+
+    /// Enable the full workspace-local state suite under `.legion/`:
+    /// palette usage, checkpoints, and proposal audit durability.
+    pub fn enable_workspace_state_persistence(&mut self, workspace_root: &std::path::Path) {
+        self.enable_palette_usage_persistence(workspace_root);
+        self.enable_checkpoint_persistence(workspace_root);
+        self.enable_proposal_audit_persistence(workspace_root);
     }
 
     /// List durable checkpoints newest-first.
@@ -14670,6 +15655,70 @@ impl AppComposition {
         if !mode.allows_assist() {
             self.phase4_projection_state.assisted_ai_projection = None;
         }
+    }
+
+    /// Preferred product AI route for Assist proposals, Delegate chat, and inline ghost text.
+    pub fn preferred_ai_provider(&self) -> ProductAiProviderPreference {
+        self.preferred_ai_provider
+    }
+
+    /// Select the product AI route preference (`auto` / `ollama` / `anthropic` / `deterministic`).
+    pub fn set_preferred_ai_provider(&mut self, preference: ProductAiProviderPreference) {
+        self.preferred_ai_provider = preference;
+    }
+
+    /// Parse and apply a preferred-provider label (UI / env-compatible).
+    pub fn set_preferred_ai_provider_label(&mut self, label: impl AsRef<str>) {
+        self.preferred_ai_provider = ProductAiProviderPreference::parse(label.as_ref());
+    }
+
+    /// Last product AI stream projection (Assist / Delegate), if any.
+    pub fn last_product_ai_stream(&self) -> Option<&ProductAiStreamProjection> {
+        self.last_product_ai_stream.as_ref()
+    }
+
+    /// Snapshot of the live progressive stream (may be mid-flight).
+    pub fn live_product_ai_stream_snapshot(&self) -> ProductAiStreamProjection {
+        self.live_product_ai_stream.snapshot()
+    }
+
+    /// Whether a progressive / background product AI stream is still in flight.
+    pub fn product_ai_stream_in_flight(&self) -> bool {
+        self.live_product_ai_stream.is_in_flight()
+    }
+
+    /// Poll live stream into `last_product_ai_stream` and apply finished background jobs.
+    ///
+    /// Returns `true` when the retained stream or chat projection changed (desktop should repaint).
+    pub fn poll_product_ai_stream(&mut self) -> bool {
+        let mut changed = false;
+        let snap = self.live_product_ai_stream.snapshot();
+        if !snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty() {
+            if self.last_product_ai_stream.as_ref() != Some(&snap) {
+                self.last_product_ai_stream = Some(snap);
+                changed = true;
+            }
+        }
+        for result in self.live_product_ai_stream.take_background_results() {
+            if let Some(stream) = result.stream {
+                self.last_product_ai_stream = Some(stream);
+            }
+            if let Some(message) = self
+                .delegate_workflow
+                .chat_messages
+                .iter_mut()
+                .find(|m| m.message_id == result.assistant_message_id)
+            {
+                message.content_label = result.content_label;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Clear the retained product AI stream (e.g. when leaving Assist/Delegate).
+    pub fn clear_product_ai_stream(&mut self) {
+        self.last_product_ai_stream = None;
     }
 
     /// Configure the optional ACP host command used by delegated tasks.
@@ -17339,8 +18388,8 @@ impl AppComposition {
             } => {
                 #[cfg(feature = "ai")]
                 {
-                    let provider =
-                        legion_ai_providers::AnthropicMessagesClient::from_env("anthropic");
+                    // Prefer env credentials; fall back to OS keyring BYOK (Tier 2).
+                    let provider = anthropic_client_with_keyring_fallback();
                     Ok(AppCommandOutcome::DelegatedTaskCompleted(Box::new(
                         self.start_delegated_task(task_description, scope, &provider)?,
                     )))
@@ -18259,10 +19308,8 @@ impl AppComposition {
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
 
         // Build the tool host backed by `spawn_sandboxed`.
-        let tool_host = AppDelegatedToolHost {
-            worktree_root: sandbox_path.clone(),
-            allowed_egress: std::collections::BTreeSet::new(),
-        };
+        let tool_host =
+            AppDelegatedToolHost::new(sandbox_path.clone(), std::collections::BTreeSet::new());
 
         // Audit sink that collects step records.
         struct VecAuditSink {
@@ -18335,6 +19382,9 @@ impl AppComposition {
             Ok(result) => {
                 // Clear the flag on the success path.
                 self.active_cancellation_flag = None;
+                if let Some(summary) = tool_host.last_enforcement_summary() {
+                    self.delegate_workflow.last_sandbox_enforcement_label = Some(summary);
+                }
                 result
             }
             Err(e) => {
@@ -18342,6 +19392,9 @@ impl AppComposition {
                 // then propagate the error.  Without this the activation stays stuck at
                 // Executing for the rest of the session.
                 self.active_cancellation_flag = None;
+                if let Some(summary) = tool_host.last_enforcement_summary() {
+                    self.delegate_workflow.last_sandbox_enforcement_label = Some(summary);
+                }
                 self.delegate_workflow
                     .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
                 if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {
@@ -19454,10 +20507,8 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = orchestrator.sandbox_path().to_path_buf();
-        let tool_host = AppDelegatedToolHost {
-            worktree_root: sandbox_path.clone(),
-            allowed_egress: std::collections::BTreeSet::new(),
-        };
+        let tool_host =
+            AppDelegatedToolHost::new(sandbox_path.clone(), std::collections::BTreeSet::new());
 
         let scope = self.legion_workflow_worker_scope();
         let config = legion_agent::agent_loop::DelegatedTaskLoopConfig {
@@ -21287,11 +22338,23 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
+        // Authorize the *actual* backend that will receive buffer text (Ollama /
+        // Anthropic / fixture), not a hard-coded deterministic localhost route.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        let (
+            route_provider_id,
+            route_model,
+            route_provider_class,
+            route_network,
+            route_health,
+            route_cost,
+            route_privacy,
+        ) = product_ai_route_fields(live_backend);
         let provider_route_request = legion_protocol::AssistedAiProviderRouteRequest {
             route_id: route_id.clone(),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-            model_label: "deterministic-local".to_string(),
-            provider_class,
+            provider_id: route_provider_id.clone(),
+            model_label: route_model.clone(),
+            provider_class: route_provider_class,
             operation_class,
             context_manifest: trust_reference(
                 &context_manifest_projection.manifest.manifest_id,
@@ -21329,21 +22392,17 @@ impl AppComposition {
                 },
                 required_capability: CapabilityId("editor.write".to_string()),
                 risk_label: legion_protocol::ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                privacy_label: route_privacy,
                 labels: vec![instruction_label.clone()],
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            network_target: route_network,
             cancellation_token: legion_protocol::CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: vec!["local.deterministic".to_string()],
-            cost_labels: vec!["local.free".to_string()],
+            health_labels: route_health,
+            cost_labels: route_cost,
             principal_id: context.principal.clone(),
             workspace_trust_state: context.trust.clone(),
             correlation_id: event_context.correlation_id,
@@ -21353,12 +22412,115 @@ impl AppComposition {
             schema_version: 1,
         };
         let broker = DenyByDefaultBroker::new(
-            SecurityPolicy::default(),
+            product_ai_security_policy(live_backend),
             CapabilityNamespace("app.ai".to_string()),
         );
-        let route_response = ProviderRouter::new(&self.ai_registry, &broker)
-            .route_completion(provider_route_request.clone())
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        // Capability/network decision only — product prose is filled by
+        // complete_product_chat after authorization (registry may lack BYOK key).
+        let route_response = {
+            let decision = broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: context.principal.clone(),
+                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                    workspace_trust_state: context.trust.clone(),
+                    target_path: None,
+                    decision_id: None,
+                    context: legion_protocol::CapabilityRequestContext {
+                        network_target: provider_route_request.network_target.clone(),
+                        ..Default::default()
+                    },
+                    correlation_id: event_context.correlation_id,
+                })
+                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+            let granted = matches!(
+                decision,
+                CapabilityResponse::Decision(ref d) if d.granted
+            ) || matches!(decision, CapabilityResponse::Granted(_));
+            if !granted {
+                let event_sequence = provider_route_request.event_sequence;
+                let refusal = legion_protocol::AssistedAiRefusalMetadata {
+                    reason_code: "capability.denied".to_string(),
+                    label: "provider capability denied by policy".to_string(),
+                    provider_id: Some(route_provider_id.clone()),
+                    operation_class: Some(operation_class),
+                    privacy_scope: None,
+                    capability: Some(CapabilityId("ai.provider.invoke".to_string())),
+                    budget_id: None,
+                    risk_label: legion_protocol::ProposalRiskLabel::High,
+                    reasons: vec!["capability.denied".to_string()],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                return self.finish_assisted_ai_metadata_only_run(
+                    run_id,
+                    route_id,
+                    operation_class,
+                    provider_class,
+                    provider_route_request.clone(),
+                    legion_protocol::AssistedAiProviderRouteResponse {
+                        route_id: provider_route_request.route_id.clone(),
+                        invocation_state:
+                            legion_protocol::AssistedAiProviderInvocationState::Refused,
+                        route_decision: legion_protocol::AssistedAiRouteDecision {
+                            disposition: legion_protocol::AssistedAiRequestDisposition::Refused,
+                            provider_invocation:
+                                legion_protocol::AssistedAiProviderInvocationState::Refused,
+                            refusal: Some(refusal.clone()),
+                            reasons: vec!["capability.denied".to_string()],
+                            redaction_hints: vec![RedactionHint::MetadataOnly],
+                            schema_version: 1,
+                        },
+                        provider_id: route_provider_id.clone(),
+                        model_label: route_model.clone(),
+                        output_labels: vec!["output.not_encoded".to_string()],
+                        refusal: Some(refusal),
+                        correlation_id: event_context.correlation_id,
+                        causality_id: event_context.causality_id,
+                        event_sequence,
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                        schema_version: 1,
+                    },
+                    context_manifest_projection,
+                    privacy_inspector_projection,
+                    permission_budget_projection,
+                    generated_at,
+                    event_context,
+                    &mut agent,
+                );
+            }
+            // Still exercise the deterministic router for offline fixture metadata
+            // when no live backend is selected; live backends skip registry complete
+            // (credentials live in the product keyring path, not the registry).
+            if live_backend.is_none() {
+                ProviderRouter::new(&self.ai_registry, &broker)
+                    .route_completion(provider_route_request.clone())
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?
+            } else {
+                legion_protocol::AssistedAiProviderRouteResponse {
+                    route_id: provider_route_request.route_id.clone(),
+                    invocation_state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+                    route_decision: legion_protocol::AssistedAiRouteDecision {
+                        disposition:
+                            legion_protocol::AssistedAiRequestDisposition::MetadataOnlyReady,
+                        provider_invocation:
+                            legion_protocol::AssistedAiProviderInvocationState::Completed,
+                        refusal: None,
+                        reasons: vec!["provider.authorized.product_edge".to_string()],
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                        schema_version: 1,
+                    },
+                    provider_id: route_provider_id,
+                    model_label: route_model,
+                    output_labels: vec!["route.authorized".to_string()],
+                    refusal: None,
+                    correlation_id: event_context.correlation_id,
+                    causality_id: event_context.causality_id,
+                    event_sequence: provider_route_request.event_sequence,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }
+            }
+        };
         if route_response.invocation_state
             != legion_protocol::AssistedAiProviderInvocationState::Completed
             || operation_class == legion_protocol::AssistedAiOperationClass::Explain
@@ -21389,6 +22551,41 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
+        // Live completion only after the capability/network decision above.
+        let buffer_excerpt = self
+            .editor
+            .text(context.buffer_id)
+            .unwrap_or("")
+            .chars()
+            .take(4_000)
+            .collect::<String>();
+        let sink = self.live_product_ai_stream.clone();
+        sink.begin("assist.proposal", "pending", "");
+        let sink_delta = sink.clone();
+        let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+        let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
+            self.preferred_ai_provider,
+            &instruction_label,
+            &buffer_excerpt,
+            &context.metadata.identity.canonical_path.0,
+            Some(&mut on_delta),
+        );
+        if let Some(stream) = stream {
+            sink.finish(
+                Some(&ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
+                }),
+                "assist.proposal",
+            );
+            self.last_product_ai_stream = Some(stream);
+        } else {
+            sink.finish(None, "assist.proposal");
+        }
+
         let proposal_id = self.proposal_coordinator.next_id();
         let preconditions = ProposalVersionPreconditions {
             file_version: Some(context.metadata.file_content_version),
@@ -21404,7 +22601,7 @@ impl AppComposition {
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            provider_id: proposal_source.provider_id.clone(),
             proposal_id,
             principal: context.principal.clone(),
             capability: CapabilityId("editor.write".to_string()),
@@ -21415,17 +22612,14 @@ impl AppComposition {
                 edits: legion_protocol::EditBatch {
                     edits: vec![legion_protocol::TextEdit {
                         range: legion_protocol::TextRange::byte(0, 0),
-                        replacement: "/* phase4 local AI proposal */\n".to_string(),
+                        replacement: proposal_source.replacement.clone(),
                     }],
                 },
             }),
             preconditions,
             preview: PreviewSummary {
-                summary: "Phase 4 local AI edit proposal".to_string(),
-                details: vec![
-                    "Generated by deterministic local provider".to_string(),
-                    "Proposal is registered only; app/editor/workspace own apply".to_string(),
-                ],
+                summary: proposal_source.summary.clone(),
+                details: proposal_source.details.clone(),
             },
             expires_at: None,
             created_at: generated_at,
@@ -22114,9 +23308,17 @@ impl AppComposition {
         buffer_id: BufferId,
         cut: bool,
     ) -> Result<(AppClipboardUpdate, Option<ProtocolTextRange>), AppCompositionError> {
-        self.active_documents.ensure_active_buffer(buffer_id)?;
-        let Some(selection) = self.primary_selection(buffer_id)? else {
-            return Ok((
+        match self.selected_text_for_clipboard(buffer_id)? {
+            Some((selected, selection)) => Ok((
+                AppClipboardUpdate {
+                    buffer_id,
+                    byte_len: selected.len(),
+                    line_count: selected_line_count(&selected),
+                    cut,
+                },
+                Some(selection),
+            )),
+            None => Ok((
                 AppClipboardUpdate {
                     buffer_id,
                     byte_len: 0,
@@ -22124,37 +23326,54 @@ impl AppComposition {
                     cut,
                 },
                 None,
-            ));
+            )),
+        }
+    }
+
+    /// Return the active buffer's primary selection text for OS clipboard write.
+    ///
+    /// Intentionally separate from [`AppCommandOutcome::ClipboardUpdated`], which
+    /// remains metadata-only for audit/projection surfaces. Desktop calls this
+    /// immediately before copy/cut so egui can write the real selection payload.
+    pub fn selected_text_for_clipboard(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<Option<(String, ProtocolTextRange)>, AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        let Some(selection) = self.primary_selection(buffer_id)? else {
+            return Ok(None);
         };
 
         let text = self.editor.text(buffer_id)?;
         let Some((start, end)) = byte_bounds_for_protocol_range(text, selection) else {
-            return Err(EditorError::InvalidEdit(
-                "clipboard selection requires valid byte-coordinate bounds",
-            )
-            .into());
+            // Fall back to line/character bounds when byte offsets are missing.
+            let start =
+                line_char_to_byte_offset(text, selection.start.line, selection.start.character)
+                    .ok_or(EditorError::InvalidEdit(
+                        "clipboard selection requires resolvable coordinates",
+                    ))?;
+            let end = line_char_to_byte_offset(text, selection.end.line, selection.end.character)
+                .ok_or(EditorError::InvalidEdit(
+                "clipboard selection requires resolvable coordinates",
+            ))?;
+            if start >= end {
+                return Ok(None);
+            }
+            return Ok(Some((text[start..end].to_string(), selection)));
         };
         if start == end {
-            return Ok((
-                AppClipboardUpdate {
-                    buffer_id,
-                    byte_len: 0,
-                    line_count: 0,
-                    cut,
-                },
-                None,
-            ));
+            return Ok(None);
         }
-        let selected = &text[start..end];
-        Ok((
-            AppClipboardUpdate {
-                buffer_id,
-                byte_len: selected.len(),
-                line_count: selected_line_count(selected),
-                cut,
-            },
-            Some(selection),
-        ))
+        Ok(Some((text[start..end].to_string(), selection)))
+    }
+
+    /// Full buffer text for desktop input synthesis (Backspace/Delete/Enter ranges).
+    pub fn buffer_text_for_input(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<String, AppCompositionError> {
+        self.active_documents.ensure_active_buffer(buffer_id)?;
+        Ok(self.editor.text(buffer_id)?.to_string())
     }
 
     fn primary_selection(
@@ -23328,6 +24547,7 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
+        let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -23462,27 +24682,16 @@ impl AppComposition {
         let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
             .route_completion(provider_route_request)
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        let assistant_content_label = if provider_route_response.invocation_state
-            == AssistedAiProviderInvocationState::Completed
-        {
-            format!(
-                "Delegate provider answer ready via {} citation(s); route={} labels={}",
-                citation_ids.len(),
-                provider_route_response.route_id,
-                provider_route_response.output_labels.join(",")
-            )
-        } else {
-            format!(
-                "Delegate provider refused; citation(s)={} route={} reason={}",
-                citation_ids.len(),
-                provider_route_response.route_id,
-                provider_route_response
-                    .refusal
-                    .as_ref()
-                    .map(|refusal| refusal.reason_code.as_str())
-                    .unwrap_or("unknown")
-            )
-        };
+        // Policy router is metadata-only; product chat text comes from a live
+        // provider when credentials exist, else a deterministic fixture label.
+        let route_completed = provider_route_response.invocation_state
+            == AssistedAiProviderInvocationState::Completed;
+        #[cfg(feature = "ai")]
+        let use_background_live = route_completed
+            && product_ai_will_attempt_live(self.preferred_ai_provider)
+            && !self.live_product_ai_stream.is_in_flight();
+        #[cfg(not(feature = "ai"))]
+        let use_background_live = false;
 
         let user_message_id = self
             .delegate_workflow
@@ -23496,7 +24705,7 @@ impl AppComposition {
             .push(DelegatedTaskChatMessage {
                 message_id: user_message_id.clone(),
                 role: DelegatedTaskChatRole::User,
-                content_label: prompt_label,
+                content_label: prompt_label.clone(),
                 plan_id: None,
                 proposal_id: None,
                 citation_ids: Vec::new(),
@@ -23507,6 +24716,98 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
+
+        let assistant_content_label = if !route_completed {
+            format!(
+                "Delegate provider refused; citation(s)={} route={} reason={}",
+                citation_ids.len(),
+                provider_route_response.route_id,
+                provider_route_response
+                    .refusal
+                    .as_ref()
+                    .map(|refusal| refusal.reason_code.as_str())
+                    .unwrap_or("unknown")
+            )
+        } else if use_background_live {
+            // Non-blocking path: stream on a worker thread; poll_product_ai_stream
+            // finalizes the assistant message when generation completes.
+            let sink = self.live_product_ai_stream.clone();
+            sink.begin("delegate.chat", "pending", "");
+            let preference = self.preferred_ai_provider;
+            let file_path = input.metadata.identity.canonical_path.0.clone();
+            let route_id = provider_route_response.route_id.clone();
+            let route_labels = provider_route_response.output_labels.clone();
+            let citation_count = citation_ids.len();
+            let assistant_id = assistant_message_id.clone();
+            let prompt_for_worker = prompt_label.clone();
+            let excerpt_for_worker = buffer_excerpt.clone();
+            std::thread::spawn(move || {
+                let sink_delta = sink.clone();
+                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let (label, stream) = resolve_delegate_chat_reply(
+                    preference,
+                    &prompt_for_worker,
+                    &excerpt_for_worker,
+                    &file_path,
+                    citation_count,
+                    &route_id,
+                    &route_labels,
+                    Some(&mut on_delta),
+                );
+                if let Some(ref stream) = stream {
+                    sink.finish(
+                        Some(&ProductChatCompletion {
+                            provider_id: stream.provider_id.clone(),
+                            model: stream.model.clone(),
+                            text: stream.text_preview.clone(),
+                            stream_chunks: stream.chunks.clone(),
+                            streamed: stream.streamed,
+                        }),
+                        "delegate.chat",
+                    );
+                } else {
+                    sink.finish(None, "delegate.chat");
+                }
+                sink.push_background_result(ProductAiBackgroundResult {
+                    assistant_message_id: assistant_id,
+                    content_label: label,
+                    stream,
+                });
+            });
+            "Streaming response…".to_string()
+        } else {
+            let sink = self.live_product_ai_stream.clone();
+            sink.begin("delegate.chat", "pending", "");
+            let sink_delta = sink.clone();
+            let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+            let (label, stream) = resolve_delegate_chat_reply(
+                self.preferred_ai_provider,
+                &prompt_label,
+                &buffer_excerpt,
+                &input.metadata.identity.canonical_path.0,
+                citation_ids.len(),
+                &provider_route_response.route_id,
+                &provider_route_response.output_labels,
+                Some(&mut on_delta),
+            );
+            if let Some(stream) = stream {
+                sink.finish(
+                    Some(&ProductChatCompletion {
+                        provider_id: stream.provider_id.clone(),
+                        model: stream.model.clone(),
+                        text: stream.text_preview.clone(),
+                        stream_chunks: stream.chunks.clone(),
+                        streamed: stream.streamed,
+                    }),
+                    "delegate.chat",
+                );
+                self.last_product_ai_stream = Some(stream);
+            } else {
+                sink.finish(None, "delegate.chat");
+            }
+            label
+        };
+
         self.delegate_workflow
             .chat_messages
             .push(DelegatedTaskChatMessage {
@@ -23898,6 +25199,23 @@ impl AppComposition {
         &self,
         metadata: InlinePredictionRequestMetadata,
     ) -> Result<InlinePredictionResult, AppCompositionError> {
+        // Tier 2: local-first product completion (Ollama / Anthropic) for ghost text.
+        // Without a live route (CI/offline), keep deterministic fixture.
+        let buffer_excerpt = self
+            .editor
+            .text(metadata.buffer_id)
+            .unwrap_or("")
+            .chars()
+            .take(2_000)
+            .collect::<String>();
+        if let Some(live) = try_live_product_inline_prediction(
+            self.preferred_ai_provider,
+            &metadata,
+            &buffer_excerpt,
+        ) {
+            return Ok(live);
+        }
+
         let request = InlinePredictionRequest {
             provider: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
             model: "zeta2-style-deterministic".to_string(),

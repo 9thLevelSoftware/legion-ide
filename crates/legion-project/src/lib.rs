@@ -67,7 +67,12 @@ impl<T> ProjectFilesystemService for T where
 type ProjectFilesystem = dyn ProjectFilesystemService;
 
 const LARGE_FILE_BYTES: u64 = 5 * 1024 * 1024;
-const MAX_TREE_CHILDREN_DEPTH: usize = 2;
+/// Maximum directory nesting depth for workspace tree scan / discovery.
+///
+/// Tier 1 (A12): raised from 2 so typical Rust monorepo paths such as
+/// `crates/<name>/src/lib.rs` (depth 4) enter the explorer, quick-open, and
+/// search index. Cap remains finite to bound pathological deep trees.
+const MAX_TREE_CHILDREN_DEPTH: usize = 32;
 const WATCHER_EVENT_BUFFER: usize = 1_024;
 const WATCHER_RENAME_DEBOUNCE_MILLIS: u64 = 64;
 const WATCHER_RECOVERY_MAX_RESCANS: usize = 2;

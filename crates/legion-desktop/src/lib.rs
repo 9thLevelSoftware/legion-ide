@@ -8,6 +8,8 @@
 
 pub mod beta;
 pub mod bridge;
+/// Honest cut-line / fixture status copy for deferred or simulated surfaces (Tier 0).
+pub mod cut_lines;
 pub mod diagnostics;
 pub mod harness;
 pub mod health;

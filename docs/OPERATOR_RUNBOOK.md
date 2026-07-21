@@ -19,6 +19,19 @@ cargo deny check
 
 If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing. Documentation hygiene allowlists live in `docs/hygiene-allowlist.toml`; keep entries narrow and historical-only.
 
+## Golden-path smoke promotion criteria (Tier 0)
+
+`.github/workflows/legion-smoke.yml` runs GP-1/2/3/4 + update-drill on a weekly schedule and `workflow_dispatch`. It is intentionally **independent**: failures do **not** block PR merges via `legion-gates.yml`.
+
+**Do not** fold smoke into the standing PR gate or add it as a required status check until all of the following hold:
+
+1. **Stability:** at least **four consecutive** scheduled (or fully equivalent dispatch) green runs on the **3-OS matrix** (ubuntu, windows, macos) without flaky skip storms.
+2. **rust-analyzer provisioning:** provision steps succeed on each OS for those runs (or documented, accepted OS-specific skip with owner sign-off).
+3. **Cost accepted:** maintainers accept the multi-OS cargo + real-server cost on the PR critical path.
+4. **Owner sign-off:** a short note under `plans/evidence/production/` records the four green run URLs/SHAs and the decision to promote.
+
+Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly smoke remain the primary GP evidence sources. See `plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`.
+
 ## GUI packaging and support artifacts
 
 The current package-and-support path is intentionally explicit so release notes and issue triage can point at concrete files instead of assumptions.

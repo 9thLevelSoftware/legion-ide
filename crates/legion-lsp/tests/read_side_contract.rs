@@ -230,8 +230,15 @@ fn workspace_symbol_response_projects_symbol_locations() {
     let locations = project_workspace_symbol_response(&response, 10);
     assert_eq!(locations.len(), 2);
     assert_eq!(locations[0].label, "beta");
-    assert_eq!(locations[0].path.as_ref().map(|path| path.0.as_str()), None);
+    assert_eq!(
+        locations[0].path.as_ref().map(|path| path.0.as_str()),
+        Some("/workspace/src/main.rs")
+    );
     assert!(locations[0].range.is_some());
+    assert_eq!(
+        locations[1].path.as_ref().map(|path| path.0.as_str()),
+        Some("/workspace/src/gamma.rs")
+    );
     assert!(locations[1].degraded);
     assert!(locations[1].range.is_none());
 }
@@ -467,12 +474,19 @@ fn definition_response_projects_location_and_location_link_shapes() {
     let locations = project_location_response(&response, 10);
     assert_eq!(locations.len(), 2);
     assert!(locations[0].location_id.starts_with("lsp-location-0-"));
-    assert_eq!(locations[0].path, None);
+    assert_eq!(
+        locations[0].path.as_ref().map(|p| p.0.as_str()),
+        Some("/workspace/src/lib.rs")
+    );
     assert!(locations[0].range.is_some());
     assert!(!locations[0].degraded);
     assert!(locations[1].location_id.starts_with("lsp-location-1-"));
+    assert_eq!(
+        locations[1].path.as_ref().map(|p| p.0.as_str()),
+        Some("/workspace/src/other.rs")
+    );
     assert!(locations[1].range.is_some());
-    assert_eq!(locations[1].label, "LSP location 1");
+    assert!(locations[1].label.contains("other.rs"));
 }
 
 #[test]

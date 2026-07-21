@@ -7,7 +7,7 @@ pub mod capabilities;
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
@@ -1390,6 +1390,25 @@ pub trait AnthropicMessagesTransport: Clone + Send + Sync + 'static {
         beta_header: Option<&str>,
         payload: Value,
     ) -> Result<String, ProviderError>;
+
+    /// POST a streaming SSE payload and invoke `on_event` as each event is parsed.
+    ///
+    /// Default implementation buffers the full body via [`Self::post_text`] then
+    /// parses events. Progressive transports may override for mid-body callbacks.
+    fn stream_sse_text(
+        &self,
+        endpoint: &str,
+        credential: Option<AnthropicCredential<'_>>,
+        beta_header: Option<&str>,
+        payload: Value,
+        on_event: &mut dyn FnMut(AnthropicSseEvent),
+    ) -> Result<(), ProviderError> {
+        let body = self.post_text(endpoint, credential, beta_header, payload)?;
+        for event in parse_anthropic_sse_events(&body)? {
+            on_event(event);
+        }
+        Ok(())
+    }
 }
 
 /// Applies an optional Anthropic credential to a blocking request builder,
@@ -1485,6 +1504,193 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
                 message: error.to_string(),
             })
     }
+
+    fn stream_sse_text(
+        &self,
+        endpoint: &str,
+        credential: Option<AnthropicCredential<'_>>,
+        beta_header: Option<&str>,
+        payload: Value,
+        on_event: &mut dyn FnMut(AnthropicSseEvent),
+    ) -> Result<(), ProviderError> {
+        let mut request = shared_blocking_client()
+            .map_err(|message| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message,
+            })?
+            .post(endpoint)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .header("accept", "text/event-stream")
+            .json(&payload);
+        if let Some(beta_header) = beta_header.filter(|value| !value.trim().is_empty()) {
+            request = request.header("anthropic-beta", beta_header);
+        }
+        request = apply_anthropic_credential(request, credential);
+        let mut response = request
+            .send()
+            .map_err(|error| ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: error.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(ProviderError::RequestFailed {
+                provider: "http".to_string(),
+                message: format!("{endpoint} returned {}", response.status()),
+            });
+        }
+
+        // Progressive read: fire events as complete SSE records arrive (not only
+        // after the full body is buffered). Accumulate *bytes* so UTF-8 sequences
+        // that straddle HTTP chunk boundaries are not corrupted.
+        let mut carry_bytes: Vec<u8> = Vec::new();
+        let mut current_event: Option<String> = None;
+        let mut current_data = String::new();
+        let mut buf = [0u8; 2048];
+        loop {
+            let n = response
+                .read(&mut buf)
+                .map_err(|error| ProviderError::RequestFailed {
+                    provider: "http".to_string(),
+                    message: error.to_string(),
+                })?;
+            if n == 0 {
+                break;
+            }
+            carry_bytes.extend_from_slice(&buf[..n]);
+            // Process complete UTF-8 lines; leave incomplete trailing bytes in carry.
+            loop {
+                let Some(nl) = carry_bytes.iter().position(|b| *b == b'\n') else {
+                    break;
+                };
+                let mut line_bytes = carry_bytes.drain(..=nl).collect::<Vec<u8>>();
+                if line_bytes.last() == Some(&b'\n') {
+                    line_bytes.pop();
+                }
+                if line_bytes.last() == Some(&b'\r') {
+                    line_bytes.pop();
+                }
+                let line = String::from_utf8_lossy(&line_bytes);
+                if line.is_empty() {
+                    if let Some(event) =
+                        flush_anthropic_sse_event(current_event.take(), &mut current_data)?
+                    {
+                        on_event(event);
+                    }
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("event:") {
+                    current_event = Some(rest.trim().to_string());
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("data:") {
+                    if !current_data.is_empty() {
+                        current_data.push('\n');
+                    }
+                    current_data.push_str(rest.trim_start());
+                }
+            }
+        }
+        // Flush any final complete lines still buffered as valid UTF-8.
+        if !carry_bytes.is_empty()
+            && let Ok(tail) = std::str::from_utf8(&carry_bytes)
+        {
+            for line in tail.split('\n') {
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() {
+                    if let Some(event) =
+                        flush_anthropic_sse_event(current_event.take(), &mut current_data)?
+                    {
+                        on_event(event);
+                    }
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("event:") {
+                    current_event = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    if !current_data.is_empty() {
+                        current_data.push('\n');
+                    }
+                    current_data.push_str(rest.trim_start());
+                }
+            }
+        }
+        if let Some(event) = flush_anthropic_sse_event(current_event.take(), &mut current_data)? {
+            on_event(event);
+        }
+        Ok(())
+    }
+}
+
+/// Parse a full Anthropic SSE body into ordered events.
+fn parse_anthropic_sse_events(body: &str) -> Result<Vec<AnthropicSseEvent>, ProviderError> {
+    let mut events = Vec::new();
+    let mut current_event: Option<String> = None;
+    let mut current_data = String::new();
+    for line in body.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            if let Some(event) = flush_anthropic_sse_event(current_event.take(), &mut current_data)?
+            {
+                events.push(event);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            current_event = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !current_data.is_empty() {
+                current_data.push('\n');
+            }
+            current_data.push_str(rest.trim_start());
+        }
+    }
+    if let Some(event) = flush_anthropic_sse_event(current_event.take(), &mut current_data)? {
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn flush_anthropic_sse_event(
+    event: Option<String>,
+    data: &mut String,
+) -> Result<Option<AnthropicSseEvent>, ProviderError> {
+    let Some(event) = event else {
+        data.clear();
+        return Ok(None);
+    };
+    if event == "ping" {
+        data.clear();
+        return Ok(None);
+    }
+    let payload = if data.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str::<Value>(data).map_err(|error| ProviderError::RequestFailed {
+            provider: "anthropic".to_string(),
+            message: error.to_string(),
+        })?
+    };
+    let parsed = match event.as_str() {
+        "message_start" => AnthropicSseEvent::MessageStart,
+        "content_block_start" => AnthropicSseEvent::ContentBlockStart,
+        "content_block_delta" => {
+            let text = payload
+                .get("delta")
+                .and_then(|delta| delta.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            AnthropicSseEvent::ContentBlockDelta(text)
+        }
+        "content_block_stop" => AnthropicSseEvent::ContentBlockStop,
+        "message_delta" => AnthropicSseEvent::MessageDelta,
+        "message_stop" => AnthropicSseEvent::MessageStop,
+        other => AnthropicSseEvent::Unknown(other.to_string()),
+    };
+    data.clear();
+    Ok(Some(parsed))
 }
 
 impl Default for AnthropicMessagesClient<ReqwestProviderHttpTransport> {
@@ -1818,70 +2024,7 @@ where
     }
 
     fn parse_sse_events(body: &str) -> Result<Vec<AnthropicSseEvent>, ProviderError> {
-        let mut events = Vec::new();
-        let mut current_event: Option<String> = None;
-        let mut current_data = String::new();
-        let flush =
-            |events: &mut Vec<AnthropicSseEvent>, event: Option<String>, data: &mut String| {
-                let Some(event) = event else {
-                    data.clear();
-                    return Ok::<(), ProviderError>(());
-                };
-                if event == "ping" {
-                    data.clear();
-                    return Ok(());
-                }
-                let payload = if data.trim().is_empty() {
-                    Value::Null
-                } else {
-                    serde_json::from_str::<Value>(data).map_err(|error| {
-                        ProviderError::RequestFailed {
-                            provider: "anthropic".to_string(),
-                            message: error.to_string(),
-                        }
-                    })?
-                };
-                let parsed = match event.as_str() {
-                    "message_start" => AnthropicSseEvent::MessageStart,
-                    "content_block_start" => AnthropicSseEvent::ContentBlockStart,
-                    "content_block_delta" => {
-                        let text = payload
-                            .get("delta")
-                            .and_then(|delta| delta.get("text"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        AnthropicSseEvent::ContentBlockDelta(text)
-                    }
-                    "content_block_stop" => AnthropicSseEvent::ContentBlockStop,
-                    "message_delta" => AnthropicSseEvent::MessageDelta,
-                    "message_stop" => AnthropicSseEvent::MessageStop,
-                    other => AnthropicSseEvent::Unknown(other.to_string()),
-                };
-                events.push(parsed);
-                data.clear();
-                Ok(())
-            };
-
-        for line in body.lines() {
-            let line = line.trim_end();
-            if line.is_empty() {
-                flush(&mut events, current_event.take(), &mut current_data)?;
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("event:") {
-                current_event = Some(rest.trim().to_string());
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("data:") {
-                if !current_data.is_empty() {
-                    current_data.push('\n');
-                }
-                current_data.push_str(rest.trim_start());
-            }
-        }
-        flush(&mut events, current_event.take(), &mut current_data)?;
-        Ok(events)
+        parse_anthropic_sse_events(body)
     }
 
     /// Sends a completion request using the native Anthropic Messages API.
@@ -1946,6 +2089,42 @@ where
                 _ => None,
             })
             .collect())
+    }
+
+    /// Streams text deltas and invokes `on_delta` as each SSE text delta is parsed.
+    ///
+    /// When the transport is [`ReqwestProviderHttpTransport`], the response body is
+    /// read progressively so callbacks can fire before the full HTTP body is buffered.
+    /// Other transports fall back to buffering the full SSE body first.
+    pub fn stream_text_deltas_with_callback(
+        &self,
+        request: ChatCompletionRequest,
+        extras: AnthropicRequestExtras,
+        mut on_delta: impl FnMut(&str),
+    ) -> Result<Vec<String>, ProviderError> {
+        let credential = self.credential()?;
+        let payload = self.completion_payload(&request, true, &extras);
+        let beta = Self::beta_header_for_extras(&extras);
+        let mut chunks = Vec::new();
+        let mut push = |text: &str| {
+            if text.is_empty() {
+                return;
+            }
+            on_delta(text);
+            chunks.push(text.to_string());
+        };
+        self.transport.stream_sse_text(
+            &self.endpoint("/v1/messages"),
+            Some(credential),
+            beta,
+            payload,
+            &mut |event| {
+                if let AnthropicSseEvent::ContentBlockDelta(text) = event {
+                    push(&text);
+                }
+            },
+        )?;
+        Ok(chunks)
     }
 
     /// Counts the input tokens for a completion request using Anthropic's token-count endpoint.

@@ -284,8 +284,16 @@ pub struct PerfReport {
     pub package_name: String,
     pub measured_at_utc: String,
     pub git_sha: String,
+    /// What this report measures. M0 CI harness is skeleton microbenchmarks only;
+    /// full OS reference workloads remain WS18.T1 follow-on. Not a product UX proof.
+    #[serde(default = "default_workload_kind")]
+    pub workload_kind: String,
     pub summary: PerfSummary,
     pub skeletons: Vec<SkeletonMeasurement>,
+}
+
+fn default_workload_kind() -> String {
+    "skeleton".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -745,6 +753,7 @@ pub fn plan_m0_skeletons(
         package_name: package_name.to_string(),
         measured_at_utc: current_utc_rfc3339(),
         git_sha: git_sha.to_string(),
+        workload_kind: default_workload_kind(),
         summary,
         skeletons,
     }
@@ -762,6 +771,7 @@ pub fn plan_perf_skeletons(
         package_name: package_name.to_string(),
         measured_at_utc: current_utc_rfc3339(),
         git_sha: git_sha.to_string(),
+        workload_kind: default_workload_kind(),
         summary,
         skeletons: measurements,
     }

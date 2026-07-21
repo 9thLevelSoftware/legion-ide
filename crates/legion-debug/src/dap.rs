@@ -1,9 +1,11 @@
-//! Metadata-only DAP client runtime.
+//! Metadata-only / simulated DAP client runtime.
 //!
 //! This crate owns the debug adapter lifecycle state machine used by the app.
-//! It intentionally projects adapter progress as metadata-only protocol DTOs;
-//! concrete adapter binary resolution and CodeLLDB policy are later backlog
-//! tasks.
+//! It intentionally projects adapter progress as metadata-only protocol DTOs
+//! **without** spawning an adapter process or speaking the DAP wire protocol.
+//! Stack frames, variables, and "verified" breakpoints are fixture data for
+//! product projection tests. Concrete adapter binary resolution and CodeLLDB
+//! policy remain later backlog tasks.
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -165,7 +167,8 @@ impl DapClientRuntime {
             .map(|mut breakpoint| {
                 breakpoint.session_id = Some(session_id.clone());
                 breakpoint.verified = true;
-                breakpoint.message = Some("verified by DAP client runtime".to_string());
+                breakpoint.message =
+                    Some("simulated verified (no DAP adapter process)".to_string());
                 breakpoint
             })
             .collect::<Vec<_>>();
@@ -215,7 +218,7 @@ impl DapClientRuntime {
                 session_id,
                 category: DebugConsoleCategory::Adapter,
                 message_label: format!(
-                    "initialize adapter={} • launch configuration={}",
+                    "SIMULATED DAP: initialize adapter={} • launch configuration={} (no adapter process)",
                     request.adapter_type, request.configuration_id.0
                 ),
                 sequence,
@@ -290,7 +293,9 @@ impl DapClientRuntime {
             console: vec![DebugConsoleEntry {
                 session_id,
                 category: DebugConsoleCategory::Adapter,
-                message_label: format!("step={label} state=paused adapter={adapter_type}"),
+                message_label: format!(
+                    "SIMULATED DAP: step={label} state=paused adapter={adapter_type}"
+                ),
                 sequence: EventSequence(2),
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,

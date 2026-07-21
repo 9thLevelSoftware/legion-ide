@@ -90,12 +90,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: xtask perf-harness (report-only on hosted runners)
+      # Skeleton microbenchmarks only (workload_kind=skeleton). Hosted budgets are
+      # report-only: LEGION_PERF_FAIL_ON_BUDGET_MS=0 disables fail-on-budget so
+      # noisy VMs cannot red PRs. Strict budgets remain a local gate.
+      - name: xtask perf-harness (report-only skeleton on hosted runners)
         env:
           LEGION_PERF_FAIL_ON_BUDGET_MS: "0"
         run: cargo run -p xtask -- perf-harness
 
-      - name: xtask verify-perf-harness (report-only on hosted runners)
+      - name: xtask verify-perf-harness (report-only skeleton on hosted runners)
         env:
           LEGION_PERF_FAIL_ON_BUDGET_MS: "0"
         run: cargo run -p xtask -- verify-perf-harness

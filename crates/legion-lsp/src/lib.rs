@@ -18,14 +18,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use legion_protocol::{
-    BufferVersion, EventId, EventSequence, FileFingerprint, FileId, LanguageCodeLensProjection,
-    LanguageCompletionProjection, LanguageHoverProjection, LanguageId, LanguageInlayHintProjection,
-    LanguageLocationProjection, LanguageOutlineSymbolProjection, LanguageProblemProjection,
-    LspDiagnosticSummary, LspFormattingOptions, LspHealthState, LspLaunchDisposition,
-    LspLaunchPolicyDecision, LspOperationContext, LspRequestId, LspRestartBackoffMetadata,
-    LspResultStatus, LspSupervisionEvent, LspSupervisionEventKind, LspSupervisionLifecycleState,
-    ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, SemanticFreshnessState,
-    SemanticPrivacyScope, SnapshotId, TextCoordinate, Utf16Position, Utf16Range, WorkspaceId,
+    BufferVersion, CanonicalPath, EventId, EventSequence, FileFingerprint, FileId,
+    LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
+    LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
+    LanguageProblemProjection, LspDiagnosticSummary, LspFormattingOptions, LspHealthState,
+    LspLaunchDisposition, LspLaunchPolicyDecision, LspOperationContext, LspRequestId,
+    LspRestartBackoffMetadata, LspResultStatus, LspSupervisionEvent, LspSupervisionEventKind,
+    LspSupervisionLifecycleState, ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint,
+    SemanticFreshnessState, SemanticPrivacyScope, SnapshotId, TextCoordinate, Utf16Position,
+    Utf16Range, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1636,12 +1637,12 @@ fn workspace_symbol_location_projection(
     let location = symbol.get("location")?;
     let range = location.get("range").and_then(protocol_range_from_lsp_json);
     let label = bounded_lsp_label(name, 120);
-    let uri_hash = location
+    let uri = location
         .get("uri")
         .or_else(|| location.get("targetUri"))
-        .and_then(Value::as_str)
-        .map(stable_hash)
-        .unwrap_or(0);
+        .and_then(Value::as_str);
+    let uri_hash = uri.map(stable_hash).unwrap_or(0);
+    let path = uri.and_then(path_from_file_uri);
     Some(LanguageLocationProjection {
         location_id: format!(
             "lsp-workspace-symbol-{index}-{:016x}-{:016x}",
@@ -1649,7 +1650,7 @@ fn workspace_symbol_location_projection(
             uri_hash
         ),
         file_id: None,
-        path: None,
+        path,
         range,
         label,
         degraded: location.get("range").is_none(),
@@ -1894,15 +1895,110 @@ fn location_projection_for_item(
         .or_else(|| location.get("targetRange"))
         .or_else(|| location.get("range"))
         .and_then(protocol_range_from_lsp_json);
+    let path = path_from_file_uri(uri);
+    let label = path
+        .as_ref()
+        .map(|p| {
+            p.0.rsplit(['/', '\\'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(p.0.as_str())
+                .to_string()
+        })
+        .map(|name| format!("LSP location {index}: {name}"))
+        .unwrap_or_else(|| format!("LSP location {index}"));
+    let degraded = range.is_none() || path.is_none();
     Some(LanguageLocationProjection {
         location_id: format!("lsp-location-{index}-{:016x}", stable_hash(uri)),
         file_id: None,
-        path: None,
+        path,
         range,
-        label: format!("LSP location {index}"),
-        degraded: range.is_none(),
+        label,
+        // Degraded when range *or* navigable path is missing (cross-file nav needs path).
+        degraded,
         schema_version: 1,
     })
+}
+
+/// Convert an LSP `file://` URI into a filesystem path for navigation.
+///
+/// Returns [`None`] for non-`file` schemes and for non-local authorities that
+/// would be mis-mapped to local paths. Windows drive designators are normalized
+/// via [`normalize_file_uri_drive`] before decoding. Percent-encoded octets
+/// (`%20`, `%3A`) are decoded so desktop open/navigation can use the path.
+///
+/// UNC-style authorities (`file://server/share/path`) are preserved as
+/// `//server/share/path` so Windows remote shares remain navigable.
+pub fn path_from_file_uri(uri: &str) -> Option<CanonicalPath> {
+    let normalized = normalize_file_uri_drive(uri);
+    let decoded = percent_decode_uri_component(normalized.as_ref());
+    let path = if let Some(rest) = decoded.strip_prefix("file:///") {
+        // `file:///C:/...` (Windows) or `file:///home/...` (Unix absolute).
+        if rest.len() >= 2
+            && rest.as_bytes()[0].is_ascii_alphabetic()
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            rest.to_string()
+        } else {
+            format!("/{rest}")
+        }
+    } else if let Some(rest) = decoded.strip_prefix("file://") {
+        // `file://server/share/...` or `file://localhost/path`.
+        let slash = rest.find('/')?;
+        let authority = &rest[..slash];
+        let path_part = &rest[slash..];
+        if authority.is_empty()
+            || authority.eq_ignore_ascii_case("localhost")
+            || authority == "127.0.0.1"
+            || authority == "[::1]"
+        {
+            // Local authority — treat as absolute local path.
+            path_part.to_string()
+        } else if authority.contains('.')
+            || authority.contains(':')
+            || authority.eq_ignore_ascii_case("http")
+        {
+            // Reject non-local / URL-like authorities rather than mis-map them.
+            return None;
+        } else {
+            // UNC host (e.g. file://fileserver/share/src/lib.rs).
+            format!("//{authority}{path_part}")
+        }
+    } else {
+        return None;
+    };
+    if path.is_empty() || path == "/" {
+        return None;
+    }
+    Some(CanonicalPath(path))
+}
+
+fn percent_decode_uri_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Context needed to project `publishDiagnostics` into Legion metadata rows.
