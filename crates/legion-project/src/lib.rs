@@ -4550,12 +4550,22 @@ impl WorkspaceActor {
         }
 
         let snapshot = self.watcher.snapshot(workspace_id, &root);
-        let new_entries: Vec<PathBuf> = match snapshot {
-            Ok(events) => events
-                .into_iter()
-                .map(|event| PathBuf::from(event.path.0))
-                .collect(),
+        let (new_entries, soft_truncated, overflow_markers) = match snapshot {
+            Ok(events) => {
+                let mut overflow_markers = Vec::new();
+                let mut paths = Vec::new();
+                for event in events {
+                    if matches!(event.kind, WatcherEventKind::Overflow) {
+                        overflow_markers.push(event);
+                    } else {
+                        paths.push(PathBuf::from(event.path.0));
+                    }
+                }
+                let truncated = !overflow_markers.is_empty();
+                (paths, truncated, overflow_markers)
+            }
             Err(PlatformError::WatcherOverflow { .. }) => {
+                // Hard overflow (e.g. synthetic/OS queue): one-shot recovery rescan.
                 state.in_recovery = true;
                 let sequence = Self::now_sequence(state);
                 self.emit(watcher_recovery_event(
@@ -4578,7 +4588,7 @@ impl WorkspaceActor {
             Err(err) => return Err(WorkspaceError::Platform(err)),
         };
 
-        let current = new_entries
+        let observed = new_entries
             .into_iter()
             .filter_map(|path| {
                 let normalized = self.fs.normalize_path(&path).ok()?;
@@ -4590,19 +4600,25 @@ impl WorkspaceActor {
 
         let mut produced = Vec::new();
         let previous: HashSet<String> = state.last_scan.keys().cloned().collect();
-        let current_paths: HashSet<String> = current.keys().cloned().collect();
+        let observed_paths: HashSet<String> = observed.keys().cloned().collect();
 
-        let removed: Vec<String> = previous.difference(&current_paths).cloned().collect();
-        let added: Vec<String> = current_paths.difference(&previous).cloned().collect();
+        // Soft-truncated walks are incomplete: update/create for observed paths only.
+        // Never invent Deleted for paths beyond the stable traversal cutoff.
+        let removed: Vec<String> = if soft_truncated {
+            Vec::new()
+        } else {
+            previous.difference(&observed_paths).cloned().collect()
+        };
+        let added: Vec<String> = observed_paths.difference(&previous).cloned().collect();
 
         let mut modified = Vec::new();
-        for path in current_paths.intersection(&previous) {
-            if state.last_scan.get(path) != current.get(path) {
+        for path in observed_paths.intersection(&previous) {
+            if state.last_scan.get(path) != observed.get(path) {
                 modified.push(path.clone());
             }
         }
 
-        if removed.len() == 1 && added.len() == 1 {
+        if !soft_truncated && removed.len() == 1 && added.len() == 1 {
             let old_path = removed[0].clone();
             let new_path = added[0].clone();
             let event = WatcherEvent {
@@ -4651,7 +4667,18 @@ impl WorkspaceActor {
             produced.push(event);
         }
 
-        state.last_scan = current;
+        if soft_truncated {
+            // Merge observed fingerprints into last_scan; retain unseen paths.
+            for (path, fingerprint) in observed {
+                state.last_scan.insert(path, fingerprint);
+            }
+            for marker in overflow_markers {
+                state.enqueue_watcher_event(marker.clone());
+                produced.push(marker);
+            }
+        } else {
+            state.last_scan = observed;
+        }
         Ok(produced)
     }
 

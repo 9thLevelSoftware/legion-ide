@@ -1295,8 +1295,8 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected proposal audit write failure".to_string(),
             });
         }
-        // Durable audit is written first so in-memory state is not advanced when
-        // persistence fails (permissions, disk full, rename errors).
+        // Validate → durable write → memory, so rejected / failed records never
+        // leave an invalid blob on disk or advance in-process state first.
         let durable_audit = match &request {
             StorageRepositoryRequest::SaveProposalAuditRecord(record) => Some(record.clone()),
             _ => None,
@@ -1312,6 +1312,8 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
             });
         }
         if let Some(record) = durable_audit.as_ref() {
+            InMemoryStorage::validate_audit_record(record)
+                .map_err(InMemoryStorage::protocol_error)?;
             self.persist_proposal_audit(record)?;
         }
         let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
@@ -1333,6 +1335,11 @@ fn atomic_write_bytes(dest: &Path, body: &[u8]) -> Result<(), String> {
         std::process::id(),
         suffix
     ));
+    let backup = parent.join(format!(
+        ".proposal-audit-bak-{}-{}.tmp",
+        std::process::id(),
+        suffix
+    ));
     let write_result = (|| -> Result<(), String> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -1344,15 +1351,37 @@ fn atomic_write_bytes(dest: &Path, body: &[u8]) -> Result<(), String> {
         file.flush()
             .map_err(|err| format!("flush temp failed: {err}"))?;
         drop(file);
-        // Windows cannot rename over an existing file; remove dest first so
-        // lifecycle transitions (Created → Applied) can rewrite the same blob.
-        if dest.exists() {
-            fs::remove_file(dest).map_err(|err| format!("remove dest failed: {err}"))?;
+        // Portable replace that keeps the prior durable blob until commit:
+        // 1) move dest → backup (Windows-safe; no overwrite)
+        // 2) move temp → dest
+        // 3) remove backup
+        // On any failure after step 1, restore backup → dest.
+        let had_existing = dest.exists();
+        if had_existing {
+            let _ = fs::remove_file(&backup);
+            fs::rename(dest, &backup).map_err(|err| format!("backup dest failed: {err}"))?;
         }
-        fs::rename(&temp, dest).map_err(|err| format!("rename temp failed: {err}"))
+        match fs::rename(&temp, dest) {
+            Ok(()) => {
+                if had_existing {
+                    let _ = fs::remove_file(&backup);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if had_existing {
+                    let _ = fs::rename(&backup, dest);
+                }
+                Err(format!("rename temp failed: {err}"))
+            }
+        }
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temp);
+        // Leave backup in place only if dest is missing (restore may have failed).
+        if dest.exists() {
+            let _ = fs::remove_file(&backup);
+        }
     }
     write_result
 }

@@ -28,9 +28,12 @@ use thiserror::Error;
 /// Maximum event count accepted from one watcher snapshot.
 /// Soft cap for precise per-path events in one recursive snapshot.
 ///
-/// Recursive monorepo walks can exceed this; when they do we return a bounded
-/// truncated snapshot rather than permanent `WatcherOverflow` (which never
-/// recovers for large trees). Callers still get nested coverage up to the cap.
+/// Recursive monorepo walks can exceed this. When they do, the snapshot returns
+/// a **bounded** event list plus a terminal `WatcherEventKind::Overflow` marker
+/// (still `Ok`). Callers must treat that as an incomplete scan: update/add for
+/// observed paths only, and never invent deletions for paths beyond the cutoff.
+/// Hard `Err(WatcherOverflow)` remains reserved for true recovery paths (e.g.
+/// synthetic/OS queue overflow tests), not the steady-state size soft-cap.
 const WATCHER_OVERFLOW_THRESHOLD: usize = 65_536;
 
 /// Maximum directory nesting depth for recursive watcher snapshots (Tier 1 A11).
@@ -2071,31 +2074,48 @@ impl WatcherService for NativeWatcherService {
     ) -> Result<Vec<WatcherEvent>, PlatformError> {
         // Tier 1 A11: recursive walk (depth-capped) so nested monorepo files
         // participate in last_scan fingerprints. Still poll-based (no OS notify
-        // backend yet); overflow fails closed like the previous shallow path.
+        // backend yet). Soft-cap truncation returns Ok + Overflow marker so large
+        // trees do not permanently alternate recovery rescans at poll cadence.
         let mut events = Vec::new();
         let mut sequence = 0u64;
-        walk_watcher_tree(workspace_id, path, 0, &mut events, &mut sequence)?;
+        let truncated = walk_watcher_tree(workspace_id, path, 0, &mut events, &mut sequence)?;
+        if truncated {
+            sequence = sequence.saturating_add(1);
+            events.push(WatcherEvent {
+                workspace_id,
+                kind: WatcherEventKind::Overflow,
+                path: CanonicalPath(path.to_string_lossy().to_string()),
+                old_path: None,
+                sequence: EventSequence(sequence),
+            });
+        }
         Ok(events)
     }
 }
 
+/// Walk workspace tree, returning `Ok(true)` when the soft entry cap truncated
+/// the walk (caller must mark incomplete and avoid inventing deletes).
 fn walk_watcher_tree(
     workspace_id: WorkspaceId,
     path: &Path,
     depth: usize,
     events: &mut Vec<WatcherEvent>,
     sequence: &mut u64,
-) -> Result<(), PlatformError> {
+) -> Result<bool, PlatformError> {
     if depth > WATCHER_RECURSIVE_DEPTH_LIMIT {
-        return Ok(());
+        return Ok(false);
     }
     let entries = fs::read_dir(path)
         .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
 
+    let mut truncated = false;
     for entry in entries {
-        // Soft truncate: keep a usable nested snapshot instead of permanent overflow.
+        // Soft cap: stop adding precise per-path events. Returning Ok(true)
+        // (not Err) keeps large monorepos in steady-state polling without a
+        // permanent recovery loop.
         if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
-            return Ok(());
+            truncated = true;
+            break;
         }
 
         let child = entry
@@ -2121,10 +2141,13 @@ fn walk_watcher_tree(
             {
                 continue;
             }
-            walk_watcher_tree(workspace_id, &child, depth + 1, events, sequence)?;
+            if walk_watcher_tree(workspace_id, &child, depth + 1, events, sequence)? {
+                truncated = true;
+                break;
+            }
         }
     }
-    Ok(())
+    Ok(truncated)
 }
 
 impl EnvironmentService for NativeEnvironmentService {

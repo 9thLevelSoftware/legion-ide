@@ -1224,11 +1224,16 @@ struct ProductChatCompletion {
     streamed: bool,
 }
 
-/// Local-first product completion: Ollama (when preferred/reachable) → Anthropic BYOK → none.
+/// Product completion bound to the **authorized** live backend only.
+///
+/// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
+/// key exists. Completion never falls through from an Ollama-authorized route to
+/// Anthropic (or the reverse): that would bypass the capability/network decision
+/// built for the selected backend. Offline / no-provider returns `None` for
+/// fixture fallbacks.
 ///
 /// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
-/// chunks arrive). Ollama remains a single-chunk completion. Offline / no-provider
-/// returns `None` for fixture fallbacks.
+/// chunks arrive). Ollama remains a single-chunk completion.
 #[cfg(feature = "ai")]
 fn complete_product_chat(
     preference: ProductAiProviderPreference,
@@ -1241,133 +1246,111 @@ fn complete_product_chat(
     use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
     use legion_ai_providers::OllamaProvider;
 
-    if matches!(preference, ProductAiProviderPreference::Deterministic) {
-        return None;
-    }
+    let backend = product_ai_selected_live_backend(preference)?;
 
-    let try_ollama = matches!(
-        preference,
-        ProductAiProviderPreference::Auto | ProductAiProviderPreference::Ollama
-    ) && ollama_loopback_reachable();
-    let try_anthropic = matches!(
-        preference,
-        ProductAiProviderPreference::Auto | ProductAiProviderPreference::Anthropic
-    ) && resolve_anthropic_api_key().is_some();
-
-    // Local-first: Ollama before Anthropic when both are eligible (Auto).
-    let order: &[&str] = match preference {
-        ProductAiProviderPreference::Ollama => &["ollama"],
-        ProductAiProviderPreference::Anthropic => &["anthropic"],
-        ProductAiProviderPreference::Auto => &["ollama", "anthropic"],
-        ProductAiProviderPreference::Deterministic => &[],
-    };
-
-    for provider in order {
-        match *provider {
-            "ollama" if try_ollama => {
-                let model = ollama_model_label();
-                let client = OllamaProvider::default();
-                let request = ChatCompletionRequest {
-                    provider: "ollama".to_string(),
-                    model: model.clone(),
-                    messages: vec![
-                        ChatMessage {
-                            role: ChatRole::System,
-                            content: system.to_string(),
-                        },
-                        ChatMessage {
-                            role: ChatRole::User,
-                            content: user.to_string(),
-                        },
-                    ],
-                    max_tokens: Some(max_tokens),
-                    temperature: Some(temperature),
-                    metadata: Default::default(),
-                };
-                if let Ok(response) = client.complete(request)
-                    && !response.text.trim().is_empty()
-                {
-                    let text = response.text.trim().to_string();
-                    if let Some(cb) = on_delta.as_mut() {
-                        cb(&text);
-                    }
-                    return Some(ProductChatCompletion {
-                        provider_id: "ollama".to_string(),
-                        model: response.model,
-                        stream_chunks: vec![text.clone()],
-                        text,
-                        streamed: false,
-                    });
+    match backend {
+        ProductAiLiveBackend::Ollama => {
+            let model = ollama_model_label();
+            let client = OllamaProvider::default();
+            let request = ChatCompletionRequest {
+                provider: "ollama".to_string(),
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
                 }
+                return Some(ProductChatCompletion {
+                    provider_id: "ollama".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
             }
-            "anthropic" if try_anthropic => {
-                let client = anthropic_client_with_keyring_fallback();
-                let request = ChatCompletionRequest {
-                    provider: "anthropic".to_string(),
-                    model: "claude-sonnet-4-20250514".to_string(),
-                    messages: vec![
-                        ChatMessage {
-                            role: ChatRole::System,
-                            content: system.to_string(),
-                        },
-                        ChatMessage {
-                            role: ChatRole::User,
-                            content: user.to_string(),
-                        },
-                    ],
-                    max_tokens: Some(max_tokens),
-                    temperature: Some(temperature),
-                    metadata: Default::default(),
-                };
-                // Progressive SSE: on_delta fires as text deltas arrive on the wire.
-                let mut delta_sink = |text: &str| {
-                    if let Some(cb) = on_delta.as_mut() {
-                        cb(text);
-                    }
-                };
-                if let Ok(chunks) = client.stream_text_deltas_with_callback(
-                    request.clone(),
-                    Default::default(),
-                    &mut delta_sink,
-                ) {
-                    let chunks: Vec<String> =
-                        chunks.into_iter().filter(|d| !d.is_empty()).collect();
-                    let text = chunks.join("");
-                    if !text.trim().is_empty() {
-                        let streamed = chunks.len() > 1;
-                        return Some(ProductChatCompletion {
-                            provider_id: "anthropic".to_string(),
-                            model: request.model.clone(),
-                            stream_chunks: if chunks.is_empty() {
-                                vec![text.clone()]
-                            } else {
-                                chunks
-                            },
-                            text: text.trim().to_string(),
-                            streamed,
-                        });
-                    }
+            None
+        }
+        ProductAiLiveBackend::Anthropic => {
+            let client = anthropic_client_with_keyring_fallback();
+            let request = ChatCompletionRequest {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            // Progressive SSE: on_delta fires as text deltas arrive on the wire.
+            let mut delta_sink = |text: &str| {
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(text);
                 }
-                if let Ok(response) = client.complete(request)
-                    && !response.text.trim().is_empty()
-                {
-                    let text = response.text.trim().to_string();
-                    if let Some(cb) = on_delta.as_mut() {
-                        cb(&text);
-                    }
+            };
+            if let Ok(chunks) = client.stream_text_deltas_with_callback(
+                request.clone(),
+                Default::default(),
+                &mut delta_sink,
+            ) {
+                let chunks: Vec<String> = chunks.into_iter().filter(|d| !d.is_empty()).collect();
+                let text = chunks.join("");
+                if !text.trim().is_empty() {
+                    let streamed = chunks.len() > 1;
                     return Some(ProductChatCompletion {
                         provider_id: "anthropic".to_string(),
-                        model: response.model,
-                        stream_chunks: vec![text.clone()],
-                        text,
-                        streamed: false,
+                        model: request.model.clone(),
+                        stream_chunks: if chunks.is_empty() {
+                            vec![text.clone()]
+                        } else {
+                            chunks
+                        },
+                        text: text.trim().to_string(),
+                        streamed,
                     });
                 }
             }
-            _ => {}
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                return Some(ProductChatCompletion {
+                    provider_id: "anthropic".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
+            }
+            None
         }
     }
-    None
 }
 
 /// Result of resolving assist edit proposal body text (live model or fixture).
@@ -1474,6 +1457,7 @@ fn resolve_assisted_edit_proposal_text(
 
 /// Resolve Delegate chat assistant body via product preference routing.
 #[cfg(feature = "ai")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_delegate_chat_reply(
     preference: ProductAiProviderPreference,
     prompt_label: &str,
@@ -1507,6 +1491,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
 }
 
 #[cfg(not(feature = "ai"))]
+#[allow(clippy::too_many_arguments)]
 fn resolve_delegate_chat_reply(
     _preference: ProductAiProviderPreference,
     _prompt_label: &str,
@@ -1818,8 +1803,7 @@ fn try_live_product_inline_prediction(
 ) -> Option<InlinePredictionResult> {
     let max_bytes = metadata
         .max_prediction_bytes
-        .min(INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES)
-        .max(1);
+        .clamp(1, INLINE_PREDICTION_MAX_GHOST_TEXT_BYTES);
     let system = format!(
         "You are Legion Assist inline prediction. Reply with ONLY the short text to insert at the cursor (ghost text). \
 No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_bytes} bytes."
@@ -2237,14 +2221,13 @@ impl DelegateWorkflowState {
         projection.context_citation_count = projection.context_citations.len() as u32;
         projection.proposal_review_count = projection.proposal_reviews.len() as u32;
         projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
-        if let Some(label) = &self.last_sandbox_enforcement_label {
-            if !projection
+        if let Some(label) = &self.last_sandbox_enforcement_label
+            && !projection
                 .plan_only_disclaimers
                 .iter()
                 .any(|existing| existing == label)
-            {
-                projection.plan_only_disclaimers.push(label.clone());
-            }
+        {
+            projection.plan_only_disclaimers.push(label.clone());
         }
     }
 
@@ -15693,11 +15676,11 @@ impl AppComposition {
     pub fn poll_product_ai_stream(&mut self) -> bool {
         let mut changed = false;
         let snap = self.live_product_ai_stream.snapshot();
-        if !snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty() {
-            if self.last_product_ai_stream.as_ref() != Some(&snap) {
-                self.last_product_ai_stream = Some(snap);
-                changed = true;
-            }
+        if (!snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty())
+            && self.last_product_ai_stream.as_ref() != Some(&snap)
+        {
+            self.last_product_ai_stream = Some(snap);
+            changed = true;
         }
         for result in self.live_product_ai_stream.take_background_results() {
             if let Some(stream) = result.stream {
@@ -22552,6 +22535,10 @@ impl AppComposition {
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
         // Live completion only after the capability/network decision above.
+        // Uses the authorized backend only (no silent Ollama→Anthropic fallback).
+        // Progressive deltas update the shared sink; full non-blocking proposal
+        // registration (like Delegate chat) remains a follow-on because Assist
+        // returns a registered proposal_id in the same call.
         let buffer_excerpt = self
             .editor
             .text(context.buffer_id)
@@ -25201,19 +25188,54 @@ impl AppComposition {
     ) -> Result<InlinePredictionResult, AppCompositionError> {
         // Tier 2: local-first product completion (Ollama / Anthropic) for ghost text.
         // Without a live route (CI/offline), keep deterministic fixture.
-        let buffer_excerpt = self
-            .editor
-            .text(metadata.buffer_id)
-            .unwrap_or("")
-            .chars()
-            .take(2_000)
-            .collect::<String>();
-        if let Some(live) = try_live_product_inline_prediction(
-            self.preferred_ai_provider,
-            &metadata,
-            &buffer_excerpt,
-        ) {
-            return Ok(live);
+        //
+        // Authorize the concrete backend before any buffer excerpt leaves the process.
+        // DenyByDefaultBroker recognizes `ai.provider.invoke` / `ai.provider.stream`
+        // for provider egress — not the structural `ai.inline_prediction.invoke`
+        // label carried in InlinePredictionRequestMetadata.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        if let Some(backend) = live_backend {
+            let (_provider_id, _model, _class, network_target, _, _, _) =
+                product_ai_route_fields(Some(backend));
+            let broker = DenyByDefaultBroker::new(
+                product_ai_security_policy(Some(backend)),
+                CapabilityNamespace("app.ai".to_string()),
+            );
+            let decision = broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: metadata.principal_id.clone(),
+                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                    workspace_trust_state: metadata.workspace_trust_state.clone(),
+                    target_path: None,
+                    decision_id: None,
+                    context: legion_protocol::CapabilityRequestContext {
+                        network_target,
+                        ..Default::default()
+                    },
+                    correlation_id: metadata.correlation_id,
+                })
+                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+            let granted = matches!(
+                decision,
+                CapabilityResponse::Decision(ref d) if d.granted
+            ) || matches!(decision, CapabilityResponse::Granted(_));
+            if granted {
+                let buffer_excerpt = self
+                    .editor
+                    .text(metadata.buffer_id)
+                    .unwrap_or("")
+                    .chars()
+                    .take(2_000)
+                    .collect::<String>();
+                if let Some(live) = try_live_product_inline_prediction(
+                    self.preferred_ai_provider,
+                    &metadata,
+                    &buffer_excerpt,
+                ) {
+                    return Ok(live);
+                }
+            }
+            // Live route denied or empty: fall through to deterministic offline fixture.
         }
 
         let request = InlinePredictionRequest {
