@@ -8063,7 +8063,7 @@ impl DebugWorkflow {
             let verified = session
                 .set_breakpoints(&path, &lines, Duration::from_secs(3))
                 .map_err(|err| err.to_string())?;
-            for (idx, verified_bp) in indices.into_iter().zip(verified.into_iter()) {
+            for (idx, verified_bp) in indices.into_iter().zip(verified) {
                 if let Some(bp) = self.breakpoints.get_mut(idx) {
                     bp.verified = verified_bp.verified;
                     bp.message = verified_bp.message.clone();
