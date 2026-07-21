@@ -26,7 +26,12 @@ use legion_protocol::{CanonicalPath, EventSequence, WatcherEvent, WatcherEventKi
 use thiserror::Error;
 
 /// Maximum event count accepted from one watcher snapshot.
-const WATCHER_OVERFLOW_THRESHOLD: usize = 4_096;
+/// Soft cap for precise per-path events in one recursive snapshot.
+///
+/// Recursive monorepo walks can exceed this; when they do we return a bounded
+/// truncated snapshot rather than permanent `WatcherOverflow` (which never
+/// recovers for large trees). Callers still get nested coverage up to the cap.
+const WATCHER_OVERFLOW_THRESHOLD: usize = 65_536;
 
 /// Maximum directory nesting depth for recursive watcher snapshots (Tier 1 A11).
 /// Aligns with the project tree depth cap so nested monorepo files are observed.
@@ -2088,11 +2093,9 @@ fn walk_watcher_tree(
         .map_err(|err| PlatformError::from_io_error("watcher snapshot", path, err))?;
 
     for entry in entries {
+        // Soft truncate: keep a usable nested snapshot instead of permanent overflow.
         if events.len() >= WATCHER_OVERFLOW_THRESHOLD {
-            return Err(PlatformError::WatcherOverflow {
-                path: path.to_path_buf(),
-                context: "overflow threshold exceeded".to_string(),
-            });
+            return Ok(());
         }
 
         let child = entry

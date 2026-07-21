@@ -1922,9 +1922,13 @@ fn location_projection_for_item(
 
 /// Convert an LSP `file://` URI into a filesystem path for navigation.
 ///
-/// Returns [`None`] for non-`file` schemes. Windows drive designators are
-/// normalized via [`normalize_file_uri_drive`] before decoding. Percent-encoded
-/// octets (`%20`, `%3A`) are decoded so desktop open/navigation can use the path.
+/// Returns [`None`] for non-`file` schemes and for non-local authorities that
+/// would be mis-mapped to local paths. Windows drive designators are normalized
+/// via [`normalize_file_uri_drive`] before decoding. Percent-encoded octets
+/// (`%20`, `%3A`) are decoded so desktop open/navigation can use the path.
+///
+/// UNC-style authorities (`file://server/share/path`) are preserved as
+/// `//server/share/path` so Windows remote shares remain navigable.
 pub fn path_from_file_uri(uri: &str) -> Option<CanonicalPath> {
     let normalized = normalize_file_uri_drive(uri);
     let decoded = percent_decode_uri_component(normalized.as_ref());
@@ -1939,9 +1943,27 @@ pub fn path_from_file_uri(uri: &str) -> Option<CanonicalPath> {
             format!("/{rest}")
         }
     } else if let Some(rest) = decoded.strip_prefix("file://") {
-        // `file://hostname/path` — keep the absolute path component.
+        // `file://server/share/...` or `file://localhost/path`.
         let slash = rest.find('/')?;
-        rest[slash..].to_string()
+        let authority = &rest[..slash];
+        let path_part = &rest[slash..];
+        if authority.is_empty()
+            || authority.eq_ignore_ascii_case("localhost")
+            || authority == "127.0.0.1"
+            || authority == "[::1]"
+        {
+            // Local authority — treat as absolute local path.
+            path_part.to_string()
+        } else if authority.contains('.')
+            || authority.contains(':')
+            || authority.eq_ignore_ascii_case("http")
+        {
+            // Reject non-local / URL-like authorities rather than mis-map them.
+            return None;
+        } else {
+            // UNC host (e.g. file://fileserver/share/src/lib.rs).
+            format!("//{authority}{path_part}")
+        }
     } else {
         return None;
     };

@@ -1126,7 +1126,29 @@ fn resolve_anthropic_api_key() -> Option<String> {
         })
 }
 
+/// Resolve configured Anthropic base URL (proxy / self-hosted / production).
+#[cfg(feature = "ai")]
+fn anthropic_base_url_from_env() -> String {
+    std::env::var("LEGION_ANTHROPIC_BASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("DEVIL_ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("ANTHROPIC_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string())
+}
+
 /// Build an Anthropic client from env, falling back to OS keyring BYOK storage.
+///
+/// Always honors configured base URL env vars; only the credential may come
+/// from the keyring when process env keys are unset.
 #[cfg(feature = "ai")]
 fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMessagesClient {
     use legion_ai_providers::{
@@ -1134,17 +1156,18 @@ fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMes
         ReqwestProviderHttpTransport,
     };
 
+    let base_url = anthropic_base_url_from_env();
     if let Some(api_key) = resolve_anthropic_api_key() {
-        // Prefer an explicit key so keyring BYOK matches the desktop write path even
-        // when process env is empty.
         return AnthropicMessagesClient::with_transport_kind(
             ANTHROPIC_PROVIDER_ID,
-            "https://api.anthropic.com",
+            base_url,
             Some(api_key),
             AnthropicCredentialKind::ApiKey,
             ReqwestProviderHttpTransport,
         );
     }
+    // No explicit key: still use from_env so base URL + any remaining credential
+    // sources stay consistent with the provider adapter.
     AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
 }
 
@@ -1522,19 +1545,169 @@ fn product_stream_from_completion(
 /// Whether product AI will attempt a live (non-fixture) completion for `preference`.
 #[cfg(feature = "ai")]
 fn product_ai_will_attempt_live(preference: ProductAiProviderPreference) -> bool {
-    match preference {
-        ProductAiProviderPreference::Deterministic => false,
-        ProductAiProviderPreference::Ollama => ollama_loopback_reachable(),
-        ProductAiProviderPreference::Anthropic => resolve_anthropic_api_key().is_some(),
-        ProductAiProviderPreference::Auto => {
-            ollama_loopback_reachable() || resolve_anthropic_api_key().is_some()
-        }
-    }
+    product_ai_selected_live_backend(preference).is_some()
 }
 
 #[cfg(not(feature = "ai"))]
 fn product_ai_will_attempt_live(_preference: ProductAiProviderPreference) -> bool {
     false
+}
+
+/// Selected live backend for product composition (policy + routing metadata).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProductAiLiveBackend {
+    Ollama,
+    Anthropic,
+}
+
+#[cfg(feature = "ai")]
+fn product_ai_selected_live_backend(
+    preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    match preference {
+        ProductAiProviderPreference::Deterministic => None,
+        ProductAiProviderPreference::Ollama => {
+            ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
+        }
+        ProductAiProviderPreference::Anthropic => {
+            resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
+        }
+        ProductAiProviderPreference::Auto => {
+            if ollama_loopback_reachable() {
+                Some(ProductAiLiveBackend::Ollama)
+            } else if resolve_anthropic_api_key().is_some() {
+                Some(ProductAiLiveBackend::Anthropic)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "ai"))]
+fn product_ai_selected_live_backend(
+    _preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    None
+}
+
+/// Security policy for product AI routes that may reach local loopback or BYOK remote.
+fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> SecurityPolicy {
+    let mut policy = SecurityPolicy::default();
+    match backend {
+        Some(ProductAiLiveBackend::Ollama) => {
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+        }
+        Some(ProductAiLiveBackend::Anthropic) => {
+            // Trusted-workspace BYOK: allow the configured Anthropic host only.
+            policy.network_policy.air_gap = false;
+            policy.network_policy.local_provider_only = false;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = true;
+            let host = anthropic_route_host();
+            if !policy.network_policy.allowlist.iter().any(|h| h == &host) {
+                policy.network_policy.allowlist.push(host);
+            }
+        }
+        None => {
+            // Deterministic / fixture: no remote egress.
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+        }
+    }
+    policy
+}
+
+fn anthropic_route_host() -> String {
+    #[cfg(feature = "ai")]
+    {
+        let base = anthropic_base_url_from_env();
+        base.trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("api.anthropic.com")
+            .split(':')
+            .next()
+            .unwrap_or("api.anthropic.com")
+            .to_string()
+    }
+    #[cfg(not(feature = "ai"))]
+    {
+        "api.anthropic.com".to_string()
+    }
+}
+
+/// Provider route metadata that matches the backend that will receive workspace text.
+fn product_ai_route_fields(
+    backend: Option<ProductAiLiveBackend>,
+) -> (
+    String,
+    String,
+    AssistedAiProviderClass,
+    Option<legion_protocol::NetworkTarget>,
+    Vec<String>,
+    Vec<String>,
+    legion_protocol::ProposalPrivacyLabel,
+) {
+    match backend {
+        Some(ProductAiLiveBackend::Ollama) => (
+            "ollama".to_string(),
+            ollama_model_label_offline_safe(),
+            AssistedAiProviderClass::LocalLoopback,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            vec!["local.ollama".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+        Some(ProductAiLiveBackend::Anthropic) => (
+            "anthropic".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+            AssistedAiProviderClass::ByokRemote,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "https".to_string(),
+                host: anthropic_route_host(),
+                port: Some(443),
+            }),
+            vec!["byok.anthropic".to_string()],
+            vec!["remote.byok".to_string()],
+            // Buffer excerpts leave the machine under BYOK remote.
+            legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata,
+        ),
+        None => (
+            DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+            "deterministic-local".to_string(),
+            AssistedAiProviderClass::Local,
+            Some(legion_protocol::NetworkTarget {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: Some(11434),
+            }),
+            vec!["local.deterministic".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+    }
+}
+
+fn ollama_model_label_offline_safe() -> String {
+    #[cfg(feature = "ai")]
+    {
+        ollama_model_label()
+    }
+    #[cfg(not(feature = "ai"))]
+    {
+        "llama3.2".to_string()
+    }
 }
 
 /// Background job result for non-blocking product AI generation.
@@ -22165,11 +22338,23 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
+        // Authorize the *actual* backend that will receive buffer text (Ollama /
+        // Anthropic / fixture), not a hard-coded deterministic localhost route.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        let (
+            route_provider_id,
+            route_model,
+            route_provider_class,
+            route_network,
+            route_health,
+            route_cost,
+            route_privacy,
+        ) = product_ai_route_fields(live_backend);
         let provider_route_request = legion_protocol::AssistedAiProviderRouteRequest {
             route_id: route_id.clone(),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-            model_label: "deterministic-local".to_string(),
-            provider_class,
+            provider_id: route_provider_id.clone(),
+            model_label: route_model.clone(),
+            provider_class: route_provider_class,
             operation_class,
             context_manifest: trust_reference(
                 &context_manifest_projection.manifest.manifest_id,
@@ -22207,21 +22392,17 @@ impl AppComposition {
                 },
                 required_capability: CapabilityId("editor.write".to_string()),
                 risk_label: legion_protocol::ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                privacy_label: route_privacy,
                 labels: vec![instruction_label.clone()],
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            network_target: route_network,
             cancellation_token: legion_protocol::CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: vec!["local.deterministic".to_string()],
-            cost_labels: vec!["local.free".to_string()],
+            health_labels: route_health,
+            cost_labels: route_cost,
             principal_id: context.principal.clone(),
             workspace_trust_state: context.trust.clone(),
             correlation_id: event_context.correlation_id,
@@ -22231,12 +22412,115 @@ impl AppComposition {
             schema_version: 1,
         };
         let broker = DenyByDefaultBroker::new(
-            SecurityPolicy::default(),
+            product_ai_security_policy(live_backend),
             CapabilityNamespace("app.ai".to_string()),
         );
-        let route_response = ProviderRouter::new(&self.ai_registry, &broker)
-            .route_completion(provider_route_request.clone())
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        // Capability/network decision only — product prose is filled by
+        // complete_product_chat after authorization (registry may lack BYOK key).
+        let route_response = {
+            let decision = broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: context.principal.clone(),
+                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                    workspace_trust_state: context.trust.clone(),
+                    target_path: None,
+                    decision_id: None,
+                    context: legion_protocol::CapabilityRequestContext {
+                        network_target: provider_route_request.network_target.clone(),
+                        ..Default::default()
+                    },
+                    correlation_id: event_context.correlation_id,
+                })
+                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+            let granted = matches!(
+                decision,
+                CapabilityResponse::Decision(ref d) if d.granted
+            ) || matches!(decision, CapabilityResponse::Granted(_));
+            if !granted {
+                let event_sequence = provider_route_request.event_sequence;
+                let refusal = legion_protocol::AssistedAiRefusalMetadata {
+                    reason_code: "capability.denied".to_string(),
+                    label: "provider capability denied by policy".to_string(),
+                    provider_id: Some(route_provider_id.clone()),
+                    operation_class: Some(operation_class),
+                    privacy_scope: None,
+                    capability: Some(CapabilityId("ai.provider.invoke".to_string())),
+                    budget_id: None,
+                    risk_label: legion_protocol::ProposalRiskLabel::High,
+                    reasons: vec!["capability.denied".to_string()],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                return self.finish_assisted_ai_metadata_only_run(
+                    run_id,
+                    route_id,
+                    operation_class,
+                    provider_class,
+                    provider_route_request.clone(),
+                    legion_protocol::AssistedAiProviderRouteResponse {
+                        route_id: provider_route_request.route_id.clone(),
+                        invocation_state:
+                            legion_protocol::AssistedAiProviderInvocationState::Refused,
+                        route_decision: legion_protocol::AssistedAiRouteDecision {
+                            disposition: legion_protocol::AssistedAiRequestDisposition::Refused,
+                            provider_invocation:
+                                legion_protocol::AssistedAiProviderInvocationState::Refused,
+                            refusal: Some(refusal.clone()),
+                            reasons: vec!["capability.denied".to_string()],
+                            redaction_hints: vec![RedactionHint::MetadataOnly],
+                            schema_version: 1,
+                        },
+                        provider_id: route_provider_id.clone(),
+                        model_label: route_model.clone(),
+                        output_labels: vec!["output.not_encoded".to_string()],
+                        refusal: Some(refusal),
+                        correlation_id: event_context.correlation_id,
+                        causality_id: event_context.causality_id,
+                        event_sequence,
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                        schema_version: 1,
+                    },
+                    context_manifest_projection,
+                    privacy_inspector_projection,
+                    permission_budget_projection,
+                    generated_at,
+                    event_context,
+                    &mut agent,
+                );
+            }
+            // Still exercise the deterministic router for offline fixture metadata
+            // when no live backend is selected; live backends skip registry complete
+            // (credentials live in the product keyring path, not the registry).
+            if live_backend.is_none() {
+                ProviderRouter::new(&self.ai_registry, &broker)
+                    .route_completion(provider_route_request.clone())
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?
+            } else {
+                legion_protocol::AssistedAiProviderRouteResponse {
+                    route_id: provider_route_request.route_id.clone(),
+                    invocation_state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+                    route_decision: legion_protocol::AssistedAiRouteDecision {
+                        disposition:
+                            legion_protocol::AssistedAiRequestDisposition::MetadataOnlyReady,
+                        provider_invocation:
+                            legion_protocol::AssistedAiProviderInvocationState::Completed,
+                        refusal: None,
+                        reasons: vec!["provider.authorized.product_edge".to_string()],
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                        schema_version: 1,
+                    },
+                    provider_id: route_provider_id,
+                    model_label: route_model,
+                    output_labels: vec!["route.authorized".to_string()],
+                    refusal: None,
+                    correlation_id: event_context.correlation_id,
+                    causality_id: event_context.causality_id,
+                    event_sequence: provider_route_request.event_sequence,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                }
+            }
+        };
         if route_response.invocation_state
             != legion_protocol::AssistedAiProviderInvocationState::Completed
             || operation_class == legion_protocol::AssistedAiOperationClass::Explain
@@ -22267,8 +22551,7 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        // Tier 2: prefer a live Anthropic completion when credentials exist;
-        // otherwise keep the deterministic fixture proposal so tests stay offline.
+        // Live completion only after the capability/network decision above.
         let buffer_excerpt = self
             .editor
             .text(context.buffer_id)

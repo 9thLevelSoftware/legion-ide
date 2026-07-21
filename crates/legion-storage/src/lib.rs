@@ -1295,7 +1295,8 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected proposal audit write failure".to_string(),
             });
         }
-        // Capture proposal audit for durable write before moving into the lock path.
+        // Durable audit is written first so in-memory state is not advanced when
+        // persistence fails (permissions, disk full, rename errors).
         let durable_audit = match &request {
             StorageRepositoryRequest::SaveProposalAuditRecord(record) => Some(record.clone()),
             _ => None,
@@ -1310,15 +1311,13 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected event metadata write failure".to_string(),
             });
         }
-        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
-        let response = storage
-            .handle_protocol_request(request)
-            .map_err(InMemoryStorage::protocol_error)?;
-        drop(storage);
-        if let Some(record) = durable_audit {
-            self.persist_proposal_audit(&record)?;
+        if let Some(record) = durable_audit.as_ref() {
+            self.persist_proposal_audit(record)?;
         }
-        Ok(response)
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        storage
+            .handle_protocol_request(request)
+            .map_err(InMemoryStorage::protocol_error)
     }
 }
 
@@ -1345,6 +1344,11 @@ fn atomic_write_bytes(dest: &Path, body: &[u8]) -> Result<(), String> {
         file.flush()
             .map_err(|err| format!("flush temp failed: {err}"))?;
         drop(file);
+        // Windows cannot rename over an existing file; remove dest first so
+        // lifecycle transitions (Created → Applied) can rewrite the same blob.
+        if dest.exists() {
+            fs::remove_file(dest).map_err(|err| format!("remove dest failed: {err}"))?;
+        }
         fs::rename(&temp, dest).map_err(|err| format!("rename temp failed: {err}"))
     })();
     if write_result.is_err() {

@@ -1540,8 +1540,9 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
         }
 
         // Progressive read: fire events as complete SSE records arrive (not only
-        // after the full body is buffered).
-        let mut carry = String::new();
+        // after the full body is buffered). Accumulate *bytes* so UTF-8 sequences
+        // that straddle HTTP chunk boundaries are not corrupted.
+        let mut carry_bytes: Vec<u8> = Vec::new();
         let mut current_event: Option<String> = None;
         let mut current_data = String::new();
         let mut buf = [0u8; 2048];
@@ -1555,13 +1556,20 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
             if n == 0 {
                 break;
             }
-            carry.push_str(&String::from_utf8_lossy(&buf[..n]));
-            while let Some(idx) = carry.find('\n') {
-                let mut line = carry[..idx].to_string();
-                carry = carry[idx + 1..].to_string();
-                if line.ends_with('\r') {
-                    line.pop();
+            carry_bytes.extend_from_slice(&buf[..n]);
+            // Process complete UTF-8 lines; leave incomplete trailing bytes in carry.
+            loop {
+                let Some(nl) = carry_bytes.iter().position(|b| *b == b'\n') else {
+                    break;
+                };
+                let mut line_bytes = carry_bytes.drain(..=nl).collect::<Vec<u8>>();
+                if line_bytes.last() == Some(&b'\n') {
+                    line_bytes.pop();
                 }
+                if line_bytes.last() == Some(&b'\r') {
+                    line_bytes.pop();
+                }
+                let line = String::from_utf8_lossy(&line_bytes);
                 if line.is_empty() {
                     if let Some(event) =
                         flush_anthropic_sse_event(current_event.take(), &mut current_data)?
@@ -1575,6 +1583,30 @@ impl AnthropicMessagesTransport for ReqwestProviderHttpTransport {
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("data:") {
+                    if !current_data.is_empty() {
+                        current_data.push('\n');
+                    }
+                    current_data.push_str(rest.trim_start());
+                }
+            }
+        }
+        // Flush any final complete lines still buffered as valid UTF-8.
+        if !carry_bytes.is_empty()
+            && let Ok(tail) = std::str::from_utf8(&carry_bytes)
+        {
+            for line in tail.split('\n') {
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() {
+                    if let Some(event) =
+                        flush_anthropic_sse_event(current_event.take(), &mut current_data)?
+                    {
+                        on_event(event);
+                    }
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("event:") {
+                    current_event = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
                     if !current_data.is_empty() {
                         current_data.push('\n');
                     }
