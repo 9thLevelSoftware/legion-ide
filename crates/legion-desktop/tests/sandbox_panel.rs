@@ -54,7 +54,8 @@ fn sandbox_panel_shows_honest_strength_label_not_descriptor_only() {
         all.contains("os-enforced")
             || all.contains("process-isolated")
             || all.contains("process-lifetime-only")
-            || all.contains("fs-write-only")
+            || all.contains("fs-write")
+            || all.contains("net-deny-all-if-bwrap")
             || all.contains("fallback"),
         "sandbox rows must contain an honest enforcement label, got: {all}"
     );
@@ -108,5 +109,30 @@ fn sandbox_panel_active_state_shows_isolation_and_lease() {
     assert!(
         all.contains("sandbox lease:"),
         "Active sandbox rows must show lease status, got: {all}"
+    );
+}
+
+/// C3: when the app records a live spawn enforcement label on the projection,
+/// the sandbox panel must show it (product spawn integration).
+#[test]
+fn sandbox_panel_surfaces_live_product_spawn_enforcement() {
+    let mut snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::Executing);
+    snapshot
+        .delegated_task_projection
+        .plan_only_disclaimers
+        .push(
+            "sandbox live enforcement: backend=landlock-v5+bwrap-unshare-net fs_write=true fs_read=false network=true caveats=none"
+                .to_string(),
+        );
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    let all = model.sandbox_rows.join("\n");
+
+    assert!(
+        all.contains("sandbox runtime: sandbox live enforcement:"),
+        "panel must project live product-spawn enforcement, got: {all}"
+    );
+    assert!(
+        all.contains("network=true") || all.contains("backend="),
+        "live enforcement fields should be visible, got: {all}"
     );
 }

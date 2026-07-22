@@ -9,4 +9,4 @@
 | C0 threat model stub | Draft | `C0-threat-model-stub.md` |
 | C1 Linux network | Landed | `C1-linux-network-isolation.md` (`bwrap --unshare-net`) |
 | C2 Windows FS residual | Landed | `C2-windows-fs-residual.md` (honest non-enforcement) |
-| C3 product spawn integration | Open | — |
+| C3 product spawn integration | Landed | `C3-product-spawn-integration.md` (live report → UI) |
