@@ -1,10 +1,12 @@
-//! Live DAP adapter process session (B1/B2).
+//! Live DAP adapter process session (B1/B2/B4).
 //!
-//! Spawns an adapter binary and drives a minimal DAP product loop:
+//! Spawns an adapter binary and drives a minimal DAP product loop over the
+//! **Microsoft DAP** wire (`seq`/`type`/`command`/`arguments`):
 //! initialize → setBreakpoints → launch/configurationDone → stopped →
 //! stackTrace/variables → step/continue → disconnect.
 //!
-//! CI uses the in-tree `fake_dap_adapter` binary; real CodeLLDB is B3.
+//! CI uses the in-tree `fake_dap_adapter` binary (same wire shape as real
+//! CodeLLDB / `lldb-dap`).
 
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::framing::{DapFrameError, DapFramer, DapJsonRpc};
+use crate::framing::{DapFrameError, DapFramer, DapMessage};
 use crate::state::DapLifecycleState;
 
 /// Errors from a live DAP session.
@@ -119,7 +121,7 @@ pub struct LiveDapSession {
     child: Child,
     stdin: Option<std::process::ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
-    next_id: u64,
+    next_seq: u64,
     adapter_type: String,
 }
 
@@ -156,19 +158,19 @@ impl LiveDapSession {
             child,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
-            next_id: 1,
+            next_seq: 1,
             adapter_type: adapter_type.into(),
         })
     }
 
-    /// Run initialize → wait for initialized event → return handshake outcome.
+    /// Run initialize → wait for initialize response + initialized event.
     pub fn initialize_handshake(
         &mut self,
         timeout: Duration,
     ) -> Result<LiveDapHandshakeOutcome, LiveDapSessionError> {
-        let id = self.alloc_id();
-        let req = DapJsonRpc::request(
-            id,
+        let seq = self.alloc_seq();
+        let req = DapMessage::request(
+            seq,
             "initialize",
             json!({
                 "clientID": "legion",
@@ -192,22 +194,18 @@ impl LiveDapSession {
         let mut saw_initialized_event = false;
 
         while Instant::now() < deadline {
-            // Blocking read with overall deadline enforced by outer loop length;
-            // fake adapter is local and fast. For real adapters B2 may add non-block.
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 break;
             }
             let msg = DapFramer::read_from(&mut self.stdout)?;
-            if msg.method.as_deref() == Some("initialized") {
+            if msg.event_name() == Some("initialized") {
                 saw_initialized_event = true;
             }
-            if msg.id == Some(serde_json::Value::from(id)) {
-                if msg.error.is_some() {
-                    return Err(LiveDapSessionError::Protocol {
-                        message: format!("initialize error: {:?}", msg.error),
-                    });
-                }
+            if let Some(result) = msg.response_for(seq) {
+                result.map_err(|message| LiveDapSessionError::Protocol {
+                    message: format!("initialize error: {message}"),
+                })?;
                 saw_initialize_response = true;
             }
             if saw_initialize_response && saw_initialized_event {
@@ -216,7 +214,7 @@ impl LiveDapSession {
                     adapter_type: self.adapter_type.clone(),
                     initialized_event: true,
                     metadata_summary: format!(
-                        "action=initialize state=launching adapter={} initialized=true live=true",
+                        "action=initialize state=launching adapter={} initialized=true live=true wire=microsoft-dap",
                         self.adapter_type
                     ),
                 });
@@ -306,16 +304,11 @@ impl LiveDapSession {
         timeout: Duration,
     ) -> Result<(), LiveDapSessionError> {
         let _ = self.request("continue", json!({ "threadId": thread_id }), timeout)?;
-        // Fake adapter also emits `continued`; drain until deadline or event.
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let msg = DapFramer::read_from(&mut self.stdout)?;
-            if msg.method.as_deref() == Some("continued") {
+            if msg.event_name() == Some("continued") {
                 return Ok(());
-            }
-            // Ignore unrelated messages.
-            if msg.id.is_some() {
-                continue;
             }
         }
         Ok(())
@@ -332,15 +325,15 @@ impl LiveDapSession {
         let mut saw_stopped = false;
         while Instant::now() < deadline {
             let msg = DapFramer::read_from(&mut self.stdout)?;
-            if msg.method.as_deref() == Some("stopped") {
+            if msg.event_name() == Some("stopped") {
                 saw_stopped = true;
-                if let Some(params) = msg.params {
-                    reason = params
+                if let Some(body) = msg.event_body() {
+                    reason = body
                         .get("reason")
                         .and_then(|v| v.as_str())
                         .unwrap_or(expected_reason_hint)
                         .to_string();
-                    thread_id = params.get("threadId").and_then(|v| v.as_u64()).unwrap_or(1);
+                    thread_id = body.get("threadId").and_then(|v| v.as_u64()).unwrap_or(1);
                 }
                 break;
             }
@@ -423,7 +416,7 @@ impl LiveDapSession {
             stack_frames: stack_frames.clone(),
             variables: variables.clone(),
             metadata_summary: format!(
-                "action=stopped reason={reason} thread={thread_id} frames={} vars={} live=true",
+                "action=stopped reason={reason} thread={thread_id} frames={} vars={} live=true wire=microsoft-dap",
                 stack_frames.len(),
                 variables.len()
             ),
@@ -432,12 +425,12 @@ impl LiveDapSession {
 
     fn request(
         &mut self,
-        method: &str,
-        params: Value,
+        command: &str,
+        arguments: Value,
         timeout: Duration,
     ) -> Result<Value, LiveDapSessionError> {
-        let id = self.alloc_id();
-        let req = DapJsonRpc::request(id, method, params);
+        let seq = self.alloc_seq();
+        let req = DapMessage::request(seq, command, arguments);
         let stdin = self
             .stdin
             .as_mut()
@@ -447,30 +440,34 @@ impl LiveDapSession {
         DapFramer::write_to(stdin, &req)?;
 
         let deadline = Instant::now() + timeout;
-        let want = Value::from(id);
         while Instant::now() < deadline {
             let msg = DapFramer::read_from(&mut self.stdout)?;
-            if msg.id.as_ref() == Some(&want) {
-                if let Some(err) = msg.error {
-                    return Err(LiveDapSessionError::Protocol {
-                        message: format!("{method} error: {err}"),
+            if let Some(result) = msg.response_for(seq) {
+                return result
+                    .map(|body| {
+                        if body.is_null() {
+                            json!({})
+                        } else {
+                            body.clone()
+                        }
+                    })
+                    .map_err(|message| LiveDapSessionError::Protocol {
+                        message: format!("{command} error: {message}"),
                     });
-                }
-                return Ok(msg.result.unwrap_or(json!({})));
             }
             // Events while waiting for this response are ignored here; callers
             // that need stopped/continued use dedicated wait helpers after.
         }
         Err(LiveDapSessionError::Timeout {
-            message: format!("waiting for {method} response id={id}"),
+            message: format!("waiting for {command} response seq={seq}"),
         })
     }
 
     /// Send disconnect and wait for process exit (best-effort).
     pub fn disconnect_and_wait(mut self, timeout: Duration) -> Result<(), LiveDapSessionError> {
-        let id = self.alloc_id();
-        let req = DapJsonRpc::request(
-            id,
+        let seq = self.alloc_seq();
+        let req = DapMessage::request(
+            seq,
             "disconnect",
             json!({ "restart": false, "terminateDebuggee": true }),
         );
@@ -498,10 +495,10 @@ impl LiveDapSession {
         }
     }
 
-    fn alloc_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        id
+    fn alloc_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        seq
     }
 }
 

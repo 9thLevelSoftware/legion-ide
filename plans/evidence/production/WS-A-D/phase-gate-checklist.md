@@ -40,7 +40,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B3 policy deny untrusted + adapter resolve + dual-mode banner (`B3-resolution-trust-dual-mode.md`)
 - [x] USER_GUIDE dual-mode honesty (simulated vs live; Legion provisional wire)
 - [x] Evidence under `phase-2-dap/`
-- [ ] Follow-on: Microsoft DAP codec + PATH real-adapter contract
+- [x] B4 Microsoft DAP codec + fake-adapter contract (`B4-microsoft-dap-codec.md`; PATH resolve re-enabled)
+- [ ] Follow-on: persistent live session UX + dogfood vs system lldb-dap
 
 ## Phase 3 — Sandbox isolation (C)
 
