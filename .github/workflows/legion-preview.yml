@@ -67,13 +67,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            ARCHIVE=$(ls target/preview/legion-desktop-preview-windows-*.zip | head -n1)
-            BUNDLE=$(ls -d target/preview/windows-* | head -n1)
+            archives=(target/preview/legion-desktop-preview-windows-*.zip)
+            bundles=(target/preview/windows-*)
+            ARCHIVE="${archives[0]:-}"
+            BUNDLE="${bundles[0]:-}"
+            test -n "$ARCHIVE" && test -n "$BUNDLE"
             test -f "$BUNDLE/legion-desktop.exe"
           else
-            ARCHIVE=$(ls target/preview/legion-desktop-preview-*.tar.gz | head -n1)
-            BUNDLE=$(ls -d target/preview/linux-* target/preview/macos-* 2>/dev/null | head -n1)
+            archives=(target/preview/legion-desktop-preview-*.tar.gz)
+            bundles=(target/preview/linux-* target/preview/macos-*)
+            ARCHIVE="${archives[0]:-}"
+            BUNDLE="${bundles[0]:-}"
+            test -n "$ARCHIVE" && test -n "$BUNDLE"
             test -x "$BUNDLE/legion-desktop"
           fi
           test -f "$BUNDLE/UNSIGNED-BETA.toml"
@@ -81,7 +88,7 @@ jobs:
           test -s "$ARCHIVE"
           grep -q 'unsigned-beta' "$BUNDLE/UNSIGNED-BETA.toml"
           grep -q 'production = false' "$BUNDLE/UNSIGNED-BETA.toml"
-          echo "Smoke OK: $ARCHIVE"
+          echo "Smoke OK: archive=$ARCHIVE bundle=$BUNDLE"
 
       - name: Smoke — beta workflow (best-effort headless)
         # Beta smoke may need a display on some runners; do not fail the package
