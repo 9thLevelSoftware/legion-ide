@@ -355,8 +355,7 @@ mod tests {
     /// Live product-spawn enforcement lines on the projection surface as runtime rows.
     #[test]
     fn rows_surface_live_enforcement_disclaimer_from_projection() {
-        let mut snapshot =
-            snapshot_with_activation(DelegatedTaskRuntimeActivationState::Executing);
+        let mut snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::Executing);
         snapshot
             .delegated_task_projection
             .plan_only_disclaimers
