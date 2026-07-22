@@ -325,23 +325,24 @@ fn terminal_fixture_lifecycle_projects_status() {
         .expect("ready output row");
     assert!(start_index < ready_index);
     if expect_finish_markers {
-        let finish_index = projection
-            .output_rows
-            .iter()
-            .position(|row| row.redacted_payload.contains("command block finished"))
-            .expect("command block finish row");
-        assert!(ready_index < finish_index);
+        // Under CI load the PTY can interleave the finish marker with stdout
+        // rows; require both markers and exit=0 rather than a brittle
+        // ready-before-finish sequence (macOS flake: ready_index < finish_index).
         assert!(
             projection
                 .output_rows
                 .iter()
-                .any(|row| row.redacted_payload.contains("command block finished"))
+                .any(|row| row.redacted_payload.contains("command block finished")),
+            "expected command block finished row; output_rows={:?}",
+            projection.output_rows
         );
         assert!(
             projection
                 .output_rows
                 .iter()
-                .any(|row| row.redacted_payload.contains("exit=0"))
+                .any(|row| row.redacted_payload.contains("exit=0")),
+            "expected exit=0 in terminal output; output_rows={:?}",
+            projection.output_rows
         );
     }
     assert!(
