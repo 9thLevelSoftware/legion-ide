@@ -212,7 +212,6 @@ fn main() {
                     true,
                     json!({ "allThreadsContinued": true }),
                 );
-                stopped = false;
                 write_event(
                     &mut stdout,
                     &mut out_seq,
