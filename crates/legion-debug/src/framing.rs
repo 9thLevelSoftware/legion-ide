@@ -1,13 +1,11 @@
-//! DAP stdio framing (`Content-Length` headers) with a **Legion provisional
-//! JSON-RPC envelope** (`jsonrpc` / `id` / `method` / `params`).
-//!
-//! This is **not** the Microsoft Debug Adapter Protocol message shape
-//! (`seq` / `type` / `command` / `arguments`). The in-tree `fake_dap_adapter`
-//! and `LiveDapSession` share this envelope for CI substrate; real CodeLLDB /
-//! `lldb-dap` require a follow-on Microsoft DAP codec.
+//! DAP stdio framing (`Content-Length` headers) with the **Microsoft Debug
+//! Adapter Protocol** message shape (`seq` / `type` / `command`|`event` /
+//! `arguments`|`body` / `request_seq` / `success`).
 //!
 //! Same framing family as LSP (`ADR-0034` / `legion-lsp`); kept local so
 //! `legion-debug` does not depend on the LSP crate.
+//!
+//! Spec: <https://microsoft.github.io/debug-adapter-protocol/specification>
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,72 +31,158 @@ pub enum DapFrameError {
     },
 }
 
-/// Legion provisional JSON-RPC 2.0 envelope on the live stdio wire (not Microsoft DAP).
+/// Microsoft DAP protocol message (`ProtocolMessage` + request/response/event).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DapJsonRpc {
-    /// Protocol version (always `"2.0"`).
-    pub jsonrpc: String,
-    /// Request/response id (integer or string in DAP; we use u64 client ids).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    /// Method for requests and events/notifications.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    /// Params for requests/events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
-    /// Result for successful responses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    /// Error for failed responses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<Value>,
+#[serde(tag = "type")]
+pub enum DapMessage {
+    /// Client → adapter request.
+    #[serde(rename = "request")]
+    Request {
+        /// Sequence number (unique per sender).
+        seq: u64,
+        /// DAP command name (`initialize`, `launch`, …).
+        command: String,
+        /// Command arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<Value>,
+    },
+    /// Adapter → client response to a request.
+    #[serde(rename = "response")]
+    Response {
+        /// Sequence number.
+        seq: u64,
+        /// Sequence of the corresponding request.
+        request_seq: u64,
+        /// Whether the request succeeded.
+        success: bool,
+        /// Command that this is a response to.
+        command: String,
+        /// Optional human-readable error or status.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Response body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Value>,
+    },
+    /// Adapter → client event.
+    #[serde(rename = "event")]
+    Event {
+        /// Sequence number.
+        seq: u64,
+        /// Event name (`initialized`, `stopped`, …).
+        event: String,
+        /// Event body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Value>,
+    },
 }
 
-impl DapJsonRpc {
-    /// Build a request with a numeric id.
-    pub fn request(id: u64, method: impl Into<String>, params: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id: Some(Value::from(id)),
-            method: Some(method.into()),
-            params: Some(params),
-            result: None,
-            error: None,
+impl DapMessage {
+    /// Build a request with a numeric sequence id.
+    pub fn request(seq: u64, command: impl Into<String>, arguments: Value) -> Self {
+        Self::Request {
+            seq,
+            command: command.into(),
+            arguments: Some(arguments),
         }
     }
 
-    /// Build a notification / event (no id).
-    pub fn notification(method: impl Into<String>, params: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            method: Some(method.into()),
-            params: Some(params),
-            result: None,
-            error: None,
+    /// Build a successful response.
+    pub fn success_response(
+        seq: u64,
+        request_seq: u64,
+        command: impl Into<String>,
+        body: Value,
+    ) -> Self {
+        Self::Response {
+            seq,
+            request_seq,
+            success: true,
+            command: command.into(),
+            message: None,
+            body: Some(body),
         }
     }
 
-    /// Build a success response.
-    pub fn response(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id: Some(id),
-            method: None,
-            params: None,
-            result: Some(result),
-            error: None,
+    /// Build a failure response.
+    pub fn error_response(
+        seq: u64,
+        request_seq: u64,
+        command: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Response {
+            seq,
+            request_seq,
+            success: false,
+            command: command.into(),
+            message: Some(message.into()),
+            body: None,
+        }
+    }
+
+    /// Build an event.
+    pub fn event(seq: u64, event: impl Into<String>, body: Value) -> Self {
+        Self::Event {
+            seq,
+            event: event.into(),
+            body: Some(body),
+        }
+    }
+
+    /// Request sequence when this is a request, else `None`.
+    pub fn request_seq_id(&self) -> Option<u64> {
+        match self {
+            Self::Request { seq, .. } => Some(*seq),
+            _ => None,
+        }
+    }
+
+    /// Event name when this is an event.
+    pub fn event_name(&self) -> Option<&str> {
+        match self {
+            Self::Event { event, .. } => Some(event.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Event body when this is an event.
+    pub fn event_body(&self) -> Option<&Value> {
+        match self {
+            Self::Event { body, .. } => body.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Response body when this is a successful response for `request_seq`.
+    pub fn response_for(&self, request_seq: u64) -> Option<Result<&Value, String>> {
+        match self {
+            Self::Response {
+                request_seq: rs,
+                success,
+                body,
+                message,
+                ..
+            } if *rs == request_seq => {
+                if *success {
+                    Some(Ok(body.as_ref().unwrap_or(&Value::Null)))
+                } else {
+                    Some(Err(message
+                        .clone()
+                        .unwrap_or_else(|| "request failed".to_string())))
+                }
+            }
+            _ => None,
         }
     }
 }
 
-/// Encode/decode DAP `Content-Length` frames.
+/// Encode/decode DAP `Content-Length` frames carrying [`DapMessage`].
 pub struct DapFramer;
 
 impl DapFramer {
-    /// Encode one envelope to a framed byte buffer.
-    pub fn encode(message: &DapJsonRpc) -> Result<Vec<u8>, DapFrameError> {
+    /// Encode one message to a framed byte buffer.
+    pub fn encode(message: &DapMessage) -> Result<Vec<u8>, DapFrameError> {
         let payload = serde_json::to_vec(message).map_err(|err| DapFrameError::Json {
             message: err.to_string(),
         })?;
@@ -115,8 +199,8 @@ impl DapFramer {
         Ok(frame)
     }
 
-    /// Decode one complete frame (headers + body) into an envelope.
-    pub fn decode(frame: &[u8]) -> Result<DapJsonRpc, DapFrameError> {
+    /// Decode one complete frame (headers + body) into a message.
+    pub fn decode(frame: &[u8]) -> Result<DapMessage, DapFrameError> {
         let header_end = frame
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -161,7 +245,7 @@ impl DapFramer {
     }
 
     /// Read one frame from a buffered reader (blocking).
-    pub fn read_from<R: std::io::BufRead>(reader: &mut R) -> Result<DapJsonRpc, DapFrameError> {
+    pub fn read_from<R: std::io::BufRead>(reader: &mut R) -> Result<DapMessage, DapFrameError> {
         let mut headers = Vec::new();
         loop {
             let mut line = String::new();
@@ -214,7 +298,7 @@ impl DapFramer {
     /// Write one framed message.
     pub fn write_to<W: std::io::Write>(
         writer: &mut W,
-        message: &DapJsonRpc,
+        message: &DapMessage,
     ) -> Result<(), DapFrameError> {
         let frame = Self::encode(message)?;
         writer
@@ -235,12 +319,56 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn encode_decode_roundtrip() {
-        let msg = DapJsonRpc::request(1, "initialize", json!({"adapterID": "legion-fake"}));
+    fn encode_decode_request_roundtrip() {
+        let msg = DapMessage::request(1, "initialize", json!({"adapterID": "legion-fake"}));
         let frame = DapFramer::encode(&msg).expect("encode");
         assert!(frame.starts_with(b"Content-Length:"));
         let decoded = DapFramer::decode(&frame).expect("decode");
-        assert_eq!(decoded.method.as_deref(), Some("initialize"));
-        assert_eq!(decoded.id, Some(Value::from(1u64)));
+        match decoded {
+            DapMessage::Request {
+                seq,
+                command,
+                arguments,
+            } => {
+                assert_eq!(seq, 1);
+                assert_eq!(command, "initialize");
+                assert_eq!(
+                    arguments
+                        .as_ref()
+                        .and_then(|a| a.get("adapterID"))
+                        .and_then(|v| v.as_str()),
+                    Some("legion-fake")
+                );
+            }
+            other => panic!("expected request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn microsoft_dap_shape_has_type_field() {
+        let msg = DapMessage::request(2, "launch", json!({"program": "a.out"}));
+        let json = serde_json::to_value(&msg).expect("to_value");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("request"));
+        assert_eq!(json.get("command").and_then(|v| v.as_str()), Some("launch"));
+        assert!(json.get("jsonrpc").is_none());
+        assert!(json.get("method").is_none());
+    }
+
+    #[test]
+    fn response_and_event_shapes() {
+        let resp = DapMessage::success_response(
+            10,
+            2,
+            "initialize",
+            json!({"supportsConfigurationDoneRequest": true}),
+        );
+        let ev = DapMessage::event(11, "initialized", json!({}));
+        let resp_json = serde_json::to_value(&resp).unwrap();
+        let ev_json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(resp_json["type"], "response");
+        assert_eq!(resp_json["request_seq"], 2);
+        assert_eq!(resp_json["success"], true);
+        assert_eq!(ev_json["type"], "event");
+        assert_eq!(ev_json["event"], "initialized");
     }
 }

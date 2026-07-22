@@ -1,6 +1,7 @@
-//! Minimal fake DAP adapter for CI (WS-A-D Phase 2 B1/B2).
+//! Minimal fake DAP adapter for CI (WS-A-D Phase 2 B1/B2/B4).
 //!
-//! Speaks enough DAP over stdio for:
+//! Speaks **Microsoft DAP** over stdio (`seq` / `type` / `command` / `arguments`)
+//! for:
 //! - `initialize` → response + `initialized` event
 //! - `setBreakpoints` → verified breakpoints
 //! - `launch` / `configurationDone` → `stopped` (entry)
@@ -8,7 +9,7 @@
 //! - `next` / `stepIn` / `stepOut` / `continue` / `pause` → `stopped` or `continued`
 //! - `disconnect` → response + exit
 //!
-//! Not a real debugger. Real CodeLLDB / lldb-dap is B3.
+//! Contract stand-in for real CodeLLDB / `lldb-dap` wire shape.
 
 use std::io::{self, BufRead, BufReader, Write};
 
@@ -18,44 +19,44 @@ fn main() {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();
+    let mut out_seq = 1u64;
     let mut stopped = false;
 
     while let Ok(msg) = read_message(&mut reader) {
-        let method = msg
-            .get("method")
-            .and_then(|m| m.as_str())
+        let msg_type = msg
+            .get("type")
+            .and_then(|t| t.as_str())
             .unwrap_or("")
             .to_string();
-        let id = msg.get("id").cloned();
-        let params = msg.get("params").cloned().unwrap_or(json!({}));
+        if msg_type != "request" {
+            continue;
+        }
+        let command = msg
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let request_seq = msg.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
+        let arguments = msg.get("arguments").cloned().unwrap_or(json!({}));
 
-        match method.as_str() {
+        match command.as_str() {
             "initialize" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "supportsConfigurationDoneRequest": true,
-                                "supportsSetVariable": false
-                            }
-                        }),
-                    );
-                }
-                write_message(
+                write_response(
                     &mut stdout,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "initialized",
-                        "params": {}
+                    &mut out_seq,
+                    request_seq,
+                    "initialize",
+                    true,
+                    json!({
+                        "supportsConfigurationDoneRequest": true,
+                        "supportsSetVariable": false
                     }),
                 );
+                write_event(&mut stdout, &mut out_seq, "initialized", json!({}));
             }
             "setBreakpoints" => {
-                let source = params.get("source").cloned().unwrap_or(json!({}));
-                let lines = params
+                let source = arguments.get("source").cloned().unwrap_or(json!({}));
+                let lines = arguments
                     .get("breakpoints")
                     .and_then(|b| b.as_array())
                     .cloned()
@@ -74,237 +75,239 @@ fn main() {
                         })
                     })
                     .collect();
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": { "breakpoints": breakpoints }
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    "setBreakpoints",
+                    true,
+                    json!({ "breakpoints": breakpoints }),
+                );
             }
             "launch" | "attach" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    &command,
+                    true,
+                    json!({}),
+                );
             }
             "configurationDone" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        }),
-                    );
-                }
-                stopped = true;
-                write_message(
+                write_response(
                     &mut stdout,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "stopped",
-                        "params": {
-                            "reason": "entry",
-                            "threadId": 1,
-                            "allThreadsStopped": true
-                        }
+                    &mut out_seq,
+                    request_seq,
+                    "configurationDone",
+                    true,
+                    json!({}),
+                );
+                stopped = true;
+                write_event(
+                    &mut stdout,
+                    &mut out_seq,
+                    "stopped",
+                    json!({
+                        "reason": "entry",
+                        "threadId": 1,
+                        "allThreadsStopped": true
                     }),
                 );
             }
             "threads" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "threads": [{ "id": 1, "name": "main" }]
-                            }
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    "threads",
+                    true,
+                    json!({
+                        "threads": [{ "id": 1, "name": "main" }]
+                    }),
+                );
             }
             "stackTrace" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "stackFrames": [{
-                                    "id": 1,
-                                    "name": "main",
-                                    "line": 10,
-                                    "column": 1,
-                                    "source": {
-                                        "name": "main.rs",
-                                        "path": "src/main.rs"
-                                    }
-                                }],
-                                "totalFrames": 1
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    "stackTrace",
+                    true,
+                    json!({
+                        "stackFrames": [{
+                            "id": 1,
+                            "name": "main",
+                            "line": 10,
+                            "column": 1,
+                            "source": {
+                                "name": "main.rs",
+                                "path": "src/main.rs"
                             }
-                        }),
-                    );
-                }
+                        }],
+                        "totalFrames": 1
+                    }),
+                );
             }
             "scopes" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "scopes": [{
-                                    "name": "Locals",
-                                    "variablesReference": 1,
-                                    "expensive": false
-                                }]
-                            }
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    "scopes",
+                    true,
+                    json!({
+                        "scopes": [{
+                            "name": "Locals",
+                            "variablesReference": 1,
+                            "expensive": false
+                        }]
+                    }),
+                );
             }
             "variables" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "variables": [{
-                                    "name": "count",
-                                    "value": "42",
-                                    "type": "i32",
-                                    "variablesReference": 0
-                                }]
-                            }
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    "variables",
+                    true,
+                    json!({
+                        "variables": [{
+                            "name": "count",
+                            "value": "42",
+                            "type": "i32",
+                            "variablesReference": 0
+                        }]
+                    }),
+                );
             }
             "next" | "stepIn" | "stepOut" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        }),
-                    );
-                }
-                stopped = true;
-                write_message(
+                write_response(
                     &mut stdout,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "stopped",
-                        "params": {
-                            "reason": "step",
-                            "threadId": 1,
-                            "allThreadsStopped": true
-                        }
+                    &mut out_seq,
+                    request_seq,
+                    &command,
+                    true,
+                    json!({}),
+                );
+                stopped = true;
+                write_event(
+                    &mut stdout,
+                    &mut out_seq,
+                    "stopped",
+                    json!({
+                        "reason": "step",
+                        "threadId": 1,
+                        "allThreadsStopped": true
                     }),
                 );
             }
             "continue" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": { "allThreadsContinued": true }
-                        }),
-                    );
-                }
-                stopped = false;
-                write_message(
+                write_response(
                     &mut stdout,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "continued",
-                        "params": {
-                            "threadId": 1,
-                            "allThreadsContinued": true
-                        }
+                    &mut out_seq,
+                    request_seq,
+                    "continue",
+                    true,
+                    json!({ "allThreadsContinued": true }),
+                );
+                stopped = false;
+                write_event(
+                    &mut stdout,
+                    &mut out_seq,
+                    "continued",
+                    json!({
+                        "threadId": 1,
+                        "allThreadsContinued": true
                     }),
                 );
             }
             "pause" => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        }),
-                    );
-                }
-                stopped = true;
-                write_message(
+                write_response(
                     &mut stdout,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "method": "stopped",
-                        "params": {
-                            "reason": "pause",
-                            "threadId": 1,
-                            "allThreadsStopped": true
-                        }
+                    &mut out_seq,
+                    request_seq,
+                    "pause",
+                    true,
+                    json!({}),
+                );
+                stopped = true;
+                write_event(
+                    &mut stdout,
+                    &mut out_seq,
+                    "stopped",
+                    json!({
+                        "reason": "pause",
+                        "threadId": 1,
+                        "allThreadsStopped": true
                     }),
                 );
             }
             "disconnect" | "terminate" => {
                 let _ = stopped;
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    &command,
+                    true,
+                    json!({}),
+                );
                 break;
             }
-            "" => {
-                // Response from client — ignore.
-            }
             other => {
-                if let Some(id) = id {
-                    write_message(
-                        &mut stdout,
-                        &json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": {
-                                "code": -32601,
-                                "message": format!("method not found: {other}")
-                            }
-                        }),
-                    );
-                }
+                write_response(
+                    &mut stdout,
+                    &mut out_seq,
+                    request_seq,
+                    other,
+                    false,
+                    json!({}),
+                );
+                // success=false responses should use message field; rewrite:
             }
         }
     }
+}
+
+fn write_response<W: Write>(
+    writer: &mut W,
+    out_seq: &mut u64,
+    request_seq: u64,
+    command: &str,
+    success: bool,
+    body: Value,
+) {
+    let seq = *out_seq;
+    *out_seq = out_seq.saturating_add(1);
+    let mut msg = json!({
+        "seq": seq,
+        "type": "response",
+        "request_seq": request_seq,
+        "success": success,
+        "command": command,
+    });
+    if success {
+        msg["body"] = body;
+    } else {
+        msg["message"] = json!(format!("method not found: {command}"));
+    }
+    write_message(writer, &msg);
+}
+
+fn write_event<W: Write>(writer: &mut W, out_seq: &mut u64, event: &str, body: Value) {
+    let seq = *out_seq;
+    *out_seq = out_seq.saturating_add(1);
+    write_message(
+        writer,
+        &json!({
+            "seq": seq,
+            "type": "event",
+            "event": event,
+            "body": body
+        }),
+    );
 }
 
 fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Value> {

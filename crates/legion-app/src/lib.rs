@@ -7947,8 +7947,7 @@ impl DebugWorkflow {
         };
 
         // Live path when an adapter resolves (or tests force fake).
-        // Wire is Legion provisional JSON-RPC (not Microsoft DAP); resolution
-        // only opts into LEGION_DAP_ADAPTER / LEGION_DAP_USE_FAKE / test fake.
+        // Wire is Microsoft DAP (B4); resolution: LEGION_DAP_ADAPTER, PATH, or USE_FAKE.
         let mode = self.effective_dap_mode();
         if mode.allows_live() {
             match self.resolve_adapter_for_launch(&config.adapter_type) {
@@ -7970,9 +7969,8 @@ impl DebugWorkflow {
                 }
                 None if mode.require_live() => {
                     return self.fail(
-                        "live DAP required (LEGION_DAP_MODE=live) but no compatible adapter resolved \
-                         (set LEGION_DAP_ADAPTER or LEGION_DAP_USE_FAKE=1; PATH auto-discovery of \
-                         Microsoft DAP adapters is deferred until standard wire lands)"
+                        "live DAP required (LEGION_DAP_MODE=live) but no adapter resolved \
+                         (set LEGION_DAP_ADAPTER, install lldb-dap/codelldb on PATH, or LEGION_DAP_USE_FAKE=1)"
                             .to_string(),
                     );
                 }
@@ -8088,7 +8086,7 @@ impl DebugWorkflow {
 
         // Resolve relative program labels against configuration cwd (workspace root).
         // Pre-launch `cargo build` from cargo_args is still a follow-on (fixture/fake
-        // path does not need a real binary; Microsoft DAP product launch will).
+        // path does not need a real binary; product launch against system adapters will).
         let program = {
             let label = config.program_label.clone();
             let candidate = Path::new(&label);
