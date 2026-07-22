@@ -7752,6 +7752,11 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 crate::cut_lines::DEBUG_SIMULATED_BANNER
             }
         ));
+        if crate::debug_auto_poll::debug_needs_auto_poll(debug) {
+            rows.push(
+                "debug: auto-poll active (live continue; frame loop drains stop)".to_string(),
+            );
+        }
         rows.push(format!(
             "debug: status={:?} session={:?} state={:?} configs={} breakpoints={} frames={} variables={} watches={} console={} inline={} note={}",
             debug.status.kind,

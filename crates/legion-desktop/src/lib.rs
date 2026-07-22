@@ -10,6 +10,8 @@ pub mod beta;
 pub mod bridge;
 /// Honest cut-line / fixture status copy for deferred or simulated surfaces (Tier 0).
 pub mod cut_lines;
+/// B8: decide when the desktop frame should auto-poll a live debug continue.
+pub mod debug_auto_poll;
 pub mod diagnostics;
 pub mod harness;
 pub mod health;

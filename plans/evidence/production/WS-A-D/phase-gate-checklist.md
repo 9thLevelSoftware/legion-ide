@@ -44,7 +44,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B5 persistent live session for step/continue (`B5-persistent-live-session.md`)
 - [x] B6 continue-until-stop + `:debug-stop` disconnect (`B6-continue-stop.md`)
 - [x] B7 non-blocking continue + `:debug-poll` (`B7-nonblocking-continue-poll.md`)
-- [ ] Follow-on: dogfood vs system lldb-dap; desktop auto-poll timer
+- [x] B8 desktop auto-poll after live continue (`B8-desktop-auto-poll.md`)
+- [ ] Follow-on: dogfood vs system lldb-dap; interactive GUI continue dogfood
 
 ## Phase 3 — Sandbox isolation (C)
 

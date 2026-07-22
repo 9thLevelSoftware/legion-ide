@@ -1,7 +1,7 @@
 # Phase 2 B7 — Non-blocking continue + poll
 
 **Date:** 2026-07-22  
-**Status:** Ready to land
+**Status:** Landed (#81)
 
 ## Problem
 

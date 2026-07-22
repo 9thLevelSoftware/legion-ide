@@ -3346,6 +3346,17 @@ impl DesktopEframeApp {
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
+        // B8: after non-blocking live continue (B7), poll until stop without
+        // requiring `:debug-poll` / another gesture.
+        {
+            let snapshot = self.runtime.projection_snapshot();
+            if crate::debug_auto_poll::debug_needs_auto_poll(&snapshot.debug_projection) {
+                self.runtime
+                    .dispatch_ui_action(DesktopAction::PollDebugSession);
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
         // Progressive product AI stream: merge live SSE sink into projection and
         // keep repainting while deltas are in flight.
         if self.runtime.poll_product_ai_stream() || self.runtime.product_ai_stream_in_flight() {
