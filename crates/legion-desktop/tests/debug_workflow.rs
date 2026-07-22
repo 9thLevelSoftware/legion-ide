@@ -159,6 +159,18 @@ fn desktop_debug_workflow_projects_right_and_bottom_debug_rows() {
     assert!(model.debug_rows.iter().any(|row| row.contains("step=over")));
     assert!(model.debug_rows.iter().any(|row| row.contains("evaluate")));
 
+    // B11 toolbar uses StopDebugSession via active session.
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::StopDebugSession)
+            .expect("stop debug"),
+        DesktopWorkflowOutcome::DebugProjectionUpdated
+    );
+    assert_eq!(
+        runtime.projection_snapshot().debug_projection.status.kind,
+        DebugStatusKindProjection::Exited
+    );
+
     fs::remove_dir_all(root).ok();
 }
 
