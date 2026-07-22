@@ -79,7 +79,8 @@ built_at_utc = "${BUILT_AT}"
 signer_status = "unsigned-beta/no-os-code-signing"
 os_code_signing = false
 production = false
-notes = "Portable unsigned preview. Not OS code-signed / notarized. Do not distribute as a production release."
+notes = "Portable unsigned preview (WS-A-D D2: unsigned-beta retained). Not OS code-signed / notarized. Do not distribute as a production release."
+policy_ref = "plans/evidence/production/WS-A-D/phase-4-release/D2-unsigned-beta-retained.md"
 EOF
 
 cat > "${BUNDLE_DIR}/package-manifest.txt" <<EOF

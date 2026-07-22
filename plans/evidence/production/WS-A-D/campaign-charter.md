@@ -88,4 +88,4 @@ Phase 5  Close-out
 2. Phase 1 residual: ≥1 interactive GUI dogfood journal (+ third if needed).
 3. ~~Phase 2 B0–B3~~ — on main (Microsoft DAP codec still follow-on).
 4. ~~Phase 3 C1 + C2 + C3~~ — on main (DAP adapter sandbox wrap still residual).
-5. ~~Phase 4 D0 + D1 portable unsigned-beta~~ — design + CI archives; D2 installers/signing next.
+5. ~~Phase 4 D0–D2~~ — design + portable CI archives; **unsigned-beta retained** until OS signing secrets (D2.1); D3 update feed next.
