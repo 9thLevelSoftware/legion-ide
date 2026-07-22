@@ -527,5 +527,54 @@ fn debug_workflow_live_fake_adapter_sets_live_projection_flag() {
         "console should record live step"
     );
 
+    let continued = match app
+        .dispatch_ui_intent(CommandDispatchIntent::DebugStep {
+            session_id: session_id.clone(),
+            kind: DebugStepKindProjection::Continue,
+        })
+        .expect("live continue")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection after continue, got {other:?}"),
+    };
+    assert!(
+        continued.live_adapter,
+        "continue-until-stop should remain live: {}",
+        continued.status.message
+    );
+    assert_eq!(continued.status.kind, DebugStatusKindProjection::Paused);
+    assert!(
+        continued.status.message.contains("continued then stopped")
+            || continued.status.message.contains("breakpoint"),
+        "continue should re-stop: {}",
+        continued.status.message
+    );
+    assert!(
+        continued
+            .stack_frames
+            .iter()
+            .any(|frame| frame.name == "main"),
+        "continue-until-stop should re-project stack"
+    );
+
+    let stopped = match app
+        .dispatch_ui_intent(CommandDispatchIntent::StopDebugSession {
+            session_id: session_id.clone(),
+        })
+        .expect("live stop")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection after stop, got {other:?}"),
+    };
+    assert!(!stopped.live_adapter);
+    assert!(stopped.active_session_id.is_none());
+    assert_eq!(stopped.status.kind, DebugStatusKindProjection::Exited);
+    assert!(
+        stopped.status.message.contains("disconnected")
+            || stopped.status.message.contains("stopped"),
+        "stop message: {}",
+        stopped.status.message
+    );
+
     fs::remove_dir_all(root).ok();
 }

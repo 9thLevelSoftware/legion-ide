@@ -2719,6 +2719,11 @@ pub enum CommandDispatchIntent {
         /// Bounded expression label.
         expression_label: String,
     },
+    /// Stop / disconnect a debug session (live adapter disconnect when active).
+    StopDebugSession {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+    },
     /// Request hover data through app-owned language tooling.
     RequestHover {
         /// Target buffer identifier.
@@ -4630,6 +4635,12 @@ impl Shell {
                     session_id,
                     expression_label: expression_label.trim().to_string(),
                 },
+            )));
+        }
+        if matches!(trimmed, ":debug-stop" | ":debug-disconnect" | ":debug-quit") {
+            let session_id = self.active_debug_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::StopDebugSession { session_id },
             )));
         }
         if let Some(command_label) = trimmed.strip_prefix(":term-launch ") {
