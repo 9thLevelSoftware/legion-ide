@@ -6,8 +6,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 
 - [x] Campaign charter exists (`campaign-charter.md`)
 - [x] Evidence folders created
-- [ ] Charter PR merged to main
-- [ ] Product-readiness ledger points at WS-A-D as next wave (no false “ready” flips)
+- [x] Charter on main (via early WS-A-D docs / campaign tree)
+- [x] Product-readiness ledger not falsely flipped “ready”
 
 ## Phase 1 — Dogfood (A)
 
@@ -29,35 +29,36 @@ Use before starting the next phase. Standing gates remain required for every cod
 | 6 | BYOK store/clear | yes (provider_key_entry) |
 | 7 | Delegate chat stream | yes (delegated_task_integration) |
 | 8 | Git projection (if used) | yes |
-| 9 | Debug shows honest simulated banner (until Phase 2) | yes |
+| 9 | Debug dual-mode honesty (simulated vs live) | yes (Phase 2 B3) |
 | 10 | Sandbox panel matches enforcement report | yes |
 
 ## Phase 2 — Real DAP (B)
 
-- [ ] B0 ADR merged (Proposed draft: `plans/adrs/ADR-0044-dap-client-architecture.md`)
-- [ ] B1 fake-adapter CI green (`B1-framing-fake-adapter.md` + `live_dap_handshake` test)
-- [ ] B2 breakpoints / stack / step / disconnect (`B2-breakpoints-stack-step.md`)
-- [ ] B3 policy deny untrusted + adapter resolve + dual-mode banner (`B3-resolution-trust-dual-mode.md`)
-- [ ] USER_GUIDE dual-mode honesty (simulated vs live)
-- [ ] Evidence under `phase-2-dap/`
+- [x] B0 ADR (`plans/adrs/ADR-0044-dap-client-architecture.md`)
+- [x] B1 fake-adapter CI green (`B1-framing-fake-adapter.md`)
+- [x] B2 breakpoints / stack / step / disconnect (`B2-breakpoints-stack-step.md`)
+- [x] B3 policy deny untrusted + adapter resolve + dual-mode banner (`B3-resolution-trust-dual-mode.md`)
+- [x] USER_GUIDE dual-mode honesty (simulated vs live; Legion provisional wire)
+- [x] Evidence under `phase-2-dap/`
+- [ ] Follow-on: Microsoft DAP codec + PATH real-adapter contract
 
 ## Phase 3 — Sandbox isolation (C)
 
 - [x] C0 threat model / acceptance matrix (stub: `C0-threat-model-stub.md`)
-- [ ] C1 Linux network isolation + escape probe (`C1-linux-network-isolation.md` — bwrap unshare-net)
-- [ ] C2 Windows FS path (enforced **or** residual cut line still honest)
+- [x] C1 Linux network isolation (`C1-linux-network-isolation.md` — bwrap unshare-net)
+- [x] C2 Windows FS residual cut line honest (`C2-windows-fs-residual.md`)
 - [ ] C3 product spawn integration
-- [ ] `docs/SECURITY.md` matrix updated
-- [ ] Evidence under `phase-3-sandbox/`
+- [x] `docs/SECURITY.md` matrix updated (C1 + C2)
+- [x] Evidence under `phase-3-sandbox/`
 
 ## Phase 4 — WS17 release (D)
 
-- [ ] D0 packaging design (artifact matrix + secrets inventory)
-- [ ] D1 unsigned preview artifacts build on 3 OS families
-- [ ] D2 signing path **or** explicit unsigned-beta retained
+- [x] D0 packaging design (artifact matrix + secrets inventory)
+- [x] D1 unsigned preview portable artifacts + CI workflow (`D1-unsigned-preview-artifacts.md`)
+- [ ] D2 signing path **or** explicit unsigned-beta retained for OS installers
 - [ ] D3 update channel + drill against staging
 - [ ] D4 readiness close (fresh-VM smoke or ledger note)
-- [ ] Evidence under `phase-4-release/`
+- [x] Evidence under `phase-4-release/` (D0 + D1)
 
 ## Phase 5 — Program close-out
 

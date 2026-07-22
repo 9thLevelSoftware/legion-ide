@@ -82,9 +82,10 @@ Phase 5  Close-out
 | Product readiness | `plans/product-readiness-ledger.md` |
 | USER_GUIDE cut lines | `docs/USER_GUIDE.md` product-areas callout |
 
-## Immediate next steps
+## Immediate next steps (updated 2026-07-21)
 
-1. Complete Phase 0 PR (this charter).
-2. Run Phase 1 dogfood sessions → `plans/evidence/dogfood/YYYY-MM-DD-dogfood-journal.md`.
-3. Open Phase 2 B0 DAP ADR when Phase 1 gate is green enough.
-4. Open Phase 3 C0 sandbox threat-model note in parallel after Phase 1 if staffing allows.
+1. ~~Charter / Phase 0~~ — done.
+2. Phase 1 residual: ≥1 interactive GUI dogfood journal (+ third if needed).
+3. ~~Phase 2 B0–B3~~ — on main (Microsoft DAP codec still follow-on).
+4. ~~Phase 3 C1 + C2 residual~~ — on main; C3 product spawn integration next.
+5. ~~Phase 4 D0 + D1 portable unsigned-beta~~ — design + CI archives; D2 installers/signing next.

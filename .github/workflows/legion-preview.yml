@@ -1,0 +1,118 @@
+name: Legion Preview
+
+# WS-A-D Phase 4 D1: build portable unsigned-beta preview bundles of
+# legion-desktop on the 3-OS matrix. Independent of standing gates — failures
+# do not block PR merges unless added to branch protection later.
+#
+# Artifacts are explicitly unsigned (no Authenticode / notarization / package
+# sigs). No private keys are used or required.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly Mondays 07:00 UTC (after smoke)
+    - cron: '0 7 * * 1'
+
+concurrency:
+  group: legion-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Preview package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "4"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Package preview (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-preview.ps1 -Release
+
+      - name: Package preview (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x scripts/package-preview.sh
+          bash scripts/package-preview.sh --release
+
+      - name: Smoke — bundle layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ARCHIVE=$(ls target/preview/legion-desktop-preview-windows-*.zip | head -n1)
+            BUNDLE=$(ls -d target/preview/windows-* | head -n1)
+            test -f "$BUNDLE/legion-desktop.exe"
+          else
+            ARCHIVE=$(ls target/preview/legion-desktop-preview-*.tar.gz | head -n1)
+            BUNDLE=$(ls -d target/preview/linux-* target/preview/macos-* 2>/dev/null | head -n1)
+            test -x "$BUNDLE/legion-desktop"
+          fi
+          test -f "$BUNDLE/UNSIGNED-BETA.toml"
+          test -f "$BUNDLE/package-manifest.txt"
+          test -s "$ARCHIVE"
+          grep -q 'unsigned-beta' "$BUNDLE/UNSIGNED-BETA.toml"
+          grep -q 'production = false' "$BUNDLE/UNSIGNED-BETA.toml"
+          echo "Smoke OK: $ARCHIVE"
+
+      - name: Smoke — beta workflow (best-effort headless)
+        # Beta smoke may need a display on some runners; do not fail the package
+        # job if GUI init fails — archive layout smoke already passed.
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BIN=$(ls target/preview/windows-*/legion-desktop.exe | head -n1)
+          else
+            BIN=$(ls target/preview/linux-*/legion-desktop target/preview/macos-*/legion-desktop 2>/dev/null | head -n1)
+          fi
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get install -y --no-install-recommends xvfb >/dev/null 2>&1 || true
+            if command -v xvfb-run >/dev/null 2>&1; then
+              xvfb-run -a "$BIN" --beta-smoke --duration-ms 1500 || true
+            else
+              "$BIN" --beta-smoke --duration-ms 1500 || true
+            fi
+          else
+            "$BIN" --beta-smoke --duration-ms 1500 || true
+          fi
+
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-desktop-preview-${{ matrix.os }}
+          path: |
+            target/preview/*.zip
+            target/preview/*.tar.gz
+            target/preview/**/UNSIGNED-BETA.toml
+            target/preview/**/package-manifest.txt
+          if-no-files-found: error
