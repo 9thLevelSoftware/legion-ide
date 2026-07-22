@@ -181,6 +181,14 @@ fn shell_carries_debug_projection_and_routes_debug_commands_without_authority() 
             session_id: DebugSessionId("debug-1".to_string()),
         })
     );
+    assert_eq!(
+        shell
+            .handle_command(":debug-poll")
+            .expect("debug poll command should parse"),
+        Some(CommandDispatchIntent::PollDebugSession {
+            session_id: DebugSessionId("debug-1".to_string()),
+        })
+    );
     assert_eq!(shell.projection_snapshot(), before_commands);
 
     let mut replacement = Shell::empty("replacement").projection_snapshot();

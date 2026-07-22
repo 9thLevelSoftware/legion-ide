@@ -539,22 +539,57 @@ fn debug_workflow_live_fake_adapter_sets_live_projection_flag() {
     };
     assert!(
         continued.live_adapter,
-        "continue-until-stop should remain live: {}",
+        "continue should remain live: {}",
         continued.status.message
     );
-    assert_eq!(continued.status.kind, DebugStatusKindProjection::Paused);
-    assert!(
-        continued.status.message.contains("continued then stopped")
-            || continued.status.message.contains("breakpoint"),
-        "continue should re-stop: {}",
+    assert_eq!(
+        continued.status.kind,
+        DebugStatusKindProjection::Running,
+        "B7 continue is non-blocking: {}",
         continued.status.message
     );
     assert!(
-        continued
-            .stack_frames
-            .iter()
-            .any(|frame| frame.name == "main"),
-        "continue-until-stop should re-project stack"
+        continued.status.message.contains("continuing")
+            || continued.status.message.contains("poll"),
+        "continue should note non-blocking: {}",
+        continued.status.message
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let polled = loop {
+        let projection = match app
+            .dispatch_ui_intent(CommandDispatchIntent::PollDebugSession {
+                session_id: session_id.clone(),
+            })
+            .expect("poll")
+        {
+            AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+            other => panic!("expected debug projection after poll, got {other:?}"),
+        };
+        if projection.status.kind == DebugStatusKindProjection::Paused {
+            break projection;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "poll did not observe stop within 3s: {}",
+                projection.status.message
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        polled.live_adapter,
+        "poll stop should remain live: {}",
+        polled.status.message
+    );
+    assert!(
+        polled.status.message.contains("stopped") || polled.status.message.contains("breakpoint"),
+        "poll should re-stop: {}",
+        polled.status.message
+    );
+    assert!(
+        polled.stack_frames.iter().any(|frame| frame.name == "main"),
+        "poll continue-until-stop should re-project stack"
     );
 
     let stopped = match app

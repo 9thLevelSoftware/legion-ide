@@ -43,7 +43,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B4 Microsoft DAP codec + fake-adapter contract (`B4-microsoft-dap-codec.md`; PATH resolve re-enabled)
 - [x] B5 persistent live session for step/continue (`B5-persistent-live-session.md`)
 - [x] B6 continue-until-stop + `:debug-stop` disconnect (`B6-continue-stop.md`)
-- [ ] Follow-on: dogfood vs system lldb-dap; non-blocking continue poll
+- [x] B7 non-blocking continue + `:debug-poll` (`B7-nonblocking-continue-poll.md`)
+- [ ] Follow-on: dogfood vs system lldb-dap; desktop auto-poll timer
 
 ## Phase 3 — Sandbox isolation (C)
 
