@@ -7723,6 +7723,18 @@ struct LiveDebugSession {
     is_fake: bool,
 }
 
+/// Background wait for next stop after non-blocking continue (B7).
+struct LiveAwaitingStop {
+    session_id: DebugSessionId,
+    adapter_type: String,
+    is_fake: bool,
+    thread_id: u64,
+    rx: std::sync::mpsc::Receiver<(
+        LiveDapSession,
+        Result<legion_debug::LiveDapStopOutcome, String>,
+    )>,
+}
+
 struct DebugWorkflow {
     projection: DebugProjection,
     runtime_enabled: bool,
@@ -7739,6 +7751,8 @@ struct DebugWorkflow {
     dap_mode_for_tests: Option<legion_debug::DapMode>,
     /// Persistent live adapter session after `launch_live` (B5).
     live: Option<LiveDebugSession>,
+    /// In-flight continue-until-stop worker (B7).
+    awaiting_stop: Option<LiveAwaitingStop>,
 }
 
 #[derive(Debug)]
@@ -7767,6 +7781,7 @@ impl Default for DebugWorkflow {
             prefer_live_fake_for_tests: false,
             dap_mode_for_tests: None,
             live: None,
+            awaiting_stop: None,
         }
     }
 }
@@ -7820,6 +7835,9 @@ impl DebugWorkflow {
     }
 
     fn drop_live_session(&mut self) {
+        // Drop awaiting receiver first: worker thread still owns the session and
+        // will Drop it (killing the child) when continue_until_stopped returns.
+        self.awaiting_stop = None;
         if let Some(live) = self.live.take() {
             let _ = live
                 .session
@@ -8250,42 +8268,53 @@ impl DebugWorkflow {
         };
         let timeout = Duration::from_secs(5);
 
+        if self.awaiting_stop.is_some() {
+            return self.deny(
+                "live DAP continue is in progress; use :debug-poll or :debug-stop".to_string(),
+            );
+        }
+
         match kind {
             StepKind::Continue => {
-                // B6: continue until next stop (breakpoint/pause), then re-project.
-                let cont = self
-                    .live
-                    .as_mut()
-                    .map(|live| live.session.continue_until_stopped(thread_id, timeout));
-                match cont {
-                    Some(Ok(stop)) => {
-                        self.apply_live_stop(&session_id, &stop);
-                        self.projection.session_state = Some(DebugSessionState::Paused);
-                        self.projection.live_adapter = true;
-                        self.projection.status = DebugStatusProjection {
-                            kind: DebugStatusKindProjection::Paused,
-                            message: format!(
-                                "Live DAP continued then stopped (adapter={adapter_type} fake={is_fake} reason={})",
-                                stop.reason
-                            ),
-                        };
-                        self.projection.console.push(DebugConsoleProjection {
-                            session_id: session_id.clone(),
-                            category_label: "adapter".to_string(),
-                            message_label: bounded_label(
-                                format!(
-                                    "LIVE DAP continue→stop: reason={} • {}",
-                                    stop.reason, stop.metadata_summary
-                                ),
-                                160,
-                            ),
-                        });
-                        self.projection.generated_at = TimestampMillis::now();
-                        self.projection()
-                    }
-                    Some(Err(err)) => self.fail(format!("live DAP continue failed: {err}")),
-                    None => self.fail("live DAP session missing".to_string()),
-                }
+                // B7: non-blocking continue — return Running immediately; poll for stop.
+                let Some(live) = self.live.take() else {
+                    return self.fail("live DAP session missing".to_string());
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                let wait_thread_id = live.thread_id;
+                let wait_timeout = Duration::from_secs(30);
+                std::thread::spawn(move || {
+                    let mut session = live.session;
+                    let result = session
+                        .continue_until_stopped(wait_thread_id, wait_timeout)
+                        .map_err(|err| err.to_string());
+                    let _ = tx.send((session, result));
+                });
+                self.awaiting_stop = Some(LiveAwaitingStop {
+                    session_id: session_id.clone(),
+                    adapter_type: adapter_type.clone(),
+                    is_fake,
+                    thread_id,
+                    rx,
+                });
+                self.projection.session_state = Some(DebugSessionState::Running);
+                self.projection.live_adapter = true;
+                self.projection.stack_frames.clear();
+                self.projection.variables.clear();
+                self.projection.status = DebugStatusProjection {
+                    kind: DebugStatusKindProjection::Running,
+                    message: format!(
+                        "Live DAP continuing (adapter={adapter_type} fake={is_fake}; poll for stop)"
+                    ),
+                };
+                self.projection.console.push(DebugConsoleProjection {
+                    session_id: session_id.clone(),
+                    category_label: "adapter".to_string(),
+                    message_label: "LIVE DAP: continue started (non-blocking; use :debug-poll)"
+                        .to_string(),
+                });
+                self.projection.generated_at = TimestampMillis::now();
+                self.projection()
             }
             StepKind::Back => {
                 self.fail("live DAP reverse-step is not supported on this adapter path".to_string())
@@ -8331,6 +8360,86 @@ impl DebugWorkflow {
         }
     }
 
+    /// Poll for a stop after non-blocking continue (B7).
+    fn poll_session(&mut self, session_id: DebugSessionId) -> DebugProjection {
+        if self.projection.active_session_id.as_ref() != Some(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        let Some(awaiting) = self.awaiting_stop.as_ref() else {
+            // Nothing to poll; return current projection (paused or running fixture).
+            return self.projection();
+        };
+        if awaiting.session_id != session_id {
+            return self.deny("debug poll session mismatch".to_string());
+        }
+        match awaiting.rx.try_recv() {
+            Ok((session, Ok(stop))) => {
+                let meta = self
+                    .awaiting_stop
+                    .take()
+                    .expect("awaiting_stop present after try_recv");
+                self.live = Some(LiveDebugSession {
+                    session,
+                    thread_id: stop.thread_id,
+                    session_id: meta.session_id.clone(),
+                    adapter_type: meta.adapter_type.clone(),
+                    is_fake: meta.is_fake,
+                });
+                self.apply_live_stop(&session_id, &stop);
+                self.projection.session_state = Some(DebugSessionState::Paused);
+                self.projection.live_adapter = true;
+                self.projection.status = DebugStatusProjection {
+                    kind: DebugStatusKindProjection::Paused,
+                    message: format!(
+                        "Live DAP continued then stopped (adapter={} fake={} reason={})",
+                        meta.adapter_type, meta.is_fake, stop.reason
+                    ),
+                };
+                self.projection.console.push(DebugConsoleProjection {
+                    session_id: session_id.clone(),
+                    category_label: "adapter".to_string(),
+                    message_label: bounded_label(
+                        format!(
+                            "LIVE DAP continue→stop (poll): reason={} • {}",
+                            stop.reason, stop.metadata_summary
+                        ),
+                        160,
+                    ),
+                });
+                self.projection.generated_at = TimestampMillis::now();
+                self.projection()
+            }
+            Ok((session, Err(err))) => {
+                let meta = self
+                    .awaiting_stop
+                    .take()
+                    .expect("awaiting_stop present after try_recv");
+                self.live = Some(LiveDebugSession {
+                    session,
+                    thread_id: meta.thread_id,
+                    session_id: meta.session_id,
+                    adapter_type: meta.adapter_type,
+                    is_fake: meta.is_fake,
+                });
+                self.fail(format!("live DAP continue failed: {err}"))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.projection.session_state = Some(DebugSessionState::Running);
+                self.projection.live_adapter = true;
+                self.projection.status = DebugStatusProjection {
+                    kind: DebugStatusKindProjection::Running,
+                    message: "Live DAP still running (poll again)".to_string(),
+                };
+                self.projection.generated_at = TimestampMillis::now();
+                self.projection()
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.awaiting_stop = None;
+                self.fail("live DAP continue worker disconnected".to_string())
+            }
+        }
+    }
+
     fn stop_session(&mut self, session_id: DebugSessionId) -> DebugProjection {
         if !self.session_is_active(&session_id) {
             return self.deny(format!("debug session {} is not active", session_id.0));
@@ -8338,10 +8447,13 @@ impl DebugWorkflow {
         let was_live = self
             .live
             .as_ref()
-            .is_some_and(|live| live.session_id == session_id);
-        if was_live {
-            self.drop_live_session();
-        }
+            .is_some_and(|live| live.session_id == session_id)
+            || self
+                .awaiting_stop
+                .as_ref()
+                .is_some_and(|awaiting| awaiting.session_id == session_id);
+        // Always clear live + awaiting (awaiting drop abandons worker; session Drop kills child).
+        self.drop_live_session();
         self.projection.active_session_id = None;
         self.projection.session_state = Some(DebugSessionState::Exited);
         self.projection.live_adapter = false;
@@ -10136,6 +10248,11 @@ pub enum AppCommandRequest {
         /// Session identifier.
         session_id: DebugSessionId,
     },
+    /// Poll live DAP for a stop after non-blocking continue.
+    PollDebugSession {
+        /// Session identifier.
+        session_id: DebugSessionId,
+    },
     /// Run to cursor.
     DebugRunToCursor {
         /// Session identifier.
@@ -10526,6 +10643,7 @@ impl CommandExecutionService {
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
             | AppCommandRequest::StopDebugSession { .. }
+            | AppCommandRequest::PollDebugSession { .. }
             | AppCommandRequest::DebugRunToCursor { .. }
             | AppCommandRequest::DebugEvaluateSelection { .. }
             | AppCommandRequest::DebugAddWatch { .. }
@@ -10895,6 +11013,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::StopDebugSession { session_id } => {
                 Ok(AppCommandRequest::StopDebugSession { session_id })
+            }
+            CommandDispatchIntent::PollDebugSession { session_id } => {
+                Ok(AppCommandRequest::PollDebugSession { session_id })
             }
             CommandDispatchIntent::DebugRunToCursor {
                 session_id,
@@ -18656,6 +18777,10 @@ impl AppComposition {
             AppCommandRequest::StopDebugSession { session_id } => {
                 let projection = self.debug_workflow.stop_session(session_id);
                 self.persist_latest_debug_audit()?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::PollDebugSession { session_id } => {
+                let projection = self.debug_workflow.poll_session(session_id);
                 Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
             }
             AppCommandRequest::DebugRunToCursor {

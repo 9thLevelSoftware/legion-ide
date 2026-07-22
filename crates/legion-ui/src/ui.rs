@@ -2724,6 +2724,11 @@ pub enum CommandDispatchIntent {
         /// Session identifier selected from projection data.
         session_id: DebugSessionId,
     },
+    /// Poll a live debug session after non-blocking continue.
+    PollDebugSession {
+        /// Session identifier selected from projection data.
+        session_id: DebugSessionId,
+    },
     /// Request hover data through app-owned language tooling.
     RequestHover {
         /// Target buffer identifier.
@@ -4641,6 +4646,12 @@ impl Shell {
             let session_id = self.active_debug_session_id()?;
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::StopDebugSession { session_id },
+            )));
+        }
+        if matches!(trimmed, ":debug-poll" | ":debug-poll-stop") {
+            let session_id = self.active_debug_session_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::PollDebugSession { session_id },
             )));
         }
         if let Some(command_label) = trimmed.strip_prefix(":term-launch ") {
