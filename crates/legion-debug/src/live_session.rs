@@ -293,7 +293,35 @@ impl LiveDapSession {
         thread_id: u64,
         timeout: Duration,
     ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
-        let _ = self.request("next", json!({ "threadId": thread_id }), timeout)?;
+        self.step_command_until_stopped("next", thread_id, timeout)
+    }
+
+    /// `stepIn`, then wait for `stopped`.
+    pub fn step_in_until_stopped(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        self.step_command_until_stopped("stepIn", thread_id, timeout)
+    }
+
+    /// `stepOut`, then wait for `stopped`.
+    pub fn step_out_until_stopped(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        self.step_command_until_stopped("stepOut", thread_id, timeout)
+    }
+
+    /// Step command (`next` / `stepIn` / `stepOut`) then inspect.
+    pub fn step_command_until_stopped(
+        &mut self,
+        command: &str,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let _ = self.request(command, json!({ "threadId": thread_id }), timeout)?;
         self.wait_stopped_and_inspect("step", timeout)
     }
 
