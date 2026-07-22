@@ -72,9 +72,11 @@ fn live_dap_breakpoints_launch_stack_step_against_fake_adapter() {
     assert_eq!(stepped.reason, "step");
     assert!(stepped.stack_frames.iter().any(|f| f.name == "main"));
 
-    session
-        .continue_execution(stepped.thread_id, Duration::from_secs(2))
-        .expect("continue");
+    let cont = session
+        .continue_until_stopped(stepped.thread_id, Duration::from_secs(3))
+        .expect("continue until stopped");
+    assert_eq!(cont.reason, "breakpoint");
+    assert!(cont.stack_frames.iter().any(|f| f.name == "main"));
 
     session
         .disconnect_and_wait(Duration::from_secs(2))

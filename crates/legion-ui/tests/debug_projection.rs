@@ -173,6 +173,14 @@ fn shell_carries_debug_projection_and_routes_debug_commands_without_authority() 
             expression_label: "selected_expression".to_string(),
         })
     );
+    assert_eq!(
+        shell
+            .handle_command(":debug-stop")
+            .expect("debug stop command should parse"),
+        Some(CommandDispatchIntent::StopDebugSession {
+            session_id: DebugSessionId("debug-1".to_string()),
+        })
+    );
     assert_eq!(shell.projection_snapshot(), before_commands);
 
     let mut replacement = Shell::empty("replacement").projection_snapshot();

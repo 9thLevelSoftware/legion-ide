@@ -222,6 +222,19 @@ fn main() {
                         "allThreadsContinued": true
                     }),
                 );
+                // B6 contract: simulate hitting the next breakpoint so product
+                // continue-until-stopped can re-project a paused stack in CI.
+                stopped = true;
+                write_event(
+                    &mut stdout,
+                    &mut out_seq,
+                    "stopped",
+                    json!({
+                        "reason": "breakpoint",
+                        "threadId": 1,
+                        "allThreadsStopped": true
+                    }),
+                );
             }
             "pause" => {
                 write_response(

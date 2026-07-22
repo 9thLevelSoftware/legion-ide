@@ -338,8 +338,35 @@ impl LiveDapSession {
             if msg.event_name() == Some("continued") {
                 return Ok(());
             }
+            // B6: fake/real adapters may stop again before we observe continued.
+            if msg.event_name() == Some("stopped") {
+                return Ok(());
+            }
         }
         Ok(())
+    }
+
+    /// `continue`, then wait for the next `stopped` (breakpoint / pause) and inspect.
+    ///
+    /// Product path for "continue until next stop" after B5 persistent sessions.
+    pub fn continue_until_stopped(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let _ = self.request("continue", json!({ "threadId": thread_id }), timeout)?;
+        // `continued` is optional; wait_stopped ignores non-stopped events.
+        self.wait_stopped_and_inspect("breakpoint", timeout)
+    }
+
+    /// `pause` request, then wait for `stopped`.
+    pub fn pause_until_stopped(
+        &mut self,
+        thread_id: u64,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let _ = self.request("pause", json!({ "threadId": thread_id }), timeout)?;
+        self.wait_stopped_and_inspect("pause", timeout)
     }
 
     fn wait_stopped_and_inspect(

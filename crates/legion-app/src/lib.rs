@@ -8252,21 +8252,34 @@ impl DebugWorkflow {
 
         match kind {
             StepKind::Continue => {
+                // B6: continue until next stop (breakpoint/pause), then re-project.
                 let cont = self
                     .live
                     .as_mut()
-                    .map(|live| live.session.continue_execution(thread_id, timeout));
+                    .map(|live| live.session.continue_until_stopped(thread_id, timeout));
                 match cont {
-                    Some(Ok(())) => {
-                        self.projection.session_state = Some(DebugSessionState::Running);
+                    Some(Ok(stop)) => {
+                        self.apply_live_stop(&session_id, &stop);
+                        self.projection.session_state = Some(DebugSessionState::Paused);
+                        self.projection.live_adapter = true;
                         self.projection.status = DebugStatusProjection {
-                            kind: DebugStatusKindProjection::Running,
+                            kind: DebugStatusKindProjection::Paused,
                             message: format!(
-                                "Live DAP continued (adapter={adapter_type} fake={is_fake})"
+                                "Live DAP continued then stopped (adapter={adapter_type} fake={is_fake} reason={})",
+                                stop.reason
                             ),
                         };
-                        self.projection.stack_frames.clear();
-                        self.projection.variables.clear();
+                        self.projection.console.push(DebugConsoleProjection {
+                            session_id: session_id.clone(),
+                            category_label: "adapter".to_string(),
+                            message_label: bounded_label(
+                                format!(
+                                    "LIVE DAP continue→stop: reason={} • {}",
+                                    stop.reason, stop.metadata_summary
+                                ),
+                                160,
+                            ),
+                        });
                         self.projection.generated_at = TimestampMillis::now();
                         self.projection()
                     }
@@ -8316,6 +8329,44 @@ impl DebugWorkflow {
                 }
             }
         }
+    }
+
+    fn stop_session(&mut self, session_id: DebugSessionId) -> DebugProjection {
+        if !self.session_is_active(&session_id) {
+            return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        let was_live = self
+            .live
+            .as_ref()
+            .is_some_and(|live| live.session_id == session_id);
+        if was_live {
+            self.drop_live_session();
+        }
+        self.projection.active_session_id = None;
+        self.projection.session_state = Some(DebugSessionState::Exited);
+        self.projection.live_adapter = false;
+        self.projection.stack_frames.clear();
+        self.projection.variables.clear();
+        self.projection.inline_values.clear();
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Exited,
+            message: if was_live {
+                "Live DAP session disconnected".to_string()
+            } else {
+                "Debug session stopped (fixture)".to_string()
+            },
+        };
+        self.projection.console.push(DebugConsoleProjection {
+            session_id: session_id.clone(),
+            category_label: "adapter".to_string(),
+            message_label: if was_live {
+                "LIVE DAP: disconnect".to_string()
+            } else {
+                "SIMULATED DAP: session stopped".to_string()
+            },
+        });
+        self.projection.generated_at = TimestampMillis::now();
+        self.projection()
     }
 
     fn run_to_cursor(
@@ -10080,6 +10131,11 @@ pub enum AppCommandRequest {
         /// Step kind.
         kind: DebugStepKindProjection,
     },
+    /// Stop / disconnect a debug session.
+    StopDebugSession {
+        /// Session identifier.
+        session_id: DebugSessionId,
+    },
     /// Run to cursor.
     DebugRunToCursor {
         /// Session identifier.
@@ -10469,6 +10525,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
+            | AppCommandRequest::StopDebugSession { .. }
             | AppCommandRequest::DebugRunToCursor { .. }
             | AppCommandRequest::DebugEvaluateSelection { .. }
             | AppCommandRequest::DebugAddWatch { .. }
@@ -10835,6 +10892,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::DebugStep { session_id, kind } => {
                 Ok(AppCommandRequest::DebugStep { session_id, kind })
+            }
+            CommandDispatchIntent::StopDebugSession { session_id } => {
+                Ok(AppCommandRequest::StopDebugSession { session_id })
             }
             CommandDispatchIntent::DebugRunToCursor {
                 session_id,
@@ -18590,6 +18650,11 @@ impl AppComposition {
             }
             AppCommandRequest::DebugStep { session_id, kind } => {
                 let projection = self.debug_workflow.step(session_id, kind);
+                self.persist_latest_debug_audit()?;
+                Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::StopDebugSession { session_id } => {
+                let projection = self.debug_workflow.stop_session(session_id);
                 self.persist_latest_debug_audit()?;
                 Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
             }
