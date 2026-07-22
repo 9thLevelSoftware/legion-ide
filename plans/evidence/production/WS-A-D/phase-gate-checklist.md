@@ -30,7 +30,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 | 7 | Delegate chat stream | yes (delegated_task_integration) |
 | 8 | Git projection (if used) | yes |
 | 9 | Debug dual-mode honesty (simulated vs live) | yes (Phase 2 B3) |
-| 10 | Sandbox panel matches enforcement report | yes |
+| 10 | Sandbox panel matches enforcement report | yes (Phase 3 C3) |
 
 ## Phase 2 — Real DAP (B)
 
@@ -57,12 +57,12 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] D1 unsigned preview portable artifacts + CI workflow (`D1-unsigned-preview-artifacts.md`)
 - [x] D2 **unsigned-beta retained** for OS installers (`D2-unsigned-beta-retained.md`; real signing = D2.1 when secrets exist)
 - [x] D3 update channel design + **local** staging drill proven (`D3-update-channel-staging.md`; hosted feed = D3.1)
-- [ ] D4 readiness close (fresh-VM smoke or ledger note)
-- [x] Evidence under `phase-4-release/` (D0–D3)
+- [x] D4 readiness close — ledger note + 3-OS preview CI proof (`D4-readiness-close.md`; no false ready flip)
+- [x] Evidence under `phase-4-release/` (D0–D4)
 
 ## Phase 5 — Program close-out
 
-- [ ] Campaign closeout MD
-- [ ] Dogfood on **installed** preview build
-- [ ] Ledger rows updated only where evidence supports
-- [ ] Residual cut lines listed (still no VSIX)
+- [x] Campaign closeout MD (`campaign-closeout-2026-07-22.md`)
+- [ ] Dogfood on **installed** preview build (interactive residual)
+- [x] Ledger rows updated only where evidence supports (PR-REL-001 remains In progress; WS-A-D cited)
+- [x] Residual cut lines listed (still no VSIX)
