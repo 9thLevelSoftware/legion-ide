@@ -99,7 +99,8 @@ mod windows_tests {
     }
 
     /// Windows job-object-only implementation is honest: filesystem writes are
-    /// NOT enforced.  The enforcement report documents this limitation.
+    /// NOT enforced. The enforcement report documents this limitation, and the
+    /// residual is real (C2 cut line): a write outside `writable_root` succeeds.
     #[test]
     fn write_outside_writable_root_enforcement_is_honest() {
         let writable = tempfile::tempdir().unwrap();
@@ -121,7 +122,13 @@ mod windows_tests {
         };
 
         let result = spawn_sandboxed(&spec).expect("spawn succeeds");
-        // SIMPLIFICATION: job-object-only path does NOT enforce filesystem writes.
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        // Residual risk (C2): job object does not block outside-root writes.
+        assert!(
+            stdout.contains("WRITE_OK") && target_file.exists(),
+            "C2 residual: outside write must succeed under job-object-only, got stdout={stdout}, exists={}",
+            target_file.exists()
+        );
         // The enforcement report must be honest — not claim enforcement that isn't there.
         assert!(
             !result.enforcement.filesystem_write_enforced,

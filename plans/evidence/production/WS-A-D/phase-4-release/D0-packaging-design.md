@@ -67,7 +67,7 @@ Secondary arches (win-arm64, linux-aarch64) are post-MVP.
 
 - [x] This design recorded under `phase-4-release/`
 - [x] Artifact matrix + secret inventory + cargo-dist primary tool named
-- [ ] Linked from campaign charter / phase-gate checklist (follow-up edit when merging)
+- [x] Linked from phase-gate checklist; D1 portable path landed in parallel
 
 ## Non-goals (D0)
 

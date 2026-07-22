@@ -46,9 +46,9 @@ Legion’s sandbox story is policy-backed and OS-assisted where the platform sup
 | Process kill on timeout | Yes — `child.kill()` via SIGKILL | Yes — `child.kill()` via SIGKILL | **Yes** — `KILL_ON_JOB_CLOSE` kills the entire process group |
 | Backend identifier | `landlock-vN` or `landlock-vN+bwrap-unshare-net` | `seatbelt-sbpl` | `job-object-kill-on-close` |
 
-**Windows note:** The Windows implementation uses a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.  This enforces process lifetime (all child processes are killed when the job handle closes, including on timeout) but does **not** restrict filesystem or network access.  The `SandboxEnforcementReport` returned on Windows always has `filesystem_write_enforced: false` and `network_enforced: false` with corresponding caveat labels.  This is an intentional, documented limitation of the current implementation — the enforcement report is honest rather than aspirational.
+**Windows note (WS-A-D Phase 3 C2 residual cut line):** The Windows implementation uses a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.  This enforces process lifetime (all child processes are killed when the job handle closes, including on timeout) but does **not** restrict filesystem or network access.  The `SandboxEnforcementReport` returned on Windows always has `filesystem_write_enforced: false` and `network_enforced: false` with caveat labels `windows-no-restricted-token`, `windows-no-filesystem-enforcement`, and `windows-no-network-enforcement`. Escape-probe tests assert the residual is **real** (outside-root writes succeed) and that the report never claims otherwise.
 
-Upgrading the Windows tier to use restricted tokens or AppContainer would require `SE_ASSIGNPRIMARYTOKEN_PRIVILEGE`, which is not available to normal user processes.  That upgrade is tracked as a follow-on item.
+Upgrading the Windows tier to restricted tokens or AppContainer would require privileges (e.g. `SE_ASSIGNPRIMARYTOKEN_PRIVILEGE`) not available to normal user processes, or a larger AppContainer packaging redesign. That upgrade is **explicitly deferred** — see `plans/evidence/production/WS-A-D/phase-3-sandbox/C2-windows-fs-residual.md`. Until it lands, product UI and docs must not claim Windows FS or network isolation parity with Linux/macOS.
 
 ### Escape probe
 
