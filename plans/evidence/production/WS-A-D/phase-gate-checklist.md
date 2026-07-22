@@ -55,10 +55,10 @@ Use before starting the next phase. Standing gates remain required for every cod
 
 - [x] D0 packaging design (artifact matrix + secrets inventory)
 - [x] D1 unsigned preview portable artifacts + CI workflow (`D1-unsigned-preview-artifacts.md`)
-- [ ] D2 signing path **or** explicit unsigned-beta retained for OS installers
+- [x] D2 **unsigned-beta retained** for OS installers (`D2-unsigned-beta-retained.md`; real signing = D2.1 when secrets exist)
 - [ ] D3 update channel + drill against staging
 - [ ] D4 readiness close (fresh-VM smoke or ledger note)
-- [x] Evidence under `phase-4-release/` (D0 + D1)
+- [x] Evidence under `phase-4-release/` (D0–D2)
 
 ## Phase 5 — Program close-out
 

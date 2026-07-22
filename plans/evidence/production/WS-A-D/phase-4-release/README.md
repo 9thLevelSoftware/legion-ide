@@ -12,3 +12,4 @@
 | --- | --- |
 | `D0-packaging-design.md` | Preview channel design: cargo-dist, artifact matrix, secrets, CI shape |
 | `D1-unsigned-preview-artifacts.md` | Portable zip/tar.gz unsigned-beta + package scripts + CI |
+| `D2-unsigned-beta-retained.md` | Explicit retain unsigned-beta until OS signing secrets exist |

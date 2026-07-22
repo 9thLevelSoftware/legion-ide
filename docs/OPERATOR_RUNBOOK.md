@@ -99,13 +99,14 @@ cargo run -p xtask -- release-manifest \
 
 The command writes `release-manifest.v1.toml` and, when a signer is resolved, `release-manifest.v1.toml.sig` alongside it. The manifest `signer_status` field records either `signed/ed25519` or `unsigned-beta/no-signer-configured`.
 
-### Unsigned-beta policy (WS17-T2 / P8.F1.T4)
+### Unsigned-beta policy (WS17-T2 / P8.F1.T4 / WS-A-D D2)
 
-If Legion ships before production signing credentials are provisioned, every release descriptor and the auto-updater manifest must carry `signer_status = "unsigned-beta/no-signer-configured"`. This is a first-class outcome — not an error — governed by the policy in `plans/product-readiness-ledger.md` (WS17-T2 entry). The unsigned-beta status must be:
+If Legion ships before production signing credentials are provisioned, every release descriptor and the auto-updater manifest must carry `signer_status = "unsigned-beta/no-signer-configured"`. This is a first-class outcome — not an error — governed by the policy in `plans/product-readiness-ledger.md` (WS17-T2 entry) and explicitly **retained** for OS installers under `plans/evidence/production/WS-A-D/phase-4-release/D2-unsigned-beta-retained.md`. Portable preview bundles from `scripts/package-preview.*` / `legion-preview.yml` use `signer_status = unsigned-beta/no-os-code-signing`. The unsigned-beta status must be:
 
 1. Visible in the release descriptor TOML written by `xtask release-pipeline --from-artifacts`.
 2. Visible in the auto-updater manifest written by `xtask release-manifest`.
 3. Documented in the readiness ledger before shipping.
+4. Never replaced by silent “signed” claims until D2.1 OS signing secrets exist outside the repo.
 
 An unsigned-beta release must never be silently treated as signed. The pipeline hard-rejects any attempt to run without `--dry-run` or `--from-artifacts`.
 
