@@ -15,7 +15,10 @@ pub mod live_session;
 /// DAP lifecycle state model.
 pub mod state;
 
-pub use adapter_resolve::{DapMode, ResolvedAdapter, resolve_live_adapter};
+pub use adapter_resolve::{
+    DapMode, ResolvedAdapter, dogfood_requires_system_adapter, resolve_live_adapter,
+    resolve_system_adapter,
+};
 pub use dap::{DapClientConfig, DapClientError, DapClientOutcome, DapClientRuntime};
 pub use evidence::{
     EvidenceProjectionError, debug_adapter_audit_evidence, debug_adapter_audit_summary,
