@@ -17,7 +17,8 @@ to fake.
 | `resolve_system_adapter` | Explicit + PATH only; **never** fake |
 | PATH preference | Preferred type first (no alphabetical demotion of `lldb-dap`) |
 | Optional integration test | `system_adapter_dogfood` — initialize + disconnect |
-| `LEGION_DAP_DOGFOOD=1` | Require system adapter (fail if missing) |
+| `LEGION_DAP_DOGFOOD=1` | Require successful system handshake (fail if missing/broken) |
+| Soft-skip default | Missing adapter **or** spawn/handshake fail → skip (CI-safe) |
 | Runbook | This file + USER_GUIDE product-area note |
 
 ## How to dogfood (local)
@@ -40,6 +41,9 @@ first, then `LEGION_DAP_USE_FAKE`).
 
 - Full launch/step/continue against a host debugee binary (needs program path +
   target-specific launch args; interactive GUI dogfood)
+- Making every PATH `lldb-dap` work on GitHub-hosted images (Windows runners may
+  ship LLVM `lldb-dap.exe` that exits before a DAP frame — soft-skip unless
+  `LEGION_DAP_DOGFOOD=1`)
 - Windows-only CodeLLDB packaging / install UX
 - Sandbox wrap of adapter spawn
 
@@ -47,6 +51,7 @@ first, then `LEGION_DAP_USE_FAKE`).
 
 ```text
 cargo test -p legion-debug --all-targets
-# without system adapter: dogfood test skips (pass)
-# with LEGION_DAP_DOGFOOD=1 and no adapter: dogfood test fails
+# missing or broken system adapter: dogfood test skips (pass)
+# LEGION_DAP_DOGFOOD=1 + working adapter: must handshake
+# LEGION_DAP_DOGFOOD=1 + missing/broken: fail closed
 ```
