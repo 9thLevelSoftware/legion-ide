@@ -45,7 +45,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B6 continue-until-stop + `:debug-stop` disconnect (`B6-continue-stop.md`)
 - [x] B7 non-blocking continue + `:debug-poll` (`B7-nonblocking-continue-poll.md`)
 - [x] B8 desktop auto-poll after live continue (`B8-desktop-auto-poll.md`)
-- [ ] Follow-on: dogfood vs system lldb-dap; interactive GUI continue dogfood
+- [x] B9 system adapter dogfood path (`B9-system-adapter-dogfood.md`; optional handshake, `LEGION_DAP_DOGFOOD=1`)
+- [ ] Follow-on: interactive GUI continue dogfood; full launch/step vs real debugee
 
 ## Phase 3 — Sandbox isolation (C)
 
