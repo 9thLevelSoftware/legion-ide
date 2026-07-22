@@ -156,15 +156,20 @@ fn host_profile_summary() -> SandboxProfileSummary {
     #[cfg(target_os = "macos")]
     {
         let profile = SeatbeltProfile::compile(scope);
+        let mut caveats: Vec<String> = profile
+            .profile
+            .notes
+            .into_iter()
+            .chain(profile.rules)
+            .collect();
+        caveats.push(
+            "product spawn: live SandboxEnforcementReport is authoritative after each TerminalCommand"
+                .to_string(),
+        );
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
-            caveats: profile
-                .profile
-                .notes
-                .into_iter()
-                .chain(profile.rules)
-                .collect(),
+            caveats,
         };
     }
 
@@ -177,8 +182,15 @@ fn host_profile_summary() -> SandboxProfileSummary {
             .into_iter()
             .chain(profile.notes)
             .collect();
+        // C1: deny-all network is enforced via bwrap --unshare-net when bwrap is
+        // available. Selective egress allowlists remain unimplemented. The live
+        // SandboxEnforcementReport from product spawn is authoritative.
         caveats.push(
-            "network egress not enforced (landlock-network-not-implemented); FS-write rules only"
+            "FS write: Landlock. Network deny-all: bwrap --unshare-net when bwrap is available (empty egress); selective allowlist not implemented"
+                .to_string(),
+        );
+        caveats.push(
+            "product spawn: live SandboxEnforcementReport (backend/fs/network/caveats) is source of truth after each TerminalCommand"
                 .to_string(),
         );
         return SandboxProfileSummary {
@@ -198,7 +210,11 @@ fn host_profile_summary() -> SandboxProfileSummary {
             .chain(profile.notes)
             .collect();
         caveats.push(
-            "Windows sandbox enforces process lifetime (job kill-on-close); filesystem and network scope are not fully enforced"
+            "Windows sandbox enforces process lifetime (job kill-on-close); filesystem and network scope are not fully enforced (C2 residual)"
+                .to_string(),
+        );
+        caveats.push(
+            "product spawn: live SandboxEnforcementReport remains authoritative after each TerminalCommand"
                 .to_string(),
         );
         return SandboxProfileSummary {
@@ -233,8 +249,8 @@ fn sandbox_backend_label(backend: &SandboxBackend) -> String {
 fn sandbox_strength_label(backend: &SandboxBackend) -> &'static str {
     match backend {
         SandboxBackend::Seatbelt => "os-enforced",
-        // Landlock path is FS-write scoped; network egress is not enforced in this build.
-        SandboxBackend::BubblewrapLandlock => "os-enforced-fs-write-only",
+        // Landlock FS-write always; network deny-all only when bwrap wraps spawn (C1/C3).
+        SandboxBackend::BubblewrapLandlock => "os-enforced-fs-write; net-deny-all-if-bwrap",
         // Windows RestrictedToken/job path enforces process lifetime; FS/network not fully enforced.
         SandboxBackend::RestrictedToken => "process-lifetime-only",
         SandboxBackend::AppContainer => "os-enforced",
@@ -318,7 +334,7 @@ mod tests {
         );
         assert_eq!(
             sandbox_strength_label(&SandboxBackend::BubblewrapLandlock),
-            "os-enforced-fs-write-only"
+            "os-enforced-fs-write; net-deny-all-if-bwrap"
         );
         assert_eq!(
             sandbox_strength_label(&SandboxBackend::RestrictedToken),
@@ -333,6 +349,29 @@ mod tests {
                 reason: "test".to_string()
             }),
             "fallback"
+        );
+    }
+
+    /// Live product-spawn enforcement lines on the projection surface as runtime rows.
+    #[test]
+    fn rows_surface_live_enforcement_disclaimer_from_projection() {
+        let mut snapshot = snapshot_with_activation(DelegatedTaskRuntimeActivationState::Executing);
+        snapshot
+            .delegated_task_projection
+            .plan_only_disclaimers
+            .push(
+                "sandbox live enforcement: backend=job-object-kill-on-close fs_write=false fs_read=false network=false caveats=windows-no-filesystem-enforcement"
+                    .to_string(),
+            );
+        let panel_rows = rows(&snapshot, active_state());
+        let all = panel_rows.join("\n");
+        assert!(
+            all.contains("sandbox runtime: sandbox live enforcement:"),
+            "C3 product spawn: panel must surface live enforcement report, got: {all}"
+        );
+        assert!(
+            all.contains("fs_write=false") || all.contains("backend="),
+            "live enforcement row should include report fields, got: {all}"
         );
     }
 
@@ -395,7 +434,8 @@ mod tests {
             all_output.contains("os-enforced")
                 || all_output.contains("process-isolated")
                 || all_output.contains("process-lifetime-only")
-                || all_output.contains("fs-write-only")
+                || all_output.contains("fs-write")
+                || all_output.contains("net-deny-all-if-bwrap")
                 || all_output.contains("fallback"),
             "rows() output should contain an honest enforcement label, got: {all_output}",
         );

@@ -47,8 +47,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] C0 threat model / acceptance matrix (stub: `C0-threat-model-stub.md`)
 - [x] C1 Linux network isolation (`C1-linux-network-isolation.md` — bwrap unshare-net)
 - [x] C2 Windows FS residual cut line honest (`C2-windows-fs-residual.md`)
-- [ ] C3 product spawn integration
-- [x] `docs/SECURITY.md` matrix updated (C1 + C2)
+- [x] C3 product spawn integration (`C3-product-spawn-integration.md` — live report → panel)
+- [x] `docs/SECURITY.md` matrix updated (C1 + C2 + C3 product path)
 - [x] Evidence under `phase-3-sandbox/`
 
 ## Phase 4 — WS17 release (D)

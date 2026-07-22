@@ -56,6 +56,16 @@ Upgrading the Windows tier to restricted tokens or AppContainer would require pr
 
 Important caveat: Windows is not presented as equivalent to the strongest Linux/macOS tiers. The product keeps the same security model across platforms, but the Windows implementation is intentionally honest about its weaker enforcement surface.
 
+### Product spawn path (WS-A-D Phase 3 C3)
+
+Delegated `TerminalCommand` tool calls in product composition go through `legion_sandbox::spawn::spawn_sandboxed` (`AppDelegatedToolHost` in `legion-app`). Each successful spawn records a live `SandboxEnforcementReport` (`backend_used`, FS write/read flags, `network_enforced`, caveat labels). That report is:
+
+- appended to the tool output as `sandbox live enforcement: …`
+- stored on the delegate workflow and projected into `plan_only_disclaimers`
+- surfaced on the desktop sandbox panel as `sandbox runtime: …` rows
+
+Compile-time profile summaries on the panel describe *typical* OS capability; **the live report is authoritative** for what the last spawn actually enforced. Interactive terminal PTY and DAP adapter processes are **not** wrapped by this path today (terminal trust/capability gates; DAP sandbox wrap remains a follow-on).
+
 Legion should be treated as a trusted desktop application with sandboxed execution lanes, not as a formal operating-system boundary or a replacement for host hardening.
 
 ## Egress policy
