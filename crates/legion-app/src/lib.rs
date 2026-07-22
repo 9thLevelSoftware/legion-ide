@@ -7714,7 +7714,15 @@ impl TerminalWorkflow {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Owned live DAP adapter process (B5); not Clone — process handles.
+struct LiveDebugSession {
+    session: LiveDapSession,
+    thread_id: u64,
+    session_id: DebugSessionId,
+    adapter_type: String,
+    is_fake: bool,
+}
+
 struct DebugWorkflow {
     projection: DebugProjection,
     runtime_enabled: bool,
@@ -7729,6 +7737,8 @@ struct DebugWorkflow {
     prefer_live_fake_for_tests: bool,
     /// Test seam: override `LEGION_DAP_MODE` without process-wide env (parallel-safe).
     dap_mode_for_tests: Option<legion_debug::DapMode>,
+    /// Persistent live adapter session after `launch_live` (B5).
+    live: Option<LiveDebugSession>,
 }
 
 #[derive(Debug)]
@@ -7756,6 +7766,7 @@ impl Default for DebugWorkflow {
             next_watch: 0,
             prefer_live_fake_for_tests: false,
             dap_mode_for_tests: None,
+            live: None,
         }
     }
 }
@@ -7793,6 +7804,7 @@ impl DebugWorkflow {
     }
 
     fn clear_workspace_state(&mut self) {
+        self.drop_live_session();
         self.projection = DebugProjection::empty();
         self.configurations.clear();
         self.breakpoints.clear();
@@ -7805,6 +7817,14 @@ impl DebugWorkflow {
         } else {
             DapClientRuntime::new(DapClientConfig::default())
         };
+    }
+
+    fn drop_live_session(&mut self) {
+        if let Some(live) = self.live.take() {
+            let _ = live
+                .session
+                .disconnect_and_wait(std::time::Duration::from_secs(2));
+        }
     }
 
     fn take_last_audit(&mut self) -> Option<DebugAdapterAuditRecord> {
@@ -8102,15 +8122,60 @@ impl DebugWorkflow {
         let stop = session
             .launch_until_stopped(&program, Duration::from_secs(5))
             .map_err(|err| err.to_string())?;
-        let _ = session.disconnect_and_wait(Duration::from_secs(2));
 
+        // B5: keep the adapter process alive for step/continue (do not disconnect).
+        self.drop_live_session();
         let session_id = DebugSessionId(format!(
             "dap-live:{}:{}",
             context.workspace_id.0, config.configuration_id.0
         ));
+        let thread_id = stop.thread_id;
+        self.live = Some(LiveDebugSession {
+            session,
+            thread_id,
+            session_id: session_id.clone(),
+            adapter_type: resolved.adapter_type.clone(),
+            is_fake: resolved.is_fake,
+        });
+
         self.projection.active_session_id = Some(session_id.clone());
         self.projection.session_state = Some(DebugSessionState::Paused);
         self.projection.live_adapter = true;
+        self.apply_live_stop(&session_id, &stop);
+        self.projection.console.push(DebugConsoleProjection {
+            session_id: session_id.clone(),
+            category_label: "adapter".to_string(),
+            message_label: bounded_label(
+                format!(
+                    "LIVE DAP: initialize adapter={} fake={} persistent=true • {}",
+                    resolved.adapter_type, resolved.is_fake, handshake.metadata_summary
+                ),
+                160,
+            ),
+        });
+        self.projection.status = DebugStatusProjection {
+            kind: DebugStatusKindProjection::Paused,
+            message: format!(
+                "Live DAP paused (adapter={} fake={} reason={} persistent=true)",
+                resolved.adapter_type, resolved.is_fake, stop.reason
+            ),
+        };
+        self.projection.generated_at = TimestampMillis::now();
+        self.record_audit(
+            session_id,
+            DebugSessionState::Paused,
+            resolved.adapter_type.clone(),
+            event_context,
+            stop.metadata_summary,
+        );
+        Ok(self.projection())
+    }
+
+    fn apply_live_stop(
+        &mut self,
+        session_id: &DebugSessionId,
+        stop: &legion_debug::LiveDapStopOutcome,
+    ) {
         self.projection.stack_frames = stop
             .stack_frames
             .iter()
@@ -8133,33 +8198,9 @@ impl DebugWorkflow {
                 has_children: false,
             })
             .collect();
-        self.projection.console.push(DebugConsoleProjection {
-            session_id: session_id.clone(),
-            category_label: "adapter".to_string(),
-            message_label: bounded_label(
-                format!(
-                    "LIVE DAP: initialize adapter={} fake={} • {}",
-                    resolved.adapter_type, resolved.is_fake, handshake.metadata_summary
-                ),
-                160,
-            ),
-        });
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Paused,
-            message: format!(
-                "Live DAP paused (adapter={} fake={} reason={})",
-                resolved.adapter_type, resolved.is_fake, stop.reason
-            ),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
-            session_id,
-            DebugSessionState::Paused,
-            resolved.adapter_type.clone(),
-            event_context,
-            stop.metadata_summary,
-        );
-        Ok(self.projection())
+        if let Some(live) = self.live.as_mut() {
+            live.thread_id = stop.thread_id;
+        }
     }
 
     fn step(
@@ -8169,6 +8210,13 @@ impl DebugWorkflow {
     ) -> DebugProjection {
         if !self.session_is_active(&session_id) {
             return self.deny(format!("debug session {} is not active", session_id.0));
+        }
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|live| live.session_id == session_id)
+        {
+            return self.step_live(session_id, kind);
         }
         let protocol_kind = debug_step_kind(kind);
         match self.runtime.step(session_id, protocol_kind) {
@@ -8183,6 +8231,90 @@ impl DebugWorkflow {
                 self.projection()
             }
             Err(error) => self.fail(format!("debug step failed: {error}")),
+        }
+    }
+
+    fn step_live(
+        &mut self,
+        session_id: DebugSessionId,
+        kind: DebugStepKindProjection,
+    ) -> DebugProjection {
+        use legion_ui::DebugStepKindProjection as StepKind;
+        use std::time::Duration;
+
+        let (thread_id, adapter_type, is_fake) = {
+            let Some(live) = self.live.as_ref() else {
+                return self.fail("live DAP session missing".to_string());
+            };
+            (live.thread_id, live.adapter_type.clone(), live.is_fake)
+        };
+        let timeout = Duration::from_secs(5);
+
+        match kind {
+            StepKind::Continue => {
+                let cont = self
+                    .live
+                    .as_mut()
+                    .map(|live| live.session.continue_execution(thread_id, timeout));
+                match cont {
+                    Some(Ok(())) => {
+                        self.projection.session_state = Some(DebugSessionState::Running);
+                        self.projection.status = DebugStatusProjection {
+                            kind: DebugStatusKindProjection::Running,
+                            message: format!(
+                                "Live DAP continued (adapter={adapter_type} fake={is_fake})"
+                            ),
+                        };
+                        self.projection.stack_frames.clear();
+                        self.projection.variables.clear();
+                        self.projection.generated_at = TimestampMillis::now();
+                        self.projection()
+                    }
+                    Some(Err(err)) => self.fail(format!("live DAP continue failed: {err}")),
+                    None => self.fail("live DAP session missing".to_string()),
+                }
+            }
+            StepKind::Back => {
+                self.fail("live DAP reverse-step is not supported on this adapter path".to_string())
+            }
+            StepKind::Over | StepKind::Into | StepKind::Out => {
+                let command = match kind {
+                    StepKind::Over => "next",
+                    StepKind::Into => "stepIn",
+                    StepKind::Out => "stepOut",
+                    _ => unreachable!(),
+                };
+                let stepped = self.live.as_mut().map(|live| {
+                    live.session
+                        .step_command_until_stopped(command, thread_id, timeout)
+                });
+                match stepped {
+                    Some(Ok(stop)) => {
+                        self.apply_live_stop(&session_id, &stop);
+                        self.projection.session_state = Some(DebugSessionState::Paused);
+                        self.projection.live_adapter = true;
+                        self.projection.status = DebugStatusProjection {
+                            kind: DebugStatusKindProjection::Paused,
+                            message: format!(
+                                "Live DAP {command} paused (adapter={adapter_type} fake={is_fake} reason={})",
+                                stop.reason
+                            ),
+                        };
+                        self.projection.console.push(DebugConsoleProjection {
+                            session_id: session_id.clone(),
+                            category_label: "adapter".to_string(),
+                            message_label: bounded_label(
+                                format!("LIVE DAP step: {} • {}", command, stop.metadata_summary),
+                                160,
+                            ),
+                        });
+                        self.projection.generated_at = TimestampMillis::now();
+                        self.projection()
+                    }
+                    Some(Err(err)) => self.fail(format!("live DAP {command} failed: {err}")),
+                    None => self.fail("live DAP session missing".to_string()),
+                }
+            }
         }
     }
 

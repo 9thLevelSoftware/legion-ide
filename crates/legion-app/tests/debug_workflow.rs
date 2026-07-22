@@ -488,6 +488,44 @@ fn debug_workflow_live_fake_adapter_sets_live_projection_flag() {
             .any(|entry| entry.message_label.contains("LIVE DAP")),
         "console should note live path"
     );
+    assert!(
+        projection.status.message.contains("persistent=true"),
+        "B5 live session should stay connected: {}",
+        projection.status.message
+    );
+
+    let session_id = projection
+        .active_session_id
+        .clone()
+        .expect("live session id");
+    let stepped = match app
+        .dispatch_ui_intent(CommandDispatchIntent::DebugStep {
+            session_id: session_id.clone(),
+            kind: DebugStepKindProjection::Over,
+        })
+        .expect("live step over")
+    {
+        AppCommandOutcome::DebugProjectionUpdated(projection) => projection,
+        other => panic!("expected debug projection after step, got {other:?}"),
+    };
+    assert!(
+        stepped.live_adapter,
+        "step should keep live_adapter: {}",
+        stepped.status.message
+    );
+    assert_eq!(stepped.status.kind, DebugStatusKindProjection::Paused);
+    assert!(
+        stepped.status.message.contains("next") || stepped.status.message.contains("Live DAP"),
+        "step message should note live step: {}",
+        stepped.status.message
+    );
+    assert!(
+        stepped
+            .console
+            .iter()
+            .any(|entry| entry.message_label.contains("LIVE DAP step")),
+        "console should record live step"
+    );
 
     fs::remove_dir_all(root).ok();
 }

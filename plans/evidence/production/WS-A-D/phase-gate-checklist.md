@@ -41,7 +41,8 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] USER_GUIDE dual-mode honesty (simulated vs live; Legion provisional wire)
 - [x] Evidence under `phase-2-dap/`
 - [x] B4 Microsoft DAP codec + fake-adapter contract (`B4-microsoft-dap-codec.md`; PATH resolve re-enabled)
-- [ ] Follow-on: persistent live session UX + dogfood vs system lldb-dap
+- [x] B5 persistent live session for step/continue (`B5-persistent-live-session.md`)
+- [ ] Follow-on: dogfood vs system lldb-dap; continue-until-breakpoint poll
 
 ## Phase 3 — Sandbox isolation (C)
 
