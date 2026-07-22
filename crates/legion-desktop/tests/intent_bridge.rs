@@ -591,6 +591,18 @@ fn intent_bridge_routes_debug_actions() {
         })
     );
     assert_eq!(
+        bridge.translate(DesktopAction::PollDebugSession, &snapshot),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::PollDebugSession {
+            session_id: session_id.clone(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(DesktopAction::StopDebugSession, &snapshot),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::StopDebugSession {
+            session_id: session_id.clone(),
+        })
+    );
+    assert_eq!(
         bridge.translate(
             DesktopAction::DebugAddWatch {
                 session_id: session_id.clone(),

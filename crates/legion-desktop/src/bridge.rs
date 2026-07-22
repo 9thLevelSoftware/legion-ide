@@ -297,6 +297,10 @@ pub enum DesktopAction {
         /// Display-safe expression label.
         expression_label: String,
     },
+    /// Poll a live debug session after non-blocking continue (B7/B8).
+    PollDebugSession,
+    /// Stop / disconnect the active debug session.
+    StopDebugSession,
     /// Stage one projected git hunk.
     StageGitHunk {
         /// Projected hunk identifier.
@@ -1276,6 +1280,9 @@ pub enum DesktopBridgeError {
     /// A terminal action requires an active terminal session projection.
     #[error("active terminal session is required for this desktop action")]
     MissingActiveTerminalSession,
+    /// A debug poll/stop action requires an active debug session projection.
+    #[error("active debug session is required for this desktop action")]
+    MissingActiveDebugSession,
 }
 
 /// Adapter-local command bridge.
@@ -1552,6 +1559,14 @@ impl DesktopCommandBridge {
                     expression_label,
                 }
             }),
+            DesktopAction::PollDebugSession => self
+                .with_active_debug_session(snapshot, |session_id| {
+                    CommandDispatchIntent::PollDebugSession { session_id }
+                }),
+            DesktopAction::StopDebugSession => self
+                .with_active_debug_session(snapshot, |session_id| {
+                    CommandDispatchIntent::StopDebugSession { session_id }
+                }),
             DesktopAction::StageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitHunk { hunk_id })
             }
@@ -2224,6 +2239,17 @@ impl DesktopCommandBridge {
         match snapshot.terminal_panel_projection.active_session_id {
             Some(session_id) => DesktopBridgeOutput::Intent(build(session_id)),
             None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveTerminalSession),
+        }
+    }
+
+    fn with_active_debug_session(
+        &self,
+        snapshot: &ShellProjectionSnapshot,
+        build: impl FnOnce(DebugSessionId) -> CommandDispatchIntent,
+    ) -> DesktopBridgeOutput {
+        match snapshot.debug_projection.active_session_id.clone() {
+            Some(session_id) => DesktopBridgeOutput::Intent(build(session_id)),
+            None => DesktopBridgeOutput::Error(DesktopBridgeError::MissingActiveDebugSession),
         }
     }
 
