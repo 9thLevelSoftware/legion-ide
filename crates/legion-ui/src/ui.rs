@@ -2819,6 +2819,11 @@ pub enum CommandDispatchIntent {
         /// Parent module path label from tree grouping.
         parent_label: String,
     },
+    /// Attach recent test-explorer evidence into a Legion workflow session.
+    AttachTestExplorerEvidence {
+        /// Workflow session id label.
+        session_id: String,
+    },
 
     /// Toggle a breakpoint or configure a logpoint/conditional breakpoint.
     ToggleDebugBreakpoint {
@@ -4612,6 +4617,16 @@ impl Shell {
                 return Ok(Some(self.push_intent(
                     CommandDispatchIntent::RunTestExplorerGroup {
                         parent_label: parent.to_string(),
+                    },
+                )));
+            }
+        }
+        if let Some(session_id) = trimmed.strip_prefix(":test-attach-evidence ") {
+            let session_id = session_id.trim();
+            if !session_id.is_empty() {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::AttachTestExplorerEvidence {
+                        session_id: session_id.to_string(),
                     },
                 )));
             }

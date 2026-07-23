@@ -10415,6 +10415,11 @@ pub enum AppCommandRequest {
         /// Parent module path label.
         parent_label: String,
     },
+    /// Attach recent test-explorer evidence into a Legion workflow session.
+    AttachTestExplorerEvidence {
+        /// Workflow session id.
+        session_id: String,
+    },
     /// Toggle a source breakpoint.
     ToggleDebugBreakpoint {
         /// Target buffer identifier.
@@ -10839,6 +10844,7 @@ impl CommandExecutionService {
             | AppCommandRequest::RefreshTestExplorer
             | AppCommandRequest::RunTestExplorerItem { .. }
             | AppCommandRequest::RunTestExplorerGroup { .. }
+            | AppCommandRequest::AttachTestExplorerEvidence { .. }
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
@@ -11197,6 +11203,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::RunTestExplorerGroup { parent_label } => {
                 Ok(AppCommandRequest::RunTestExplorerGroup { parent_label })
+            }
+            CommandDispatchIntent::AttachTestExplorerEvidence { session_id } => {
+                Ok(AppCommandRequest::AttachTestExplorerEvidence { session_id })
             }
             CommandDispatchIntent::ToggleDebugBreakpoint {
                 buffer_id,
@@ -18974,6 +18983,28 @@ impl AppComposition {
                 let projection = self.run_test_explorer_group(&parent_label)?;
                 Ok(AppCommandOutcome::TestExplorerUpdated(projection))
             }
+            AppCommandRequest::AttachTestExplorerEvidence { session_id } => {
+                #[cfg(feature = "ai")]
+                {
+                    let session_id = LegionWorkflowSessionId(session_id);
+                    let added = self.attach_test_explorer_evidence_to_workflow(&session_id)?;
+                    let mut projection = self.test_explorer_projection.clone();
+                    projection.diagnostics.push(format!(
+                        "attached-evidence:session={}:count={added}",
+                        session_id.0
+                    ));
+                    projection.generated_at = TimestampMillis::now();
+                    self.test_explorer_projection = projection.clone();
+                    Ok(AppCommandOutcome::TestExplorerUpdated(projection))
+                }
+                #[cfg(not(feature = "ai"))]
+                {
+                    let _ = session_id;
+                    Err(AppCompositionError::LegionWorkflow(
+                        "test-explorer evidence attach requires ai feature".to_string(),
+                    ))
+                }
+            }
             AppCommandRequest::ToggleDebugBreakpoint {
                 buffer_id,
                 line,
@@ -21104,11 +21135,25 @@ impl AppComposition {
         let merge_readiness_report = AppLegionWorkflowMergeReadinessReport::from(
             legion_agent::merge_readiness::merge_readiness_report_for_session(session),
         );
+        // Merge latest test-explorer runs into export (deduped by evidence_id).
+        // Session attach is durable; export also includes unsaved explorer runs.
+        let mut evidence_records = artifacts.evidence_records;
+        if let Ok(explorer_records) = self.test_explorer_legion_evidence_records() {
+            for record in explorer_records {
+                if evidence_records
+                    .iter()
+                    .any(|existing| existing.evidence_id == record.evidence_id)
+                {
+                    continue;
+                }
+                evidence_records.push(record);
+            }
+        }
         Ok(LegionWorkflowEvidenceBundle {
             session_snapshot: session.clone(),
             task_packets: artifacts.task_packets,
             worker_results: artifacts.worker_results,
-            evidence_records: artifacts.evidence_records,
+            evidence_records,
             decision_feed_rows: self.automate_workflow.decision_feed_for_session(session_id),
             merge_readiness_report,
             mcp_registries: self.automate_workflow.mcp_registries(),
@@ -24686,6 +24731,65 @@ impl AppComposition {
                 test_run_summary_evidence(summary, generated_at).map_err(|err| err.to_string())
             })
             .collect()
+    }
+
+    /// Convert recent explorer runs into Legion workflow evidence records (P2.F3.T5b).
+    ///
+    /// Uses a synthetic worker id `test-explorer` so records are consumable by
+    /// workflow export without requiring an active worker loop. Metadata-only.
+    #[cfg(feature = "ai")]
+    pub fn test_explorer_legion_evidence_records(
+        &self,
+    ) -> Result<Vec<LegionEvidenceRecord>, String> {
+        let generated_at = TimestampMillis::now();
+        let worker_id = LegionWorkflowWorkerId("test-explorer".to_string());
+        self.test_explorer_run_summaries
+            .iter()
+            .map(|summary| {
+                legion_agent::evidence::test_run_summary_evidence_record(
+                    &worker_id,
+                    summary,
+                    generated_at,
+                )
+                .map_err(|err| err.to_string())
+            })
+            .collect()
+    }
+
+    /// Attach recent test-explorer evidence into a workflow session's artifact bag.
+    ///
+    /// Deduplicates by `evidence_id`. Returns the number of newly attached records.
+    #[cfg(feature = "ai")]
+    pub fn attach_test_explorer_evidence_to_workflow(
+        &mut self,
+        session_id: &LegionWorkflowSessionId,
+    ) -> Result<usize, AppCompositionError> {
+        if self.legion_workflow_session(session_id).is_none() {
+            return Err(AppCompositionError::LegionWorkflow(format!(
+                "workflow session {} not found",
+                session_id.0
+            )));
+        }
+        let records = self
+            .test_explorer_legion_evidence_records()
+            .map_err(AppCompositionError::LegionWorkflow)?;
+        let artifacts = self
+            .legion_workflow_session_artifacts
+            .entry(session_id.0.clone())
+            .or_default();
+        let mut added = 0usize;
+        for record in records {
+            if artifacts
+                .evidence_records
+                .iter()
+                .any(|existing| existing.evidence_id == record.evidence_id)
+            {
+                continue;
+            }
+            artifacts.evidence_records.push(record);
+            added = added.saturating_add(1);
+        }
+        Ok(added)
     }
 
     /// Refresh app-owned git projection data for the active workspace.
