@@ -30,8 +30,9 @@ launch/step remain residual.
 | `B11-debug-controls-honesty.md` | Debug toolbar + residual honesty |
 | `B12-live-prebuild-cargo.md` | Cargo prebuild before non-fake live launch |
 | `B13-system-launch-step-dogfood.md` | Optional system launch+step dogfood |
+| `B14-debug-keyboard-gui-checklist.md` | F5/F10/F11 debug keys + GUI checklist |
 
 ## Residual
 
-- Human windowed GUI dogfood journal
+- Human-filled windowed GUI journal (checklist + keys ready)
 - Sandbox wrap of adapter spawn (Phase 3 deferred)

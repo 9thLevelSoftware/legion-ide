@@ -3487,7 +3487,40 @@ impl DesktopEframeApp {
                     mode: DockMode::Manual,
                 });
             }
-            if input.key_pressed(egui::Key::F5) {
+            // B14: when a debug session is active, F5/F10/F11 match common IDE
+            // debug bindings. Idle F5 keeps Refresh Explorer (existing product).
+            if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
+                use legion_ui::DebugStepKindProjection;
+                if input.key_pressed(egui::Key::F5) {
+                    if input.modifiers.shift {
+                        actions.push(DesktopAction::StopDebugSession);
+                    } else {
+                        actions.push(DesktopAction::DebugStep {
+                            session_id: session_id.clone(),
+                            kind: DebugStepKindProjection::Continue,
+                        });
+                    }
+                }
+                if input.key_pressed(egui::Key::F10) {
+                    actions.push(DesktopAction::DebugStep {
+                        session_id: session_id.clone(),
+                        kind: DebugStepKindProjection::Over,
+                    });
+                }
+                if input.key_pressed(egui::Key::F11) {
+                    if input.modifiers.shift {
+                        actions.push(DesktopAction::DebugStep {
+                            session_id: session_id.clone(),
+                            kind: DebugStepKindProjection::Out,
+                        });
+                    } else {
+                        actions.push(DesktopAction::DebugStep {
+                            session_id: session_id.clone(),
+                            kind: DebugStepKindProjection::Into,
+                        });
+                    }
+                }
+            } else if input.key_pressed(egui::Key::F5) {
                 actions.push(DesktopAction::RefreshExplorer);
             }
             if command && input.key_pressed(egui::Key::Z) {

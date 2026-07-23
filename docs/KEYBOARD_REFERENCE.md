@@ -12,7 +12,12 @@ Treat the labels as the product source of truth for the current profile and plat
 | App command palette | Save Active Buffer | `⌘S` | Save the active tab through app authority. |
 | App command palette | Close Active Tab | `⌘W` | Close the active tab through app authority. |
 | App command palette | Reveal Active File in Explorer | `⇧⌘E` | Reveal the active file in the explorer. |
-| App command palette | Refresh Explorer | `F5` | Reload the workspace tree projection. |
+| App command palette | Refresh Explorer | `F5` | Reload the workspace tree projection when **no** debug session is active. |
+| Debug session | Continue | `F5` | Live/fixture continue (non-blocking on live path; auto-poll drains stop). |
+| Debug session | Stop / disconnect | `Shift+F5` | Tear down live adapter or exit fixture session. |
+| Debug session | Step over | `F10` | |
+| Debug session | Step into | `F11` | |
+| Debug session | Step out | `Shift+F11` | |
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
 | Completion popup | Navigate next | `↓` (Down Arrow) | Move selection down in the completion list. |
