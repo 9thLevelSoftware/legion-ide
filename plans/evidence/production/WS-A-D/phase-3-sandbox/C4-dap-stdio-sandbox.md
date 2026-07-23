@@ -1,7 +1,7 @@
 # Phase 3 C4 — DAP adapter sandboxed stdio spawn
 
 **Date:** 2026-07-23  
-**Status:** Ready to land
+**Status:** Landed on `main` via [#93](https://github.com/9thLevelSoftware/legion-ide/pull/93) (`0cd04dc`)
 
 ## Problem
 

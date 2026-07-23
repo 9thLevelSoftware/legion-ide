@@ -16,7 +16,7 @@ Campaign **program close** for the planned A–D wave, with **honest residuals**
 | 1 | Dogfood floor + interim closeout (interactive GUI journal residual) | #68; `phase-1-dogfood/` |
 | 2 | DAP ADR-0044, fake adapter CI, B0–B3 dual-mode + trust deny | #69, #70; `phase-2-dap/` |
 | 2+ | **Post-closeout DAP residuals (B4–B17):** Microsoft wire through smart F5, prebuild, system launch dogfood, keyboard, stop-on-entry default | #78–#91; `phase-2-dap/B4`…`B17` |
-| 3 | C1 Linux bwrap net, C2 Windows residual, C3 product spawn → panel | #71, #73, #74; `phase-3-sandbox/` |
+| 3 | C1 Linux bwrap net, C2 Windows residual, C3 product spawn → panel, **C4 DAP sandboxed stdio** | #71, #73, #74, #93; `phase-3-sandbox/` |
 | 4 | D0 design, D1 3-OS preview CI, D2 unsigned-beta retained, D3 local update drill, D4 ledger note | #72, #73, #75, #76, this closeout; `phase-4-release/` |
 
 ### Phase 4 D4 smoke proof
@@ -54,7 +54,7 @@ https://github.com/9thLevelSoftware/legion-ide/actions/runs/29887799213
 2. Optional: re-run `LEGION_DAP_DOGFOOD=1` system adapter tests when a working host LLDB is available.
 3. D2.1 / D3.1 when CI secrets + staging hosting are available.
 4. Optional D4.1 fresh-VM matrix when installers exist.
-5. Optional: tighten Windows FS isolation for DAP beyond job-object (still residual).
+5. Optional: tighten Windows FS isolation for DAP beyond job-object (still residual; C4 did not change C2 honesty).
 
 ## Sign-off
 

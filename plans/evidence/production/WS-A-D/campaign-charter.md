@@ -87,7 +87,7 @@ Phase 5  Close-out
 1. ~~Charter / Phase 0~~ — done.
 2. Phase 1 residual: interactive GUI dogfood journal(s) still open.
 3. ~~Phase 2 B0–B3~~ — on main (Microsoft DAP codec still follow-on).
-4. ~~Phase 3 C0–C3~~ — on main (DAP adapter sandbox wrap residual).
+4. ~~Phase 3 C0–C4~~ — on main (C4 DAP sandboxed stdio #93; Windows job-only residual remains).
 5. ~~Phase 4 D0–D4~~ — closed with residuals (D2.1 signing, D3.1 hosted feed, D4.1 fresh-VM).
 6. ~~Phase 5 campaign closeout~~ — `campaign-closeout-2026-07-22.md` (installed-preview dogfood residual).
 
