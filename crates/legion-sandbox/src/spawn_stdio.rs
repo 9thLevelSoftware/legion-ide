@@ -108,6 +108,9 @@ pub fn spawn_sandboxed_stdio(
     result
 }
 
+/// Shared Command builder for direct program spawn (Linux non-bwrap + Windows).
+/// macOS always wraps via sandbox-exec, so this helper is not compiled there.
+#[cfg(any(target_os = "linux", windows))]
 fn base_command(spec: &SandboxStdioSpec) -> Command {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
