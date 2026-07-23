@@ -64,7 +64,7 @@ Delegated `TerminalCommand` tool calls in product composition go through `legion
 - stored on the delegate workflow and projected into `plan_only_disclaimers`
 - surfaced on the desktop sandbox panel as `sandbox runtime: …` rows
 
-Compile-time profile summaries on the panel describe *typical* OS capability; **the live report is authoritative** for what the last spawn actually enforced. Interactive terminal PTY and DAP adapter processes are **not** wrapped by this path today (terminal trust/capability gates; DAP sandbox wrap remains a follow-on).
+Compile-time profile summaries on the panel describe *typical* OS capability; **the live report is authoritative** for what the last spawn actually enforced. Interactive terminal PTY is **not** wrapped by batch `spawn_sandboxed` (trust/capability gates). **Live non-fake DAP adapters** use `spawn_sandboxed_stdio` (C4): Linux Landlock (+ optional bwrap net), macOS Seatbelt, Windows job-object kill-on-close when assignable — with honest caveats; fake adapter CI path stays unsandboxed.
 
 Legion should be treated as a trusted desktop application with sandboxed execution lanes, not as a formal operating-system boundary or a replacement for host hardening.
 
