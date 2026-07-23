@@ -144,8 +144,8 @@ fn take_pipes(mut child: Child) -> Result<(Child, ChildStdin, ChildStdout), Sand
 #[cfg(target_os = "linux")]
 fn linux_stdio(spec: &SandboxStdioSpec) -> Result<SandboxedStdioProcess, SandboxError> {
     use landlock::{
-        ABI, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-        RulesetAttr, RulesetCreatedAttr,
+        ABI, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+        RulesetCreatedAttr,
     };
     use std::io;
     use std::os::unix::process::CommandExt;
