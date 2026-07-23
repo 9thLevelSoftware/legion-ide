@@ -17307,6 +17307,16 @@ impl AppComposition {
         self.lsp_session.failure_reason()
     }
 
+    /// Test-only: inject code lenses into language tooling for test-explorer
+    /// LSP-runnable preference coverage (P2.F3.T4c).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_test_code_lenses_for_tests(
+        &mut self,
+        lenses: Vec<legion_protocol::LanguageCodeLensProjection>,
+    ) {
+        self.language_tooling.projection.code_lenses = lenses;
+    }
+
     /// Test-only: returns `true` if the LSP session is in the `BackingOff`
     /// state (waiting for a backoff timer).  PKT-LSP-C T3.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -24480,20 +24490,35 @@ impl AppComposition {
         self.search_projection.clone()
     }
 
-    /// Refresh cargo-test discovery for the test explorer panel (P2.F3.T4).
+    /// Refresh test explorer discovery (P2.F3.T4 / T4c).
     ///
-    /// Requires an open workspace. Does not execute tests — list-only.
+    /// Prefers LSP runnable code lenses when present; otherwise `cargo test --list`.
     /// Preserves last-run metadata from a prior per-item run.
     pub fn refresh_test_explorer(&mut self) -> Result<TestExplorerProjection, AppCompositionError> {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
             return Err(AppCompositionError::WorkspaceNotOpen);
         };
         let prior = self.test_explorer_projection.clone();
-        let mut projection = test_explorer::discover_cargo_tests(
-            Path::new(root_path),
-            test_explorer::DEFAULT_DISCOVER_TIMEOUT,
-            TimestampMillis::now(),
+        let generated_at = TimestampMillis::now();
+        let runnable_items = test_explorer::items_from_runnable_code_lenses(
+            &self.language_tooling.projection().code_lenses,
         );
+        let mut projection = if !runnable_items.is_empty() {
+            let mut projection = test_explorer::projection_from_items(
+                runnable_items,
+                vec!["source=lsp-runnable".to_string()],
+                "ready",
+                generated_at,
+            );
+            projection.controller_label = "lsp-runnable".to_string();
+            projection
+        } else {
+            test_explorer::discover_cargo_tests(
+                Path::new(root_path),
+                test_explorer::DEFAULT_DISCOVER_TIMEOUT,
+                generated_at,
+            )
+        };
         projection.last_run_item_id = prior.last_run_item_id;
         projection.last_run_status = prior.last_run_status;
         projection.last_run_exit_code = prior.last_run_exit_code;
@@ -24502,9 +24527,10 @@ impl AppComposition {
         Ok(projection)
     }
 
-    /// Run one discovered test via `cargo test -- --exact <item_id>` (P2.F3.T4b).
+    /// Run one discovered test (P2.F3.T4b / T4c).
     ///
-    /// Metadata-only: exit code + summary counts; raw logs are not retained.
+    /// LSP runnable items launch a policy-gated terminal with the command label.
+    /// Cargo items use `cargo test -- --exact <item_id>`. Metadata-only results.
     pub fn run_test_explorer_item(
         &mut self,
         item_id: &str,
@@ -24512,6 +24538,47 @@ impl AppComposition {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
             return Err(AppCompositionError::WorkspaceNotOpen);
         };
+        let item = self
+            .test_explorer_projection
+            .items
+            .iter()
+            .find(|item| item.item_id == item_id)
+            .cloned();
+        if let Some(item) = item
+            && let Some(command_label) = item.run_command_label.clone()
+        {
+            // LSP runnable path: terminal launch (same authority as code-lens activate).
+            let context = self.active_documents.require_workspace_context()?;
+            let event_context = self.next_event_context();
+            let _terminal =
+                self.terminal_workflow
+                    .launch(context, command_label.clone(), None, event_context);
+            self.persist_latest_terminal_audit()?;
+            let started_at = TimestampMillis::now();
+            let result = test_explorer::CargoTestItemRunResult {
+                item_id: item_id.to_string(),
+                status_label: "launched".to_string(),
+                exit_code: None,
+                passed: 0,
+                failed: 0,
+                skipped: 0,
+                duration_ms: 0,
+                diagnostics: vec![format!("terminal-launch:{command_label}")],
+            };
+            let mut row = result.to_verification_row(started_at);
+            row.command_class_label = "lsp-runnable-terminal".to_string();
+            row.state = legion_protocol::VerificationRunState::Running;
+            row.label = format!("lsp runnable {item_id}");
+            test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+            let projection = test_explorer::apply_run_to_projection(
+                self.test_explorer_projection.clone(),
+                &result,
+                TimestampMillis::now(),
+            );
+            self.test_explorer_projection = projection.clone();
+            return Ok(projection);
+        }
+
         if let Err(reason) = test_explorer::validate_test_item_id(item_id) {
             return Err(AppCompositionError::LanguageTooling(format!(
                 "invalid test item id: {reason}"

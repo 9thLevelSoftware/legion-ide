@@ -1,8 +1,8 @@
 //! Test explorer discovery + per-item run (P2.F3.T4).
 //!
-//! Discovers Cargo tests via `cargo test -- --list` and runs a single filtered
-//! item via `cargo test -- --exact <id>`. Projections stay metadata-only
-//! (counts/exit codes/labels; no raw test logs).
+//! Discovery prefers LSP runnable code lenses when present; otherwise falls
+//! back to `cargo test -- --list`. Per-item run uses the lens command label or
+//! `cargo test -- --exact <id>`. Projections stay metadata-only.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -65,6 +65,43 @@ pub fn parse_cargo_test_list(stdout: &str) -> Vec<TestExplorerItemProjection> {
             label,
             kind_label: kind.to_string(),
             parent_label,
+            run_command_label: None,
+        });
+        if items.len() >= MAX_PROJECTED_ITEMS {
+            break;
+        }
+    }
+    items
+}
+
+/// Prefer LSP runnable code lenses over cargo list when any are present.
+///
+/// Kanban P2.F3.T4 stop condition: do not force `cargo test --list` on every
+/// refresh if LSP runnables are available.
+pub fn items_from_runnable_code_lenses(
+    lenses: &[legion_protocol::LanguageCodeLensProjection],
+) -> Vec<TestExplorerItemProjection> {
+    let mut items = Vec::new();
+    for lens in lenses {
+        let kind_l = lens.kind_label.to_ascii_lowercase();
+        let cmd_l = lens.command_label.to_ascii_lowercase();
+        let title_l = lens.title.to_ascii_lowercase();
+        // Explicit runnable kind (product path), or test-ish titles/commands from
+        // rust-analyzer-style code lenses without requiring an exact kind string.
+        let is_runnable = kind_l.contains("runnable")
+            || kind_l.contains("test")
+            || cmd_l.contains("test")
+            || title_l.contains("run test")
+            || title_l.contains("debug test");
+        if !is_runnable {
+            continue;
+        }
+        items.push(TestExplorerItemProjection {
+            item_id: lens.lens_id.clone(),
+            label: lens.title.clone(),
+            kind_label: "runnable".to_string(),
+            parent_label: Some(lens.source_label.clone()),
+            run_command_label: Some(lens.command_label.clone()),
         });
         if items.len() >= MAX_PROJECTED_ITEMS {
             break;
@@ -153,6 +190,7 @@ impl CargoTestItemRunResult {
             "failed" => VerificationRunState::Failed,
             "timeout" => VerificationRunState::Blocked,
             "empty" => VerificationRunState::Blocked,
+            "launched" | "running" => VerificationRunState::Running,
             _ => VerificationRunState::Failed,
         };
         let completed_at = TimestampMillis(started_at.0.saturating_add(self.duration_ms));
@@ -480,6 +518,7 @@ nested::deep::case: test
                 label: format!("t{i}"),
                 kind_label: "test".to_string(),
                 parent_label: None,
+                run_command_label: None,
             })
             .collect();
         let projection = projection_from_items(items, Vec::new(), "ready", TimestampMillis(1));
@@ -489,6 +528,41 @@ nested::deep::case: test
                 .diagnostics
                 .iter()
                 .any(|d| d.starts_with("omitted_items="))
+        );
+    }
+
+    #[test]
+    fn items_from_runnable_code_lenses_filters_non_test_lenses() {
+        use legion_protocol::LanguageCodeLensProjection;
+        let lenses = vec![
+            LanguageCodeLensProjection {
+                lens_id: "l1".to_string(),
+                title: "Run Test".to_string(),
+                command_label: "cargo test foo".to_string(),
+                kind_label: "runnable".to_string(),
+                range: None,
+                data_label: None,
+                source_label: "rust-analyzer".to_string(),
+                schema_version: 1,
+            },
+            LanguageCodeLensProjection {
+                lens_id: "l2".to_string(),
+                title: "2 references".to_string(),
+                command_label: "Find references".to_string(),
+                kind_label: "references".to_string(),
+                range: None,
+                data_label: None,
+                source_label: "legion-index".to_string(),
+                schema_version: 1,
+            },
+        ];
+        let items = items_from_runnable_code_lenses(&lenses);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_id, "l1");
+        assert_eq!(items[0].kind_label, "runnable");
+        assert_eq!(
+            items[0].run_command_label.as_deref(),
+            Some("cargo test foo")
         );
     }
 
@@ -517,6 +591,7 @@ nested::deep::case: test
                 label: "one".to_string(),
                 kind_label: "test".to_string(),
                 parent_label: Some("t".to_string()),
+                run_command_label: None,
             }],
             Vec::new(),
             "ready",
