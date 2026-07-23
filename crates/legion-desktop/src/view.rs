@@ -7965,7 +7965,7 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             ),
             _ => "none".to_string(),
         };
-        let groups = legion_app::test_explorer::group_items_by_parent(&explorer.items);
+        let groups = legion_ui::group_test_explorer_items_by_parent(&explorer.items);
         rows.push(format!(
             "test explorer: status={} controller={} items={} groups={} last_run={} diagnostics={}",
             explorer.status_label,
@@ -7979,9 +7979,9 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 explorer.diagnostics.join(",")
             }
         ));
-        rows.extend(legion_app::test_explorer::format_tree_rows(
+        rows.extend(legion_ui::format_test_explorer_tree_rows(
             &explorer.items,
-            legion_app::test_explorer::MAX_TREE_DISPLAY_ROWS,
+            legion_ui::MAX_TEST_EXPLORER_TREE_DISPLAY_ROWS,
         ));
     }
     if !verification.rows.is_empty() || !runnable_lenses.is_empty() {

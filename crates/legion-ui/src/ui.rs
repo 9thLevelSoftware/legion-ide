@@ -1953,6 +1953,76 @@ impl Default for TestExplorerProjection {
     }
 }
 
+/// Maximum tree display rows for the desktop Tests panel (group headers + items).
+pub const MAX_TEST_EXPLORER_TREE_DISPLAY_ROWS: usize = 48;
+
+/// One module-path group for tree presentation (display-only; items stay flat).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestExplorerGroup<'a> {
+    /// Parent module path, or `"<root>"` when absent.
+    pub parent_label: String,
+    /// Items under this parent, in original order.
+    pub items: Vec<&'a TestExplorerItemProjection>,
+}
+
+/// Group discovered items by `parent_label` for tree presentation.
+///
+/// Groups are sorted by parent path (stable); items within a group keep input order.
+pub fn group_test_explorer_items_by_parent(
+    items: &[TestExplorerItemProjection],
+) -> Vec<TestExplorerGroup<'_>> {
+    let mut map: std::collections::BTreeMap<String, Vec<&TestExplorerItemProjection>> =
+        std::collections::BTreeMap::new();
+    for item in items {
+        let parent = item
+            .parent_label
+            .clone()
+            .unwrap_or_else(|| "<root>".to_string());
+        map.entry(parent).or_default().push(item);
+    }
+    map.into_iter()
+        .map(|(parent_label, items)| TestExplorerGroup {
+            parent_label,
+            items,
+        })
+        .collect()
+}
+
+/// Format grouped items as display-safe tree rows for the Tests panel.
+pub fn format_test_explorer_tree_rows(
+    items: &[TestExplorerItemProjection],
+    max_rows: usize,
+) -> Vec<String> {
+    let groups = group_test_explorer_items_by_parent(items);
+    let mut rows = Vec::new();
+    let mut omitted_items = 0usize;
+    for group in groups {
+        if rows.len() >= max_rows {
+            omitted_items = omitted_items.saturating_add(group.items.len());
+            continue;
+        }
+        rows.push(format!(
+            "group {} ({})",
+            group.parent_label,
+            group.items.len()
+        ));
+        for item in group.items {
+            if rows.len() >= max_rows {
+                omitted_items = omitted_items.saturating_add(1);
+                continue;
+            }
+            rows.push(format!(
+                "  item {}: kind={} label={}",
+                item.item_id, item.kind_label, item.label
+            ));
+        }
+    }
+    if omitted_items > 0 {
+        rows.push(format!("tree-omitted-items={omitted_items}"));
+    }
+    rows
+}
+
 /// Projection-only metadata row for a supervised language-server health record.
 ///
 /// No authority. All fields are display-safe labels derived from protocol metadata.

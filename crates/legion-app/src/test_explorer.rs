@@ -26,78 +26,8 @@ pub const MAX_PROJECTED_ITEMS: usize = 500;
 /// Maximum retained per-item run rows for the verification projection.
 pub const MAX_RECENT_RUNS: usize = 20;
 
-/// Maximum tree display rows for the desktop Tests panel (group headers + items).
-pub const MAX_TREE_DISPLAY_ROWS: usize = 48;
-
 /// Maximum stdout bytes retained transiently for summary parsing (not projected).
 const MAX_PARSE_STDOUT_BYTES: usize = 16 * 1024;
-
-/// One module-path group for tree presentation (display-only; items stay flat).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestExplorerGroup<'a> {
-    /// Parent module path, or `"<root>"` when absent.
-    pub parent_label: String,
-    /// Items under this parent, in original order.
-    pub items: Vec<&'a TestExplorerItemProjection>,
-}
-
-/// Group discovered items by `parent_label` for tree presentation.
-///
-/// Groups are sorted by parent path (stable); items within a group keep input order.
-pub fn group_items_by_parent(items: &[TestExplorerItemProjection]) -> Vec<TestExplorerGroup<'_>> {
-    let mut map: std::collections::BTreeMap<String, Vec<&TestExplorerItemProjection>> =
-        std::collections::BTreeMap::new();
-    for item in items {
-        let parent = item
-            .parent_label
-            .clone()
-            .unwrap_or_else(|| "<root>".to_string());
-        map.entry(parent).or_default().push(item);
-    }
-    // BTreeMap sorts keys for stable deterministic UI.
-    map.into_iter()
-        .map(|(parent_label, items)| TestExplorerGroup {
-            parent_label,
-            items,
-        })
-        .collect()
-}
-
-/// Format grouped items as display-safe tree rows for the Tests panel.
-///
-/// Example:
-/// `group tests (2)`
-/// `  item tests::fixture_ok: kind=test label=fixture_ok`
-pub fn format_tree_rows(items: &[TestExplorerItemProjection], max_rows: usize) -> Vec<String> {
-    let groups = group_items_by_parent(items);
-    let mut rows = Vec::new();
-    let mut omitted_items = 0usize;
-    for group in groups {
-        if rows.len() >= max_rows {
-            omitted_items = omitted_items.saturating_add(group.items.len());
-            continue;
-        }
-        rows.push(format!(
-            "group {} ({})",
-            group.parent_label,
-            group.items.len()
-        ));
-        for item in group.items {
-            if rows.len() >= max_rows {
-                omitted_items = omitted_items.saturating_add(1);
-                continue;
-            }
-            rows.push(format!(
-                "  item {}: kind={} label={}",
-                item.item_id, item.kind_label, item.label
-            ));
-        }
-    }
-    if omitted_items > 0 {
-        rows.push(format!("tree-omitted-items={omitted_items}"));
-    }
-    rows
-}
 
 /// Parse `cargo test -- --list` stdout into projection items.
 ///
@@ -599,66 +529,6 @@ nested::deep::case: test
                 .iter()
                 .any(|d| d.starts_with("omitted_items="))
         );
-    }
-
-    #[test]
-    fn group_items_by_parent_orders_and_buckets() {
-        let items = vec![
-            TestExplorerItemProjection {
-                item_id: "z::one".to_string(),
-                label: "one".to_string(),
-                kind_label: "test".to_string(),
-                parent_label: Some("z".to_string()),
-                run_command_label: None,
-            },
-            TestExplorerItemProjection {
-                item_id: "a::two".to_string(),
-                label: "two".to_string(),
-                kind_label: "test".to_string(),
-                parent_label: Some("a".to_string()),
-                run_command_label: None,
-            },
-            TestExplorerItemProjection {
-                item_id: "root_only".to_string(),
-                label: "root_only".to_string(),
-                kind_label: "test".to_string(),
-                parent_label: None,
-                run_command_label: None,
-            },
-            TestExplorerItemProjection {
-                item_id: "a::three".to_string(),
-                label: "three".to_string(),
-                kind_label: "bench".to_string(),
-                parent_label: Some("a".to_string()),
-                run_command_label: None,
-            },
-        ];
-        let groups = group_items_by_parent(&items);
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].parent_label, "<root>");
-        assert_eq!(groups[0].items.len(), 1);
-        assert_eq!(groups[1].parent_label, "a");
-        assert_eq!(groups[1].items.len(), 2);
-        assert_eq!(groups[1].items[0].label, "two");
-        assert_eq!(groups[1].items[1].label, "three");
-        assert_eq!(groups[2].parent_label, "z");
-    }
-
-    #[test]
-    fn format_tree_rows_emits_group_headers_and_cap() {
-        let items: Vec<_> = (0..10)
-            .map(|i| TestExplorerItemProjection {
-                item_id: format!("mod::t{i}"),
-                label: format!("t{i}"),
-                kind_label: "test".to_string(),
-                parent_label: Some("mod".to_string()),
-                run_command_label: None,
-            })
-            .collect();
-        let rows = format_tree_rows(&items, 5);
-        assert!(rows[0].starts_with("group mod (10)"));
-        assert!(rows.iter().any(|r| r.starts_with("  item ")));
-        assert!(rows.iter().any(|r| r.starts_with("tree-omitted-items=")));
     }
 
     #[test]
