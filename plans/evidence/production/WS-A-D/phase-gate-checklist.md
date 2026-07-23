@@ -51,6 +51,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B12 live DAP cargo prebuild for non-fake launches (`B12-live-prebuild-cargo.md`)
 - [x] B13 system adapter launch+step dogfood (`B13-system-launch-step-dogfood.md`; optional, `LEGION_DAP_DOGFOOD=1`)
 - [x] B14 debug keyboard + interactive GUI checklist (`B14-debug-keyboard-gui-checklist.md`)
+- [x] B15 F9 toggle breakpoint at cursor (`B15-f9-toggle-breakpoint.md`)
 - [ ] Follow-on: human-filled windowed GUI journal (checklist ready)
 
 ## Phase 3 — Sandbox isolation (C)

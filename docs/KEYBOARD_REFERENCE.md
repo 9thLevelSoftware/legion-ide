@@ -18,6 +18,7 @@ Treat the labels as the product source of truth for the current profile and plat
 | Debug session | Step over | `F10` | |
 | Debug session | Step into | `F11` | |
 | Debug session | Step out | `Shift+F11` | |
+| Debug | Toggle breakpoint at cursor | `F9` | Zero-based projected cursor line on the active buffer. |
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
 | Completion popup | Navigate next | `↓` (Down Arrow) | Move selection down in the completion list. |

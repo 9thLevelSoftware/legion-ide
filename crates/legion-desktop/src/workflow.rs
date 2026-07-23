@@ -3523,6 +3523,18 @@ impl DesktopEframeApp {
             } else if input.key_pressed(egui::Key::F5) {
                 actions.push(DesktopAction::RefreshExplorer);
             }
+            // B15: F9 toggles a breakpoint on the projected primary cursor line.
+            if input.key_pressed(egui::Key::F9)
+                && snapshot.active_buffer_projection.buffer_id.is_some()
+            {
+                let line = projected_cursor(&snapshot).line;
+                actions.push(DesktopAction::ToggleDebugBreakpoint {
+                    line,
+                    condition: None,
+                    hit_condition: None,
+                    log_message: None,
+                });
+            }
             if command && input.key_pressed(egui::Key::Z) {
                 if input.modifiers.shift {
                     actions.push(DesktopAction::Redo);
