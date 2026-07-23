@@ -8085,6 +8085,18 @@ impl DebugWorkflow {
     ) -> Result<DebugProjection, String> {
         use std::time::Duration;
 
+        // B12: system adapters need a real binary; run cargo prebuild when
+        // configuration carries cargo_args. Fake adapter skips (CI speed).
+        let prebuild_note = if live_dap_should_prebuild_impl(resolved.is_fake, &config.cargo_args) {
+            Some(run_live_dap_prebuild_impl(
+                config.cwd.0.as_str(),
+                &config.cargo_args,
+                Duration::from_secs(180),
+            )?)
+        } else {
+            None
+        };
+
         let mut session = LiveDapSession::spawn(
             &resolved.program,
             &resolved.args,
@@ -8123,8 +8135,6 @@ impl DebugWorkflow {
         }
 
         // Resolve relative program labels against configuration cwd (workspace root).
-        // Pre-launch `cargo build` from cargo_args is still a follow-on (fixture/fake
-        // path does not need a real binary; product launch against system adapters will).
         let program = {
             let label = config.program_label.clone();
             let candidate = Path::new(&label);
@@ -8160,6 +8170,13 @@ impl DebugWorkflow {
         self.projection.session_state = Some(DebugSessionState::Paused);
         self.projection.live_adapter = true;
         self.apply_live_stop(&session_id, &stop);
+        if let Some(note) = prebuild_note {
+            self.projection.console.push(DebugConsoleProjection {
+                session_id: session_id.clone(),
+                category_label: "adapter".to_string(),
+                message_label: bounded_label(format!("LIVE DAP prebuild: {note}"), 160),
+            });
+        }
         self.projection.console.push(DebugConsoleProjection {
             session_id: session_id.clone(),
             category_label: "adapter".to_string(),
@@ -8795,6 +8812,80 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
         "text"
     };
     LanguageId(language.to_string())
+}
+
+/// B12: whether live launch should run a cargo prebuild.
+///
+/// Exposed under `test-helpers` for integration tests; production callers use
+/// `launch_live` only.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn live_dap_should_prebuild(is_fake: bool, cargo_args: &[String]) -> bool {
+    live_dap_should_prebuild_impl(is_fake, cargo_args)
+}
+
+fn live_dap_should_prebuild_impl(is_fake: bool, cargo_args: &[String]) -> bool {
+    !is_fake && !cargo_args.is_empty()
+}
+
+/// Execute `cargo <cargo_args>` in `cwd` with a hard timeout (B12).
+///
+/// Returns a short metadata-only summary for the debug console (no full logs).
+/// Stdio is nulled so a chatty cargo cannot fill pipes and deadlock the wait.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn run_live_dap_prebuild(
+    cwd: &str,
+    cargo_args: &[String],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    run_live_dap_prebuild_impl(cwd, cargo_args, timeout)
+}
+
+fn run_live_dap_prebuild_impl(
+    cwd: &str,
+    cargo_args: &[String],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new("cargo")
+        .args(cargo_args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("cargo prebuild spawn failed in {cwd}: {err}"))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(format!("cargo {} ok (cwd={})", cargo_args.join(" "), cwd));
+                }
+                return Err(format!(
+                    "cargo prebuild failed (status={status}; args={})",
+                    cargo_args.join(" ")
+                ));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "cargo prebuild timed out after {timeout:?} (args={})",
+                        cargo_args.join(" ")
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                return Err(format!("cargo prebuild wait failed: {err}"));
+            }
+        }
+    }
 }
 
 fn bounded_label(value: impl Into<String>, limit: usize) -> String {
