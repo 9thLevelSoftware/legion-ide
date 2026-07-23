@@ -9,7 +9,9 @@ use legion_app::test_explorer::{
     parse_cargo_test_list, parse_cargo_test_summary, projection_from_items, validate_test_item_id,
 };
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_protocol::{PrincipalId, TimestampMillis, WorkspaceTrustState};
+use legion_protocol::{
+    LanguageCodeLensProjection, PrincipalId, TimestampMillis, WorkspaceTrustState,
+};
 use legion_ui::CommandDispatchIntent;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -104,6 +106,49 @@ fn test_explorer_refresh_discovers_fixture_or_reports_honest_error() {
         other => panic!("unexpected outcome: {other:?}"),
     }
 
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn test_explorer_prefers_lsp_runnables_over_cargo_list() {
+    let root = create_fixture_crate();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-test-explorer-lsp".to_string()),
+    )
+    .expect("open workspace");
+
+    // Inject a runnable code lens into language tooling projection.
+    app.inject_test_code_lenses_for_tests(vec![LanguageCodeLensProjection {
+        lens_id: "lens-run-1".to_string(),
+        title: "Run Test fixture_ok".to_string(),
+        command_label: "cargo test fixture_ok".to_string(),
+        kind_label: "runnable".to_string(),
+        range: None,
+        data_label: None,
+        source_label: "rust-analyzer".to_string(),
+        schema_version: 1,
+    }]);
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
+        .expect("refresh");
+    match outcome {
+        AppCommandOutcome::TestExplorerUpdated(projection) => {
+            assert_eq!(projection.controller_label, "lsp-runnable");
+            assert_eq!(projection.items.len(), 1);
+            assert_eq!(projection.items[0].item_id, "lens-run-1");
+            assert!(
+                projection
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.contains("lsp-runnable"))
+            );
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
     let _ = fs::remove_dir_all(&root);
 }
 

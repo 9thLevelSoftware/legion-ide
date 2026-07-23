@@ -1889,14 +1889,19 @@ impl Default for DebugProjection {
 /// One discovered test or benchmark row (metadata-only; no run output).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestExplorerItemProjection {
-    /// Stable item id (typically the full cargo test path).
+    /// Stable item id (typically the full cargo test path or lens id).
     pub item_id: String,
     /// Display leaf label.
     pub label: String,
-    /// Kind label (`test` or `bench`).
+    /// Kind label (`test`, `bench`, or `runnable`).
     pub kind_label: String,
     /// Optional parent module path label.
     pub parent_label: Option<String>,
+    /// Optional display-safe run command label (LSP runnable path).
+    ///
+    /// When present, per-item run launches this terminal command instead of
+    /// `cargo test --exact`. Never raw secrets; projection metadata only.
+    pub run_command_label: Option<String>,
 }
 
 /// Projection-only test explorer surface (P2.F3.T4 discovery + run substrate).
