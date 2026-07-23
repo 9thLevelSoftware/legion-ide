@@ -7965,11 +7965,13 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             ),
             _ => "none".to_string(),
         };
+        let groups = legion_app::test_explorer::group_items_by_parent(&explorer.items);
         rows.push(format!(
-            "test explorer: status={} controller={} items={} last_run={} diagnostics={}",
+            "test explorer: status={} controller={} items={} groups={} last_run={} diagnostics={}",
             explorer.status_label,
             explorer.controller_label,
             explorer.items.len(),
+            groups.len(),
             last_run,
             if explorer.diagnostics.is_empty() {
                 "none".to_string()
@@ -7977,13 +7979,10 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                 explorer.diagnostics.join(",")
             }
         ));
-        rows.extend(explorer.items.iter().take(24).map(|item| {
-            let parent = item.parent_label.as_deref().unwrap_or("<root>");
-            format!(
-                "item {}: kind={} parent={} label={}",
-                item.item_id, item.kind_label, parent, item.label
-            )
-        }));
+        rows.extend(legion_app::test_explorer::format_tree_rows(
+            &explorer.items,
+            legion_app::test_explorer::MAX_TREE_DISPLAY_ROWS,
+        ));
     }
     if !verification.rows.is_empty() || !runnable_lenses.is_empty() {
         rows.push(format!(
