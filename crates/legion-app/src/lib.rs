@@ -8148,7 +8148,12 @@ impl DebugWorkflow {
             }
         };
         let stop = session
-            .launch_until_stopped(&program, Duration::from_secs(5))
+            .launch_until_stopped_with(
+                &program,
+                Some(config.cwd.0.as_str()),
+                config.stop_on_entry,
+                Duration::from_secs(5),
+            )
             .map_err(|err| err.to_string())?;
 
         // B5: keep the adapter process alive for step/continue (do not disconnect).

@@ -273,16 +273,33 @@ impl LiveDapSession {
         program: &str,
         timeout: Duration,
     ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
-        let _ = self.request(
-            "launch",
-            json!({
-                "name": "legion-live",
-                "type": self.adapter_type,
-                "request": "launch",
-                "program": program
-            }),
-            timeout,
-        )?;
+        self.launch_until_stopped_with(program, None, false, timeout)
+    }
+
+    /// `launch` with optional working directory and `stopOnEntry` (B13).
+    ///
+    /// System adapters (lldb-dap / CodeLLDB) commonly need `cwd` and prefer
+    /// `stopOnEntry` for a deterministic first stop during dogfood.
+    pub fn launch_until_stopped_with(
+        &mut self,
+        program: &str,
+        cwd: Option<&str>,
+        stop_on_entry: bool,
+        timeout: Duration,
+    ) -> Result<LiveDapStopOutcome, LiveDapSessionError> {
+        let mut arguments = json!({
+            "name": "legion-live",
+            "type": self.adapter_type,
+            "request": "launch",
+            "program": program,
+            "stopOnEntry": stop_on_entry,
+        });
+        if let Some(cwd) = cwd
+            && let Some(obj) = arguments.as_object_mut()
+        {
+            obj.insert("cwd".to_string(), json!(cwd));
+        }
+        let _ = self.request("launch", arguments, timeout)?;
         let _ = self.request("configurationDone", json!({}), timeout)?;
         self.wait_stopped_and_inspect("entry", timeout)
     }

@@ -29,9 +29,9 @@ launch/step remain residual.
 | `B10-headless-continue-auto-poll.md` | Headless continue→auto-poll dogfood |
 | `B11-debug-controls-honesty.md` | Debug toolbar + residual honesty |
 | `B12-live-prebuild-cargo.md` | Cargo prebuild before non-fake live launch |
+| `B13-system-launch-step-dogfood.md` | Optional system launch+step dogfood |
 
 ## Residual
 
 - Human windowed GUI dogfood journal
-- Full launch/step/continue against a host system debugee binary (prebuild is now wired)
 - Sandbox wrap of adapter spawn (Phase 3 deferred)
