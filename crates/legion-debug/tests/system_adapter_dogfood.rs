@@ -7,9 +7,8 @@
 //! Intentional dogfood: `LEGION_DAP_DOGFOOD=1` fails closed if the adapter is
 //! missing **or** the initialize handshake does not complete.
 //!
-//! Scope is intentionally **initialize + disconnect** only. Full launch/step
-//! against a real debugee needs a host-specific binary and remains interactive
-//! residual (GUI dogfood).
+//! Scope is **initialize + disconnect**. Full launch/step against a host
+//! debugee is covered by `system_adapter_launch_step_dogfood` (B13).
 
 use std::time::Duration;
 

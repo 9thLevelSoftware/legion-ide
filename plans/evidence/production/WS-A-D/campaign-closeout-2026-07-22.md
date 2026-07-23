@@ -32,7 +32,7 @@ https://github.com/9thLevelSoftware/legion-ide/actions/runs/29887799213
 | ~~Microsoft DAP wire + fake contract~~ | B | **Closed** B4 (`B4-microsoft-dap-codec.md`) |
 | ~~Persistent live DAP session~~ | B | **Closed** B5–B6 |
 | ~~Non-blocking continue + desktop auto-poll~~ | B | **Closed** B7–B8; B10 headless dogfood |
-| System adapter full launch/step vs host debugee | B | B9 = optional initialize handshake only |
+| ~~System adapter full launch/step dogfood path~~ | B | **Closed** B12 prebuild + B13 optional launch/step (`LEGION_DAP_DOGFOOD=1`); host LLDB quality not guaranteed |
 | DAP adapter sandbox wrap | C | Deferred P2 |
 | Windows FS/network OS isolation beyond job object | C | C2 residual accepted honest |
 | OS installer formats (MSI/DMG/deb) + D2.1 signing | D | Portable zip/tar.gz only |
