@@ -40,7 +40,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 9 | Debug: refresh configs; Launch (toolbar or `:debug-launch`) | | |
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
-| 12 | Debug: Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14 |
+| 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
 | 13 | Sandbox panel: Windows caveats visible if Job Object-only | | |
 
 ## Commands / keys (debug)
@@ -49,6 +49,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 |--------|----|-----|-------|
 | Refresh configs | Refresh configs | — | `:debug-configs` |
 | Launch | Launch | — | `:debug-launch <id>` |
+| Toggle BP | — | `F9` | `:debug-breakpoint …` |
 | Continue | Continue | `F5` (session active) | `:debug-step continue` |
 | Step over | Step Over | `F10` | `:debug-step over` |
 | Step into | Step Into | `F11` | `:debug-step into` |

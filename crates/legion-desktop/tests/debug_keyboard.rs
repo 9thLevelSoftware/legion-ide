@@ -193,3 +193,33 @@ fn debug_session_f5_continue_f10_step_shift_f5_stop() {
 
     fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn f9_toggles_breakpoint_on_active_buffer_cursor_line() {
+    let root = create_root();
+    let source = root.join("src/main.rs");
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        root.clone(),
+        Some(source.to_string_lossy().into_owned()),
+    ))
+    .expect("open");
+    runtime.enable_debug_fixture_for_tests();
+
+    let mut app = DesktopEframeApp::new(runtime);
+    let before = app.runtime_snapshot().debug_projection.breakpoints.len();
+    let _ = app.run_headless_full_frame(key_input(egui::Key::F9, false));
+    let after = app.runtime_snapshot().debug_projection.breakpoints.len();
+    assert_eq!(
+        after,
+        before + 1,
+        "F9 should add a breakpoint on the cursor line"
+    );
+    let _ = app.run_headless_full_frame(key_input(egui::Key::F9, false));
+    let toggled = app.runtime_snapshot().debug_projection.breakpoints.len();
+    assert_eq!(
+        toggled, before,
+        "second F9 on same line should remove the breakpoint"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
