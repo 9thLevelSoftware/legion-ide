@@ -12,6 +12,8 @@ Weekly Legion-on-Legion dogfood journals live here.
 | `2026-07-21-phase1-floor-journal.md` | Phase 1 automated floor |
 | `2026-07-22-preview-artifact-journal.md` | Preview packaging |
 | `2026-07-22-dap-b10-headless-journal.md` | DAP B10 headless continue auto-poll (**not** human windowed GUI) |
+| `INTERACTIVE-GUI-CHECKLIST.md` | Human windowed session checklist (Phase 1 residual) |
+| `INSTALLED-PREVIEW-CHECKLIST.md` | Unsigned-beta portable install dogfood (Phase 5 residual) |
 
 ## Naming
 

@@ -3487,8 +3487,8 @@ impl DesktopEframeApp {
                     mode: DockMode::Manual,
                 });
             }
-            // B14: when a debug session is active, F5/F10/F11 match common IDE
-            // debug bindings. Idle F5 keeps Refresh Explorer (existing product).
+            // B14/B17: IDE-style debug keys. F5: Continue (session) → Launch first
+            // config (idle + configs) → Refresh Explorer (idle, no configs).
             if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
                 use legion_ui::DebugStepKindProjection;
                 if input.key_pressed(egui::Key::F5) {
@@ -3521,7 +3521,16 @@ impl DesktopEframeApp {
                     }
                 }
             } else if input.key_pressed(egui::Key::F5) {
-                actions.push(DesktopAction::RefreshExplorer);
+                if let Some(configuration_id) = snapshot
+                    .debug_projection
+                    .configurations
+                    .first()
+                    .map(|c| c.configuration_id.clone())
+                {
+                    actions.push(DesktopAction::LaunchDebugSession { configuration_id });
+                } else {
+                    actions.push(DesktopAction::RefreshExplorer);
+                }
             }
             // B15: F9 toggles a breakpoint on the projected primary cursor line.
             if input.key_pressed(egui::Key::F9)

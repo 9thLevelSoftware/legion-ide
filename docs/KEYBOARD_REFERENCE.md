@@ -12,7 +12,8 @@ Treat the labels as the product source of truth for the current profile and plat
 | App command palette | Save Active Buffer | `⌘S` | Save the active tab through app authority. |
 | App command palette | Close Active Tab | `⌘W` | Close the active tab through app authority. |
 | App command palette | Reveal Active File in Explorer | `⇧⌘E` | Reveal the active file in the explorer. |
-| App command palette | Refresh Explorer | `F5` | Reload the workspace tree projection when **no** debug session is active. |
+| App command palette | Refresh Explorer | `F5` | When **no** debug session and **no** launch configs are projected. |
+| Debug idle + configs | Launch first config | `F5` | B17: zero-config start when configs exist and no session is active. |
 | Debug session | Continue | `F5` | Live/fixture continue (non-blocking on live path; auto-poll drains stop). |
 | Debug session | Stop / disconnect | `Shift+F5` | Tear down live adapter or exit fixture session. |
 | Debug session | Step over | `F10` | |

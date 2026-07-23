@@ -53,6 +53,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B14 debug keyboard + interactive GUI checklist (`B14-debug-keyboard-gui-checklist.md`)
 - [x] B15 F9 toggle breakpoint at cursor (`B15-f9-toggle-breakpoint.md`)
 - [x] B16 cargo configs default stop_on_entry (`B16-stop-on-entry-default.md`)
+- [x] B17 smart F5 launch + installed-preview checklist (`B17-smart-f5-launch.md`)
 - [ ] Follow-on: human-filled windowed GUI journal (checklist ready)
 
 ## Phase 3 — Sandbox isolation (C)
@@ -76,6 +77,6 @@ Use before starting the next phase. Standing gates remain required for every cod
 ## Phase 5 — Program close-out
 
 - [x] Campaign closeout MD (`campaign-closeout-2026-07-22.md`)
-- [ ] Dogfood on **installed** preview build (interactive residual)
+- [ ] Dogfood on **installed** preview build (interactive residual; checklist: `dogfood/INSTALLED-PREVIEW-CHECKLIST.md`)
 - [x] Ledger rows updated only where evidence supports (PR-REL-001 remains In progress; WS-A-D cited)
 - [x] Residual cut lines listed (still no VSIX)
