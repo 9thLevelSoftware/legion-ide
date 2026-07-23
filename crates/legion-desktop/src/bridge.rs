@@ -222,6 +222,11 @@ pub enum DesktopAction {
     RefreshGit,
     /// Refresh cargo test discovery for the test explorer panel.
     RefreshTestExplorer,
+    /// Run one discovered test explorer item (cargo exact filter).
+    RunTestExplorerItem {
+        /// Discovered item id.
+        item_id: String,
+    },
     /// Switch to an existing git branch.
     SwitchGitBranch {
         /// Branch label.
@@ -1454,6 +1459,9 @@ impl DesktopCommandBridge {
             }
             DesktopAction::RefreshTestExplorer => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshTestExplorer)
+            }
+            DesktopAction::RunTestExplorerItem { item_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RunTestExplorerItem { item_id })
             }
             DesktopAction::PushGitRemote => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {

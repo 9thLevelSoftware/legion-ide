@@ -31,5 +31,5 @@ cargo test -p legion-app --lib test_explorer
 ## Follow-ons
 
 1. Prefer LSP code-lens runnables when present; fall back to cargo list.
-2. Per-item run → `TestRunSummary` + verification projection.
+2. ~~Per-item run → verification projection~~ — closed in `P2-F3-T4b-test-explorer-run.md`.
 3. Tree grouping by module path in desktop dock.
