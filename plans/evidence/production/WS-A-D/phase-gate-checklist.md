@@ -54,6 +54,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B15 F9 toggle breakpoint at cursor (`B15-f9-toggle-breakpoint.md`)
 - [x] B16 cargo configs default stop_on_entry (`B16-stop-on-entry-default.md`)
 - [x] B17 smart F5 launch + installed-preview checklist (`B17-smart-f5-launch.md`)
+- [x] B18 residual honesty through B17 (`B18-residual-honesty-b17.md`)
 - [ ] Follow-on: human-filled windowed GUI journal (checklist ready)
 
 ## Phase 3 — Sandbox isolation (C)
