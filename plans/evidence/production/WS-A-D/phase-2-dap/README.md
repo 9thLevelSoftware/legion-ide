@@ -33,8 +33,10 @@ launch/step remain residual.
 | `B14-debug-keyboard-gui-checklist.md` | F5/F10/F11 debug keys + GUI checklist |
 | `B15-f9-toggle-breakpoint.md` | F9 toggle breakpoint at cursor |
 | `B16-stop-on-entry-default.md` | Cargo locator stop_on_entry default |
+| `B17-smart-f5-launch.md` | Smart F5 launch first config |
 
 ## Residual
 
 - Human-filled windowed GUI journal (checklist + keys ready)
+- DAP adapter process sandbox wrap (needs streaming spawn API; C0 P2)
 - Sandbox wrap of adapter spawn (Phase 3 deferred)

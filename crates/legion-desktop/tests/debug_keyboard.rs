@@ -195,6 +195,52 @@ fn debug_session_f5_continue_f10_step_shift_f5_stop() {
 }
 
 #[test]
+fn f5_launches_first_config_when_idle_with_configs() {
+    let root = create_root();
+    let source = root.join("src/main.rs");
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        root.clone(),
+        Some(source.to_string_lossy().into_owned()),
+    ))
+    .expect("open");
+    runtime.enable_debug_fixture_for_tests();
+    runtime
+        .handle_action(DesktopAction::RefreshDebugConfigurations)
+        .expect("configs");
+    assert!(
+        !runtime
+            .projection_snapshot()
+            .debug_projection
+            .configurations
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .projection_snapshot()
+            .debug_projection
+            .active_session_id
+            .is_none()
+    );
+
+    let mut app = DesktopEframeApp::new(runtime);
+    let _ = app.run_headless_full_frame(key_input(egui::Key::F5, false));
+    let debug = app.runtime_snapshot().debug_projection;
+    assert!(
+        debug.active_session_id.is_some(),
+        "B17 F5 with configs should launch: {}",
+        debug.status.message
+    );
+    assert_eq!(
+        debug.status.kind,
+        DebugStatusKindProjection::Paused,
+        "fixture launch should pause: {}",
+        debug.status.message
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn f9_toggles_breakpoint_on_active_buffer_cursor_line() {
     let root = create_root();
     let source = root.join("src/main.rs");

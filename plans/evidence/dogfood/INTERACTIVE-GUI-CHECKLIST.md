@@ -37,7 +37,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 6 | Assist Auto with Ollama (if installed): streaming status then proposal | | |
 | 7 | Delegate chat: Streaming… then reply | | |
 | 8 | Git panel opens / status rows | | |
-| 9 | Debug: refresh configs; Launch (toolbar or `:debug-launch`) | | |
+| 9 | Debug: refresh configs; Launch (`F5` idle+configs, toolbar, or `:debug-launch`) | | B17 |
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
 | 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
@@ -48,7 +48,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | Action | UI | Key | Shell |
 |--------|----|-----|-------|
 | Refresh configs | Refresh configs | — | `:debug-configs` |
-| Launch | Launch | — | `:debug-launch <id>` |
+| Launch | Launch | `F5` (idle + configs) | `:debug-launch <id>` |
 | Toggle BP | — | `F9` | `:debug-breakpoint …` |
 | Continue | Continue | `F5` (session active) | `:debug-step continue` |
 | Step over | Step Over | `F10` | `:debug-step over` |
