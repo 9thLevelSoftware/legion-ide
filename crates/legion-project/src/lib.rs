@@ -508,7 +508,9 @@ pub fn discover_cargo_debug_configurations(
                 "--bin".to_string(),
                 bin,
             ],
-            stop_on_entry: false,
+            // B16: stop at entry for live system adapters so zero-config cargo
+            // debug has a deterministic first pause without a pre-set BP.
+            stop_on_entry: true,
             deterministic: true,
             schema_version: 1,
         })
