@@ -3104,6 +3104,16 @@ fn render_manual_context_inspector(
     if soft_button(ui, "Refresh tests").clicked() {
         actions.push(DesktopAction::RefreshTestExplorer);
     }
+    if let Some(item_id) = snapshot
+        .test_explorer_projection
+        .items
+        .first()
+        .map(|item| item.item_id.clone())
+    {
+        if soft_button(ui, "Run first listed test").clicked() {
+            actions.push(DesktopAction::RunTestExplorerItem { item_id });
+        }
+    }
     if soft_button(ui, "Run cargo test").clicked() {
         actions.push(DesktopAction::TerminalLaunch {
             command_label: "cargo test".to_string(),
@@ -7937,12 +7947,31 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     if explorer.status_label != "idle"
         || !explorer.items.is_empty()
         || !explorer.diagnostics.is_empty()
+        || explorer.last_run_item_id.is_some()
     {
+        let last_run = match (
+            explorer.last_run_item_id.as_deref(),
+            explorer.last_run_status.as_deref(),
+        ) {
+            (Some(id), Some(status)) => format!(
+                "{id}:{status}:exit={}:{}ms",
+                explorer
+                    .last_run_exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                explorer
+                    .last_run_duration_ms
+                    .map(|ms| ms.to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            ),
+            _ => "none".to_string(),
+        };
         rows.push(format!(
-            "test explorer: status={} controller={} items={} diagnostics={}",
+            "test explorer: status={} controller={} items={} last_run={} diagnostics={}",
             explorer.status_label,
             explorer.controller_label,
             explorer.items.len(),
+            last_run,
             if explorer.diagnostics.is_empty() {
                 "none".to_string()
             } else {

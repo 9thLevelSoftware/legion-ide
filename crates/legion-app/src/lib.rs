@@ -10404,6 +10404,11 @@ pub enum AppCommandRequest {
     RefreshDebugConfigurations,
     /// Refresh cargo test discovery for the test explorer.
     RefreshTestExplorer,
+    /// Run one discovered test explorer item (cargo exact filter).
+    RunTestExplorerItem {
+        /// Discovered item id (cargo test path).
+        item_id: String,
+    },
     /// Toggle a source breakpoint.
     ToggleDebugBreakpoint {
         /// Target buffer identifier.
@@ -10826,6 +10831,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ValidateGitCommitMessage { .. }
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::RefreshTestExplorer
+            | AppCommandRequest::RunTestExplorerItem { .. }
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
@@ -11178,6 +11184,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::RefreshTestExplorer => {
                 Ok(AppCommandRequest::RefreshTestExplorer)
+            }
+            CommandDispatchIntent::RunTestExplorerItem { item_id } => {
+                Ok(AppCommandRequest::RunTestExplorerItem { item_id })
             }
             CommandDispatchIntent::ToggleDebugBreakpoint {
                 buffer_id,
@@ -14880,6 +14889,7 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
         "refresh-tests" => Some(CommandDispatchIntent::RefreshTestExplorer),
+        "run-test" => None, // requires item id via :test-run <id>
         "git-switch-branch" => None,
         "git-create-branch" => None,
         "git-delete-branch" => None,
@@ -15745,6 +15755,8 @@ pub struct AppComposition {
     debug_workflow: DebugWorkflow,
     /// Cargo test discovery projection (P2.F3.T4 thin slice).
     test_explorer_projection: TestExplorerProjection,
+    /// Recent per-item cargo test runs (metadata-only verification rows).
+    test_explorer_recent_runs: Vec<legion_protocol::VerificationRunRow>,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
@@ -16007,6 +16019,7 @@ impl AppComposition {
             local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
             test_explorer_projection: TestExplorerProjection::empty(),
+            test_explorer_recent_runs: Vec::new(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
@@ -18928,6 +18941,10 @@ impl AppComposition {
             }
             AppCommandRequest::RefreshTestExplorer => {
                 let projection = self.refresh_test_explorer()?;
+                Ok(AppCommandOutcome::TestExplorerUpdated(projection))
+            }
+            AppCommandRequest::RunTestExplorerItem { item_id } => {
+                let projection = self.run_test_explorer_item(&item_id)?;
                 Ok(AppCommandOutcome::TestExplorerUpdated(projection))
             }
             AppCommandRequest::ToggleDebugBreakpoint {
@@ -22819,10 +22836,9 @@ impl AppComposition {
         delegated_task_projection: &DelegatedTaskProjection,
         generated_at: TimestampMillis,
     ) -> legion_protocol::VerificationRunProjection {
-        let rows = delegated_task_projection
-            .plan_rows
-            .iter()
-            .map(|plan| legion_protocol::VerificationRunRow {
+        let mut rows = self.test_explorer_recent_runs.clone();
+        rows.extend(delegated_task_projection.plan_rows.iter().map(|plan| {
+            legion_protocol::VerificationRunRow {
                 run_id: format!("verification:{}", plan.plan_id.0),
                 label: "Required delegated-task verification".to_string(),
                 state: if plan.readiness
@@ -22844,8 +22860,8 @@ impl AppComposition {
                 privacy_label: plan.privacy_label,
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
-            })
-            .collect::<Vec<_>>();
+            }
+        }));
         legion_protocol::VerificationRunProjection {
             projection_id: "verification-runs:app-shell".to_string(),
             rows,
@@ -24467,13 +24483,52 @@ impl AppComposition {
     /// Refresh cargo-test discovery for the test explorer panel (P2.F3.T4).
     ///
     /// Requires an open workspace. Does not execute tests — list-only.
+    /// Preserves last-run metadata from a prior per-item run.
     pub fn refresh_test_explorer(&mut self) -> Result<TestExplorerProjection, AppCompositionError> {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
             return Err(AppCompositionError::WorkspaceNotOpen);
         };
-        let projection = test_explorer::discover_cargo_tests(
+        let prior = self.test_explorer_projection.clone();
+        let mut projection = test_explorer::discover_cargo_tests(
             Path::new(root_path),
             test_explorer::DEFAULT_DISCOVER_TIMEOUT,
+            TimestampMillis::now(),
+        );
+        projection.last_run_item_id = prior.last_run_item_id;
+        projection.last_run_status = prior.last_run_status;
+        projection.last_run_exit_code = prior.last_run_exit_code;
+        projection.last_run_duration_ms = prior.last_run_duration_ms;
+        self.test_explorer_projection = projection.clone();
+        Ok(projection)
+    }
+
+    /// Run one discovered test via `cargo test -- --exact <item_id>` (P2.F3.T4b).
+    ///
+    /// Metadata-only: exit code + summary counts; raw logs are not retained.
+    pub fn run_test_explorer_item(
+        &mut self,
+        item_id: &str,
+    ) -> Result<TestExplorerProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        if let Err(reason) = test_explorer::validate_test_item_id(item_id) {
+            return Err(AppCompositionError::LanguageTooling(format!(
+                "invalid test item id: {reason}"
+            )));
+        }
+        let started_at = TimestampMillis::now();
+        let result = test_explorer::run_cargo_test_item(
+            Path::new(root_path),
+            item_id.trim(),
+            test_explorer::DEFAULT_RUN_TIMEOUT,
+        )
+        .map_err(AppCompositionError::LanguageTooling)?;
+        let row = result.to_verification_row(started_at);
+        test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+        let projection = test_explorer::apply_run_to_projection(
+            self.test_explorer_projection.clone(),
+            &result,
             TimestampMillis::now(),
         );
         self.test_explorer_projection = projection.clone();

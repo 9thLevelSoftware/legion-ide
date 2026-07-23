@@ -1899,10 +1899,10 @@ pub struct TestExplorerItemProjection {
     pub parent_label: Option<String>,
 }
 
-/// Projection-only test explorer surface (P2.F3.T4 discovery substrate).
+/// Projection-only test explorer surface (P2.F3.T4 discovery + run substrate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestExplorerProjection {
-    /// Status label (`idle`, `ready`, `empty`, `error`, `timeout`).
+    /// Status label (`idle`, `ready`, `empty`, `error`, `timeout`, `running`).
     pub status_label: String,
     /// Controller label (e.g. `cargo-test`).
     pub controller_label: String,
@@ -1910,6 +1910,14 @@ pub struct TestExplorerProjection {
     pub items: Vec<TestExplorerItemProjection>,
     /// Display-safe diagnostics (timeouts, caps, spawn failures).
     pub diagnostics: Vec<String>,
+    /// Last run item id when a per-item run completed.
+    pub last_run_item_id: Option<String>,
+    /// Last run status label (`passed`, `failed`, `timeout`, `error`, `empty`).
+    pub last_run_status: Option<String>,
+    /// Last run process exit code when available.
+    pub last_run_exit_code: Option<i32>,
+    /// Last run duration in milliseconds.
+    pub last_run_duration_ms: Option<u64>,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Projection schema version.
@@ -1924,6 +1932,10 @@ impl TestExplorerProjection {
             controller_label: "cargo-test".to_string(),
             items: Vec::new(),
             diagnostics: Vec::new(),
+            last_run_item_id: None,
+            last_run_status: None,
+            last_run_exit_code: None,
+            last_run_duration_ms: None,
             generated_at: TimestampMillis(0),
             schema_version: 1,
         }
@@ -2722,6 +2734,11 @@ pub enum CommandDispatchIntent {
     RefreshDebugConfigurations,
     /// Refresh test explorer discovery (cargo test --list).
     RefreshTestExplorer,
+    /// Run one discovered test explorer item via cargo exact filter.
+    RunTestExplorerItem {
+        /// Discovered item id (cargo test path).
+        item_id: String,
+    },
 
     /// Toggle a breakpoint or configure a logpoint/conditional breakpoint.
     ToggleDebugBreakpoint {
@@ -4498,6 +4515,16 @@ impl Shell {
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::RefreshTestExplorer),
             ));
+        }
+        if let Some(item_id) = trimmed.strip_prefix(":test-run ") {
+            let item_id = item_id.trim();
+            if !item_id.is_empty() {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::RunTestExplorerItem {
+                        item_id: item_id.to_string(),
+                    },
+                )));
+            }
         }
         if let Some(branch) = trimmed.strip_prefix(":git-switch-branch ") {
             return Ok(Some(self.push_intent(
