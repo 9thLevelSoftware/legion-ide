@@ -1886,6 +1886,56 @@ impl Default for DebugProjection {
     }
 }
 
+/// One discovered test or benchmark row (metadata-only; no run output).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestExplorerItemProjection {
+    /// Stable item id (typically the full cargo test path).
+    pub item_id: String,
+    /// Display leaf label.
+    pub label: String,
+    /// Kind label (`test` or `bench`).
+    pub kind_label: String,
+    /// Optional parent module path label.
+    pub parent_label: Option<String>,
+}
+
+/// Projection-only test explorer surface (P2.F3.T4 discovery substrate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestExplorerProjection {
+    /// Status label (`idle`, `ready`, `empty`, `error`, `timeout`).
+    pub status_label: String,
+    /// Controller label (e.g. `cargo-test`).
+    pub controller_label: String,
+    /// Discovered items (capped).
+    pub items: Vec<TestExplorerItemProjection>,
+    /// Display-safe diagnostics (timeouts, caps, spawn failures).
+    pub diagnostics: Vec<String>,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMillis,
+    /// Projection schema version.
+    pub schema_version: u16,
+}
+
+impl TestExplorerProjection {
+    /// Construct an idle empty test explorer projection.
+    pub fn empty() -> Self {
+        Self {
+            status_label: "idle".to_string(),
+            controller_label: "cargo-test".to_string(),
+            items: Vec::new(),
+            diagnostics: Vec::new(),
+            generated_at: TimestampMillis(0),
+            schema_version: 1,
+        }
+    }
+}
+
+impl Default for TestExplorerProjection {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// Projection-only metadata row for a supervised language-server health record.
 ///
 /// No authority. All fields are display-safe labels derived from protocol metadata.
@@ -2670,6 +2720,8 @@ pub enum CommandDispatchIntent {
     },
     /// Refresh debugger configuration projections.
     RefreshDebugConfigurations,
+    /// Refresh test explorer discovery (cargo test --list).
+    RefreshTestExplorer,
 
     /// Toggle a breakpoint or configure a logpoint/conditional breakpoint.
     ToggleDebugBreakpoint {
@@ -3348,6 +3400,8 @@ pub struct ShellProjectionSnapshot {
     pub git_projection: GitProjection,
     /// Debugger projection supplied by the application layer.
     pub debug_projection: DebugProjection,
+    /// Test explorer projection supplied by the application layer.
+    pub test_explorer_projection: TestExplorerProjection,
     /// Language tooling projection supplied by the application layer.
     pub language_tooling_projection: LanguageToolingProjection,
     /// Terminal panel projection supplied by the application layer.
@@ -3451,6 +3505,8 @@ pub struct Shell {
     pub git_projection: GitProjection,
     /// Static debugger projection.
     pub debug_projection: DebugProjection,
+    /// Static test explorer projection.
+    pub test_explorer_projection: TestExplorerProjection,
     /// Static language tooling projection.
     pub language_tooling_projection: LanguageToolingProjection,
     /// Static terminal panel projection.
@@ -3498,6 +3554,7 @@ impl Shell {
             structural_search_projection: snapshot.structural_search_projection,
             git_projection: snapshot.git_projection,
             debug_projection: snapshot.debug_projection,
+            test_explorer_projection: snapshot.test_explorer_projection,
             language_tooling_projection: snapshot.language_tooling_projection,
             terminal_panel_projection: snapshot.terminal_panel_projection,
             command_dispatch_intents: Vec::new(),
@@ -3545,6 +3602,7 @@ impl Shell {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         })
@@ -3590,6 +3648,7 @@ impl Shell {
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
             debug_projection: self.debug_projection.clone(),
+            test_explorer_projection: self.test_explorer_projection.clone(),
             language_tooling_projection: self.language_tooling_projection.clone(),
             terminal_panel_projection: self.terminal_panel_projection.clone(),
         }
@@ -3633,6 +3692,7 @@ impl Shell {
         self.structural_search_projection = snapshot.structural_search_projection;
         self.git_projection = snapshot.git_projection;
         self.debug_projection = snapshot.debug_projection;
+        self.test_explorer_projection = snapshot.test_explorer_projection;
         self.language_tooling_projection = snapshot.language_tooling_projection;
         self.terminal_panel_projection = snapshot.terminal_panel_projection;
     }
@@ -4433,6 +4493,11 @@ impl Shell {
         }
         if trimmed == ":git-refresh" {
             return Ok(Some(self.push_intent(CommandDispatchIntent::RefreshGit)));
+        }
+        if trimmed == ":test-refresh" || trimmed == ":tests-refresh" {
+            return Ok(Some(
+                self.push_intent(CommandDispatchIntent::RefreshTestExplorer),
+            ));
         }
         if let Some(branch) = trimmed.strip_prefix(":git-switch-branch ") {
             return Ok(Some(self.push_intent(
@@ -6232,6 +6297,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -6350,6 +6416,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -6527,6 +6594,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -6604,6 +6672,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -6675,6 +6744,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -6917,6 +6987,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -7013,6 +7084,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -7144,6 +7216,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -7237,6 +7310,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -7394,6 +7468,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });
@@ -7499,6 +7574,7 @@ mod tests {
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling_projection: LanguageToolingProjection::empty(),
             terminal_panel_projection: TerminalPanelProjection::empty(),
         });

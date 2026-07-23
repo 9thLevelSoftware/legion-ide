@@ -47,6 +47,7 @@ pub mod proposal;
 
 /// App-side support-bundle surface: list crash reports, build metadata-only or raw exports.
 pub mod diagnostics;
+pub mod test_explorer;
 
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
 pub use legion_storage::checkpoint::DurableCheckpointSummary;
@@ -229,8 +230,8 @@ use legion_ui::ui::{
     PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
     SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
     SearchStatusProjection, SettingsProjection, StructuralSearchCaptureProjection,
-    StructuralSearchMatchProjection, StructuralSearchProjection, ThemePreferenceProjection,
-    ToastVerbosityProjection, WorkspaceSessionRecordProjection,
+    StructuralSearchMatchProjection, StructuralSearchProjection, TestExplorerProjection,
+    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
@@ -10401,6 +10402,8 @@ pub enum AppCommandRequest {
     },
     /// Refresh debug launch configurations and persisted breakpoints.
     RefreshDebugConfigurations,
+    /// Refresh cargo test discovery for the test explorer.
+    RefreshTestExplorer,
     /// Toggle a source breakpoint.
     ToggleDebugBreakpoint {
         /// Target buffer identifier.
@@ -10822,6 +10825,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ExportWorktreeEvidence
             | AppCommandRequest::ValidateGitCommitMessage { .. }
             | AppCommandRequest::RefreshDebugConfigurations
+            | AppCommandRequest::RefreshTestExplorer
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
@@ -11171,6 +11175,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::RefreshDebugConfigurations => {
                 Ok(AppCommandRequest::RefreshDebugConfigurations)
+            }
+            CommandDispatchIntent::RefreshTestExplorer => {
+                Ok(AppCommandRequest::RefreshTestExplorer)
             }
             CommandDispatchIntent::ToggleDebugBreakpoint {
                 buffer_id,
@@ -13771,6 +13778,8 @@ pub enum AppCommandOutcome {
     GitUpdated(GitProjection),
     /// Debug projection changed.
     DebugProjectionUpdated(DebugProjection),
+    /// Test explorer projection changed.
+    TestExplorerUpdated(TestExplorerProjection),
     /// Language tooling projection changed.
     LanguageToolingUpdated(LanguageToolingProjection),
     /// Assist inline prediction projection changed.
@@ -14870,6 +14879,7 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "save-all" => Some(CommandDispatchIntent::SaveAll),
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "refresh-tests" => Some(CommandDispatchIntent::RefreshTestExplorer),
         "git-switch-branch" => None,
         "git-create-branch" => None,
         "git-delete-branch" => None,
@@ -15733,6 +15743,8 @@ pub struct AppComposition {
     /// Last blob-write error, if any, propagated as a degraded-mode diagnostic.
     local_history_last_write_error: Option<String>,
     debug_workflow: DebugWorkflow,
+    /// Cargo test discovery projection (P2.F3.T4 thin slice).
+    test_explorer_projection: TestExplorerProjection,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
@@ -15994,6 +16006,7 @@ impl AppComposition {
             local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
             local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
+            test_explorer_projection: TestExplorerProjection::empty(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
@@ -18912,6 +18925,10 @@ impl AppComposition {
                     .debug_workflow
                     .refresh_configurations(context, Path::new(root_path))?;
                 Ok(AppCommandOutcome::DebugProjectionUpdated(projection))
+            }
+            AppCommandRequest::RefreshTestExplorer => {
+                let projection = self.refresh_test_explorer()?;
+                Ok(AppCommandOutcome::TestExplorerUpdated(projection))
             }
             AppCommandRequest::ToggleDebugBreakpoint {
                 buffer_id,
@@ -24447,6 +24464,22 @@ impl AppComposition {
         self.search_projection.clone()
     }
 
+    /// Refresh cargo-test discovery for the test explorer panel (P2.F3.T4).
+    ///
+    /// Requires an open workspace. Does not execute tests — list-only.
+    pub fn refresh_test_explorer(&mut self) -> Result<TestExplorerProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        let projection = test_explorer::discover_cargo_tests(
+            Path::new(root_path),
+            test_explorer::DEFAULT_DISCOVER_TIMEOUT,
+            TimestampMillis::now(),
+        );
+        self.test_explorer_projection = projection.clone();
+        Ok(projection)
+    }
+
     /// Refresh app-owned git projection data for the active workspace.
     pub fn refresh_git_projection(&mut self) -> GitProjection {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -27671,6 +27704,7 @@ impl AppComposition {
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
             debug_projection: self.debug_workflow.projection(),
+            test_explorer_projection: self.test_explorer_projection.clone(),
             language_tooling_projection: {
                 // D2: inject live LSP health records from the background session handle.
                 // PKT-LSP-C T3: also inject session lifecycle status (backoff countdown etc).
