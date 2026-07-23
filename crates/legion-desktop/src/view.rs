@@ -3109,10 +3109,9 @@ fn render_manual_context_inspector(
         .items
         .first()
         .map(|item| item.item_id.clone())
+        && soft_button(ui, "Run first listed test").clicked()
     {
-        if soft_button(ui, "Run first listed test").clicked() {
-            actions.push(DesktopAction::RunTestExplorerItem { item_id });
-        }
+        actions.push(DesktopAction::RunTestExplorerItem { item_id });
     }
     if soft_button(ui, "Run cargo test").clicked() {
         actions.push(DesktopAction::TerminalLaunch {
