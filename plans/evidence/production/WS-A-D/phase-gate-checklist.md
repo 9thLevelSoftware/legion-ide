@@ -48,6 +48,7 @@ Use before starting the next phase. Standing gates remain required for every cod
 - [x] B9 system adapter dogfood path (`B9-system-adapter-dogfood.md`; optional handshake, `LEGION_DAP_DOGFOOD=1`)
 - [x] B10 headless continue → auto-poll dogfood (`B10-headless-continue-auto-poll.md`)
 - [x] B11 debug toolbar + residual honesty refresh (`B11-debug-controls-honesty.md`)
+- [x] B12 live DAP cargo prebuild for non-fake launches (`B12-live-prebuild-cargo.md`)
 - [ ] Follow-on: human windowed GUI journal; full launch/step vs system debugee
 
 ## Phase 3 — Sandbox isolation (C)
