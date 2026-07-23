@@ -32,6 +32,7 @@ launch/step remain residual.
 | `B13-system-launch-step-dogfood.md` | Optional system launch+step dogfood |
 | `B14-debug-keyboard-gui-checklist.md` | F5/F10/F11 debug keys + GUI checklist |
 | `B15-f9-toggle-breakpoint.md` | F9 toggle breakpoint at cursor |
+| `B16-stop-on-entry-default.md` | Cargo locator stop_on_entry default |
 
 ## Residual
 

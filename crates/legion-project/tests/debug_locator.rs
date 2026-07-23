@@ -95,6 +95,10 @@ path = "src/bin/admin.rs"
             .ends_with("target/debug/sample-app")
     );
     assert!(package_bin.deterministic);
+    assert!(
+        package_bin.stop_on_entry,
+        "B16: cargo locator should stop on entry for live adapters"
+    );
 
     assert!(configs.iter().any(|config| {
         config.configuration_id.0 == "cargo:sample-app:bin:admin-tool"
