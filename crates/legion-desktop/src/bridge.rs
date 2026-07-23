@@ -220,6 +220,8 @@ pub enum DesktopAction {
     RefreshExplorer,
     /// Refresh git status, syntactic diff, blame, graph, and conflict projections.
     RefreshGit,
+    /// Refresh cargo test discovery for the test explorer panel.
+    RefreshTestExplorer,
     /// Switch to an existing git branch.
     SwitchGitBranch {
         /// Branch label.
@@ -1449,6 +1451,9 @@ impl DesktopCommandBridge {
             }
             DesktopAction::RefreshGit => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshGit)
+            }
+            DesktopAction::RefreshTestExplorer => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RefreshTestExplorer)
             }
             DesktopAction::PushGitRemote => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {

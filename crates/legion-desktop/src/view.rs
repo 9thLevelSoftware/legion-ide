@@ -3101,6 +3101,9 @@ fn render_manual_context_inspector(
     render_compact_rows(ui, &model.language_rows, "No language symbols", 5);
     section_label(ui, "Tests", Some(theme::tokens().accent.green));
     render_compact_rows(ui, &model.test_rows, "No projected test explorer", 6);
+    if soft_button(ui, "Refresh tests").clicked() {
+        actions.push(DesktopAction::RefreshTestExplorer);
+    }
     if soft_button(ui, "Run cargo test").clicked() {
         actions.push(DesktopAction::TerminalLaunch {
             command_label: "cargo test".to_string(),
@@ -7923,6 +7926,7 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let verification = &snapshot.verification_run_projection;
+    let explorer = &snapshot.test_explorer_projection;
     let runnable_lenses = snapshot
         .language_tooling_projection
         .code_lenses
@@ -7930,6 +7934,29 @@ fn test_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .filter(|lens| lens.kind_label.contains("runnable"))
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
+    if explorer.status_label != "idle"
+        || !explorer.items.is_empty()
+        || !explorer.diagnostics.is_empty()
+    {
+        rows.push(format!(
+            "test explorer: status={} controller={} items={} diagnostics={}",
+            explorer.status_label,
+            explorer.controller_label,
+            explorer.items.len(),
+            if explorer.diagnostics.is_empty() {
+                "none".to_string()
+            } else {
+                explorer.diagnostics.join(",")
+            }
+        ));
+        rows.extend(explorer.items.iter().take(24).map(|item| {
+            let parent = item.parent_label.as_deref().unwrap_or("<root>");
+            format!(
+                "item {}: kind={} parent={} label={}",
+                item.item_id, item.kind_label, parent, item.label
+            )
+        }));
+    }
     if !verification.rows.is_empty() || !runnable_lenses.is_empty() {
         rows.push(format!(
             "test explorer: verification_runs={} runnable_lenses={} omitted={} projection={}",

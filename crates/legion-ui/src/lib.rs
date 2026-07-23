@@ -30,6 +30,7 @@ pub use ui::{
     SearchStatusProjection, SettingsProjection, Shell, ShellCommandError, ShellLayoutProjection,
     ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
     StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    TOAST_VISIBLE_LIMIT, ThemePreferenceProjection, ToastActionProjection, ToastProjection,
-    ToastStackProjection, ToastVerbosityProjection, project_lsp_health,
+    TOAST_VISIBLE_LIMIT, TestExplorerItemProjection, TestExplorerProjection,
+    ThemePreferenceProjection, ToastActionProjection, ToastProjection, ToastStackProjection,
+    ToastVerbosityProjection, project_lsp_health,
 };

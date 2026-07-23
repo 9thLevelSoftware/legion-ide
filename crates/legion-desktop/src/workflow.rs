@@ -355,6 +355,8 @@ pub enum DesktopWorkflowOutcome {
     GitUpdated,
     /// Debug projection changed through app authority.
     DebugProjectionUpdated,
+    /// Test explorer projection changed through app authority.
+    TestExplorerUpdated,
     /// Language tooling projection changed through app authority.
     LanguageToolingUpdated,
     /// Assist inline prediction projection changed through app authority.
@@ -2381,6 +2383,17 @@ impl DesktopRuntime {
                     format!("Debug: {}", projection.status.message),
                 );
                 DesktopWorkflowOutcome::DebugProjectionUpdated
+            }
+            AppCommandOutcome::TestExplorerUpdated(projection) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Tests: {} ({} items)",
+                        projection.status_label,
+                        projection.items.len()
+                    ),
+                );
+                DesktopWorkflowOutcome::TestExplorerUpdated
             }
             AppCommandOutcome::LanguageToolingUpdated(projection) => {
                 self.set_status(
