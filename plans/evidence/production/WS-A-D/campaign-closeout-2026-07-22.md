@@ -35,7 +35,7 @@ https://github.com/9thLevelSoftware/legion-ide/actions/runs/29887799213
 | ~~Non-blocking continue + desktop auto-poll~~ | B | **Closed** B7–B8; B10 headless dogfood |
 | ~~System adapter launch/step dogfood path~~ | B | **Closed** B12–B13 (`LEGION_DAP_DOGFOOD=1`); host LLDB quality not guaranteed |
 | ~~Debug product keys / toolbar / smart F5~~ | B | **Closed** B11, B14–B17 |
-| DAP adapter sandbox wrap | C | Deferred — needs long-lived piped spawn API (C0 P2) |
+| ~~DAP adapter sandbox wrap~~ | C | **Closed** C4 `spawn_sandboxed_stdio` for non-fake live adapters (Windows job-only residual unchanged) |
 | Windows FS/network OS isolation beyond job object | C | C2 residual accepted honest |
 | OS installer formats (MSI/DMG/deb) + D2.1 signing | D | Portable zip/tar.gz only |
 | Hosted update feed D3.1 | D | Local `update-drill` only |
@@ -54,7 +54,7 @@ https://github.com/9thLevelSoftware/legion-ide/actions/runs/29887799213
 2. Optional: re-run `LEGION_DAP_DOGFOOD=1` system adapter tests when a working host LLDB is available.
 3. D2.1 / D3.1 when CI secrets + staging hosting are available.
 4. Optional D4.1 fresh-VM matrix when installers exist.
-5. DAP adapter sandbox wrap only after a streaming/sandboxed-stdio spawn API exists.
+5. Optional: tighten Windows FS isolation for DAP beyond job-object (still residual).
 
 ## Sign-off
 
