@@ -14,12 +14,11 @@
 | UI | Manual Context **Tests** panel shows discovered rows |
 | Cap | 500 items max with omission diagnostic |
 
-## Explicit non-claims
+## Explicit non-claims (original slice)
 
-- Does **not** run tests from the explorer (still "Run cargo test" terminal launch).
-- Does **not** use LSP runnables yet (kanban stop condition prefers LSP when available).
+- Original slice was list-only; later slices added run/LSP/tree (see follow-ons).
 - Does **not** flip **PR-LANG-002** off Substrate validated.
-- Windows/macOS/Linux: discovery depends on local `cargo` on PATH.
+- Windows/macOS/Linux: cargo discovery depends on local `cargo` on PATH.
 
 ## Verification
 
@@ -32,4 +31,4 @@ cargo test -p legion-app --lib test_explorer
 
 1. ~~Prefer LSP code-lens runnables when present; fall back to cargo list~~ — closed in `P2-F3-T4c-lsp-runnable-preference.md`.
 2. ~~Per-item run → verification projection~~ — closed in `P2-F3-T4b-test-explorer-run.md`.
-3. Tree grouping by module path in desktop dock.
+3. ~~Tree grouping by module path in desktop dock~~ — closed in `P2-F3-T4d-test-explorer-tree.md`.
