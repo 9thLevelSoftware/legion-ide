@@ -58,6 +58,7 @@ pub use proposal::proposal_risk_rule_ids_from_coverage;
 use legion_collaboration::{CollaborationRuntimeConfig, CollaborationSessionRuntime};
 use legion_debug::{
     DapClientConfig, DapClientOutcome, DapClientRuntime, LiveDapSession, resolve_live_adapter,
+    test_run_summary_evidence,
 };
 use legion_editor::{
     BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
@@ -10409,6 +10410,11 @@ pub enum AppCommandRequest {
         /// Discovered item id (cargo test path).
         item_id: String,
     },
+    /// Run all tests under a module/group path (cargo substring filter).
+    RunTestExplorerGroup {
+        /// Parent module path label.
+        parent_label: String,
+    },
     /// Toggle a source breakpoint.
     ToggleDebugBreakpoint {
         /// Target buffer identifier.
@@ -10832,6 +10838,7 @@ impl CommandExecutionService {
             | AppCommandRequest::RefreshDebugConfigurations
             | AppCommandRequest::RefreshTestExplorer
             | AppCommandRequest::RunTestExplorerItem { .. }
+            | AppCommandRequest::RunTestExplorerGroup { .. }
             | AppCommandRequest::ToggleDebugBreakpoint { .. }
             | AppCommandRequest::LaunchDebugSession { .. }
             | AppCommandRequest::DebugStep { .. }
@@ -11187,6 +11194,9 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::RunTestExplorerItem { item_id } => {
                 Ok(AppCommandRequest::RunTestExplorerItem { item_id })
+            }
+            CommandDispatchIntent::RunTestExplorerGroup { parent_label } => {
+                Ok(AppCommandRequest::RunTestExplorerGroup { parent_label })
             }
             CommandDispatchIntent::ToggleDebugBreakpoint {
                 buffer_id,
@@ -15757,6 +15767,8 @@ pub struct AppComposition {
     test_explorer_projection: TestExplorerProjection,
     /// Recent per-item cargo test runs (metadata-only verification rows).
     test_explorer_recent_runs: Vec<legion_protocol::VerificationRunRow>,
+    /// Recent protocol test-run summaries for agent evidence (P2.F3.T5).
+    test_explorer_run_summaries: Vec<legion_protocol::TestRunSummary>,
     language_tooling: LanguageToolingWorkflow,
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
@@ -16020,6 +16032,7 @@ impl AppComposition {
             debug_workflow: DebugWorkflow::default(),
             test_explorer_projection: TestExplorerProjection::empty(),
             test_explorer_recent_runs: Vec::new(),
+            test_explorer_run_summaries: Vec::new(),
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
@@ -18955,6 +18968,10 @@ impl AppComposition {
             }
             AppCommandRequest::RunTestExplorerItem { item_id } => {
                 let projection = self.run_test_explorer_item(&item_id)?;
+                Ok(AppCommandOutcome::TestExplorerUpdated(projection))
+            }
+            AppCommandRequest::RunTestExplorerGroup { parent_label } => {
+                let projection = self.run_test_explorer_group(&parent_label)?;
                 Ok(AppCommandOutcome::TestExplorerUpdated(projection))
             }
             AppCommandRequest::ToggleDebugBreakpoint {
@@ -24570,6 +24587,8 @@ impl AppComposition {
             row.state = legion_protocol::VerificationRunState::Running;
             row.label = format!("lsp runnable {item_id}");
             test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+            let summary = result.to_test_run_summary(started_at);
+            test_explorer::push_test_run_summary(&mut self.test_explorer_run_summaries, summary);
             let projection = test_explorer::apply_run_to_projection(
                 self.test_explorer_projection.clone(),
                 &result,
@@ -24591,8 +24610,7 @@ impl AppComposition {
             test_explorer::DEFAULT_RUN_TIMEOUT,
         )
         .map_err(AppCompositionError::LanguageTooling)?;
-        let row = result.to_verification_row(started_at);
-        test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+        self.record_test_explorer_run_result(&result, started_at);
         let projection = test_explorer::apply_run_to_projection(
             self.test_explorer_projection.clone(),
             &result,
@@ -24600,6 +24618,74 @@ impl AppComposition {
         );
         self.test_explorer_projection = projection.clone();
         Ok(projection)
+    }
+
+    /// Run all cargo tests matching a module/group path (P2.F3.T4e).
+    ///
+    /// Uses substring filter (not `--exact`) so parent paths include children.
+    pub fn run_test_explorer_group(
+        &mut self,
+        parent_label: &str,
+    ) -> Result<TestExplorerProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        if let Err(reason) = test_explorer::validate_test_item_id(parent_label) {
+            return Err(AppCompositionError::LanguageTooling(format!(
+                "invalid test group id: {reason}"
+            )));
+        }
+        let started_at = TimestampMillis::now();
+        let result = test_explorer::run_cargo_test_group(
+            Path::new(root_path),
+            parent_label.trim(),
+            test_explorer::DEFAULT_RUN_TIMEOUT,
+        )
+        .map_err(AppCompositionError::LanguageTooling)?;
+        let mut row = result.to_verification_row(started_at);
+        row.command_class_label = "cargo-test-group".to_string();
+        row.label = format!("cargo-test group {parent_label}");
+        test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+        let summary = result.to_test_run_summary(started_at);
+        test_explorer::push_test_run_summary(&mut self.test_explorer_run_summaries, summary);
+        let projection = test_explorer::apply_run_to_projection(
+            self.test_explorer_projection.clone(),
+            &result,
+            TimestampMillis::now(),
+        );
+        self.test_explorer_projection = projection.clone();
+        Ok(projection)
+    }
+
+    fn record_test_explorer_run_result(
+        &mut self,
+        result: &test_explorer::CargoTestItemRunResult,
+        started_at: TimestampMillis,
+    ) {
+        let row = result.to_verification_row(started_at);
+        test_explorer::push_recent_run(&mut self.test_explorer_recent_runs, row);
+        let summary = result.to_test_run_summary(started_at);
+        test_explorer::push_test_run_summary(&mut self.test_explorer_run_summaries, summary);
+    }
+
+    /// Protocol test-run summaries from the explorer (newest first; capped).
+    pub fn test_explorer_run_summaries(&self) -> &[legion_protocol::TestRunSummary] {
+        &self.test_explorer_run_summaries
+    }
+
+    /// Metadata-only evidence artifacts for recent explorer runs (P2.F3.T5).
+    ///
+    /// Suitable for agent consumption: no raw logs or stack traces.
+    pub fn test_explorer_evidence_artifacts(
+        &self,
+    ) -> Result<Vec<legion_protocol::EvidenceArtifact>, String> {
+        let generated_at = TimestampMillis::now();
+        self.test_explorer_run_summaries
+            .iter()
+            .map(|summary| {
+                test_run_summary_evidence(summary, generated_at).map_err(|err| err.to_string())
+            })
+            .collect()
     }
 
     /// Refresh app-owned git projection data for the active workspace.

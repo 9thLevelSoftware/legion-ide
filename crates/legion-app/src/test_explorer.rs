@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use legion_protocol::{
-    ProposalPrivacyLabel, ProposalRiskLabel, RedactionHint, TimestampMillis, VerificationRunRow,
-    VerificationRunState,
+    ProposalPrivacyLabel, ProposalRiskLabel, RedactionHint, TestControllerId, TestRunId,
+    TestRunState, TestRunSummary, TimestampMillis, VerificationRunRow, VerificationRunState,
 };
 use legion_ui::{TestExplorerItemProjection, TestExplorerProjection};
 
@@ -183,6 +183,33 @@ pub struct CargoTestItemRunResult {
 }
 
 impl CargoTestItemRunResult {
+    /// Map status label to protocol test-run state.
+    pub fn test_run_state(&self) -> TestRunState {
+        match self.status_label.as_str() {
+            "passed" => TestRunState::Passed,
+            "failed" => TestRunState::Failed,
+            "timeout" | "empty" => TestRunState::Skipped,
+            "launched" | "running" => TestRunState::Running,
+            _ => TestRunState::Errored,
+        }
+    }
+
+    /// Map to a protocol [`TestRunSummary`] (metadata counts only; no raw logs).
+    pub fn to_test_run_summary(&self, started_at: TimestampMillis) -> TestRunSummary {
+        let run_id = TestRunId(format!("test-explorer:{}:{}", self.item_id, started_at.0));
+        TestRunSummary {
+            run_id,
+            controller_id: TestControllerId("cargo-test".to_string()),
+            state: self.test_run_state(),
+            passed: self.passed,
+            failed: self.failed,
+            skipped: self.skipped,
+            errored: u32::from(self.status_label == "error" || self.status_label == "timeout"),
+            duration_ms: self.duration_ms,
+            schema_version: 1,
+        }
+    }
+
     /// Map to a metadata-only verification run row (no raw command body).
     pub fn to_verification_row(&self, started_at: TimestampMillis) -> VerificationRunRow {
         let state = match self.status_label.as_str() {
@@ -194,15 +221,16 @@ impl CargoTestItemRunResult {
             _ => VerificationRunState::Failed,
         };
         let completed_at = TimestampMillis(started_at.0.saturating_add(self.duration_ms));
+        let summary = self.to_test_run_summary(started_at);
         VerificationRunRow {
-            run_id: format!("test-explorer:{}:{}", self.item_id, started_at.0),
-            label: format!("cargo-test exact {}", self.item_id),
+            run_id: summary.run_id.0.clone(),
+            label: format!("cargo-test {}", self.item_id),
             state,
             command_class_label: "cargo-test-exact".to_string(),
             command_body_redacted: true,
             exit_code: self.exit_code,
             target_labels: vec![self.item_id.clone()],
-            evidence_artifact_id: None,
+            evidence_artifact_id: Some(format!("artifact:evidence:test-run:{}", summary.run_id.0)),
             started_at: Some(started_at),
             completed_at: Some(completed_at),
             risk_label: ProposalRiskLabel::Low,
@@ -243,17 +271,38 @@ fn extract_count(line: &str, label: &str) -> u32 {
 }
 
 /// Run one discovered test with `cargo test -- --exact <item_id>`.
-///
-/// Stdio is captured only to parse the summary line; raw output is dropped.
 pub fn run_cargo_test_item(
     workspace_root: &Path,
     item_id: &str,
     timeout: Duration,
 ) -> Result<CargoTestItemRunResult, String> {
-    validate_test_item_id(item_id)?;
+    run_cargo_test_filter(workspace_root, item_id, true, timeout)
+}
+
+/// Run all tests matching a module/group filter (`cargo test <filter>`).
+///
+/// Filter is validated like an item id; no shell interpolation.
+pub fn run_cargo_test_group(
+    workspace_root: &Path,
+    parent_label: &str,
+    timeout: Duration,
+) -> Result<CargoTestItemRunResult, String> {
+    run_cargo_test_filter(workspace_root, parent_label, false, timeout)
+}
+
+/// Run cargo tests with either exact match or substring filter.
+///
+/// Stdio is captured only to parse the summary line; raw output is dropped.
+pub fn run_cargo_test_filter(
+    workspace_root: &Path,
+    filter: &str,
+    exact: bool,
+    timeout: Duration,
+) -> Result<CargoTestItemRunResult, String> {
+    validate_test_item_id(filter)?;
     if !workspace_root.is_dir() {
         return Ok(CargoTestItemRunResult {
-            item_id: item_id.to_string(),
+            item_id: filter.to_string(),
             status_label: "error".to_string(),
             exit_code: None,
             passed: 0,
@@ -265,8 +314,13 @@ pub fn run_cargo_test_item(
     }
 
     let started = Instant::now();
+    let mut args = vec!["test".to_string(), "--".to_string()];
+    if exact {
+        args.push("--exact".to_string());
+    }
+    args.push(filter.to_string());
     let mut child = Command::new("cargo")
-        .args(["test", "--", "--exact", item_id])
+        .args(&args)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -281,7 +335,7 @@ pub fn run_cargo_test_item(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ok(CargoTestItemRunResult {
-                    item_id: item_id.to_string(),
+                    item_id: filter.to_string(),
                     status_label: "timeout".to_string(),
                     exit_code: None,
                     passed: 0,
@@ -294,7 +348,7 @@ pub fn run_cargo_test_item(
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(err) => {
                 return Ok(CargoTestItemRunResult {
-                    item_id: item_id.to_string(),
+                    item_id: filter.to_string(),
                     status_label: "error".to_string(),
                     exit_code: None,
                     passed: 0,
@@ -326,6 +380,9 @@ pub fn run_cargo_test_item(
     if !output.status.success() {
         diagnostics.push(format!("exit-code={}", exit_code.unwrap_or(-1)));
     }
+    if !exact {
+        diagnostics.push("filter-mode=group".to_string());
+    }
 
     let status_label = if !output.status.success() || failed > 0 {
         "failed"
@@ -338,7 +395,7 @@ pub fn run_cargo_test_item(
     };
 
     Ok(CargoTestItemRunResult {
-        item_id: item_id.to_string(),
+        item_id: filter.to_string(),
         status_label: status_label.to_string(),
         exit_code,
         passed,
@@ -347,6 +404,14 @@ pub fn run_cargo_test_item(
         duration_ms,
         diagnostics,
     })
+}
+
+/// Cap retained protocol test-run summaries for agent evidence (P2.F3.T5).
+pub fn push_test_run_summary(summaries: &mut Vec<TestRunSummary>, summary: TestRunSummary) {
+    summaries.insert(0, summary);
+    if summaries.len() > MAX_RECENT_RUNS {
+        summaries.truncate(MAX_RECENT_RUNS);
+    }
 }
 
 /// Apply a run result onto an existing explorer projection (preserves items).
@@ -581,6 +646,27 @@ nested::deep::case: test
         let (p, f, s, ok) = parse_cargo_test_summary(out);
         assert!(ok);
         assert_eq!((p, f, s), (1, 0, 0));
+    }
+
+    #[test]
+    fn to_test_run_summary_is_metadata_only_counts() {
+        let result = CargoTestItemRunResult {
+            item_id: "mod::t".to_string(),
+            status_label: "passed".to_string(),
+            exit_code: Some(0),
+            passed: 2,
+            failed: 0,
+            skipped: 1,
+            duration_ms: 9,
+            diagnostics: Vec::new(),
+        };
+        let summary = result.to_test_run_summary(TimestampMillis(100));
+        assert_eq!(summary.passed, 2);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.state, TestRunState::Passed);
+        assert!(summary.run_id.0.contains("mod::t"));
+        assert_eq!(summary.controller_id.0, "cargo-test");
     }
 
     #[test]

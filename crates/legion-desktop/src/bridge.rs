@@ -227,6 +227,11 @@ pub enum DesktopAction {
         /// Discovered item id.
         item_id: String,
     },
+    /// Run all tests under a module/group path.
+    RunTestExplorerGroup {
+        /// Parent module path label.
+        parent_label: String,
+    },
     /// Switch to an existing git branch.
     SwitchGitBranch {
         /// Branch label.
@@ -1462,6 +1467,11 @@ impl DesktopCommandBridge {
             }
             DesktopAction::RunTestExplorerItem { item_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::RunTestExplorerItem { item_id })
+            }
+            DesktopAction::RunTestExplorerGroup { parent_label } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::RunTestExplorerGroup {
+                    parent_label,
+                })
             }
             DesktopAction::PushGitRemote => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {

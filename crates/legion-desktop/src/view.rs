@@ -3113,6 +3113,17 @@ fn render_manual_context_inspector(
     {
         actions.push(DesktopAction::RunTestExplorerItem { item_id });
     }
+    if let Some(parent) = snapshot
+        .test_explorer_projection
+        .items
+        .first()
+        .and_then(|item| item.parent_label.clone())
+        && soft_button(ui, "Run first group").clicked()
+    {
+        actions.push(DesktopAction::RunTestExplorerGroup {
+            parent_label: parent,
+        });
+    }
     if soft_button(ui, "Run cargo test").clicked() {
         actions.push(DesktopAction::TerminalLaunch {
             command_label: "cargo test".to_string(),

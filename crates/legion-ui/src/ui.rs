@@ -2814,6 +2814,11 @@ pub enum CommandDispatchIntent {
         /// Discovered item id (cargo test path).
         item_id: String,
     },
+    /// Run all tests under a module/group path (cargo substring filter).
+    RunTestExplorerGroup {
+        /// Parent module path label from tree grouping.
+        parent_label: String,
+    },
 
     /// Toggle a breakpoint or configure a logpoint/conditional breakpoint.
     ToggleDebugBreakpoint {
@@ -4597,6 +4602,16 @@ impl Shell {
                 return Ok(Some(self.push_intent(
                     CommandDispatchIntent::RunTestExplorerItem {
                         item_id: item_id.to_string(),
+                    },
+                )));
+            }
+        }
+        if let Some(parent) = trimmed.strip_prefix(":test-run-group ") {
+            let parent = parent.trim();
+            if !parent.is_empty() {
+                return Ok(Some(self.push_intent(
+                    CommandDispatchIntent::RunTestExplorerGroup {
+                        parent_label: parent.to_string(),
                     },
                 )));
             }

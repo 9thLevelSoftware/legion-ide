@@ -219,10 +219,58 @@ fn test_explorer_run_fixture_records_last_run_and_verification_row() {
                     .rows
                     .iter()
                     .any(|row| row.command_class_label == "cargo-test-exact"
-                        && row.target_labels.iter().any(|t| t == &item_id)),
+                        && row.target_labels.iter().any(|t| t == &item_id)
+                        && row.evidence_artifact_id.is_some()),
                 "expected verification row for exact run, got {:?}",
                 snap.verification_run_projection.rows
             );
+            assert!(
+                !app.test_explorer_run_summaries().is_empty(),
+                "expected protocol test-run summaries for agent evidence"
+            );
+            let artifacts = app
+                .test_explorer_evidence_artifacts()
+                .expect("evidence artifacts");
+            assert!(!artifacts.is_empty());
+            assert!(artifacts.iter().all(|a| !a.raw_payload_retained));
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|a| a.artifact_id.starts_with("artifact:evidence:test-run:"))
+            );
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn test_explorer_run_group_records_filter_mode_and_summary() {
+    let root = create_fixture_crate();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-test-explorer-group".to_string()),
+    )
+    .expect("open workspace");
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerGroup {
+            parent_label: "tests".to_string(),
+        })
+        .expect("group run");
+    match outcome {
+        AppCommandOutcome::TestExplorerUpdated(projection) => {
+            assert_eq!(projection.last_run_item_id.as_deref(), Some("tests"));
+            assert!(
+                projection
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.contains("filter-mode=group") || d.starts_with("last-run:tests:")),
+                "diagnostics={:?}",
+                projection.diagnostics
+            );
+            assert!(!app.test_explorer_run_summaries().is_empty());
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
