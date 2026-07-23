@@ -1,4 +1,4 @@
-//! P2.F3.T4 — cargo test discovery + per-item exact run for the test explorer.
+//! P2.F3.T4–T5b — cargo test discovery, run, evidence, and workflow attach.
 
 use std::{
     fs,
@@ -10,9 +10,16 @@ use legion_app::test_explorer::{
 };
 use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{
-    LanguageCodeLensProjection, PrincipalId, TimestampMillis, WorkspaceTrustState,
+    ByteRange, CausalityId, CommandRiskLabel, CorrelationId, DelegatedTaskAffectedTargetSummary,
+    DelegatedTaskOperationClass, FileFingerprint, LanguageCodeLensProjection,
+    LegionWorkflowModelBackend, LegionWorkflowSession, LegionWorkflowSessionId,
+    LegionWorkflowState, LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId,
+    LegionWorkflowWorkerRole, LegionWorkflowWorkerState, PrincipalId, PrivacyClassification,
+    ProductMode, ProposalPrivacyLabel, ProposalRiskLabel, ProposalTargetKind, RedactionHint,
+    TimestampMillis, WorkspaceId, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
+use uuid::Uuid;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -241,6 +248,136 @@ fn test_explorer_run_fixture_records_last_run_and_verification_row() {
         }
         other => panic!("unexpected outcome: {other:?}"),
     }
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn minimal_workflow_session(label: &str) -> LegionWorkflowSession {
+    let worker = LegionWorkflowWorkerAssignment {
+        worker_id: LegionWorkflowWorkerId(format!("worker:{label}")),
+        role: LegionWorkflowWorkerRole::Implementer,
+        state: LegionWorkflowWorkerState::Ready,
+        model_backend: LegionWorkflowModelBackend::Local,
+        display_safe_model_label: format!("model:{label}"),
+        allowed_command_classes: vec![DelegatedTaskOperationClass::DraftProposalMetadata],
+        linked_delegated_plan_id: None,
+        assisted_ai_route: None,
+        affected_targets: vec![DelegatedTaskAffectedTargetSummary {
+            target_id: format!("target:{label}"),
+            kind: ProposalTargetKind::MetadataOnly,
+            workspace_id: Some(WorkspaceId(1)),
+            file_id: None,
+            buffer_id: None,
+            ranges: vec![ByteRange::new(0, 0)],
+            hashes: vec![FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: format!("hash:{label}"),
+            }],
+            counts: Vec::new(),
+            labels: vec![format!("target:{label}")],
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        risk_labels: vec![CommandRiskLabel::Review],
+        privacy_labels: vec![PrivacyClassification::Metadata],
+        correlation_id: CorrelationId(31),
+        causality_id: CausalityId(Uuid::from_u128(31)),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    LegionWorkflowSession {
+        session_id: LegionWorkflowSessionId(format!("session:{label}")),
+        directive_artifact_id: Some(format!("directive:{label}")),
+        spec_artifact_id: Some(format!("spec:{label}")),
+        task_graph_artifact_id: Some(format!("task-graph:{label}")),
+        product_mode: ProductMode::LegionWorkflows,
+        worker_assignments: vec![worker],
+        dependency_edges: Vec::new(),
+        conflict_summaries: Vec::new(),
+        verification_gates: Vec::new(),
+        sign_off_records: Vec::new(),
+        proposal_ids: Vec::new(),
+        merge_approval: None,
+        lifecycle_state: LegionWorkflowState::Executing,
+        generated_at: TimestampMillis(1),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+        correlation_id: CorrelationId(13),
+        causality_id: CausalityId(Uuid::from_u128(13)),
+    }
+}
+
+#[test]
+fn test_explorer_attach_and_export_includes_agent_evidence() {
+    let root = create_fixture_crate();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-test-explorer-attach".to_string()),
+    )
+    .expect("open workspace");
+
+    // Produce at least one explorer run summary.
+    let _ = app
+        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
+            item_id: "tests::fixture_ok".to_string(),
+        })
+        .expect("run fixture");
+    assert!(!app.test_explorer_run_summaries().is_empty());
+
+    let session = minimal_workflow_session("test-explorer-attach");
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::AttachTestExplorerEvidence {
+            session_id: session_id.0.clone(),
+        })
+        .expect("attach evidence");
+    match outcome {
+        AppCommandOutcome::TestExplorerUpdated(projection) => {
+            assert!(
+                projection
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.contains("attached-evidence:") && d.contains("count=")),
+                "diagnostics={:?}",
+                projection.diagnostics
+            );
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+
+    let records = app
+        .test_explorer_legion_evidence_records()
+        .expect("legion records");
+    assert!(!records.is_empty());
+    assert!(
+        records
+            .iter()
+            .all(|r| r.evidence_id.contains("test-explorer")
+                && r.redaction_hints.contains(&RedactionHint::MetadataOnly))
+    );
+
+    let bundle = app
+        .export_legion_workflow_evidence_bundle(&session_id)
+        .expect("export bundle");
+    assert!(
+        bundle
+            .evidence_records
+            .iter()
+            .any(|r| r.evidence_id.contains("test-run") || r.command_label.is_some()),
+        "export should include explorer evidence, got {:?}",
+        bundle
+            .evidence_records
+            .iter()
+            .map(|r| r.evidence_id.as_str())
+            .collect::<Vec<_>>()
+    );
+
     let _ = fs::remove_dir_all(&root);
 }
 
