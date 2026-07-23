@@ -154,6 +154,16 @@ impl LiveDapSession {
             .ok_or_else(|| LiveDapSessionError::Spawn {
                 message: "missing stdout pipe".to_string(),
             })?;
+        Self::from_stdio(child, stdin, stdout, adapter_type)
+    }
+
+    /// Build a session from an already-spawned child with stdio pipes (C4 sandbox).
+    pub fn from_stdio(
+        child: std::process::Child,
+        stdin: std::process::ChildStdin,
+        stdout: std::process::ChildStdout,
+        adapter_type: impl Into<String>,
+    ) -> Result<Self, LiveDapSessionError> {
         Ok(Self {
             child,
             stdin: Some(stdin),

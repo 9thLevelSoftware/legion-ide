@@ -40,4 +40,4 @@ launch/step remain residual.
 
 - Human-filled windowed GUI journal (checklist + keys ready)
 - Installed unsigned-beta preview journal (checklist ready)
-- DAP adapter process sandbox wrap (needs streaming spawn API; C0 P2)
+- ~~DAP adapter sandbox wrap~~ → Phase 3 `C4-dap-stdio-sandbox.md`

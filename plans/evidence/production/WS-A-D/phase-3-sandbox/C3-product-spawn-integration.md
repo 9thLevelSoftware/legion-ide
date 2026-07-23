@@ -29,7 +29,7 @@ Compile-time host profile notes (Seatbelt / Landlock / Job Object) remain **advi
 | Residual | Why |
 | --- | --- |
 | Interactive terminal PTY not through `spawn_sandboxed` | Separate trust/capability product path |
-| DAP adapter process not sandbox-wrapped | Deferred (C0 P2 / after Microsoft DAP codec) |
+| ~~DAP adapter process not sandbox-wrapped~~ | **Closed C4** (`spawn_sandboxed_stdio`; Windows job-only residual) |
 | Selective Linux egress allowlist | Still unimplemented |
 
 ## Code map

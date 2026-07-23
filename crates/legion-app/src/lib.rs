@@ -7721,6 +7721,8 @@ struct LiveDebugSession {
     session_id: DebugSessionId,
     adapter_type: String,
     is_fake: bool,
+    /// C4: platform sandbox lifetime (e.g. Windows job) for sandboxed adapter.
+    _sandbox_guard: Option<legion_sandbox::spawn_stdio::PlatformGuard>,
 }
 
 /// Background wait for next stop after non-blocking continue (B7).
@@ -7729,6 +7731,8 @@ struct LiveAwaitingStop {
     adapter_type: String,
     is_fake: bool,
     thread_id: u64,
+    /// Kept alive while continue worker holds the child (C4 job object).
+    sandbox_guard: Option<legion_sandbox::spawn_stdio::PlatformGuard>,
     rx: std::sync::mpsc::Receiver<(
         LiveDapSession,
         Result<legion_debug::LiveDapStopOutcome, String>,
@@ -8097,12 +8101,8 @@ impl DebugWorkflow {
             None
         };
 
-        let mut session = LiveDapSession::spawn(
-            &resolved.program,
-            &resolved.args,
-            resolved.adapter_type.as_str(),
-        )
-        .map_err(|err| err.to_string())?;
+        let (mut session, sandbox_guard, sandbox_note) =
+            spawn_live_dap_session(resolved, config.cwd.0.as_str())?;
         let handshake = session
             .initialize_handshake(Duration::from_secs(5))
             .map_err(|err| err.to_string())?;
@@ -8169,6 +8169,7 @@ impl DebugWorkflow {
             session_id: session_id.clone(),
             adapter_type: resolved.adapter_type.clone(),
             is_fake: resolved.is_fake,
+            _sandbox_guard: sandbox_guard,
         });
 
         self.projection.active_session_id = Some(session_id.clone());
@@ -8180,6 +8181,13 @@ impl DebugWorkflow {
                 session_id: session_id.clone(),
                 category_label: "adapter".to_string(),
                 message_label: bounded_label(format!("LIVE DAP prebuild: {note}"), 160),
+            });
+        }
+        if let Some(note) = sandbox_note {
+            self.projection.console.push(DebugConsoleProjection {
+                session_id: session_id.clone(),
+                category_label: "adapter".to_string(),
+                message_label: bounded_label(format!("LIVE DAP sandbox: {note}"), 160),
             });
         }
         self.projection.console.push(DebugConsoleProjection {
@@ -8305,6 +8313,8 @@ impl DebugWorkflow {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let wait_thread_id = live.thread_id;
                 let wait_timeout = Duration::from_secs(30);
+                // Keep sandbox guard alive while worker holds the child (C4).
+                let sandbox_guard = live._sandbox_guard;
                 std::thread::spawn(move || {
                     let mut session = live.session;
                     let result = session
@@ -8317,6 +8327,7 @@ impl DebugWorkflow {
                     adapter_type: adapter_type.clone(),
                     is_fake,
                     thread_id,
+                    sandbox_guard,
                     rx,
                 });
                 self.projection.session_state = Some(DebugSessionState::Running);
@@ -8406,6 +8417,7 @@ impl DebugWorkflow {
                     session_id: meta.session_id.clone(),
                     adapter_type: meta.adapter_type.clone(),
                     is_fake: meta.is_fake,
+                    _sandbox_guard: meta.sandbox_guard,
                 });
                 self.apply_live_stop(&session_id, &stop);
                 self.projection.session_state = Some(DebugSessionState::Paused);
@@ -8442,6 +8454,7 @@ impl DebugWorkflow {
                     session_id: meta.session_id,
                     adapter_type: meta.adapter_type,
                     is_fake: meta.is_fake,
+                    _sandbox_guard: meta.sandbox_guard,
                 });
                 self.fail(format!("live DAP continue failed: {err}"))
             }
@@ -8817,6 +8830,80 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
         "text"
     };
     LanguageId(language.to_string())
+}
+
+/// C4: spawn live DAP session — sandboxed stdio for non-fake adapters.
+fn spawn_live_dap_session(
+    resolved: &legion_debug::ResolvedAdapter,
+    workspace_cwd: &str,
+) -> Result<
+    (
+        LiveDapSession,
+        Option<legion_sandbox::spawn_stdio::PlatformGuard>,
+        Option<String>,
+    ),
+    String,
+> {
+    if resolved.is_fake {
+        let session = LiveDapSession::spawn(
+            &resolved.program,
+            &resolved.args,
+            resolved.adapter_type.as_str(),
+        )
+        .map_err(|err| err.to_string())?;
+        return Ok((session, None, None));
+    }
+
+    use legion_sandbox::spawn_stdio::{SandboxStdioSpec, spawn_sandboxed_stdio};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    let cwd = PathBuf::from(workspace_cwd);
+    let spec = SandboxStdioSpec {
+        program: resolved.program.clone(),
+        args: resolved.args.clone(),
+        working_dir: cwd.clone(),
+        writable_root: cwd,
+        allowed_egress: BTreeSet::new(),
+        env: Vec::new(),
+    };
+    match spawn_sandboxed_stdio(&spec) {
+        Ok(sandboxed) => {
+            let (child, stdin, stdout, report, guard) = sandboxed.into_parts();
+            let note = format!(
+                "backend={} fs_write={} net={} caveats={}",
+                report.backend_used,
+                report.filesystem_write_enforced,
+                report.network_enforced,
+                if report.caveat_labels.is_empty() {
+                    "none".to_string()
+                } else {
+                    report.caveat_labels.join(",")
+                }
+            );
+            let session =
+                LiveDapSession::from_stdio(child, stdin, stdout, resolved.adapter_type.as_str())
+                    .map_err(|err| err.to_string())?;
+            Ok((session, Some(guard), Some(note)))
+        }
+        Err(err) => {
+            // Fail open to plain spawn for product dogfood when sandbox unavailable,
+            // but surface honesty in the console note.
+            let session = LiveDapSession::spawn(
+                &resolved.program,
+                &resolved.args,
+                resolved.adapter_type.as_str(),
+            )
+            .map_err(|spawn_err| {
+                format!("sandbox spawn failed ({err}); plain spawn failed: {spawn_err}")
+            })?;
+            Ok((
+                session,
+                None,
+                Some(format!("sandbox-unavailable fallback: {err}")),
+            ))
+        }
+    }
 }
 
 /// B12: whether live launch should run a cargo prebuild.

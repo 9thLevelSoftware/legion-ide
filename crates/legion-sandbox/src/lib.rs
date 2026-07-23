@@ -12,6 +12,8 @@ pub mod landlock;
 pub mod network;
 pub mod seatbelt;
 pub mod spawn;
+/// Long-lived sandboxed stdio spawn (DAP / interactive protocols).
+pub mod spawn_stdio;
 pub mod windows;
 
 /// Platform-specific sandbox backend selection.
