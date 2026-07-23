@@ -76,11 +76,11 @@ use legion_protocol::{
     ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
-    ActiveBufferProjection, DockLayout, DockMode, DockSide, DockSideLayout, GitBlameLineProjection,
-    GitHunkProjection, PaletteMode, PaletteProjection, PaletteResultKind, PanelId, PanelRegistry,
-    SearchScopeProjection, SettingsProjection, ShellProjectionSnapshot, StatusSeverity,
-    ThemePreferenceProjection, ToastActionProjection, ToastStackProjection,
-    ToastVerbosityProjection,
+    ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
+    DockSideLayout, GitBlameLineProjection, GitHunkProjection, PaletteMode, PaletteProjection,
+    PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection, SettingsProjection,
+    ShellProjectionSnapshot, StatusSeverity, ThemePreferenceProjection, ToastActionProjection,
+    ToastStackProjection, ToastVerbosityProjection,
 };
 
 use crate::{
@@ -1196,12 +1196,16 @@ fn render_bottom_console(
                     &model.structural_search_rows,
                     "No structural search results",
                 );
-                if !model.debug_rows.is_empty() {
+                if !model.debug_rows.is_empty()
+                    || snapshot.debug_projection.active_session_id.is_some()
+                    || !snapshot.debug_projection.configurations.is_empty()
+                {
                     section_label(
                         &mut columns[1],
                         "Debug",
                         Some(theme::tokens().accent.orange),
                     );
+                    render_debug_controls(&mut columns[1], snapshot, actions);
                     render_compact_rows(
                         &mut columns[1],
                         &model.debug_rows,
@@ -3114,6 +3118,7 @@ fn render_manual_context_inspector(
         4,
     );
     section_label(ui, "Debug", Some(theme::tokens().accent.orange));
+    render_debug_controls(ui, snapshot, actions);
     render_compact_rows(ui, &model.debug_rows, "No projected debug state", 6);
     section_label(ui, "Structural Search", Some(theme::tokens().accent.cyan));
     render_compact_rows(
@@ -7728,6 +7733,65 @@ fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .map(|warn| format!("git commit-warning: {warn}")),
     );
     rows
+}
+
+/// Projection-driven debug toolbar (B11): launch / step / continue / poll / stop.
+///
+/// Emits the same [`DesktopAction`]s keyboard and tests already use — no app
+/// ownership in the renderer.
+fn render_debug_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let debug = &snapshot.debug_projection;
+    ui.horizontal_wrapped(|ui| {
+        if let Some(session_id) = debug.active_session_id.clone() {
+            if ui.small_button("Continue").clicked() {
+                actions.push(DesktopAction::DebugStep {
+                    session_id: session_id.clone(),
+                    kind: DebugStepKindProjection::Continue,
+                });
+            }
+            if ui.small_button("Step Over").clicked() {
+                actions.push(DesktopAction::DebugStep {
+                    session_id: session_id.clone(),
+                    kind: DebugStepKindProjection::Over,
+                });
+            }
+            if ui.small_button("Step Into").clicked() {
+                actions.push(DesktopAction::DebugStep {
+                    session_id: session_id.clone(),
+                    kind: DebugStepKindProjection::Into,
+                });
+            }
+            if ui.small_button("Step Out").clicked() {
+                actions.push(DesktopAction::DebugStep {
+                    session_id: session_id.clone(),
+                    kind: DebugStepKindProjection::Out,
+                });
+            }
+            if ui.small_button("Poll").clicked() {
+                actions.push(DesktopAction::PollDebugSession);
+            }
+            if ui.small_button("Stop").clicked() {
+                actions.push(DesktopAction::StopDebugSession);
+            }
+        } else if let Some(configuration_id) = debug
+            .configurations
+            .first()
+            .map(|config| config.configuration_id.clone())
+        {
+            if ui.small_button("Launch").clicked() {
+                actions.push(DesktopAction::LaunchDebugSession { configuration_id });
+            }
+            if ui.small_button("Refresh configs").clicked() {
+                actions.push(DesktopAction::RefreshDebugConfigurations);
+            }
+        } else if ui.small_button("Refresh configs").clicked() {
+            actions.push(DesktopAction::RefreshDebugConfigurations);
+        }
+    });
 }
 
 fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
