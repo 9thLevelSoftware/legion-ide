@@ -16298,13 +16298,6 @@ impl AppComposition {
             )));
         }
 
-        // I2: Detect targets whose current disk state differs from content_before and
-        // create a pre-restore snapshot so those displaced edits can be recovered.
-        let pre_restore_snapshot = self.build_pre_restore_snapshot(&checkpoint);
-        if let Some(snap) = pre_restore_snapshot {
-            let _ = self.checkpoint_store.save_checkpoint(snap);
-        }
-
         // C1: Build workspace-layer file ops — no raw std::fs calls.
         let mut ops: Vec<WorkspaceRestoreFileOp> = Vec::new();
         for target in &checkpoint.targets {
@@ -16332,6 +16325,20 @@ impl AppComposition {
                     });
                 }
             }
+        }
+
+        // Durable checkpoint JSON is workspace-controlled input.  Validate the complete
+        // operation set before reading any target for the displaced-content snapshot.
+        // `restore_files_for_checkpoint` validates again immediately before mutation.
+        self.workspace
+            .validate_checkpoint_restore_ops(&ops)
+            .map_err(|err| AppCompositionError::Checkpoint(format!("restore failed: {err}")))?;
+
+        // I2: Detect targets whose current disk state differs from content_before and
+        // create a pre-restore snapshot so those displaced edits can be recovered.
+        let pre_restore_snapshot = self.build_pre_restore_snapshot(&checkpoint)?;
+        if let Some(snap) = pre_restore_snapshot {
+            let _ = self.checkpoint_store.save_checkpoint(snap);
         }
 
         // C2: Execute all ops through the workspace filesystem layer.
@@ -16372,13 +16379,17 @@ impl AppComposition {
     fn build_pre_restore_snapshot(
         &self,
         checkpoint: &DurableCheckpoint,
-    ) -> Option<DurableCheckpoint> {
+    ) -> Result<Option<DurableCheckpoint>, AppCompositionError> {
         use legion_storage::checkpoint::CheckpointTarget;
         let mut snap_targets: Vec<CheckpointTarget> = Vec::new();
 
         for target in &checkpoint.targets {
-            let path = std::path::Path::new(&target.path.0);
-            let current = std::fs::read_to_string(path).ok();
+            let current = self
+                .workspace
+                .read_checkpoint_target(&target.path)
+                .map_err(|err| {
+                    AppCompositionError::Checkpoint(format!("restore snapshot failed: {err}"))
+                })?;
             let displaced = match &target.kind {
                 // For a CreatedFile we're about to delete the file; any current content is
                 // displaced.
@@ -16406,11 +16417,11 @@ impl AppComposition {
         }
 
         if snap_targets.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let snap_id = format!("pre-restore-{}", checkpoint.checkpoint_id);
-        Some(DurableCheckpoint {
+        Ok(Some(DurableCheckpoint {
             checkpoint_id: snap_id,
             proposal_id: checkpoint.proposal_id,
             principal: checkpoint.principal.clone(),
@@ -16418,7 +16429,7 @@ impl AppComposition {
             targets: snap_targets,
             available: true,
             schema_version: CHECKPOINT_SCHEMA_VERSION,
-        })
+        }))
     }
 
     /// Query checkpoint audit records, optionally filtered by proposal identifier.
