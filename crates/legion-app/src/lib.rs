@@ -24600,6 +24600,11 @@ impl AppComposition {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
             return Err(AppCompositionError::WorkspaceNotOpen);
         };
+        if self.active_documents.active_workspace_trust != Some(WorkspaceTrustState::Trusted) {
+            return Err(AppCompositionError::WorkspaceNotTrusted(
+                "test run denied: workspace is untrusted".to_string(),
+            ));
+        }
         let item = self
             .test_explorer_projection
             .items

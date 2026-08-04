@@ -180,6 +180,28 @@ fn test_explorer_run_rejects_invalid_item_id() {
 }
 
 #[test]
+fn test_explorer_run_rejects_untrusted_workspace() {
+    let root = create_fixture_crate();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Untrusted,
+        PrincipalId("principal-test-explorer-untrusted".to_string()),
+    )
+    .expect("open workspace");
+
+    let err = app
+        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
+            item_id: "tests::fixture_ok".to_string(),
+        })
+        .expect_err("must not execute tests in an untrusted workspace");
+    let msg = format!("{err}");
+    assert!(msg.contains("workspace is untrusted"), "msg={msg}");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn test_explorer_run_fixture_records_last_run_and_verification_row() {
     assert!(validate_test_item_id("tests::fixture_ok").is_ok());
     let (p, f, _, ok) = parse_cargo_test_summary(
