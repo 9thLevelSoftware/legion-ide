@@ -8888,23 +8888,9 @@ fn spawn_live_dap_session(
                     .map_err(|err| err.to_string())?;
             Ok((session, Some(guard), Some(note)))
         }
-        Err(err) => {
-            // Fail open to plain spawn for product dogfood when sandbox unavailable,
-            // but surface honesty in the console note.
-            let session = LiveDapSession::spawn(
-                &resolved.program,
-                &resolved.args,
-                resolved.adapter_type.as_str(),
-            )
-            .map_err(|spawn_err| {
-                format!("sandbox spawn failed ({err}); plain spawn failed: {spawn_err}")
-            })?;
-            Ok((
-                session,
-                None,
-                Some(format!("sandbox-unavailable fallback: {err}")),
-            ))
-        }
+        Err(err) => Err(format!(
+            "refusing to launch live DAP adapter without sandbox enforcement: {err}"
+        )),
     }
 }
 
