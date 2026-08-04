@@ -45,6 +45,72 @@ pub trait DelegatedToolHost {
     ) -> Result<String, String>;
 }
 
+#[cfg(test)]
+mod forbidden_walk_tests {
+    use super::*;
+    use legion_protocol::{
+        CanonicalPath, DelegatedTaskRiskTolerance, DelegatedTaskScopeTargetKind,
+    };
+    use tempfile::TempDir;
+
+    fn config(root: &Path, scope_forbidden: Vec<CanonicalPath>) -> DelegatedTaskLoopConfig {
+        DelegatedTaskLoopConfig {
+            system_prompt: String::new(),
+            initial_message: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            budget: DelegatedTaskLoopBudget::default(),
+            workspace_root: root.to_path_buf(),
+            worktree_root: root.to_path_buf(),
+            scope: DelegatedTaskScope {
+                target_kind: DelegatedTaskScopeTargetKind::Repo,
+                workspace_root: CanonicalPath(root.to_string_lossy().into_owned()),
+                target_path: None,
+                risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+                allowed_tools: vec![LegionToolKind::Grep, LegionToolKind::Glob],
+                forbidden_paths: scope_forbidden,
+                schema_version: 1,
+            },
+            forbidden_paths: vec!["config-secret".to_string()],
+        }
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_omit_forbidden_descendants() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("scope-secret")).unwrap();
+        std::fs::create_dir_all(dir.path().join("config-secret")).unwrap();
+        std::fs::write(dir.path().join("allowed.txt"), "CANARY allowed").unwrap();
+        std::fs::write(
+            dir.path().join("scope-secret/token.txt"),
+            "CANARY scope secret",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("config-secret/token.txt"),
+            "CANARY config secret",
+        )
+        .unwrap();
+        let config = config(
+            dir.path(),
+            vec![CanonicalPath(
+                dir.path()
+                    .join("scope-secret")
+                    .to_string_lossy()
+                    .into_owned(),
+            )],
+        );
+
+        let grep = execute_grep(&serde_json::json!({"pattern": "CANARY"}), &config).unwrap();
+        assert!(grep.contains("allowed.txt"));
+        assert!(!grep.contains("secret"));
+
+        let glob = execute_glob(&serde_json::json!({"pattern": "**/*.txt"}), &config).unwrap();
+        assert!(glob.contains("allowed.txt"));
+        assert!(!glob.contains("secret"));
+    }
+}
+
 /// Sink for audit records emitted by the loop.
 pub trait DelegatedTaskAuditSink {
     /// Record a loop step.
@@ -197,6 +263,28 @@ fn worktree_relative_to_workspace_path(worktree_relative: &Path, workspace_root:
     workspace_root.join(worktree_relative)
 }
 
+/// Return whether a worktree entry is excluded by either source of delegated-task
+/// forbidden paths. This check is intentionally applied to every recursive walk
+/// entry, rather than only to the caller-supplied search root.
+fn worktree_path_is_forbidden(config: &DelegatedTaskLoopConfig, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(&config.worktree_root) else {
+        return true;
+    };
+    let candidate = worktree_relative_to_workspace_path(relative, &config.workspace_root);
+    let canonical = legion_protocol::CanonicalPath(candidate.to_string_lossy().into_owned());
+
+    config.scope.forbids_path(&canonical)
+        || config.forbidden_paths.iter().any(|forbidden| {
+            let forbidden = Path::new(forbidden);
+            let forbidden = if forbidden.is_absolute() {
+                forbidden.to_path_buf()
+            } else {
+                config.workspace_root.join(forbidden)
+            };
+            candidate == forbidden || candidate.starts_with(forbidden)
+        })
+}
+
 /// Invoke the capability broker for a single tool call.
 ///
 /// Returns `Ok(())` if the broker grants the capability, or a
@@ -311,8 +399,9 @@ fn execute_read(
 
 fn execute_grep(
     input: &serde_json::Value,
-    worktree_root: &Path,
+    config: &DelegatedTaskLoopConfig,
 ) -> Result<String, LegionToolCallFeedback> {
+    let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Grep)?;
     let sub_path = input.get("path").and_then(|v| v.as_str());
     let file_glob = input.get("file_glob").and_then(|v| v.as_str());
@@ -380,6 +469,7 @@ fn execute_grep(
         &search_root,
         &re,
         &glob_matcher,
+        config,
         &mut results,
         limit,
     );
@@ -397,6 +487,7 @@ fn grep_walk(
     dir: &Path,
     re: &regex::Regex,
     glob_matcher: &Option<globset::GlobSet>,
+    config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
 ) {
@@ -411,13 +502,16 @@ fn grep_walk(
             return;
         }
         let path = entry.path();
+        if worktree_path_is_forbidden(config, &path) {
+            continue;
+        }
         if path.is_dir() {
             // Skip hidden dirs
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') {
                 continue;
             }
-            grep_walk(base, &path, re, glob_matcher, results, limit);
+            grep_walk(base, &path, re, glob_matcher, config, results, limit);
         } else if path.is_file() {
             // Apply file glob filter
             if let Some(matcher) = glob_matcher {
@@ -460,8 +554,9 @@ fn looks_binary(path: &Path) -> bool {
 
 fn execute_glob(
     input: &serde_json::Value,
-    worktree_root: &Path,
+    config: &DelegatedTaskLoopConfig,
 ) -> Result<String, LegionToolCallFeedback> {
+    let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Glob)?;
     let sub_path = input.get("path").and_then(|v| v.as_str());
     let limit = input
@@ -509,7 +604,14 @@ fn execute_glob(
     };
 
     let mut results = Vec::new();
-    glob_walk(&search_root, &search_root, &matcher, &mut results, limit);
+    glob_walk(
+        &search_root,
+        &search_root,
+        &matcher,
+        config,
+        &mut results,
+        limit,
+    );
 
     if results.is_empty() {
         return Ok("No matching files found.".to_string());
@@ -523,6 +625,7 @@ fn glob_walk(
     base: &Path,
     dir: &Path,
     matcher: &globset::GlobSet,
+    config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
 ) {
@@ -537,12 +640,15 @@ fn glob_walk(
             return;
         }
         let path = entry.path();
+        if worktree_path_is_forbidden(config, &path) {
+            continue;
+        }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if path.is_dir() {
             if name.starts_with('.') {
                 continue;
             }
-            glob_walk(base, &path, matcher, results, limit);
+            glob_walk(base, &path, matcher, config, results, limit);
         } else if path.is_file() {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             if matcher.is_match(rel) || matcher.is_match(name) {
@@ -901,6 +1007,25 @@ fn validate_and_execute(
         })
     })?;
 
+    if let Some(path) = path_opt.as_deref()
+        && config.forbidden_paths.iter().any(|forbidden| {
+            let forbidden = Path::new(forbidden);
+            let forbidden = if forbidden.is_absolute() {
+                forbidden.to_path_buf()
+            } else {
+                config.workspace_root.join(forbidden)
+            };
+            path == forbidden || path.starts_with(forbidden)
+        })
+    {
+        return Err(LegionToolCallFeedback::new(
+            tool,
+            LegionToolCallFeedbackKind::ScopeDenied,
+            "target path matches a configured forbidden-path entry",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
     // Step 5: broker capability check
     check_broker_capability(broker, tool, loop_correlation_id)?;
 
@@ -912,18 +1037,14 @@ fn validate_and_execute(
                 proposal: None,
             })
         }
-        LegionToolKind::Grep => {
-            execute_grep(input, &config.worktree_root).map(|content| ToolExecutionOutput {
-                content,
-                proposal: None,
-            })
-        }
-        LegionToolKind::Glob => {
-            execute_glob(input, &config.worktree_root).map(|content| ToolExecutionOutput {
-                content,
-                proposal: None,
-            })
-        }
+        LegionToolKind::Grep => execute_grep(input, config).map(|content| ToolExecutionOutput {
+            content,
+            proposal: None,
+        }),
+        LegionToolKind::Glob => execute_glob(input, config).map(|content| ToolExecutionOutput {
+            content,
+            proposal: None,
+        }),
         LegionToolKind::Outline => {
             execute_outline(input, &config.worktree_root).map(|content| ToolExecutionOutput {
                 content,
