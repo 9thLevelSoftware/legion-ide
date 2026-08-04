@@ -46,7 +46,8 @@ pub struct DelegatedTaskSandboxOrchestrator {
 impl DelegatedTaskSandboxOrchestrator {
     /// Creates a new orchestrator.
     pub fn new(run_id: &str) -> Self {
-        let sandbox_path = PathBuf::from("target/delegated-tasks").join(format!("task-{}", run_id));
+        let sandbox_path =
+            PathBuf::from("target/delegated-tasks").join(format!("task-{}", encode_run_id(run_id)));
         Self {
             sandbox_path,
             source_root: None,
@@ -63,7 +64,7 @@ impl DelegatedTaskSandboxOrchestrator {
     pub fn with_workspace_root(source_root: &Path, run_id: &str) -> Self {
         let sandbox_path = source_root
             .join("target/delegated-tasks")
-            .join(format!("task-{}", run_id));
+            .join(format!("task-{}", encode_run_id(run_id)));
         Self {
             sandbox_path,
             source_root: Some(source_root.to_path_buf()),
@@ -91,7 +92,7 @@ impl DelegatedTaskSandboxOrchestrator {
         run_id: &str,
         source_root: Option<&Path>,
     ) -> Self {
-        let sandbox_path = sandbox_root.join(format!("task-{run_id}"));
+        let sandbox_path = sandbox_root.join(format!("task-{}", encode_run_id(run_id)));
         Self {
             sandbox_path,
             source_root: source_root.map(|p| p.to_path_buf()),
@@ -290,6 +291,25 @@ impl DelegatedTaskSandboxOrchestrator {
         self.lease = None;
         Ok(())
     }
+}
+
+/// Encodes an externally supplied run id as exactly one portable path component.
+///
+/// Keep the common identifier characters readable, but percent-encode every
+/// other UTF-8 byte. In particular, this prevents `/` and `\\` from turning a
+/// delegated plan id into path traversal on Unix or Windows. Encoding `%` as
+/// well makes the mapping unambiguous.
+fn encode_run_id(run_id: &str) -> String {
+    let mut encoded = String::with_capacity(run_id.len());
+    for byte in run_id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+    encoded
 }
 
 /// Returns the sibling lease file path for a `task-<run_id>` sandbox
@@ -1127,6 +1147,35 @@ mod tests {
             result.is_ok(),
             "sibling sandbox path must be accepted, got: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn workspace_run_id_cannot_escape_delegated_tasks_root() {
+        let tmp = tempfile::tempdir().expect("tmp dir");
+        let workspace_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace dir");
+
+        let orchestrator = DelegatedTaskSandboxOrchestrator::with_workspace_root(
+            &workspace_root,
+            "../../../../../victim\\windows",
+        );
+        let delegated_tasks_root = workspace_root.join("target/delegated-tasks");
+
+        assert_eq!(
+            orchestrator.sandbox_path().parent(),
+            Some(delegated_tasks_root.as_path())
+        );
+        assert_eq!(
+            orchestrator
+                .sandbox_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("task-..%2F..%2F..%2F..%2F..%2Fvictim%5Cwindows")
+        );
+        assert_eq!(
+            orchestrator.sandbox_path().components().count(),
+            delegated_tasks_root.components().count() + 1
         );
     }
 
