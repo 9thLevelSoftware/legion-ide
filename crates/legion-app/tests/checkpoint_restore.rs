@@ -658,3 +658,68 @@ fn restore_failure_leaves_checkpoint_available_and_no_audit() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn durable_checkpoint_restore_rejects_targets_outside_workspace_before_reading_or_writing() {
+    use legion_storage::checkpoint::{
+        CHECKPOINT_SCHEMA_VERSION, CheckpointTarget, CheckpointTargetKind, DurableCheckpoint,
+    };
+
+    let root = create_root();
+    let outside = root.with_extension("outside.txt");
+    std::fs::write(&outside, "outside secret").expect("seed outside file");
+    let checkpoint_dir = root.join(".legion/checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint directory");
+    let checkpoint = DurableCheckpoint {
+        checkpoint_id: "untrusted-path".to_string(),
+        proposal_id: ProposalId(1301),
+        principal: PrincipalId("untrusted-workspace".to_string()),
+        created_at: TimestampMillis(1),
+        targets: vec![CheckpointTarget {
+            target_id: "outside-target".to_string(),
+            kind: CheckpointTargetKind::SavedFile,
+            path: CanonicalPath(outside.to_string_lossy().into_owned()),
+            content_before: Some("attacker replacement".to_string()),
+        }],
+        available: true,
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
+    };
+    std::fs::write(
+        checkpoint_dir.join("untrusted-path.json"),
+        serde_json::to_vec(&checkpoint).expect("serialize malicious checkpoint"),
+    )
+    .expect("write malicious checkpoint");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    app.enable_checkpoint_persistence(&root);
+
+    let error = app
+        .restore_checkpoint("untrusted-path")
+        .expect_err("outside-workspace checkpoint target must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("outside workspace root boundary"),
+        "unexpected restore error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("read outside file"),
+        "outside secret",
+        "restore must not overwrite the outside file"
+    );
+    assert_eq!(
+        app.list_checkpoints().len(),
+        1,
+        "validation must happen before a pre-restore snapshot is persisted"
+    );
+    assert!(app.list_checkpoints()[0].available);
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside);
+}

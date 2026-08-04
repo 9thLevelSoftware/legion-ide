@@ -5907,7 +5907,13 @@ impl WorkspaceActor {
         &self,
         ops: &[WorkspaceRestoreFileOp],
     ) -> Result<(), WorkspaceError> {
-        for op in ops {
+        // Check every path before performing the first mutation.  Checkpoint files are
+        // workspace-controlled input, so their `CanonicalPath` strings cannot be trusted.
+        // Returning canonicalized operations also ensures the filesystem layer never sees
+        // the original, potentially relative or symlink-escaping spelling.
+        let ops = self.validate_checkpoint_restore_ops(ops)?;
+
+        for op in &ops {
             match op {
                 WorkspaceRestoreFileOp::WriteFile { path, content } => {
                     let dest = std::path::Path::new(&path.0);
@@ -5939,6 +5945,72 @@ impl WorkspaceActor {
             }
         }
         Ok(())
+    }
+
+    /// Validate and canonicalize every path used by a checkpoint restore.
+    ///
+    /// This is intentionally a batch operation so callers can reject an entire untrusted
+    /// durable checkpoint before reading a target or applying any mutation.
+    pub fn validate_checkpoint_restore_ops(
+        &self,
+        ops: &[WorkspaceRestoreFileOp],
+    ) -> Result<Vec<WorkspaceRestoreFileOp>, WorkspaceError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state.as_ref().ok_or(WorkspaceError::WorkspaceMissing {
+            workspace_id: WorkspaceId(0),
+        })?;
+        let canonical = |path: &CanonicalPath| -> WorkspaceResult<CanonicalPath> {
+            let canonical = self.canonicalize_candidate(state, &path.0)?;
+            self.decision_for_workspace(state, "fs.write", Some(&canonical.to_string_lossy()))?;
+            Ok(CanonicalPath(canonical.to_string_lossy().into_owned()))
+        };
+
+        ops.iter()
+            .map(|op| match op {
+                WorkspaceRestoreFileOp::WriteFile { path, content } => {
+                    Ok(WorkspaceRestoreFileOp::WriteFile {
+                        path: canonical(path)?,
+                        content: content.clone(),
+                    })
+                }
+                WorkspaceRestoreFileOp::DeleteFile { path } => {
+                    Ok(WorkspaceRestoreFileOp::DeleteFile {
+                        path: canonical(path)?,
+                    })
+                }
+                WorkspaceRestoreFileOp::RenameFile {
+                    source,
+                    destination,
+                } => Ok(WorkspaceRestoreFileOp::RenameFile {
+                    source: canonical(source)?,
+                    destination: canonical(destination)?,
+                }),
+            })
+            .collect()
+    }
+
+    /// Read a checkpoint target after enforcing workspace containment and read policy.
+    pub fn read_checkpoint_target(
+        &self,
+        path: &CanonicalPath,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| WorkspaceError::Internal("workspace state lock poisoned"))?;
+        let state = state.as_ref().ok_or(WorkspaceError::WorkspaceMissing {
+            workspace_id: WorkspaceId(0),
+        })?;
+        let canonical = self.canonicalize_candidate(state, &path.0)?;
+        self.decision_for_workspace(state, "fs.read", Some(&canonical.to_string_lossy()))?;
+        match self.fs.read_text_file(&canonical) {
+            Ok(content) => Ok(Some(content)),
+            Err(PlatformError::NotFound { .. }) => Ok(None),
+            Err(err) => Err(WorkspaceError::Platform(err)),
+        }
     }
 
     fn rollback_target_path(target: &WorkspaceMutationRollbackTarget) -> CanonicalPath {
