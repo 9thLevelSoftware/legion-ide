@@ -216,3 +216,42 @@ fn export_worktree_evidence_written_to_legion_evidence_dir() {
         evidence_path_str
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn export_worktree_evidence_rejects_symlinked_state_directory() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TempGitRepo::new();
+    setup_repo_with_changes(&repo);
+    let escape_target = tempfile::tempdir().expect("escape target");
+    fs::create_dir(repo.path().join(".legion")).expect("state dir");
+    symlink(
+        escape_target.path(),
+        repo.path().join(".legion").join("evidence"),
+    )
+    .expect("malicious evidence symlink");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("ev-test".to_string()),
+    )
+    .expect("workspace open");
+
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::ExportWorktreeEvidence)
+        .expect_err("export must reject a symlinked evidence directory");
+    assert!(
+        error.to_string().contains("symlink"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        fs::read_dir(escape_target.path())
+            .expect("read escape target")
+            .next()
+            .is_none(),
+        "export must not write through the repository-controlled symlink"
+    );
+}

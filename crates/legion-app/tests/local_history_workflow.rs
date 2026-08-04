@@ -206,6 +206,37 @@ fn local_history_blobs_not_visible_to_git_status() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn local_history_rejects_symlinked_state_directory() {
+    use std::os::unix::fs::symlink;
+
+    let ws = TempWorkspace::new();
+    let escape_target = tempfile::tempdir().expect("escape target");
+    fs::create_dir(ws.path().join(".legion")).expect("state dir");
+    symlink(
+        escape_target.path(),
+        ws.path().join(".legion").join("local-history"),
+    )
+    .expect("malicious local-history symlink");
+
+    let (mut app, _) = open_app_with_file(&ws, "src/secret.rs", "const SECRET: &str = \"nope\";\n");
+    save_file(&mut app);
+
+    assert!(
+        fs::read_dir(escape_target.path())
+            .expect("read escape target")
+            .next()
+            .is_none(),
+        "saving must not write through the repository-controlled symlink"
+    );
+    assert!(
+        app.test_local_history_last_write_error()
+            .is_some_and(|error| error.contains("symlink")),
+        "the best-effort history failure should remain observable"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // I-2: prune deletes evicted blob files from disk
 // ---------------------------------------------------------------------------
