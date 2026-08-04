@@ -157,34 +157,18 @@ mod linux {
         AccessFs::from_write(WRITE_POLICY_ABI)
     }
 
+    fn canonical_helper_path<'a>(
+        candidates: impl IntoIterator<Item = &'a Path>,
+    ) -> Option<PathBuf> {
+        candidates
+            .into_iter()
+            .filter(|path| path.is_absolute())
+            .filter_map(|path| path.canonicalize().ok())
+            .find(|path| path.is_absolute() && path.is_file())
+    }
+
     fn bwrap_path() -> Option<PathBuf> {
-        let candidates = [
-            PathBuf::from("/usr/bin/bwrap"),
-            PathBuf::from("/bin/bwrap"),
-            PathBuf::from("bwrap"),
-        ];
-        for path in candidates {
-            if path.file_name().is_some_and(|n| n == "bwrap") {
-                // PATH lookup for bare name
-                if path.components().count() == 1 {
-                    if std::process::Command::new("bwrap")
-                        .arg("--version")
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status()
-                        .map(|s| s.success())
-                        .unwrap_or(false)
-                    {
-                        return Some(PathBuf::from("bwrap"));
-                    }
-                    continue;
-                }
-            }
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None
+        canonical_helper_path([Path::new("/usr/bin/bwrap"), Path::new("/bin/bwrap")])
     }
 
     pub fn spawn_sandboxed_linux(
@@ -369,6 +353,19 @@ mod linux {
             assert!(rights.contains(AccessFs::WriteFile));
             assert!(rights.contains(AccessFs::Truncate));
             assert!(rights.contains(AccessFs::IoctlDev));
+        }
+
+        #[test]
+        fn bwrap_discovery_never_returns_a_path_resolved_name() {
+            if let Some(path) = bwrap_path() {
+                assert!(path.is_absolute());
+                assert!(path.is_file());
+            }
+        }
+
+        #[test]
+        fn helper_discovery_rejects_relative_candidates() {
+            assert_eq!(canonical_helper_path([Path::new("Cargo.toml")]), None);
         }
     }
 }
