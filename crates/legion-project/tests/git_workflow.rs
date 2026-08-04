@@ -382,6 +382,46 @@ fn git_commit_validates_message_and_commits_staged_hunks() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn git_commit_disables_repository_controlled_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TempGitRepo::new();
+    repo.write("tracked.txt", "staged change\n");
+    run_git(repo.path(), ["add", "tracked.txt"]);
+
+    let hooks = repo.path().join("repository-hooks");
+    fs::create_dir(&hooks).expect("hooks directory should be created");
+    run_git(
+        repo.path(),
+        ["config", "core.hooksPath", "repository-hooks"],
+    );
+    for hook in [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+    ] {
+        let hook_path = hooks.join(hook);
+        fs::write(&hook_path, "#!/bin/sh\ntouch hook-ran\n").expect("hook should be written");
+        let mut permissions = fs::metadata(&hook_path)
+            .expect("hook metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook_path, permissions).expect("hook should be executable");
+    }
+
+    commit_git_changes(repo.path(), "feat: safe commit").expect("commit should succeed");
+
+    assert!(
+        !repo.path().join("hook-ran").exists(),
+        "the IDE commit action must not execute repository-controlled hooks"
+    );
+    let head = run_git(repo.path(), ["log", "-1", "--pretty=%s"]);
+    assert_eq!(head.trim(), "feat: safe commit");
+}
+
 #[test]
 fn git_conflict_resolves_current_and_incoming() {
     let repo = TempGitRepo::new();
