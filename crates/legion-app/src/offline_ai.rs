@@ -778,9 +778,11 @@ fn lease_path_for_sandbox(sandbox_path: &Path) -> PathBuf {
 /// Mirrors `legion_agent::reap_orphaned_sandboxes` for offline builds, which
 /// have no dependency on `legion-agent`. A directory is an orphan when its
 /// name starts with `task-` and its run-id suffix is not in
-/// `active_run_ids`. Attempts `git worktree remove --force` first and falls
-/// back to plain directory removal. Returns the paths that were removed. A
-/// missing root is a successful no-op.
+/// `active_run_ids`. Removes the directory directly, without launching Git:
+/// this function runs during application startup, before workspace trust has
+/// been established, so it must not resolve an executable through the ambient
+/// `PATH`. Returns the paths that were removed. A missing root is a successful
+/// no-op.
 ///
 /// Lock-file lease protocol: each sandbox may have a sibling
 /// `task-<run_id>.lock` file (see `DelegatedTaskSandboxOrchestrator`). A
@@ -862,17 +864,7 @@ pub fn reap_orphaned_sandboxes(
             // Owner process is alive and holding the lease: skip, do not delete.
             continue;
         };
-        let worktree_removed = Command::new("git")
-            .arg("worktree")
-            .arg("remove")
-            .arg("--force")
-            .arg(&path)
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        if !worktree_removed {
-            std::fs::remove_dir_all(&path)?;
-        }
+        std::fs::remove_dir_all(&path)?;
         // Remove the lock file while still holding `held_lease`. On
         // Windows, std opens files with FILE_SHARE_DELETE, so calling
         // `remove_file` on a path we hold an open (locked) handle to
