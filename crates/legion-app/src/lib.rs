@@ -16698,11 +16698,9 @@ impl AppComposition {
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
-        // PKT-LSP-C T1: LSP session start is now LAZY — triggered on first
-        // `.rs` buffer open or explicit palette command, not on workspace open.
-        // (The eager start was removed here; see `bind_opened_file` for the
-        // lazy trigger and `try_start_lsp_session_for_current_workspace` for
-        // the palette command path.)
+        // Starting a language server launches a local process, so opening a
+        // workspace must not start one implicitly. The user can approve that
+        // boundary explicitly with the "Language Server: Start" command.
 
         // PKT-APPLY: Enable batch runtime apply for Trusted workspaces so that
         // `plan_batch_execution_contract` unblocks commit and finalize without
@@ -17306,16 +17304,15 @@ impl AppComposition {
     }
 
     /// Test-only: returns `true` if the LSP session handle is in the `Idle`
-    /// state (no start attempted).  Used by T1 tests to assert that lazy start
-    /// does NOT fire on workspace open.  PKT-LSP-C T1.
+    /// state (no start attempted). Used by tests to assert that opening a
+    /// workspace or file never launches a language server implicitly.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lsp_is_idle_for_test(&self) -> bool {
         self.lsp_session.is_idle()
     }
 
     /// Test-only: returns `true` if the LSP session handle is in the
-    /// `Starting` state.  Used by T1 tests to assert that lazy start fires
-    /// after the first `.rs` buffer is bound.  PKT-LSP-C T1.
+    /// `Starting` state.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn lsp_is_starting_for_test(&self) -> bool {
         self.lsp_session.is_starting()
@@ -17355,7 +17352,7 @@ impl AppComposition {
     }
 
     /// Test-only: explicitly trigger a session start for the current workspace,
-    /// mirroring what the lazy trigger or palette command does.  Useful for
+    /// mirroring what the palette command does. Useful for
     /// tests that want to put the session into Refused/Starting state without
     /// opening an actual `.rs` file.  PKT-LSP-C T1 / T5.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -17365,8 +17362,7 @@ impl AppComposition {
 
     /// Attempt to start the LSP session for the currently-open workspace.
     ///
-    /// Called from the lazy-start trigger in `bind_opened_file` (first `.rs`
-    /// buffer open) and from the "Start language server" palette command.
+    /// Called only from an explicit language-server lifecycle command.
     /// If the session is already Starting or Live this is a no-op.
     /// If the workspace is untrusted the session immediately enters Refused.
     /// PKT-LSP-C T1.
@@ -17590,18 +17586,6 @@ impl AppComposition {
         self.language_tooling.refresh_retrieval_document(&document);
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
-
-        // PKT-LSP-C T1: Lazy LSP session start triggered on first language-matching
-        // buffer open.  Rust files (".rs") are the only supported language server
-        // language right now; extend this check when more servers land.
-        if identity
-            .canonical_path
-            .0
-            .to_ascii_lowercase()
-            .ends_with(".rs")
-        {
-            self.try_start_lsp_session_for_current_workspace();
-        }
 
         Ok(identity.file_id)
     }
@@ -19309,7 +19293,8 @@ impl AppComposition {
                     session_id,
                 ))
             }
-            // PKT-LSP-C T1: lazy-start palette commands.
+            // These explicit user actions are the approval boundary for
+            // launching a language-server process.
             AppCommandRequest::LspStartSession => {
                 self.try_start_lsp_session_for_current_workspace();
                 Ok(AppCommandOutcome::Noop)
@@ -33293,10 +33278,10 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PKT-LSP-C T1: Lazy session start — TDD tests
+// PKT-LSP-C T1: Explicit session start — TDD tests
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
-mod lsp_lazy_start_tests {
+mod lsp_explicit_start_tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -33313,7 +33298,7 @@ mod lsp_lazy_start_tests {
     }
 
     /// After `open_workspace(Trusted)` the LSP session must stay `Idle`.
-    /// PKT-LSP-C T1: lazy start means no server is spawned at workspace open.
+    /// Opening a workspace never implicitly approves a process launch.
     #[test]
     fn t1_open_workspace_trusted_leaves_lsp_idle() {
         let root = unique_temp_dir("ws-open");
@@ -33326,12 +33311,12 @@ mod lsp_lazy_start_tests {
         .expect("open workspace");
         assert!(
             app.lsp_is_idle_for_test(),
-            "LSP session must remain Idle after workspace open (lazy start)"
+            "LSP session must remain Idle after workspace open"
         );
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// Opening a non-.rs file must NOT trigger lazy LSP start.
+    /// Opening a non-.rs file must not trigger LSP start.
     /// PKT-LSP-C T1.
     #[test]
     fn t1_open_non_rs_file_does_not_trigger_lsp_start() {
@@ -33353,12 +33338,16 @@ mod lsp_lazy_start_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// Opening a `.rs` file must trigger lazy LSP start and move the session
-    /// out of `Idle`.  Without a `Cargo.toml` in the workspace root the
-    /// session transitions immediately to `Refused`.  PKT-LSP-C T1.
+    /// Opening a `.rs` file must not cross the process-spawn boundary. A
+    /// separate lifecycle command is required even for a trusted workspace.
     #[test]
-    fn t1_open_rs_file_triggers_lazy_lsp_start() {
+    fn t1_open_rs_file_does_not_trigger_lsp_start() {
         let root = unique_temp_dir("rs-open");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"explicit-start-test\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write Cargo.toml");
         let rs_path = root.join("main.rs");
         fs::write(&rs_path, "fn main() {}").expect("write main.rs");
         let mut app = AppComposition::new();
@@ -33368,14 +33357,11 @@ mod lsp_lazy_start_tests {
             PrincipalId("test".to_string()),
         )
         .expect("open workspace");
-        assert!(
-            app.lsp_is_idle_for_test(),
-            "must be Idle before first .rs open"
-        );
+        assert!(app.lsp_is_idle_for_test(), "must be Idle before .rs open");
         let _ = app.open_file(rs_path.to_string_lossy().as_ref());
         assert!(
-            !app.lsp_is_idle_for_test(),
-            "LSP session must leave Idle after opening a .rs file (lazy start fired)"
+            app.lsp_is_idle_for_test(),
+            "LSP session must remain Idle after opening a .rs file"
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -33431,11 +33417,16 @@ mod lsp_lazy_start_tests {
         )
         .expect("open workspace");
 
-        // Trigger lazy start: session will refuse (no Cargo.toml).
         let _ = app.open_file(rs_path.to_string_lossy().as_ref());
+        assert!(app.lsp_is_idle_for_test(), "file open must not start LSP");
+
+        // Explicitly approve the initial start; it refuses because this
+        // workspace has no Cargo.toml.
+        let result = app.dispatch_ui_intent(CommandDispatchIntent::LspStartSession);
+        assert!(result.is_ok(), "start dispatch must succeed");
         assert!(
             !app.lsp_is_idle_for_test(),
-            "should have left Idle after .rs open"
+            "should have left Idle after explicit start"
         );
         assert!(
             !app.lsp_is_starting_for_test(),

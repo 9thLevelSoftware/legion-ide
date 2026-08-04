@@ -584,11 +584,8 @@ fn t8_lsp_rename_via_mock_server_generates_proposal_zero_mutation() {
     )
     .expect("open_workspace");
 
-    // Start the mock server BEFORE opening any .rs file: opening a .rs file
-    // triggers the lazy-start of the LSP session (try_start_lsp_session_for_
-    // current_workspace). If we call force_lsp_start_with_server_path_for_test
-    // after open_file the session is already in Starting state and the mock-
-    // start is a no-op, leaving the real rust-analyzer in flight.
+    // Explicitly start the injected mock server. Opening a Rust file must not
+    // implicitly launch a PATH-resolved language-server process.
     app.force_lsp_start_with_server_path_for_test(mock_path);
 
     app.open_file(src_file.to_string_lossy())
