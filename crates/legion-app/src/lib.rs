@@ -14595,6 +14595,91 @@ fn canonicalize_for_history(path: &str) -> String {
     normalize_path_separators(&stripped.to_string_lossy())
 }
 
+/// Create a directory below a workspace without traversing an existing symlink.
+///
+/// Workspace repositories are attacker-controlled, including hidden state directories.  Check
+/// every component before using it and verify the resolved directory remains below the resolved
+/// workspace root.  This deliberately fails closed instead of following a `.legion` symlink.
+fn create_workspace_state_dir(
+    workspace_root: &std::path::Path,
+    components: &[&str],
+) -> std::io::Result<std::path::PathBuf> {
+    let canonical_root = std::fs::canonicalize(workspace_root)?;
+    let mut directory = canonical_root.clone();
+
+    for component in components {
+        directory.push(component);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("workspace state path is a symlink: {}", directory.display()),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "workspace state path is not a directory: {}",
+                        directory.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&directory)?;
+            }
+            Err(error) => return Err(error),
+        }
+
+        let resolved = std::fs::canonicalize(&directory)?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "workspace state path escaped workspace: {}",
+                    directory.display()
+                ),
+            ));
+        }
+        directory = resolved;
+    }
+
+    Ok(directory)
+}
+
+/// Write a workspace-state file without following a pre-existing symlink at the leaf.
+fn write_workspace_state_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file.write_all(content),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("workspace state file is a symlink: {}", path.display()),
+                ))
+            } else if metadata.is_file() {
+                // Blobs are content-addressed and `.gitignore` is stable, so an existing regular
+                // file needs no overwrite. Avoiding overwrite also closes the leaf symlink race.
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("workspace state path is not a file: {}", path.display()),
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn git_protocol_error(code: impl Into<String>, message: impl Into<String>) -> AppCompositionError {
     AppCompositionError::Protocol(ProtocolError {
         code: code.into(),
@@ -24991,10 +25076,16 @@ impl AppComposition {
             let canonical_without_unc = strip_unc_prefix(canonical_path);
             let path_key =
                 canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-            std::path::PathBuf::from(root)
-                .join(".legion")
-                .join("local-history")
-                .join(&path_key)
+            match create_workspace_state_dir(
+                std::path::Path::new(root),
+                &[".legion", "local-history", &path_key],
+            ) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    self.local_history_last_write_error = Some(error.to_string());
+                    return;
+                }
+            }
         } else {
             return; // No workspace; skip.
         };
@@ -25002,24 +25093,15 @@ impl AppComposition {
         // Ensure the .legion/local-history/ parent dir has a .gitignore so user git
         // never picks up content blobs, regardless of the root .gitignore.
         if let Some(parent) = blob_dir.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                self.local_history_last_write_error = Some(format!("create_dir {e}"));
-                return;
-            }
             let gi_path = parent.join(".gitignore");
             if !gi_path.exists() {
-                let _ = std::fs::write(&gi_path, "*\n");
+                let _ = write_workspace_state_file(&gi_path, b"*\n");
             }
         }
 
         // Write blob; capture errors for degraded-mode diagnostic — do not fail the save.
-        let dir_err = std::fs::create_dir_all(&blob_dir).err();
-        let write_err = if dir_err.is_none() {
-            let blob_path = blob_dir.join(format!("{content_hash}.blob"));
-            std::fs::write(&blob_path, content.as_bytes()).err()
-        } else {
-            dir_err
-        };
+        let blob_path = blob_dir.join(format!("{content_hash}.blob"));
+        let write_err = write_workspace_state_file(&blob_path, content.as_bytes()).err();
         if let Some(err) = write_err {
             self.local_history_last_write_error = Some(err.to_string());
         } else {
@@ -25154,19 +25236,23 @@ impl AppComposition {
             .as_deref()
             .ok_or(AppCompositionError::WorkspaceNotOpen)?;
 
-        let evidence_dir = std::path::PathBuf::from(root_path)
-            .join(".legion")
-            .join("evidence");
-        std::fs::create_dir_all(&evidence_dir).map_err(|e| {
-            git_protocol_error(
-                "evidence.dir_create_failed",
-                format!("cannot create evidence directory: {e}"),
-            )
-        })?;
+        let evidence_dir =
+            create_workspace_state_dir(std::path::Path::new(root_path), &[".legion", "evidence"])
+                .map_err(|e| {
+                git_protocol_error(
+                    "evidence.dir_create_failed",
+                    format!("cannot create evidence directory: {e}"),
+                )
+            })?;
         // Ensure evidence dir has a .gitignore so user git never picks up evidence files.
         let gi_path = evidence_dir.join(".gitignore");
         if !gi_path.exists() {
-            let _ = std::fs::write(&gi_path, "*\n");
+            write_workspace_state_file(&gi_path, b"*\n").map_err(|e| {
+                git_protocol_error(
+                    "evidence.gitignore_write_failed",
+                    format!("cannot write evidence .gitignore: {e}"),
+                )
+            })?;
         }
 
         let timestamp_ms = std::time::SystemTime::now()
@@ -25223,7 +25309,7 @@ impl AppComposition {
 
         let filename = format!("worktree-state-{timestamp_ms}.toml");
         let evidence_path = evidence_dir.join(&filename);
-        std::fs::write(&evidence_path, toml.as_bytes()).map_err(|e| {
+        write_workspace_state_file(&evidence_path, toml.as_bytes()).map_err(|e| {
             git_protocol_error(
                 "evidence.write_failed",
                 format!("cannot write evidence file: {e}"),
