@@ -11,6 +11,9 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use crate::SandboxError;
 use crate::spawn::SandboxEnforcementReport;
 
+#[cfg(target_os = "linux")]
+const TRUSTED_BWRAP_PATHS: [&str; 2] = ["/usr/bin/bwrap", "/bin/bwrap"];
+
 /// Spec for a long-lived sandboxed stdio process.
 #[derive(Debug, Clone)]
 pub struct SandboxStdioSpec {
@@ -172,7 +175,7 @@ fn linux_stdio(spec: &SandboxStdioSpec) -> Result<SandboxedStdioProcess, Sandbox
 
     let deny_all_network = spec.allowed_egress.is_empty();
     let bwrap = if deny_all_network {
-        ["bwrap", "/usr/bin/bwrap", "/bin/bwrap"]
+        TRUSTED_BWRAP_PATHS
             .into_iter()
             .find(|p| {
                 Command::new(p)
@@ -271,6 +274,21 @@ fn linux_stdio(spec: &SandboxStdioSpec) -> Result<SandboxedStdioProcess, Sandbox
         },
         _guard: PlatformGuard::default(),
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::TRUSTED_BWRAP_PATHS;
+    use std::path::Path;
+
+    #[test]
+    fn bwrap_candidates_do_not_resolve_through_path() {
+        assert!(
+            TRUSTED_BWRAP_PATHS
+                .iter()
+                .all(|candidate| Path::new(candidate).is_absolute())
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
