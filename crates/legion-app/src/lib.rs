@@ -1014,20 +1014,27 @@ impl legion_agent::agent_loop::DelegatedTaskAuditSink for LegionWorkflowVecAudit
 }
 
 #[cfg(feature = "ai")]
-struct LegionWorkflowAllowAllCapabilityBroker;
+/// Capability boundary for resolver-backed workflow workers.
+///
+/// Providers may draft proposal content, but they must not use tools that return
+/// workspace source to the provider.  In particular, this broker is deliberately
+/// narrower than the delegated runtime's general-purpose broker.
+struct LegionWorkflowProposalOnlyCapabilityBroker;
 
 #[cfg(feature = "ai")]
-impl CapabilityBrokerPort for LegionWorkflowAllowAllCapabilityBroker {
+impl CapabilityBrokerPort for LegionWorkflowProposalOnlyCapabilityBroker {
     fn handle(&self, request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
         let cap_id = match &request {
             CapabilityRequest::Request { capability_id, .. } => capability_id.clone(),
             _ => CapabilityId("unknown".to_string()),
         };
+        let granted = cap_id.0 == "delegate.tool.edit-as-proposal";
         Ok(CapabilityResponse::Decision(CapabilityDecision {
             decision_id: CapabilityDecisionId(1),
-            granted: true,
+            granted,
             capability: cap_id,
-            reason: None,
+            reason: (!granted)
+                .then(|| "workflow providers are restricted to proposal-only tools".to_string()),
         }))
     }
 }
@@ -21348,13 +21355,10 @@ impl AppComposition {
             workspace_root: CanonicalPath(workspace_root.to_string_lossy().into_owned()),
             target_path: None,
             risk_tolerance: legion_protocol::DelegatedTaskRiskTolerance::Balanced,
-            allowed_tools: vec![
-                legion_protocol::LegionToolKind::Read,
-                legion_protocol::LegionToolKind::Grep,
-                legion_protocol::LegionToolKind::Glob,
-                legion_protocol::LegionToolKind::Outline,
-                legion_protocol::LegionToolKind::EditAsProposal,
-            ],
+            // Resolver-provided providers are an egress boundary.  Tools that return
+            // workspace content must not be advertised or executed until this path is
+            // integrated with an explicit privacy/egress authorization flow.
+            allowed_tools: vec![legion_protocol::LegionToolKind::EditAsProposal],
             forbidden_paths: Vec::new(),
             schema_version: 1,
         }
@@ -21542,14 +21546,14 @@ impl AppComposition {
         use legion_agent::agent_loop::run_delegated_task_loop;
 
         let mut audit_sink = LegionWorkflowVecAuditSink { steps: Vec::new() };
-        let allow_all_broker = LegionWorkflowAllowAllCapabilityBroker;
+        let proposal_only_broker = LegionWorkflowProposalOnlyCapabilityBroker;
         let loop_result = run_delegated_task_loop(
             &config,
             provider.as_ref(),
             &tool_host,
             &mut audit_sink,
             &cancellation_flag,
-            &allow_all_broker,
+            &proposal_only_broker,
         )
         .map_err(|error| {
             AppCompositionError::AiRuntime(format!("delegated loop error: {error}"))
@@ -31776,6 +31780,44 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn workflow_provider_boundary_denies_workspace_read_capabilities() {
+        let broker = LegionWorkflowProposalOnlyCapabilityBroker;
+        let decision_for = |capability: &str| {
+            broker
+                .handle(CapabilityRequest::Request {
+                    principal_id: PrincipalId("workflow-provider-test".to_string()),
+                    capability_id: CapabilityId(capability.to_string()),
+                    workspace_trust_state: WorkspaceTrustState::Trusted,
+                    target_path: None,
+                    decision_id: None,
+                    context: CapabilityRequestContext::default(),
+                    correlation_id: CorrelationId(1),
+                })
+                .expect("capability decision")
+        };
+
+        assert!(matches!(
+            decision_for("delegate.tool.read"),
+            CapabilityResponse::Decision(CapabilityDecision { granted: false, .. })
+        ));
+        assert!(matches!(
+            decision_for("delegate.tool.grep"),
+            CapabilityResponse::Decision(CapabilityDecision { granted: false, .. })
+        ));
+        assert!(matches!(
+            decision_for("delegate.tool.edit-as-proposal"),
+            CapabilityResponse::Decision(CapabilityDecision { granted: true, .. })
+        ));
+
+        let scope = AppComposition::new().legion_workflow_worker_scope();
+        assert_eq!(
+            scope.allowed_tools,
+            vec![legion_protocol::LegionToolKind::EditAsProposal]
+        );
+    }
 
     #[test]
     fn parse_terminal_keeps_unterminated_osc_bytes() {

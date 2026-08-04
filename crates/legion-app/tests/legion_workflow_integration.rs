@@ -701,8 +701,6 @@ fn scripted_main_edit_provider(
 ) -> Box<dyn ToolCallingProvider + Send> {
     Box::new(
         ScriptedToolCallingProviderBuilder::new()
-            .tool_use("read-main", "read", json!({ "path": "main.txt" }))
-            .expect_prior_result_contains("clean")
             .tool_use(
                 "edit-main",
                 "edit-as-proposal",
