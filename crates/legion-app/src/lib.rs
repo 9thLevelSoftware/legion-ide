@@ -2057,6 +2057,23 @@ fn format_sandbox_enforcement_summary(
 }
 
 #[cfg(feature = "ai")]
+fn require_delegated_terminal_enforcement(
+    report: &legion_sandbox::spawn::SandboxEnforcementReport,
+) -> Result<(), String> {
+    if report.filesystem_write_enforced
+        && report.filesystem_read_enforced
+        && report.network_enforced
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "terminal command denied: sandbox does not enforce the required filesystem and network isolation ({})",
+        format_sandbox_enforcement_summary(report)
+    ))
+}
+
+#[cfg(feature = "ai")]
 impl legion_agent::agent_loop::DelegatedToolHost for AppDelegatedToolHost {
     fn run_terminal_command(
         &self,
@@ -2070,23 +2087,48 @@ impl legion_agent::agent_loop::DelegatedToolHost for AppDelegatedToolHost {
         let working_dir = workdir.unwrap_or(&self.worktree_root).to_path_buf();
         let timeout = Duration::from_secs(u64::from(timeout_seconds.unwrap_or(30)));
 
-        let spec = SandboxSpawnSpec {
-            program: if cfg!(windows) {
-                PathBuf::from("cmd.exe")
-            } else {
-                PathBuf::from("/bin/sh")
-            },
-            args: if cfg!(windows) {
-                vec!["/C".to_string(), command.to_string()]
-            } else {
-                vec!["-c".to_string(), command.to_string()]
-            },
-            working_dir,
+        let shell = if cfg!(windows) {
+            PathBuf::from("cmd.exe")
+        } else {
+            PathBuf::from("/bin/sh")
+        };
+        let spec_for_args = |args| SandboxSpawnSpec {
+            program: shell.clone(),
+            args,
+            working_dir: working_dir.clone(),
             writable_root: self.worktree_root.clone(),
             allowed_egress: self.allowed_egress.clone(),
             timeout,
             env: vec![],
         };
+
+        // Probe the selected backend with a fixed, harmless command before any
+        // model-controlled input is executed. The enforcement report is only
+        // available after spawn, so checking the real command's report alone
+        // would be too late to prevent data access or exfiltration.
+        let probe_spec = spec_for_args(if cfg!(windows) {
+            vec!["/C".to_string(), "exit /B 0".to_string()]
+        } else {
+            vec!["-c".to_string(), "true".to_string()]
+        });
+        let probe = spawn_sandboxed(&probe_spec)
+            .map_err(|e| format!("sandbox enforcement probe failed: {e}"))?;
+        if let Ok(mut slot) = self.last_enforcement.lock() {
+            *slot = Some(probe.enforcement.clone());
+        }
+        if probe.timed_out {
+            return Err(format!(
+                "sandbox enforcement probe timed out after {}s",
+                timeout.as_secs()
+            ));
+        }
+        require_delegated_terminal_enforcement(&probe.enforcement)?;
+
+        let spec = spec_for_args(if cfg!(windows) {
+            vec!["/C".to_string(), command.to_string()]
+        } else {
+            vec!["-c".to_string(), command.to_string()]
+        });
 
         match spawn_sandboxed(&spec) {
             Ok(output) => {
@@ -2096,6 +2138,7 @@ impl legion_agent::agent_loop::DelegatedToolHost for AppDelegatedToolHost {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let summary = format_sandbox_enforcement_summary(&output.enforcement);
+                require_delegated_terminal_enforcement(&output.enforcement)?;
                 if output.timed_out {
                     Err(format!(
                         "command timed out after {}s ({summary})",

@@ -732,23 +732,23 @@ fn reap_orphaned_delegated_task_sandboxes_removes_preseeded_orphan_and_reports_i
 
 #[test]
 #[cfg(feature = "ai")]
-fn app_delegated_tool_host_runs_echo_command() {
+fn app_delegated_tool_host_denies_command_when_isolation_is_incomplete() {
     use legion_agent::agent_loop::DelegatedToolHost;
 
     let tmp = temp_workspace("tool-host-echo");
     let host = AppDelegatedToolHost::new(tmp.root.clone(), std::collections::BTreeSet::new());
 
-    let output = host
+    let error = host
         .run_terminal_command("echo hello", None, None)
-        .expect("echo should succeed");
+        .expect_err("current sandbox backends lack required read isolation");
 
     assert!(
-        output.contains("hello"),
-        "output should contain 'hello'; got: {output}"
+        error.contains("terminal command denied"),
+        "error should explain the fail-closed denial; got: {error}"
     );
     assert!(
-        output.contains("sandbox live enforcement:"),
-        "tool host must surface live SandboxEnforcementReport; got: {output}"
+        error.contains("sandbox live enforcement:"),
+        "tool host must surface live SandboxEnforcementReport; got: {error}"
     );
     assert!(
         host.last_enforcement_summary()
