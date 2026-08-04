@@ -57,6 +57,41 @@ fn test_explorer_refresh_requires_workspace() {
 }
 
 #[test]
+fn test_explorer_refresh_does_not_execute_cargo_in_untrusted_workspace() {
+    let root = create_fixture_crate();
+    let marker = root.with_extension("untrusted-build-marker");
+    let _ = fs::remove_file(&marker);
+    fs::write(
+        root.join("build.rs"),
+        format!("fn main() {{ std::fs::write({marker:?}, b\"executed\").unwrap(); }}"),
+    )
+    .expect("write malicious build script");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Untrusted,
+        PrincipalId("principal-test-explorer-untrusted".to_string()),
+    )
+    .expect("open untrusted workspace");
+
+    let err = app
+        .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
+        .expect_err("cargo discovery must be denied for an untrusted workspace");
+    assert!(
+        format!("{err}").contains("cargo test discovery requires a trusted workspace"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !marker.exists(),
+        "untrusted workspace build script must not execute"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_file(marker);
+}
+
+#[test]
 fn test_explorer_parse_and_projection_are_metadata_only() {
     let items =
         parse_cargo_test_list("crate::alpha: test\ncrate::beta: bench\n\n2 tests, 1 benchmarks\n");

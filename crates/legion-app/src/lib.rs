@@ -24683,6 +24683,11 @@ impl AppComposition {
             projection.controller_label = "lsp-runnable".to_string();
             projection
         } else {
+            if self.active_documents.active_workspace_trust != Some(WorkspaceTrustState::Trusted) {
+                return Err(AppCompositionError::WorkspaceNotTrusted(
+                    "cargo test discovery requires a trusted workspace".to_string(),
+                ));
+            }
             test_explorer::discover_cargo_tests(
                 Path::new(root_path),
                 test_explorer::DEFAULT_DISCOVER_TIMEOUT,
