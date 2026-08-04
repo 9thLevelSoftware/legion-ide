@@ -1444,9 +1444,7 @@ pub fn create_git_worktree(
 
 /// Commit the current index with the supplied message.
 ///
-/// Git inherits the caller's authentication environment unchanged, so SSH agent
-/// sockets (`SSH_AUTH_SOCK`) and credential helpers remain available for any
-/// remote hooks or commit-related integrations that rely on them.
+/// Repository-controlled hooks are disabled for this non-interactive action.
 pub fn commit_git_changes(
     root: impl AsRef<Path>,
     message: &str,
@@ -1454,7 +1452,15 @@ pub fn commit_git_changes(
     validate_git_commit_message(message)?;
     git_stdout(
         root.as_ref(),
-        &["commit", "--file", "-", "--cleanup=verbatim"],
+        &[
+            "-c",
+            "core.hooksPath=",
+            "commit",
+            "--no-verify",
+            "--file",
+            "-",
+            "--cleanup=verbatim",
+        ],
         Some(message.as_bytes()),
     )
 }
