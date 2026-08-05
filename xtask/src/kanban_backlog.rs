@@ -24,6 +24,12 @@ const REQUIRED_TASK_FIELDS: &[&str] = &[
     "verification",
     "acceptance",
     "stop_condition",
+    // `status` is required, not defaulted. A defaulted status lets a card
+    // silently read `todo` because nobody set it, which is indistinguishable
+    // from a card that was triaged and genuinely is not started. That failure
+    // mode reports delivered work as outstanding and is exactly what this
+    // backlog exists to prevent.
+    "status",
 ];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -51,22 +57,51 @@ pub struct BacklogCard {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub stop_condition: String,
-    /// Closed-vocabulary progress marker: `todo` (default), `in-progress`,
-    /// `done`, or `blocked`. Validated by [`validate_backlog`].
-    #[serde(default = "default_status")]
-    pub status: String,
-    /// Optional pointer to the evidence file/command output backing this
-    /// card's status. Required and must be non-blank when `status = "done"`.
+    /// Closed-vocabulary progress marker: `todo`, `in-progress`, `done`, or
+    /// `blocked`. There is no default — an omitted field is a validation
+    /// error, so an untriaged card fails the gate instead of masquerading as
+    /// `todo`.
+    pub status: Option<String>,
+    /// Pointer to the evidence file/command output backing this card's status.
+    /// Required and non-blank for every status in [`STATUSES_REQUIRING_EVIDENCE`].
     #[serde(default)]
     pub evidence: Option<String>,
+    /// Named external dependency that this card is waiting on, from
+    /// [`VALID_EXTERNAL_UNBLOCKS`]. Required when `status = "blocked"` so a
+    /// blocked card names what would unblock it instead of stalling in prose.
+    #[serde(default)]
+    pub external_unblock: Option<String>,
 }
 
-fn default_status() -> String {
-    "todo".to_string()
+impl BacklogCard {
+    /// Status as a string slice; empty when the field was omitted. Callers that
+    /// need to distinguish omitted from present use [`BacklogCard::status`]
+    /// directly.
+    fn status_str(&self) -> &str {
+        self.status.as_deref().unwrap_or("")
+    }
 }
 
 /// Closed vocabulary of valid `status` values for a backlog task.
 const VALID_STATUS_VALUES: &[&str] = &["todo", "in-progress", "done", "blocked"];
+
+/// Statuses that make a claim about work having happened, and therefore must
+/// name evidence. `todo` is the only status that asserts nothing.
+const STATUSES_REQUIRING_EVIDENCE: &[&str] = &["in-progress", "done", "blocked"];
+
+/// Closed vocabulary of external unblock gates. These are the things no amount
+/// of code can close — credentials, hosting, vendors, and consent — and naming
+/// them keeps a blocked card auditable.
+const VALID_EXTERNAL_UNBLOCKS: &[&str] = &[
+    "EXT-CERT-WIN",
+    "EXT-CERT-MAC",
+    "EXT-CERT-LIN",
+    "EXT-FEED",
+    "EXT-PENTEST",
+    "EXT-LIVEKEY",
+    "EXT-VM",
+    "EXT-CORPUS",
+];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BacklogFeature {
@@ -136,8 +171,16 @@ pub enum KanbanBacklogValidationError {
         card_id: String,
         status: String,
     },
-    MissingEvidenceForDone {
+    MissingEvidenceForStatus {
         card_id: String,
+        status: String,
+    },
+    MissingExternalUnblock {
+        card_id: String,
+    },
+    UnknownExternalUnblock {
+        card_id: String,
+        external_unblock: String,
     },
 }
 
@@ -162,9 +205,22 @@ impl std::fmt::Display for KanbanBacklogValidationError {
                 "card `{card_id}` has invalid status `{status}` (expected one of: {})",
                 VALID_STATUS_VALUES.join(", ")
             ),
-            KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => write!(
+            KanbanBacklogValidationError::MissingEvidenceForStatus { card_id, status } => write!(
                 f,
-                "card `{card_id}` is marked `done` but has no non-empty `evidence` field"
+                "card `{card_id}` is marked `{status}` but has no non-empty `evidence` field"
+            ),
+            KanbanBacklogValidationError::MissingExternalUnblock { card_id } => write!(
+                f,
+                "card `{card_id}` is marked `blocked` but names no `external_unblock` (expected one of: {})",
+                VALID_EXTERNAL_UNBLOCKS.join(", ")
+            ),
+            KanbanBacklogValidationError::UnknownExternalUnblock {
+                card_id,
+                external_unblock,
+            } => write!(
+                f,
+                "card `{card_id}` declares unknown `external_unblock` `{external_unblock}` (expected one of: {})",
+                VALID_EXTERNAL_UNBLOCKS.join(", ")
             ),
         }
     }
@@ -235,6 +291,7 @@ fn check_required_fields(task: &BacklogCard) -> Result<(), KanbanBacklogValidati
             "verification" => !task.verification.is_empty(),
             "acceptance" => !task.acceptance.is_empty(),
             "stop_condition" => !task.stop_condition.trim().is_empty(),
+            "status" => !task.status_str().trim().is_empty(),
             _ => false,
         };
         if !present {
@@ -247,28 +304,51 @@ fn check_required_fields(task: &BacklogCard) -> Result<(), KanbanBacklogValidati
     Ok(())
 }
 
-/// Validate the closed-vocabulary `status` field and the done-requires-evidence
-/// rule: a task claiming `status = "done"` without a non-blank `evidence`
-/// pointer is exactly the kind of unverifiable done-claim this repo forbids.
+/// Validate the closed-vocabulary `status` field, the status-requires-evidence
+/// rule, and the blocked-names-its-unblock rule.
+///
+/// A task claiming `done` without a non-blank `evidence` pointer is exactly the
+/// kind of unverifiable done-claim this repo forbids. `in-progress` and
+/// `blocked` are held to the same standard: both assert that someone looked at
+/// the card, so both must say what they looked at.
 fn check_status_and_evidence(task: &BacklogCard) -> Result<(), KanbanBacklogValidationError> {
-    if !VALID_STATUS_VALUES.contains(&task.status.as_str()) {
+    let status = task.status_str();
+    if !VALID_STATUS_VALUES.contains(&status) {
         return Err(KanbanBacklogValidationError::InvalidStatus {
             card_id: task.id.clone(),
-            status: task.status.clone(),
+            status: status.to_string(),
         });
     }
 
-    if task.status == "done" {
+    if STATUSES_REQUIRING_EVIDENCE.contains(&status) {
         let has_evidence = task
             .evidence
             .as_deref()
             .map(|e| !e.trim().is_empty())
             .unwrap_or(false);
         if !has_evidence {
-            return Err(KanbanBacklogValidationError::MissingEvidenceForDone {
+            return Err(KanbanBacklogValidationError::MissingEvidenceForStatus {
+                card_id: task.id.clone(),
+                status: status.to_string(),
+            });
+        }
+    }
+
+    match task.external_unblock.as_deref().map(str::trim) {
+        Some(unblock) if !unblock.is_empty() => {
+            if !VALID_EXTERNAL_UNBLOCKS.contains(&unblock) {
+                return Err(KanbanBacklogValidationError::UnknownExternalUnblock {
+                    card_id: task.id.clone(),
+                    external_unblock: unblock.to_string(),
+                });
+            }
+        }
+        _ if status == "blocked" => {
+            return Err(KanbanBacklogValidationError::MissingExternalUnblock {
                 card_id: task.id.clone(),
             });
         }
+        _ => {}
     }
 
     Ok(())
@@ -328,8 +408,9 @@ mod tests {
             verification: vec!["cargo test".to_string()],
             acceptance: vec!["done".to_string()],
             stop_condition: "stop".to_string(),
-            status: default_status(),
+            status: Some("todo".to_string()),
             evidence: None,
+            external_unblock: None,
         }
     }
 
@@ -352,6 +433,80 @@ mod tests {
         assert!(matches!(
             err,
             KanbanBacklogValidationError::MissingRequiredField { field: "files", .. }
+        ));
+    }
+
+    #[test]
+    fn omitted_status_is_reported_as_a_missing_field() {
+        // The regression this guards: an omitted status used to deserialize to
+        // `todo`, so an untriaged card was indistinguishable from a card
+        // deliberately marked not-started.
+        let mut c = card("P0.F1.T1");
+        c.status = None;
+        let err = check_required_fields(&c).expect_err("omitted status should fail");
+        assert!(matches!(
+            err,
+            KanbanBacklogValidationError::MissingRequiredField {
+                field: "status",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn in_progress_without_evidence_is_rejected() {
+        let mut c = card("P2.F5.T2");
+        c.status = Some("in-progress".to_string());
+        let err = check_status_and_evidence(&c).expect_err("in-progress needs evidence");
+        assert!(matches!(
+            err,
+            KanbanBacklogValidationError::MissingEvidenceForStatus { status, .. } if status == "in-progress"
+        ));
+    }
+
+    #[test]
+    fn todo_without_evidence_is_accepted() {
+        // `todo` asserts nothing, so it is the one status that needs no proof.
+        let c = card("P7.F1.T1");
+        check_status_and_evidence(&c).expect("todo should not require evidence");
+    }
+
+    #[test]
+    fn blocked_without_external_unblock_is_rejected() {
+        let mut c = card("P8.F1.T3");
+        c.status = Some("blocked".to_string());
+        c.evidence = Some(
+            "plans/evidence/production/WS-A-D/phase-4-release/D2-unsigned-beta-retained.md"
+                .to_string(),
+        );
+        let err = check_status_and_evidence(&c).expect_err("blocked must name its unblock");
+        assert!(matches!(
+            err,
+            KanbanBacklogValidationError::MissingExternalUnblock { .. }
+        ));
+    }
+
+    #[test]
+    fn blocked_with_known_external_unblock_is_accepted() {
+        let mut c = card("P8.F1.T3");
+        c.status = Some("blocked".to_string());
+        c.evidence = Some(
+            "plans/evidence/production/WS-A-D/phase-4-release/D2-unsigned-beta-retained.md"
+                .to_string(),
+        );
+        c.external_unblock = Some("EXT-CERT-WIN".to_string());
+        check_status_and_evidence(&c).expect("a named external unblock should validate");
+    }
+
+    #[test]
+    fn unknown_external_unblock_is_rejected() {
+        let mut c = card("P0.F1.T1");
+        c.external_unblock = Some("EXT-VIBES".to_string());
+        let err = check_status_and_evidence(&c).expect_err("unknown unblock should fail");
+        assert!(matches!(
+            err,
+            KanbanBacklogValidationError::UnknownExternalUnblock { external_unblock, .. }
+                if external_unblock == "EXT-VIBES"
         ));
     }
 }

@@ -352,3 +352,67 @@ fn docs_hygiene_checks_untracked_markdown_in_git_repo() {
             .all(|violation| !violation.path.starts_with(".almanac"))
     );
 }
+
+#[test]
+fn docs_hygiene_reports_duplicate_adr_number() {
+    // Regression guard for the real collision: `ADR-0044` named both the DAP
+    // client architecture and the collaboration operation layer, in two
+    // different ADR directories, so every citation of "ADR-0044" was ambiguous.
+    let repo = TempRepo::new("duplicate-adr");
+    repo.write(
+        "plans/adrs/ADR-0044-dap-client-architecture.md",
+        "# ADR-0044\n",
+    );
+    repo.write(
+        "docs/adrs/ADR-0044-collaboration-operation-layer.md",
+        "# ADR-0044\n",
+    );
+
+    let result = run_docs_hygiene(&repo.root, &DocsHygieneConfig::default());
+    let violations = result.expect_err("a duplicate ADR number must be reported");
+
+    assert!(
+        violations.iter().any(|violation| violation
+            .message
+            .contains("ADR number `0044` is used by both")),
+        "expected a duplicate-number violation, got: {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.message.contains("must live under `plans/adrs/`")),
+        "expected a misplaced-ADR violation, got: {violations:?}"
+    );
+}
+
+#[test]
+fn docs_hygiene_accepts_uniquely_numbered_adrs_in_the_canonical_dir() {
+    let repo = TempRepo::new("unique-adrs");
+    repo.write(
+        "plans/adrs/ADR-0044-dap-client-architecture.md",
+        "# ADR-0044\n",
+    );
+    repo.write(
+        "plans/adrs/ADR-0045-collaboration-operation-layer.md",
+        "# ADR-0045\n",
+    );
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("uniquely numbered ADRs in plans/adrs should pass");
+}
+
+#[test]
+fn docs_hygiene_exempts_evidence_records_that_name_an_adr_number() {
+    // `plans/evidence/production/M0/ADR-0033-ratification.md` is a record
+    // *about* ADR-0033, not a second ADR-0033. Flagging it would make the rule
+    // unusable against the existing evidence archive.
+    let repo = TempRepo::new("adr-evidence-exempt");
+    repo.write("plans/adrs/ADR-0033-syntax-parse-engine.md", "# ADR-0033\n");
+    repo.write(
+        "plans/evidence/production/M0/ADR-0033-ratification.md",
+        "# Ratification\n",
+    );
+
+    run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
+        .expect("an evidence ratification record should not count as a second ADR");
+}

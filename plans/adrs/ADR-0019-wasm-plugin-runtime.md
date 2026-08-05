@@ -1,7 +1,14 @@
 # ADR-0019: WASM Plugin Runtime Boundary
 
-Status: Accepted
+Status: Accepted — with an open supply-chain debt against the Wasmtime clause below
 Date: 2026-05-25
+
+> **Debt recorded 2026-08-05.** The "future Wasmtime/WASI engine" clause in
+> *Consequences* requires supply-chain review before the engine is added.
+> Wasmtime is already a workspace dependency of `legion-plugin` and backs
+> `WasmPluginHost`; no ADR authorizes it and `plans/dependency-policy.md` does
+> not list it. See `plans/evidence/production/W0-truth-reconciliation/W0-7-wasmtime-adr-debt.md`.
+> Backlog card `P7.F1.T1` clears this and gates the rest of P7.
 
 ## Context
 

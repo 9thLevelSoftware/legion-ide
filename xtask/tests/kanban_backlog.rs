@@ -66,6 +66,7 @@ dependencies = []
 verification = ["cargo test -p legion-protocol"]
 acceptance = ["One mode table exists"]
 stop_condition = "Manual mode policy still forbids AI"
+status = "todo"
 "#
 }
 
@@ -225,8 +226,9 @@ fn collect_all_ids_returns_feature_and_task_ids() {
                     verification: vec![],
                     acceptance: vec![],
                     stop_condition: "n/a".to_string(),
-                    status: "todo".to_string(),
+                    status: Some("todo".to_string()),
                     evidence: None,
+                    external_unblock: None,
                 }],
             }],
         }],
@@ -265,42 +267,54 @@ fn from_file_reports_parse_error() {
     );
 }
 
+/// Swap the fixture's `status = "todo"` line for `block`, which may carry its
+/// own status plus any of `evidence` / `external_unblock`.
+fn with_status_block(block: &str) -> String {
+    minimal_valid_backlog_toml().replace("status = \"todo\"", block)
+}
+
+const SAMPLE_EVIDENCE: &str = "plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md";
+
 #[test]
-fn status_defaults_to_todo_when_absent() {
-    let dir = TempDir::new("status-default");
-    let path = dir.write("backlog.toml", minimal_valid_backlog_toml());
+fn absent_status_is_rejected() {
+    // Regression guard for the fail-open default: an omitted `status` used to
+    // deserialize to `todo`, so 65 untriaged cards reported as not-started and
+    // the gate stayed green. An omitted status is now a hard error.
+    let toml_src = minimal_valid_backlog_toml().replace("status = \"todo\"\n", "");
+    let dir = TempDir::new("status-absent");
+    let path = dir.write("backlog.toml", &toml_src);
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
-    assert_eq!(backlog.epics[0].features[0].tasks[0].status, "todo");
-    validate_backlog(&backlog).expect("default status of todo should validate");
+    assert_eq!(backlog.epics[0].features[0].tasks[0].status, None);
+    let err = validate_backlog(&backlog).expect_err("an omitted status must be rejected");
+    match err {
+        KanbanBacklogValidationError::MissingRequiredField { card_id, field } => {
+            assert_eq!(card_id, "P0.F1.T1");
+            assert_eq!(field, "status");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }
 
 #[test]
 fn status_accepts_all_valid_values() {
     for status in ["todo", "in-progress", "done", "blocked"] {
-        let toml_src = if status == "done" {
-            // `done` requires non-empty evidence; supply it so this test
-            // isolates the status-vocabulary check, not the evidence rule.
-            format!(
-                "{}\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"\n",
-                minimal_valid_backlog_toml().replace(
-                    "stop_condition = \"Manual mode policy still forbids AI\"",
-                    &format!(
-                        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"{status}\""
-                    )
-                )
-            )
-        } else {
-            minimal_valid_backlog_toml().replace(
-                "stop_condition = \"Manual mode policy still forbids AI\"",
-                &format!(
-                    "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"{status}\""
-                ),
-            )
-        };
+        // Every status except `todo` asserts that work happened, so it must
+        // carry evidence; `blocked` must additionally name its unblock. Supply
+        // both so this test isolates the status vocabulary itself.
+        let mut block = format!("status = \"{status}\"");
+        if status != "todo" {
+            block.push_str(&format!("\nevidence = \"{SAMPLE_EVIDENCE}\""));
+        }
+        if status == "blocked" {
+            block.push_str("\nexternal_unblock = \"EXT-CERT-WIN\"");
+        }
         let dir = TempDir::new(&format!("status-valid-{status}"));
-        let path = dir.write("backlog.toml", &toml_src);
+        let path = dir.write("backlog.toml", &with_status_block(&block));
         let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
-        assert_eq!(backlog.epics[0].features[0].tasks[0].status, status);
+        assert_eq!(
+            backlog.epics[0].features[0].tasks[0].status.as_deref(),
+            Some(status)
+        );
         validate_backlog(&backlog)
             .unwrap_or_else(|err| panic!("status `{status}` should validate, got: {err}"));
     }
@@ -308,12 +322,8 @@ fn status_accepts_all_valid_values() {
 
 #[test]
 fn status_rejects_invalid_value() {
-    let toml_src = minimal_valid_backlog_toml().replace(
-        "stop_condition = \"Manual mode policy still forbids AI\"",
-        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"shipped\"",
-    );
     let dir = TempDir::new("status-invalid");
-    let path = dir.write("backlog.toml", &toml_src);
+    let path = dir.write("backlog.toml", &with_status_block("status = \"shipped\""));
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
     let err = validate_backlog(&backlog).expect_err("invalid status value should be rejected");
     match err {
@@ -326,38 +336,45 @@ fn status_rejects_invalid_value() {
 }
 
 #[test]
-fn done_status_without_evidence_is_rejected() {
-    let toml_src = minimal_valid_backlog_toml().replace(
-        "stop_condition = \"Manual mode policy still forbids AI\"",
-        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"",
-    );
-    let dir = TempDir::new("done-no-evidence");
-    let path = dir.write("backlog.toml", &toml_src);
-    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
-    let err = validate_backlog(&backlog)
-        .expect_err("a task marked done without evidence must be rejected");
-    match err {
-        KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => {
-            assert_eq!(card_id, "P0.F1.T1");
+fn statuses_asserting_work_require_evidence() {
+    // `done`, `in-progress`, and `blocked` all claim someone looked at the
+    // card, so all three must say what they looked at.
+    for status in ["done", "in-progress", "blocked"] {
+        let dir = TempDir::new(&format!("no-evidence-{status}"));
+        let path = dir.write(
+            "backlog.toml",
+            &with_status_block(&format!("status = \"{status}\"")),
+        );
+        let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+        let err = validate_backlog(&backlog)
+            .expect_err(&format!("`{status}` without evidence must be rejected"));
+        match err {
+            KanbanBacklogValidationError::MissingEvidenceForStatus {
+                card_id,
+                status: reported,
+            } => {
+                assert_eq!(card_id, "P0.F1.T1");
+                assert_eq!(reported, status);
+            }
+            other => panic!("unexpected error variant for `{status}`: {other:?}"),
         }
-        other => panic!("unexpected error variant: {other:?}"),
     }
 }
 
 #[test]
 fn done_status_with_blank_evidence_is_rejected() {
-    let toml_src = minimal_valid_backlog_toml().replace(
-        "stop_condition = \"Manual mode policy still forbids AI\"",
-        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"\nevidence = \"   \"",
-    );
     let dir = TempDir::new("done-blank-evidence");
-    let path = dir.write("backlog.toml", &toml_src);
+    let path = dir.write(
+        "backlog.toml",
+        &with_status_block("status = \"done\"\nevidence = \"   \""),
+    );
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
     let err = validate_backlog(&backlog)
         .expect_err("a task marked done with blank evidence must be rejected");
     match err {
-        KanbanBacklogValidationError::MissingEvidenceForDone { card_id } => {
+        KanbanBacklogValidationError::MissingEvidenceForStatus { card_id, status } => {
             assert_eq!(card_id, "P0.F1.T1");
+            assert_eq!(status, "done");
         }
         other => panic!("unexpected error variant: {other:?}"),
     }
@@ -365,31 +382,73 @@ fn done_status_with_blank_evidence_is_rejected() {
 
 #[test]
 fn done_status_with_evidence_is_accepted() {
-    let toml_src = minimal_valid_backlog_toml().replace(
-        "stop_condition = \"Manual mode policy still forbids AI\"",
-        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"done\"\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"",
-    );
     let dir = TempDir::new("done-with-evidence");
-    let path = dir.write("backlog.toml", &toml_src);
+    let path = dir.write(
+        "backlog.toml",
+        &with_status_block(&format!(
+            "status = \"done\"\nevidence = \"{SAMPLE_EVIDENCE}\""
+        )),
+    );
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
     validate_backlog(&backlog).expect("done status with non-empty evidence should validate");
     assert_eq!(
         backlog.epics[0].features[0].tasks[0].evidence.as_deref(),
-        Some("plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md")
+        Some(SAMPLE_EVIDENCE)
     );
 }
 
 #[test]
-fn evidence_without_done_status_is_allowed() {
-    // `evidence` is a generally optional field; it is only required when
-    // `status = "done"`. A todo/in-progress task may still carry a partial
-    // evidence pointer without failing validation.
-    let toml_src = minimal_valid_backlog_toml().replace(
-        "stop_condition = \"Manual mode policy still forbids AI\"",
-        "stop_condition = \"Manual mode policy still forbids AI\"\nstatus = \"in-progress\"\nevidence = \"plans/evidence/production/WS-P0/WS-P0-rebaseline-evidence.md\"",
+fn evidence_on_a_todo_card_is_allowed() {
+    // Evidence is never *forbidden* — a not-yet-started card may still point at
+    // partial findings without tripping validation.
+    let dir = TempDir::new("evidence-on-todo");
+    let path = dir.write(
+        "backlog.toml",
+        &with_status_block(&format!(
+            "status = \"todo\"\nevidence = \"{SAMPLE_EVIDENCE}\""
+        )),
     );
-    let dir = TempDir::new("evidence-no-done");
-    let path = dir.write("backlog.toml", &toml_src);
     let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
-    validate_backlog(&backlog).expect("evidence without done status should still validate");
+    validate_backlog(&backlog).expect("evidence on a todo card should still validate");
+}
+
+#[test]
+fn blocked_status_without_external_unblock_is_rejected() {
+    let dir = TempDir::new("blocked-no-unblock");
+    let path = dir.write(
+        "backlog.toml",
+        &with_status_block(&format!(
+            "status = \"blocked\"\nevidence = \"{SAMPLE_EVIDENCE}\""
+        )),
+    );
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    let err = validate_backlog(&backlog)
+        .expect_err("a blocked task must name the external gate holding it up");
+    match err {
+        KanbanBacklogValidationError::MissingExternalUnblock { card_id } => {
+            assert_eq!(card_id, "P0.F1.T1");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_external_unblock_is_rejected() {
+    let dir = TempDir::new("unknown-unblock");
+    let path = dir.write(
+        "backlog.toml",
+        &with_status_block("status = \"todo\"\nexternal_unblock = \"EXT-SOMEDAY\""),
+    );
+    let backlog = KanbanBacklog::from_file(&path).expect("backlog should parse");
+    let err = validate_backlog(&backlog).expect_err("an unknown external unblock must be rejected");
+    match err {
+        KanbanBacklogValidationError::UnknownExternalUnblock {
+            card_id,
+            external_unblock,
+        } => {
+            assert_eq!(card_id, "P0.F1.T1");
+            assert_eq!(external_unblock, "EXT-SOMEDAY");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }

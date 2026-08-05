@@ -72,6 +72,9 @@ jobs:
       - name: xtask verify-kanban-backlog
         run: cargo run -p xtask -- verify-kanban-backlog
 
+      - name: xtask verify-readiness-consistency
+        run: cargo run -p xtask -- verify-readiness-consistency
+
       - name: xtask release-pipeline dry run
         run: cargo run -p xtask -- release-pipeline --dry-run
 
