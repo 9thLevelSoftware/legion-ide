@@ -19,25 +19,24 @@ Reference images inspected with `view_image`:
 
 Native images inspected in the same QA pass:
 
-- `D:\tmp\legion-native-capture-20260806-task6\manual-1440x900.png`
-- `D:\tmp\legion-native-capture-20260806-task6\assist-1440x900.png`
-- `D:\tmp\legion-native-capture-20260806-task6\delegate-1440x900.png`
-- `D:\tmp\legion-native-capture-20260806-task6\legion-workflows-1440x900.png`
-- `D:\tmp\legion-native-capture-20260806-task6\assist-960x720.png`
+- `D:\tmp\legion-native-capture-20260806-final\manual-1440x900.png`
+- `D:\tmp\legion-native-capture-20260806-final\assist-1440x900.png`
+- `D:\tmp\legion-native-capture-20260806-final\delegate-1440x900.png`
+- `D:\tmp\legion-native-capture-20260806-final\legion-workflows-1440x900.png`
+- `D:\tmp\legion-native-capture-20260806-final\assist-960x720.png`
 
 The Windows display reported 144 DPI (150%). The native client was therefore resized to 2160x1350 physical pixels for a 1440x900 logical capture and to 1440x1080 physical pixels for a 960x720 logical capture. Win32 `GetClientRect` and `ClientToScreen` supplied the exact client origin; `GetDpiForWindow` verified the scale. The captured physical client was then downsampled with Lanczos. No browser, mocked DOM, or synthetic renderer was used for the native images.
 
 The exact launch and capture commands were:
 
 ```powershell
-$env:CARGO_BUILD_JOBS='1'
 cargo build -p legion-desktop
-$captureDir = 'D:\tmp\legion-native-capture-20260806-task6'
+$captureDir = 'D:\tmp\legion-native-capture-20260806-final'
 $app = Start-Process .\target\debug\legion-desktop.exe -ArgumentList @(
   '--workspace', 'D:\legion-ide\.worktrees\ui-prototype-polish',
   '--file', 'crates/legion-desktop/src/view.rs',
-  '--session-state', "$captureDir\session-final.json"
-) -PassThru
+  '--session-state', "$captureDir\session-final-accepted.json"
+) -WindowStyle Normal -PassThru
 
 Add-Type @'
 using System;
@@ -57,6 +56,10 @@ public static class NativeCapture {
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after,
     int x, int y, int width, int height, uint flags);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx,
+    uint dy, uint data, UIntPtr extraInfo);
   public static IntPtr FindTitledWindow(uint processId, string title) {
     IntPtr result = IntPtr.Zero;
     EnumWindows((hwnd, state) => {
@@ -74,7 +77,7 @@ public static class NativeCapture {
 }
 '@
 
-$app.WaitForInputIdle() | Out-Null
+try { $app.WaitForInputIdle() | Out-Null } catch { }
 $hwnd = [NativeCapture]::FindTitledWindow([uint32]$app.Id, 'Legion IDE')
 if ($hwnd -eq [IntPtr]::Zero) { throw 'visible Legion IDE HWND was not found' }
 $client = [NativeCapture+RECT]::new()
@@ -107,8 +110,14 @@ ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
 ffmpeg -hide_banner -loglevel error -i $rawDesktop `
   -vf 'scale=1440:900:flags=lanczos' -frames:v 1 -update 1 -y $desktopCapture
 
-# The same two ffmpeg commands were repeated after real pointer mode changes,
-# assigning delegate/assist/workflows output names shown in the evidence list.
+# The same two ffmpeg commands were repeated after native pointer actions.
+# Coordinates are logical client coordinates. Escalation confirmation is a
+# real two-step interaction; the inert wordmark click advances the subsequent
+# projection frame without invoking an application action.
+# Assist: click 660,26.
+# Delegate: click 784,26; click Confirm at 567,455; click 100,22.
+# Legion Workflows: click 911,26; click Confirm at 567,455; click 100,22.
+# Return to Assist: click 660,26.
 
 # 960x720 logical at 150%: 1440x1080 physical.
 [NativeCapture]::SetWindowPos($hwnd, [IntPtr]::Zero, 500, 200,

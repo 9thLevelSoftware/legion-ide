@@ -53,13 +53,13 @@ The artifact is authoritative for composition, density, and visual language. Rep
 
 ### Checklist
 
-- [ ] Add failing tests proving `DockMode::{Manual, Assist, Delegate, Automate}` renders the canonical visible labels `Manual`, `Assist`, `Delegate`, `Legion Workflows`.
-- [ ] Preserve legacy parsing aliases for `Automate`, `Autonomous`, `LegionWorkflows`, and `Legion Workflows`, but normalize all output to `Legion Workflows`.
-- [ ] Make `DockMode::Automate::to_product_mode()` map to canonical `ProductMode::LegionWorkflows`; do not remove legacy protocol variants needed for deserialization.
-- [ ] Rename the renderer-local `DesktopProductMode::Delegates` variant to singular `Delegate` and remove obsolete user-facing `Automate`, `Autonomous`, and `Delegates` copy from mode chrome, onboarding, status, confirmation, and palette rows.
-- [ ] Source switch labels/shortcuts from one four-entry renderer helper that is mechanically consistent with `CANONICAL_PRODUCT_MODES`.
-- [ ] Keep the internal `DockMode::Automate` binding for layout/projection compatibility.
-- [ ] Run and record RED then GREEN evidence.
+- [x] Add failing tests proving `DockMode::{Manual, Assist, Delegate, Automate}` renders the canonical visible labels `Manual`, `Assist`, `Delegate`, `Legion Workflows`.
+- [x] Preserve legacy parsing aliases for `Automate`, `Autonomous`, `LegionWorkflows`, and `Legion Workflows`, but normalize all output to `Legion Workflows`.
+- [x] Make `DockMode::Automate::to_product_mode()` map to canonical `ProductMode::LegionWorkflows`; do not remove legacy protocol variants needed for deserialization.
+- [x] Rename the renderer-local `DesktopProductMode::Delegates` variant to singular `Delegate` and remove obsolete user-facing `Automate`, `Autonomous`, and `Delegates` copy from mode chrome, onboarding, status, confirmation, and palette rows.
+- [x] Source switch labels/shortcuts from one four-entry renderer helper that is mechanically consistent with `CANONICAL_PRODUCT_MODES`.
+- [x] Keep the internal `DockMode::Automate` binding for layout/projection compatibility.
+- [x] Run and record RED then GREEN evidence.
 
 ### Focused verification
 
@@ -86,16 +86,16 @@ The final `rg` may find compatibility parser input or internal comments/identifi
 
 ### Checklist
 
-- [ ] Add failing token and geometry tests before implementation.
-- [ ] Retokenize dark mode to the accepted blue-slate/warm-amber system: shell `#16202b`, editor `#121a23`, panel `#1d2a38`, borders centered on `#2c3a4a`, primary text `#f4f1eb`, muted text `#7e8a9b`, primary amber `#cf8136`, Assist blue `#2e7fb8`, success `#4fae6d`, and danger red near `#d23b2e`.
-- [ ] Retain a legible light theme with the same semantic token roles; update focus tokens so they remain visible in both themes.
-- [ ] Introduce a small, pure `ShellGeometry`/layout-policy helper in `view.rs` that derives panel sizes and compact behavior from available width/height. Do not scatter viewport thresholds across render functions.
-- [ ] Use the reference desktop geometry at 1440x900 and a compact geometry at 960x720 that preserves a >=360px editor canvas.
-- [ ] Keep left/right/bottom panels resizable at normal widths while ensuring deterministic compact defaults and minimums.
-- [ ] Add an activity-rail composition inside the left region without inventing navigation state; rail buttons may expose existing dock/palette actions only.
-- [ ] Replace mode-dependent outer panel widths/heights with stable shell geometry so changing modes does not shift the editor.
-- [ ] Keep top and status bars fixed at reference density; avoid text smaller than 11px for essential information.
-- [ ] Run and record RED then GREEN evidence.
+- [x] Add failing token and geometry tests before implementation.
+- [x] Retokenize dark mode to the accepted blue-slate/warm-amber system: shell `#16202b`, editor `#121a23`, panel `#1d2a38`, borders centered on `#2c3a4a`, primary text `#f4f1eb`, muted text `#7e8a9b`, primary amber `#cf8136`, Assist blue `#2e7fb8`, success `#4fae6d`, and danger red near `#d23b2e`.
+- [x] Retain a legible light theme with the same semantic token roles; update focus tokens so they remain visible in both themes.
+- [x] Introduce a small, pure `ShellGeometry`/layout-policy helper in `view.rs` that derives panel sizes and compact behavior from available width/height. Do not scatter viewport thresholds across render functions.
+- [x] Use the reference desktop geometry at 1440x900 and a compact geometry at 960x720 that preserves a >=360px editor canvas.
+- [x] Keep left/right/bottom panels resizable at normal widths while ensuring deterministic compact defaults and minimums.
+- [x] Add an activity-rail composition inside the left region without inventing navigation state; rail buttons may expose existing dock/palette actions only.
+- [x] Replace mode-dependent outer panel widths/heights with stable shell geometry so changing modes does not shift the editor.
+- [x] Keep top and status bars fixed at reference density; avoid text smaller than 11px for essential information.
+- [x] Run and record RED then GREEN evidence.
 
 ### Focused verification
 
@@ -121,16 +121,16 @@ cargo fmt --all --check
 
 ### Checklist
 
-- [ ] Add failing headless/control tests for the new chrome before implementation.
-- [ ] Recompose the top bar into three collision-safe regions: Legion wordmark/workspace, centered four-mode switch, and one command-palette/presence region. Remove decorative window-control dots and the row of competing command buttons.
-- [ ] Route the `Command`/shortcut control to the existing command palette. Do not invent search or presence results.
-- [ ] Simplify the first-screen left sidebar to the narrow activity rail plus `EXPLORER · {workspace}` and the real projected tree. Keep richer Git/debug/test surfaces reachable through existing docks/palette instead of crowding the explorer.
-- [ ] Retune the real tab strip and breadcrumb bar to the reference: compact height, amber selected-tab rule, restrained close/dirty indicators, and slate separators.
-- [ ] Retune `EguiCodeCanvasPainter` colors for editor background, current line, line numbers, selection, cursor, and syntax while preserving the existing editor action path.
-- [ ] Make the bottom console terminal-first with `TERMINAL`, `PROBLEMS`, and `AGENT LOG` tabs projected from existing state; never render a live agent log in Manual.
-- [ ] Make the status bar a single compact line with only truthful projected mode/trust/LSP/file/cursor information.
-- [ ] Preserve focus, selection, scroll, user panel sizing, and settings across mode changes.
-- [ ] Run and record RED then GREEN evidence.
+- [x] Add failing headless/control tests for the new chrome before implementation.
+- [x] Recompose the top bar into three collision-safe regions: Legion wordmark/workspace, centered four-mode switch, and one command-palette/presence region. Remove decorative window-control dots and the row of competing command buttons.
+- [x] Route the `Command`/shortcut control to the existing command palette. Do not invent search or presence results.
+- [x] Simplify the first-screen left sidebar to the narrow activity rail plus `EXPLORER · {workspace}` and the real projected tree. Keep richer Git/debug/test surfaces reachable through existing docks/palette instead of crowding the explorer.
+- [x] Retune the real tab strip and breadcrumb bar to the reference: compact height, amber selected-tab rule, restrained close/dirty indicators, and slate separators.
+- [x] Retune `EguiCodeCanvasPainter` colors for editor background, current line, line numbers, selection, cursor, and syntax while preserving the existing editor action path.
+- [x] Make the bottom console terminal-first with `TERMINAL`, `PROBLEMS`, and `AGENT LOG` tabs projected from existing state; never render a live agent log in Manual.
+- [x] Make the status bar a single compact line with only truthful projected mode/trust/LSP/file/cursor information.
+- [x] Preserve focus, selection, scroll, user panel sizing, and settings across mode changes.
+- [x] Run and record RED then GREEN evidence.
 
 ### Focused verification
 
@@ -158,15 +158,15 @@ cargo fmt --all --check
 
 ### Checklist
 
-- [ ] Add failing action-routing and projection tests for each mode before implementation.
-- [ ] Manual rail: show `AI engine disengaged`, zero-egress/local-only policy copy, and an `Enable Assist` action that emits only `SetProductMode { Assist }`. Hide agent, remote presence, collaboration-live, and provider surfaces.
-- [ ] Assist rail: reuse the real `AssistInlinePredictionProjection`; active suggestions expose Accept/Dismiss, idle state exposes Predict, and the list shows truthful next-edit predictions. Preserve request/accept/dismiss/cancel action mappings.
-- [ ] Delegate rail: provide an adapter-local unsent task draft, scope/budget/sandbox explanation from existing projections, and a `Delegate task` CTA that emits `StartDelegatedTask { task_description, desktop_default_delegated_scope(snapshot) }`. It must not emit `StartAiProposal`.
-- [ ] When Delegate is active, compactly render real phase, task/DAG, proposal, review, permission, cancel, and evidence state rather than prototype fake progress.
-- [ ] Legion Workflows rail: compact existing workflow/fleet task cards, resource budgets, risk gate, approval, permission, cancel, and kill-switch controls into the prototype's stacked layout while retaining canonical copy and proposal-mediated behavior.
-- [ ] No rail may synthesize a permission grant, successful task, presence avatar, budget, or approval state absent from the snapshot.
-- [ ] Keep the existing richer workbench surfaces reachable; first-screen simplification must not delete capabilities.
-- [ ] Run and record RED then GREEN evidence.
+- [x] Add failing action-routing and projection tests for each mode before implementation.
+- [x] Manual rail: show `AI engine disengaged`, zero-egress/local-only policy copy, and an `Enable Assist` action that emits only `SetProductMode { Assist }`. Hide agent, remote presence, collaboration-live, and provider surfaces.
+- [x] Assist rail: reuse the real `AssistInlinePredictionProjection`; active suggestions expose Accept/Dismiss, idle state exposes Predict, and the list shows truthful next-edit predictions. Preserve request/accept/dismiss/cancel action mappings.
+- [x] Delegate rail: provide an adapter-local unsent task draft, scope/budget/sandbox explanation from existing projections, and a `Delegate task` CTA that emits `StartDelegatedTask { task_description, desktop_default_delegated_scope(snapshot) }`. It must not emit `StartAiProposal`.
+- [x] When Delegate is active, compactly render real phase, task/DAG, proposal, review, permission, cancel, and evidence state rather than prototype fake progress.
+- [x] Legion Workflows rail: compact existing workflow/fleet task cards, resource budgets, risk gate, approval, permission, cancel, and kill-switch controls into the prototype's stacked layout while retaining canonical copy and proposal-mediated behavior.
+- [x] No rail may synthesize a permission grant, successful task, presence avatar, budget, or approval state absent from the snapshot.
+- [x] Keep the existing richer workbench surfaces reachable; first-screen simplification must not delete capabilities.
+- [x] Run and record RED then GREEN evidence.
 
 ### Focused verification
 
@@ -194,16 +194,16 @@ cargo fmt --all --check
 
 ### Checklist
 
-- [ ] Add failing transition-policy, cancel, confirm, and keyboard tests before implementation.
-- [ ] Add renderer-owned `pending_mode_confirmation: Option<DockMode>` presentation state; it is not product state and grants no authority.
-- [ ] Encode confirmation policy with explicit named matches, never ordinal arithmetic: entering Delegate from Manual/Assist requires confirmation; entering Legion Workflows from Manual/Assist/Delegate requires confirmation; Manual/Assist entry and every privilege-reducing transition apply immediately.
-- [ ] Clicking an escalation target leaves the projected active mode unchanged and opens a modal that explains proposal-mediated execution and bounded permissions without showing grant checkboxes.
-- [ ] Confirm emits the existing `DesktopAction::SetProductMode`; Cancel and Escape emit nothing and restore focus to the switch. A subsequent snapshot remains the sole source of active-mode truth.
-- [ ] Route every rendered desktop mode entry point through the same request helper so onboarding/rail/switch behavior cannot drift.
-- [ ] Add semantic labels, selected/current state, dialog title/body, confirm/cancel actions, visible focus, and a non-trapping keyboard order to the existing accessibility metadata seam.
-- [ ] Verify compact mode switch labels remain readable at 960x720 and at 200% zoom.
-- [ ] Clearly document in code that presentation confirmation is not the execution security boundary; operation-level app gates remain authoritative.
-- [ ] Run and record RED then GREEN evidence.
+- [x] Add failing transition-policy, cancel, confirm, and keyboard tests before implementation.
+- [x] Add renderer-owned `pending_mode_confirmation: Option<DockMode>` presentation state; it is not product state and grants no authority.
+- [x] Encode confirmation policy with explicit named matches, never ordinal arithmetic: entering Delegate from Manual/Assist requires confirmation; entering Legion Workflows from Manual/Assist/Delegate requires confirmation; Manual/Assist entry and every privilege-reducing transition apply immediately.
+- [x] Clicking an escalation target leaves the projected active mode unchanged and opens a modal that explains proposal-mediated execution and bounded permissions without showing grant checkboxes.
+- [x] Confirm emits the existing `DesktopAction::SetProductMode`; Cancel and Escape emit nothing and restore focus to the switch. A subsequent snapshot remains the sole source of active-mode truth.
+- [x] Route every rendered desktop mode entry point through the same request helper so onboarding/rail/switch behavior cannot drift.
+- [x] Add semantic labels, selected/current state, dialog title/body, confirm/cancel actions, visible focus, and a non-trapping keyboard order to the existing accessibility metadata seam.
+- [x] Verify compact mode switch labels remain readable at 960x720 and at 200% zoom.
+- [x] Clearly document in code that presentation confirmation is not the execution security boundary; operation-level app gates remain authoritative.
+- [x] Run and record RED then GREEN evidence.
 
 ### Focused verification
 
@@ -228,12 +228,12 @@ cargo fmt --all --check
 
 ### Checklist
 
-- [ ] Launch the native app against a deterministic local workspace and capture Manual, Assist, Delegate, and Legion Workflows at 1440x900 plus Assist at 960x720.
-- [ ] In one visual QA pass, inspect the accepted concept and latest implementation captures with `view_image`.
-- [ ] Write a fidelity ledger with at least: shell geometry, four-mode switch, dark token palette, explorer/editor composition, mode-specific right rail, terminal/status composition, compact viewport behavior, copy differences, and focus/accessibility evidence.
-- [ ] Record the intentional deviations: `Legion Workflows` replaces artifact `Autonomous`; Manual hides agent/presence surfaces; workflow mutations remain proposal-mediated; no blanket low-risk auto-approval; system fonts substitute for unbundled prototype web fonts if licensing/assets are absent.
-- [ ] Record viewport method and exact capture commands, including why local Edge/reference capture was used (no Browser/IAB connector was available).
-- [ ] Resolve all P0/P1 fidelity gaps discovered in the comparison before final verification. Cosmetic P2 gaps may remain only when explicitly documented with rationale.
+- [x] Launch the native app against a deterministic local workspace and capture Manual, Assist, Delegate, and Legion Workflows at 1440x900 plus Assist at 960x720.
+- [x] In one visual QA pass, inspect the accepted concept and latest implementation captures with `view_image`.
+- [x] Write a fidelity ledger with at least: shell geometry, four-mode switch, dark token palette, explorer/editor composition, mode-specific right rail, terminal/status composition, compact viewport behavior, copy differences, and focus/accessibility evidence.
+- [x] Record the intentional deviations: `Legion Workflows` replaces artifact `Autonomous`; Manual hides agent/presence surfaces; workflow mutations remain proposal-mediated; no blanket low-risk auto-approval; system fonts substitute for unbundled prototype web fonts if licensing/assets are absent.
+- [x] Record viewport method and exact capture commands, including why local Edge/reference capture was used (no Browser/IAB connector was available).
+- [x] Resolve all P0/P1 fidelity gaps discovered in the comparison before final verification. Cosmetic P2 gaps may remain only when explicitly documented with rationale.
 - [ ] Run the focused package checks and the repository UI safety gates. Do not claim the broad desktop test bundle green unless a fresh full run completes.
 - [ ] Run and record final verification from the exact final HEAD.
 
