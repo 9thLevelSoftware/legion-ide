@@ -25,122 +25,27 @@ Native images inspected in the same QA pass:
 - `D:\tmp\legion-native-capture-20260806-final\legion-workflows-1440x900.png`
 - `D:\tmp\legion-native-capture-20260806-final\assist-960x720.png`
 
-The Windows display reported 144 DPI (150%). The native client was therefore resized to 2160x1350 physical pixels for a 1440x900 logical capture and to 1440x1080 physical pixels for a 960x720 logical capture. Win32 `GetClientRect` and `ClientToScreen` supplied the exact client origin; `GetDpiForWindow` verified the scale. The captured physical client was then downsampled with Lanczos. No browser, mocked DOM, or synthetic renderer was used for the native images.
+The Windows display reported 144 DPI (150%), but this per-monitor-aware native window's `GetClientRect` and `ClientToScreen` values were already physical pixels. The capture therefore used those values directly: exactly 1440x900 and 960x720 client pixels. Applying the DPI factor again was rejected during QA because it captured desktop pixels outside the app. `System.Drawing` dimension checks and `view_image` inspection confirmed every final PNG has the requested dimensions and contains only the Legion client.
 
-The exact launch and capture commands were:
+The exact top-level commands were:
 
 ```powershell
+$env:CARGO_BUILD_JOBS = '1'
 cargo build -p legion-desktop
-$captureDir = 'D:\tmp\legion-native-capture-20260806-final'
-$app = Start-Process .\target\debug\legion-desktop.exe -ArgumentList @(
-  '--workspace', 'D:\legion-ide\.worktrees\ui-prototype-polish',
-  '--file', 'crates/legion-desktop/src/view.rs',
-  '--session-state', "$captureDir\session-final-accepted.json"
-) -WindowStyle Normal -PassThru
-
-Add-Type @'
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class NativeCapture {
-  public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr state);
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
-  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
-  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after,
-    int x, int y, int width, int height, uint flags);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx,
-    uint dy, uint data, UIntPtr extraInfo);
-  public static IntPtr FindTitledWindow(uint processId, string title) {
-    IntPtr result = IntPtr.Zero;
-    EnumWindows((hwnd, state) => {
-      GetWindowThreadProcessId(hwnd, out uint owner);
-      var text = new StringBuilder(256);
-      GetWindowText(hwnd, text, text.Capacity);
-      if (owner == processId && IsWindowVisible(hwnd) && text.ToString() == title) {
-        result = hwnd;
-        return false;
-      }
-      return true;
-    }, IntPtr.Zero);
-    return result;
-  }
-}
-'@
-
-try { $app.WaitForInputIdle() | Out-Null } catch { }
-$hwnd = [NativeCapture]::FindTitledWindow([uint32]$app.Id, 'Legion IDE')
-if ($hwnd -eq [IntPtr]::Zero) { throw 'visible Legion IDE HWND was not found' }
-$client = [NativeCapture+RECT]::new()
-$window = [NativeCapture+RECT]::new()
-[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
-[NativeCapture]::GetWindowRect($hwnd, [ref]$window) | Out-Null
-$chromeWidth = ($window.Right - $window.Left) - ($client.Right - $client.Left)
-$chromeHeight = ($window.Bottom - $window.Top) - ($client.Bottom - $client.Top)
-$dpi = [NativeCapture]::GetDpiForWindow($hwnd) # 144
-$scale = $dpi / 96.0 # 1.5
-
-# This caller receives logical Win32 coordinates. A 1440x900 logical client is
-# 2160x1350 physical at 150%; gdigrab requires the converted physical values.
-[NativeCapture]::SetWindowPos($hwnd, [IntPtr]::Zero, 180, 20,
-  1440 + $chromeWidth, 900 + $chromeHeight, 0x0040) | Out-Null
-Start-Sleep -Milliseconds 500
-$clientOrigin = [NativeCapture+POINT]::new()
-[NativeCapture]::ClientToScreen($hwnd, [ref]$clientOrigin) | Out-Null
-[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
-if ($client.Right -ne 1440 -or $client.Bottom -ne 900) { throw 'desktop client resize failed' }
-$physicalX = [math]::Floor($clientOrigin.X * $scale) # 280
-$physicalY = [math]::Floor($clientOrigin.Y * $scale) # 75
-$physicalWidth = [Convert]::ToInt32($client.Right * $scale) # 2160
-$physicalHeight = [Convert]::ToInt32($client.Bottom * $scale) # 1350
-$rawDesktop = "$captureDir\manual-final-2160x1350-raw.png"
-$desktopCapture = "$captureDir\manual-1440x900.png"
-ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
-  -offset_x $physicalX -offset_y $physicalY -video_size "${physicalWidth}x${physicalHeight}" `
-  -i desktop -frames:v 1 -update 1 -y $rawDesktop
-ffmpeg -hide_banner -loglevel error -i $rawDesktop `
-  -vf 'scale=1440:900:flags=lanczos' -frames:v 1 -update 1 -y $desktopCapture
-
-# The same two ffmpeg commands were repeated after native pointer actions.
-# Coordinates are logical client coordinates. Escalation confirmation is a
-# real two-step interaction; the inert wordmark click advances the subsequent
-# projection frame without invoking an application action.
-# Assist: click 660,26.
-# Delegate: click 784,26; click Confirm at 567,455; click 100,22.
-# Legion Workflows: click 911,26; click Confirm at 567,455; click 100,22.
-# Return to Assist: click 660,26.
-
-# 960x720 logical at 150%: 1440x1080 physical.
-[NativeCapture]::SetWindowPos($hwnd, [IntPtr]::Zero, 500, 200,
-  960 + $chromeWidth, 720 + $chromeHeight, 0x0040) | Out-Null
-Start-Sleep -Milliseconds 500
-$clientOrigin = [NativeCapture+POINT]::new()
-[NativeCapture]::ClientToScreen($hwnd, [ref]$clientOrigin) | Out-Null
-[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
-if ($client.Right -ne 960 -or $client.Bottom -ne 720) { throw 'compact client resize failed' }
-$physicalX = [math]::Floor($clientOrigin.X * $scale)
-$physicalY = [math]::Floor($clientOrigin.Y * $scale)
-$physicalWidth = [Convert]::ToInt32($client.Right * $scale) # 1440
-$physicalHeight = [Convert]::ToInt32($client.Bottom * $scale) # 1080
-$rawCompact = "$captureDir\assist-final-1440x1080-raw.png"
-$compactCapture = "$captureDir\assist-960x720.png"
-ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
-  -offset_x $physicalX -offset_y $physicalY -video_size "${physicalWidth}x${physicalHeight}" `
-  -i desktop -frames:v 1 -update 1 -y $rawCompact
-ffmpeg -hide_banner -loglevel error -i $rawCompact `
-  -vf 'scale=960:720:flags=lanczos' -frames:v 1 -update 1 -y $compactCapture
+& .\.superpowers\sdd\capture-final.ps1
 ```
 
-Mode changes and onboarding dismissal were performed through real pointer clicks in the native window. The screenshots and session file remain temporary evidence and are deliberately not committed.
+The local capture helper launched `target\debug\legion-desktop.exe` with the worktree, `crates/legion-desktop/src/view.rs`, and the deterministic session file. It then:
+
+- polled for the visible `Legion IDE` HWND by process and title instead of trusting `WaitForInputIdle`;
+- made the native window temporarily topmost so a foreground Teams/Edge window could not occlude evidence;
+- resized and asserted the Win32 client at 1440x900, then 960x720;
+- activated the client with an inert wordmark click, used real pointer down/up events with a 100ms dwell, and clicked the actual mode controls;
+- confirmed both privilege-increasing transitions through the real `Confirm` button, while the inert wordmark click advanced the following projection frame;
+- captured `ClientToScreen` origin plus `GetClientRect` width/height directly with `ffmpeg` `gdigrab`, without an additional DPI multiplier; and
+- verified Manual, Assist, Delegate, Legion Workflows, and compact Assist individually with `view_image`.
+
+The pointer sequence was wordmark → Manual capture; Assist → wordmark → Assist capture; Delegate → Confirm → wordmark → Delegate capture; Legion Workflows → Confirm → wordmark → workflow capture; Assist → wordmark → compact resize and capture. Screenshots, raw frames, the session copy, and the capture helper remain temporary local evidence and are deliberately not committed.
 
 ## Fidelity ledger
 

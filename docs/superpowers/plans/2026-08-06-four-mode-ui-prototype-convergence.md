@@ -234,21 +234,38 @@ cargo fmt --all --check
 - [x] Record the intentional deviations: `Legion Workflows` replaces artifact `Autonomous`; Manual hides agent/presence surfaces; workflow mutations remain proposal-mediated; no blanket low-risk auto-approval; system fonts substitute for unbundled prototype web fonts if licensing/assets are absent.
 - [x] Record viewport method and exact capture commands, including why local Edge/reference capture was used (no Browser/IAB connector was available).
 - [x] Resolve all P0/P1 fidelity gaps discovered in the comparison before final verification. Cosmetic P2 gaps may remain only when explicitly documented with rationale.
-- [ ] Run the focused package checks and the repository UI safety gates. Do not claim the broad desktop test bundle green unless a fresh full run completes.
-- [ ] Run and record final verification from the exact final HEAD.
+- [x] Run the focused package checks and the repository UI safety gates. Do not claim the broad desktop test bundle green unless a fresh full run completes.
+- [x] Run and record final verification from the exact final HEAD.
 
 ### Final verification
 
 ```powershell
-cargo fmt --all --check
-cargo check -p legion-ui -p legion-desktop
+$env:CARGO_BUILD_JOBS = '1'
+cargo check -p legion-ui -p legion-desktop --all-targets
 cargo test -p legion-ui
-cargo test -p legion-desktop --tests
+cargo test -p legion-desktop --lib
+cargo test -p legion-desktop --test accessibility
+cargo test -p legion-desktop --test keyboard_nav
+cargo test -p legion-desktop --test projection_rendering
 cargo clippy -p legion-ui -p legion-desktop --all-targets -- -D warnings
 cargo run -p xtask -- check-deps
+cargo run -p xtask -- docs-hygiene
 cargo run -p xtask -- claim-audit
 cargo run -p xtask -- no-egui-textedit
+cargo run -p xtask -- verify-kanban-backlog
+cargo run -p xtask -- verify-readiness-consistency
+git diff --check 019aa9c..HEAD
 git status --short
 ```
 
-If package/full-suite timing prevents completion, report the exact command, elapsed limit, and last observed state; never convert a timeout into a passing claim.
+### Recorded outcome
+
+- `legion-ui` passed all unit, integration, and doc-test targets; UI/desktop all-target checking and strict Clippy passed with one build job.
+- Focused desktop verification passed: 53 library tests, 8 accessibility tests, 17 keyboard-navigation tests, and 57 projection-rendering tests.
+- Every remaining `legion-desktop` test target was also executed serially/per-target and passed. The single aggregate `cargo test -p legion-desktop --tests` command is deliberately not claimed green: an initial parallel attempt exhausted host memory and a later aggregate invocation stopped making progress after compilation.
+- Supporting workflow verification passed: 131 `legion-app` library tests, 24 delegated-task integration tests, 37 Legion Workflows integration tests, plus 70 storage unit tests, 1 debug-breakpoint test, and 4 plan-revision tests.
+- `check-deps`, `docs-hygiene`, `claim-audit`, `no-egui-textedit`, `verify-kanban-backlog`, and `verify-readiness-consistency` all passed; the latter two cross-checked 10 epics, 38 features, and 146 tasks.
+- `git diff --check 019aa9c..HEAD` passed and the worktree was clean before this documentation closeout.
+- Repository-wide `cargo fmt --all --check` remains red only for the two unrelated pre-existing baseline files `xtask/src/readiness_consistency.rs` and `xtask/tests/docs_hygiene.rs`. Package-scoped desktop formatting passed.
+
+If a package or aggregate suite cannot complete, preserve the exact command and observed state; never convert a timeout, resource failure, or stall into a passing claim.
