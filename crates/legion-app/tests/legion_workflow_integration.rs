@@ -607,14 +607,14 @@ impl ToolCallingProvider for LoggingEditProvider {
     }
 }
 
-struct CancelOnSecondTurnProvider {
+struct CancelImmediatelyProvider {
     id: ProviderId,
     flag: SharedCancellationFlag,
     cancelled_at: Arc<Mutex<Option<Instant>>>,
     cursor: Mutex<usize>,
 }
 
-impl CancelOnSecondTurnProvider {
+impl CancelImmediatelyProvider {
     fn new(flag: SharedCancellationFlag, cancelled_at: Arc<Mutex<Option<Instant>>>) -> Self {
         Self {
             id: "provider:cancel-turn-two".to_string(),
@@ -625,7 +625,7 @@ impl CancelOnSecondTurnProvider {
     }
 }
 
-impl ModelProvider for CancelOnSecondTurnProvider {
+impl ModelProvider for CancelImmediatelyProvider {
     fn provider_id(&self) -> ProviderId {
         self.id.clone()
     }
@@ -652,7 +652,7 @@ impl ModelProvider for CancelOnSecondTurnProvider {
     }
 }
 
-impl ToolCallingProvider for CancelOnSecondTurnProvider {
+impl ToolCallingProvider for CancelImmediatelyProvider {
     fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
@@ -663,17 +663,7 @@ impl ToolCallingProvider for CancelOnSecondTurnProvider {
         drop(cursor);
 
         match turn {
-            0 => Ok(ToolCompletionResponse {
-                provider: self.id.clone(),
-                model: request.model,
-                blocks: vec![ToolTurnBlock::ToolUse {
-                    id: "read-before-cancel".to_string(),
-                    name: "read".to_string(),
-                    input: json!({ "path": "main.txt" }),
-                }],
-                stop_reason: ToolCompletionStopReason::ToolUse,
-            }),
-            1 => {
+            0 => {
                 *self.cancelled_at.lock().expect("cancelled_at lock") = Some(Instant::now());
                 self.flag.cancel();
                 Ok(ToolCompletionResponse {
@@ -689,7 +679,7 @@ impl ToolCallingProvider for CancelOnSecondTurnProvider {
             }
             _ => Err(ProviderError::RequestFailed {
                 provider: self.id.clone(),
-                message: "cancel-on-second-turn provider exhausted".to_string(),
+                message: "cancel-immediately provider exhausted".to_string(),
             }),
         }
     }
@@ -2207,7 +2197,7 @@ fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
     let resolver = NamedWorkerProviderResolver::new([
         (
             "worker:cancelled".to_string(),
-            Box::new(CancelOnSecondTurnProvider::new(
+            Box::new(CancelImmediatelyProvider::new(
                 cancellation_flag,
                 cancelled_at.clone(),
             )) as Box<dyn ToolCallingProvider + Send>,
