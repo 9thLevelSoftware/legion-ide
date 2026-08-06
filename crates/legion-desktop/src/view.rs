@@ -909,10 +909,15 @@ impl DesktopProjectionViewModel {
 #[derive(Debug)]
 pub struct ProjectionView {
     show_trust: bool,
-    show_auxiliary: bool,
     theme_preference: theme::ThemePreference,
     selected_bottom_panel: BottomPanelTab,
     last_editor_rect: Option<egui::Rect>,
+    /// Renderer-only presentation state. This is not product-mode authority.
+    pending_mode_confirmation: Option<DockMode>,
+    pending_mode_confirmation_source: Option<DockMode>,
+    pending_mode_confirmation_origin: Option<egui::Id>,
+    pending_mode_confirmation_needs_focus: bool,
+    mode_confirmation_restore_focus: Option<egui::Id>,
 }
 
 /// Renderer-owned selection for the operational bottom panel.
@@ -938,10 +943,14 @@ impl ProjectionView {
     pub fn new() -> Self {
         Self {
             show_trust: true,
-            show_auxiliary: true,
             theme_preference: theme::ThemePreference::all()[0],
             selected_bottom_panel: BottomPanelTab::Terminal,
             last_editor_rect: None,
+            pending_mode_confirmation: None,
+            pending_mode_confirmation_source: None,
+            pending_mode_confirmation_origin: None,
+            pending_mode_confirmation_needs_focus: false,
+            mode_confirmation_restore_focus: None,
         }
     }
 
@@ -954,6 +963,44 @@ impl ProjectionView {
     #[doc(hidden)]
     pub fn last_editor_rect(&self) -> Option<egui::Rect> {
         self.last_editor_rect
+    }
+
+    fn request_product_mode(
+        &mut self,
+        current: DockMode,
+        target: DockMode,
+        origin: egui::Id,
+        actions: &mut Vec<DesktopAction>,
+    ) {
+        match mode_transition_policy(current, target) {
+            ModeTransitionPolicy::NoAction => {}
+            ModeTransitionPolicy::Immediate => {
+                self.clear_mode_confirmation(false);
+                actions.push(DesktopAction::SetProductMode { mode: target });
+            }
+            ModeTransitionPolicy::Confirm => {
+                self.pending_mode_confirmation = Some(target);
+                self.pending_mode_confirmation_source = Some(current);
+                self.pending_mode_confirmation_origin = Some(origin);
+                self.pending_mode_confirmation_needs_focus = true;
+            }
+        }
+    }
+
+    fn clear_mode_confirmation(&mut self, restore_focus: bool) {
+        self.pending_mode_confirmation = None;
+        self.pending_mode_confirmation_source = None;
+        self.pending_mode_confirmation_needs_focus = false;
+        let origin = self.pending_mode_confirmation_origin.take();
+        self.mode_confirmation_restore_focus = if restore_focus { origin } else { None };
+    }
+
+    fn normalize_mode_confirmation(&mut self, projected_mode: DockMode) {
+        if self.pending_mode_confirmation.is_some()
+            && self.pending_mode_confirmation_source != Some(projected_mode)
+        {
+            self.clear_mode_confirmation(true);
+        }
     }
 
     /// Renders the current projection snapshot into egui panels.
@@ -972,6 +1019,7 @@ impl ProjectionView {
         snapshot: &ShellProjectionSnapshot,
         state: &DesktopProjectionViewState,
     ) -> ProjectionViewOutput {
+        self.normalize_mode_confirmation(snapshot.product_mode);
         if projected_product_mode(snapshot) == DesktopProductMode::Manual
             && self.selected_bottom_panel == BottomPanelTab::AgentLog
         {
@@ -997,7 +1045,7 @@ impl ProjectionView {
             .exact_size(geometry.top_bar_height)
             .frame(theme::toolbar_frame())
             .show_inside(ui, |ui| {
-                render_top_command_bar(ui, snapshot, &model, geometry, &mut actions);
+                render_top_command_bar(ui, snapshot, &model, geometry, self, &mut actions);
             });
 
         let left_panel = egui::Panel::left("legion_desktop_explorer")
@@ -1053,15 +1101,7 @@ impl ProjectionView {
                 .min_size(geometry.right_min_width)
         };
         right_panel.show_inside(ui, |ui| {
-            render_right_dock(
-                ui,
-                snapshot,
-                state,
-                &model,
-                &mut self.show_trust,
-                &mut self.show_auxiliary,
-                &mut actions,
-            );
+            render_right_dock(ui, snapshot, state, &model, self, &mut actions);
         });
 
         egui::CentralPanel::default()
@@ -1074,6 +1114,10 @@ impl ProjectionView {
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
         render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
+        if let Some(origin) = self.mode_confirmation_restore_focus.take() {
+            ui.ctx().memory_mut(|memory| memory.request_focus(origin));
+        }
+        render_mode_confirmation_dialog(ui.ctx(), self, &mut actions);
         model.bottom_tab_rows = bottom_tab_rows(snapshot, self.selected_bottom_panel);
 
         ProjectionViewOutput {
@@ -1090,6 +1134,7 @@ fn render_top_command_bar(
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
     geometry: ShellGeometry,
+    view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
     let level = projected_product_mode(snapshot);
@@ -1120,7 +1165,7 @@ fn render_top_command_bar(
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 if composition.shows_mode_switch {
-                    render_product_mode_switch(ui, level, composition.density, actions);
+                    render_product_mode_switch(ui, level, composition.density, view, actions);
                 }
             },
         );
@@ -1143,10 +1188,12 @@ fn render_top_command_bar(
 fn render_product_mode_switch(
     ui: &mut egui::Ui,
     active_level: DesktopProductMode,
-    _density: TopBarDensity,
+    density: TopBarDensity,
+    view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
     let tokens = theme::tokens();
+    let compact_visuals = density == TopBarDensity::Compact && ui.available_width() < 440.0;
     egui::Frame::NONE
         .fill(tokens.bg.input)
         .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
@@ -1158,11 +1205,17 @@ fn render_product_mode_switch(
                     let canonical = canonical_mode_entry(spec.mode);
                     let active = spec.mode == active_level;
                     let color = level_color(spec.mode);
+                    let visual_label = if compact_visuals {
+                        spec.compact_label
+                    } else {
+                        canonical.label
+                    };
+                    let button_width = if compact_visuals { 48.0 } else { 116.0 };
                     let response = ui
                         .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
                             ui.add_sized(
-                                [116.0, 24.0],
-                                egui::Button::new(theme::accent(canonical.label, color))
+                                [button_width, 24.0],
+                                egui::Button::new(theme::accent(visual_label, color))
                                     .selected(active)
                                     .fill(if active {
                                         theme::dim(color, 28)
@@ -1172,14 +1225,158 @@ fn render_product_mode_switch(
                             )
                         })
                         .inner;
-                    if response.clicked() && spec.mode != active_level {
-                        actions.push(DesktopAction::SetProductMode {
-                            mode: spec.mode.to_dock_mode(),
-                        });
+                    ui.ctx().accesskit_node_builder(response.id, |node| {
+                        node.set_label(canonical.label);
+                        node.set_selected(active);
+                        if active {
+                            node.set_aria_current(egui::accesskit::AriaCurrent::True);
+                        } else {
+                            node.clear_aria_current();
+                        }
+                    });
+                    if response.clicked() {
+                        view.request_product_mode(
+                            active_level.to_dock_mode(),
+                            spec.mode.to_dock_mode(),
+                            response.id,
+                            actions,
+                        );
                     }
                 }
             });
         });
+}
+
+const MODE_CONFIRMATION_BODY: &str = "Execution remains proposal-mediated and limited to bounded permissions. This presentation confirmation grants no permissions; operation-level app gates remain authoritative.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeTransitionPolicy {
+    NoAction,
+    Immediate,
+    Confirm,
+}
+
+fn mode_transition_policy(current: DockMode, target: DockMode) -> ModeTransitionPolicy {
+    match (current, target) {
+        (DockMode::Manual, DockMode::Manual)
+        | (DockMode::Assist, DockMode::Assist)
+        | (DockMode::Delegate, DockMode::Delegate)
+        | (DockMode::Automate, DockMode::Automate) => ModeTransitionPolicy::NoAction,
+        (DockMode::Assist, DockMode::Manual)
+        | (DockMode::Delegate, DockMode::Manual)
+        | (DockMode::Automate, DockMode::Manual)
+        | (DockMode::Manual, DockMode::Assist)
+        | (DockMode::Delegate, DockMode::Assist)
+        | (DockMode::Automate, DockMode::Assist)
+        | (DockMode::Automate, DockMode::Delegate) => ModeTransitionPolicy::Immediate,
+        (DockMode::Manual, DockMode::Delegate)
+        | (DockMode::Assist, DockMode::Delegate)
+        | (DockMode::Manual, DockMode::Automate)
+        | (DockMode::Assist, DockMode::Automate)
+        | (DockMode::Delegate, DockMode::Automate) => ModeTransitionPolicy::Confirm,
+    }
+}
+
+fn mode_confirmation_title(target: DockMode) -> String {
+    format!("Confirm {} mode", target.label())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeConfirmationDecision {
+    Confirm,
+    Cancel,
+}
+
+fn render_mode_confirmation_dialog(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let Some(target) = view.pending_mode_confirmation else {
+        return;
+    };
+    let title = mode_confirmation_title(target);
+    let content_rect = ctx.content_rect();
+    let dialog_width = (content_rect.width() - 48.0).clamp(280.0, 420.0);
+    let dialog_height = 240.0;
+    let dialog_offset = egui::vec2(
+        (content_rect.width() - dialog_width) * 0.5,
+        (content_rect.height() - dialog_height) * 0.5,
+    );
+    let dialog_id = egui::Id::new("legion_desktop_mode_confirmation");
+    let mut decision = None;
+    let modal = egui::Modal::new(dialog_id)
+        .area(
+            egui::Modal::default_area(dialog_id)
+                .anchor(egui::Align2::LEFT_TOP, dialog_offset)
+                .default_size([dialog_width, dialog_height]),
+        )
+        .frame(theme::pane_frame(theme::tokens().bg.panel))
+        .show(ctx, |ui| {
+            ui.set_min_width(dialog_width);
+            ctx.accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::Dialog);
+                node.set_label(title.clone());
+                node.set_description(MODE_CONFIRMATION_BODY);
+                node.set_modal();
+            });
+
+            ui.label(theme::title(&title));
+            ui.add_space(6.0);
+            ui.label(theme::body(MODE_CONFIRMATION_BODY));
+            ui.add_space(10.0);
+            ui.label(theme::muted(
+                "Mode selection alone does not start execution, grant a capability, or apply a change.",
+            ));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let confirm = ui
+                    .push_id("legion_desktop_mode_confirmation_confirm", |ui| {
+                        ui.add(
+                            egui::Button::new("Confirm")
+                                .min_size(egui::vec2(112.0, 28.0))
+                                .fill(theme::tokens().accent.amber)
+                                .stroke(egui::Stroke::new(
+                                    1.0_f32,
+                                    theme::tokens().border.focus,
+                                )),
+                        )
+                    })
+                    .inner;
+                if view.pending_mode_confirmation_needs_focus {
+                    confirm.request_focus();
+                    view.pending_mode_confirmation_needs_focus = false;
+                }
+                if confirm.clicked() {
+                    decision = Some(ModeConfirmationDecision::Confirm);
+                }
+
+                let cancel = ui
+                    .push_id("legion_desktop_mode_confirmation_cancel", |ui| {
+                        ui.add(egui::Button::new("Cancel").min_size(egui::vec2(112.0, 28.0)))
+                    })
+                    .inner;
+                if cancel.clicked() {
+                    decision = Some(ModeConfirmationDecision::Cancel);
+                }
+            });
+        });
+
+    // This dialog is renderer presentation, not the execution security boundary.
+    // Operation-level app gates remain authoritative after the mode projection changes.
+    match decision {
+        Some(ModeConfirmationDecision::Confirm) => {
+            view.clear_mode_confirmation(false);
+            actions.push(DesktopAction::SetProductMode { mode: target });
+        }
+        Some(ModeConfirmationDecision::Cancel) => {
+            view.clear_mode_confirmation(true);
+        }
+        None if modal.should_close() => {
+            view.clear_mode_confirmation(true);
+        }
+        None => {}
+    }
 }
 
 fn render_left_sidebar(
@@ -1322,16 +1519,15 @@ fn render_right_dock(
     snapshot: &ShellProjectionSnapshot,
     state: &DesktopProjectionViewState,
     model: &DesktopProjectionViewModel,
-    show_trust: &mut bool,
-    _show_auxiliary: &mut bool,
+    view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
     match projected_product_mode(snapshot) {
-        DesktopProductMode::Manual => render_manual_context_inspector(ui, actions),
+        DesktopProductMode::Manual => render_manual_context_inspector(ui, snapshot, view, actions),
         DesktopProductMode::Assist => render_assist_rail(ui, snapshot, model, actions),
         DesktopProductMode::Delegate => {
             if delegated_activity_projected(snapshot) {
-                render_delegation_console(ui, snapshot, model, show_trust, actions)
+                render_delegation_console(ui, snapshot, model, &mut view.show_trust, actions)
             } else {
                 render_delegate_draft_rail(ui, snapshot, model, actions)
             }
@@ -1356,7 +1552,7 @@ fn render_right_dock(
             });
     }
     if projected_product_mode(snapshot) != DesktopProductMode::Manual {
-        render_onboarding_panel(ui, snapshot, state, model, actions);
+        render_onboarding_panel(ui, snapshot, state, model, view, actions);
     }
     render_settings_panel(ui, model, actions);
 }
@@ -3105,7 +3301,12 @@ fn delegate_task_column(
     );
 }
 
-fn render_manual_context_inspector(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
+fn render_manual_context_inspector(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    view: &mut ProjectionView,
+    actions: &mut Vec<DesktopAction>,
+) {
     inspector_header(ui, "Manual", DesktopProductMode::Manual);
     ui.add_space(72.0);
     ui.vertical_centered(|ui| {
@@ -3120,10 +3321,14 @@ fn render_manual_context_inspector(ui: &mut egui::Ui, actions: &mut Vec<DesktopA
             "No prompt stream, provider route, remote presence, or collaboration activity is active in this rail.",
         ));
         ui.add_space(12.0);
-        if primary_button(ui, "Enable Assist", theme::tokens().accent.amber).clicked() {
-            actions.push(DesktopAction::SetProductMode {
-                mode: DockMode::Assist,
-            });
+        let response = primary_button(ui, "Enable Assist", theme::tokens().accent.amber);
+        if response.clicked() {
+            view.request_product_mode(
+                snapshot.product_mode,
+                DockMode::Assist,
+                response.id,
+                actions,
+            );
         }
     });
 }
@@ -3204,6 +3409,7 @@ fn render_onboarding_panel(
     snapshot: &ShellProjectionSnapshot,
     state: &DesktopProjectionViewState,
     model: &DesktopProjectionViewModel,
+    view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
     if !state.first_run_onboarding_visible {
@@ -3229,25 +3435,41 @@ fn render_onboarding_panel(
             if soft_button(ui, "Open Settings").clicked() {
                 actions.push(DesktopAction::OpenSettings);
             }
-            if soft_button(ui, "Manual").clicked() {
-                actions.push(DesktopAction::SetProductMode {
-                    mode: DockMode::Manual,
-                });
+            let manual = soft_button(ui, "Manual");
+            if manual.clicked() {
+                view.request_product_mode(
+                    snapshot.product_mode,
+                    DockMode::Manual,
+                    manual.id,
+                    actions,
+                );
             }
-            if soft_button(ui, "Assist").clicked() {
-                actions.push(DesktopAction::SetProductMode {
-                    mode: DockMode::Assist,
-                });
+            let assist = soft_button(ui, "Assist");
+            if assist.clicked() {
+                view.request_product_mode(
+                    snapshot.product_mode,
+                    DockMode::Assist,
+                    assist.id,
+                    actions,
+                );
             }
-            if soft_button(ui, "Delegate").clicked() {
-                actions.push(DesktopAction::SetProductMode {
-                    mode: DockMode::Delegate,
-                });
+            let delegate = soft_button(ui, "Delegate");
+            if delegate.clicked() {
+                view.request_product_mode(
+                    snapshot.product_mode,
+                    DockMode::Delegate,
+                    delegate.id,
+                    actions,
+                );
             }
-            if soft_button(ui, "Legion Workflows").clicked() {
-                actions.push(DesktopAction::SetProductMode {
-                    mode: DockMode::Automate,
-                });
+            let workflows = soft_button(ui, "Legion Workflows");
+            if workflows.clicked() {
+                view.request_product_mode(
+                    snapshot.product_mode,
+                    DockMode::Automate,
+                    workflows.id,
+                    actions,
+                );
             }
             if soft_button(ui, "Dismiss").clicked() {
                 actions.push(DesktopAction::DismissOnboarding);
@@ -5040,16 +5262,9 @@ impl DesktopProductMode {
 struct ModeChromeSpec {
     mode: DesktopProductMode,
     ordinal: u8,
+    compact_label: &'static str,
     icon: &'static str,
     micro: &'static str,
-    confirmation: Option<ModeConfirmationSpec>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ModeConfirmationSpec {
-    title: &'static str,
-    body: &'static str,
-    allow_dependency_install: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5087,38 +5302,30 @@ fn product_mode_switch_specs() -> [ModeChromeSpec; 4] {
         ModeChromeSpec {
             mode: DesktopProductMode::Manual,
             ordinal: 1,
+            compact_label: "M",
             icon: "keyboard",
             micro: "You write. AI stays quiet.",
-            confirmation: None,
         },
         ModeChromeSpec {
             mode: DesktopProductMode::Assist,
             ordinal: 2,
+            compact_label: "A",
             icon: "sparkles",
             micro: "AI completes inline as you type.",
-            confirmation: None,
         },
         ModeChromeSpec {
             mode: DesktopProductMode::Delegate,
             ordinal: 3,
+            compact_label: "D",
             icon: "layers",
             micro: "AI proposes multi-file diffs; you review and approve.",
-            confirmation: Some(ModeConfirmationSpec {
-                title: "Enter Delegate Mode?",
-                body: "Agents work on scoped tasks and prepare diffs for your review. Nothing is applied without your approval.",
-                allow_dependency_install: false,
-            }),
         },
         ModeChromeSpec {
             mode: DesktopProductMode::LegionWorkflows,
             ordinal: 4,
+            compact_label: "LW",
             icon: "network",
             micro: "A full agent fleet plans, executes, tests, and reports.",
-            confirmation: Some(ModeConfirmationSpec {
-                title: "Activate Legion Workflows?",
-                body: "The workflow will break down directives, modify files, run tests, and prepare changes for review under the permissions below.",
-                allow_dependency_install: true,
-            }),
         },
     ]
 }
@@ -5320,7 +5527,9 @@ fn autonomy_scale_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     product_mode_switch_specs()
         .iter()
         .map(|spec| {
-            let confirm = if spec.confirmation.is_some() {
+            let confirm = if mode_transition_policy(snapshot.product_mode, spec.mode.to_dock_mode())
+                == ModeTransitionPolicy::Confirm
+            {
                 "required"
             } else {
                 "none"
@@ -5343,20 +5552,25 @@ fn mode_confirmation_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let active = projected_product_mode(snapshot);
     product_mode_switch_specs()
         .iter()
-        .map(|spec| match spec.confirmation {
-            Some(confirmation) => format!(
-                "mode confirmation: target={} active={} required=true title=\"{}\" scope_default=module scope_options=[selected,module,repo] require_approval=true allow_tests=true allow_terminal=false allow_dependency_install={} protected=[.env,secrets/,*.pem] body=\"{}\"",
-                canonical_mode_entry(spec.mode).label,
-                spec.mode == active,
-                confirmation.title,
-                confirmation.allow_dependency_install,
-                confirmation.body
-            ),
-            None => format!(
+        .map(|spec| {
+            let label = canonical_mode_entry(spec.mode).label;
+            if mode_transition_policy(snapshot.product_mode, spec.mode.to_dock_mode())
+                == ModeTransitionPolicy::Confirm
+            {
+                format!(
+                    "mode confirmation: target={} active={} required=true title=\"{}\" proposal_mediated=true bounded_permissions=true grants_permissions=false security_boundary=false body=\"{}\"",
+                    label,
+                    spec.mode == active,
+                    mode_confirmation_title(spec.mode.to_dock_mode()),
+                    MODE_CONFIRMATION_BODY
+                )
+            } else {
+                format!(
                 "mode confirmation: target={} active={} required=false",
-                canonical_mode_entry(spec.mode).label,
+                label,
                 spec.mode == active
-            ),
+                )
+            }
         })
         .collect()
 }

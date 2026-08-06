@@ -192,6 +192,76 @@ fn accessible_button_center(output: &egui::FullOutput, label: &str) -> egui::Pos
     )
 }
 
+fn accessible_top_button_id(output: &egui::FullOutput, label: &str) -> egui::accesskit::NodeId {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("full headless frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            let bounds = node.bounds()?;
+            let center_y = (bounds.y0 + bounds.y1) * 0.5;
+            (node.label() == Some(label)
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click)
+                && center_y <= 42.0)
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("rendered mode button `{label}` should have a stable node id"))
+}
+
+fn full_frame_key_input(key: egui::Key) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..egui::RawInput::default()
+    }
+}
+
+fn accesskit_focus_input(target_node: egui::accesskit::NodeId) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events: vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Focus,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node,
+                data: None,
+            },
+        )],
+        ..egui::RawInput::default()
+    }
+}
+
+fn accesskit_has_dialog(output: &egui::FullOutput) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.role() == egui::accesskit::Role::Dialog)
+        })
+}
+
 fn click_rendered_mode(app: &mut DesktopEframeApp, primed: &egui::FullOutput, label: &str) {
     let pos = accessible_button_center(primed, label);
     let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
@@ -254,6 +324,104 @@ fn product_mode_switch_accepts_keyboard_activation() {
         app.runtime_snapshot().product_mode,
         DockMode::Manual,
         "keyboard activation should select the Manual product mode"
+    );
+}
+
+#[test]
+fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoration() {
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let delegate_id = accessible_top_button_id(&primed, "Delegate");
+    let _focused = app.run_headless_full_frame(accesskit_focus_input(delegate_id));
+
+    let opened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    assert!(accesskit_has_dialog(&opened));
+    let confirm_id = opened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("dialog should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| (node.label() == Some("Confirm")).then_some(*id))
+        .expect("dialog should expose its initially focused Confirm action");
+    assert_eq!(
+        opened
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("dialog should expose AccessKit")
+            .focus,
+        confirm_id,
+        "opening the modal should place keyboard focus on Confirm exactly once"
+    );
+
+    let _escaped = app.run_headless_full_frame(full_frame_key_input(egui::Key::Escape));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let escaped = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&escaped));
+    assert_eq!(
+        escaped
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("restored frame should expose AccessKit")
+            .focus,
+        delegate_id,
+        "Escape should restore focus to the originating mode button"
+    );
+
+    let reopened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert!(accesskit_has_dialog(&reopened));
+    let cancel_id = reopened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("dialog should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some("Cancel") && node.role() == egui::accesskit::Role::Button)
+                .then_some(*id)
+        })
+        .expect("dialog should expose its Cancel action");
+    let tabbed = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        tabbed
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("tabbed dialog should expose AccessKit")
+            .focus,
+        cancel_id,
+        "Tab should advance from Confirm to Cancel without trapping focus"
+    );
+    let _cancelled = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let restored = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&restored));
+    assert_eq!(
+        restored
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("cancelled frame should expose AccessKit")
+            .focus,
+        delegate_id,
+        "keyboard Cancel should restore focus to the originating mode button"
+    );
+
+    let reopened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert!(accesskit_has_dialog(&reopened));
+    let _confirmed = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(
+        app.runtime_snapshot().product_mode,
+        DockMode::Delegate,
+        "keyboard Confirm should dispatch exactly the existing mode action"
     );
 }
 

@@ -168,6 +168,83 @@ fn full_frame_pointer_input(events: Vec<egui::Event>) -> egui::RawInput {
     }
 }
 
+fn full_frame_key_input(key: egui::Key) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..egui::RawInput::default()
+    }
+}
+
+fn accessible_clickable_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+    let bounds = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("full headless frames should expose the accessibility tree")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("rendered `{label}` control should be clickable"));
+    egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    )
+}
+
+fn click_accessible_control(
+    app: &mut DesktopEframeApp,
+    primed: &egui::FullOutput,
+    label: &str,
+) -> egui::FullOutput {
+    let pos = accessible_clickable_center(primed, label);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]));
+    app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]))
+}
+
+fn accesskit_has_dialog(output: &egui::FullOutput) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.role() == egui::accesskit::Role::Dialog)
+        })
+}
+
 fn open_file_via_palette(app: &mut DesktopEframeApp, relative_path: &str) {
     let _ = app.run_headless_input(command_key_input(egui::Key::O));
     assert!(
@@ -331,6 +408,60 @@ fn headless_input_cmd_alt_m_switches_product_mode_through_real_egui_context() {
         "mode stay untouched\n",
         "this limited regression only verifies the projection-level mode transition"
     );
+}
+
+#[test]
+fn headless_input_mode_escalation_cancel_and_escape_emit_no_product_mode_change() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let _opened = click_accessible_control(&mut app, &primed, "Delegate");
+    let opened = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    assert!(accesskit_has_dialog(&opened));
+    let _cancelled = click_accessible_control(&mut app, &opened, "Cancel");
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let cancelled = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&cancelled));
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let _opened = click_accessible_control(&mut app, &primed, "Delegate");
+    let opened = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(accesskit_has_dialog(&opened));
+    let _escaped = app.run_headless_full_frame(full_frame_key_input(egui::Key::Escape));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let escaped = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&escaped));
+}
+
+#[test]
+fn headless_input_mode_escalation_confirm_is_the_only_mode_change_trigger() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let _opened = click_accessible_control(&mut app, &primed, "Legion Workflows");
+    let opened = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert_eq!(
+        app.runtime_snapshot().product_mode,
+        DockMode::Manual,
+        "opening the presentation dialog must not mutate app-owned mode truth"
+    );
+    assert!(accesskit_has_dialog(&opened));
+
+    let _confirmed = click_accessible_control(&mut app, &opened, "Confirm");
+    assert_eq!(
+        app.runtime_snapshot().product_mode,
+        DockMode::Automate,
+        "only Confirm should dispatch the existing mode action through app authority"
+    );
+    let next = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&next));
 }
 
 #[test]

@@ -861,16 +861,16 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     assert!(manual.mode_confirmation_rows.iter().any(|row| {
         row.contains("target=Delegate")
             && row.contains("required=true")
-            && row.contains("require_approval=true")
-            && row.contains("allow_tests=true")
-            && row.contains("allow_terminal=false")
-            && row.contains("allow_dependency_install=false")
-            && row.contains("protected=[.env,secrets/,*.pem]")
+            && row.contains("proposal_mediated=true")
+            && row.contains("bounded_permissions=true")
+            && row.contains("grants_permissions=false")
+            && row.contains("security_boundary=false")
     }));
     assert!(manual.mode_confirmation_rows.iter().any(|row| {
         row.contains("target=Legion Workflows")
             && row.contains("required=true")
-            && row.contains("allow_dependency_install=true")
+            && row.contains("proposal_mediated=true")
+            && row.contains("grants_permissions=false")
     }));
     assert!(!manual.command_palette_overlay.open);
     assert!(manual.bottom_tab_rows.iter().any(|row| {
@@ -900,7 +900,7 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     assert!(delegated.autonomy_scale_rows.iter().any(|row| {
         row.contains("label=Delegate")
             && row.contains("active=true")
-            && row.contains("confirm=required")
+            && row.contains("confirm=none")
     }));
     assert!(!delegated.command_palette_overlay.open);
     assert!(delegated.bottom_tab_rows.iter().any(|row| {
@@ -1850,6 +1850,14 @@ fn accesskit_has_clickable_label(output: &egui::FullOutput, label: &str) -> bool
         })
 }
 
+fn accesskit_has_role(output: &egui::FullOutput, role: egui::accesskit::Role) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| update.nodes.iter().any(|(_id, node)| node.role() == role))
+}
+
 fn accesskit_label_is_disabled(output: &egui::FullOutput, label: &str) -> bool {
     output
         .platform_output
@@ -2036,6 +2044,232 @@ fn projection_rendering_manual_rail_suppresses_generic_onboarding_even_when_requ
         &full,
         "Enable Assist",
         right_rail
+    ));
+}
+
+#[test]
+fn projection_rendering_routes_every_mode_pair_through_the_named_confirmation_policy() {
+    let cases = [
+        (DockMode::Manual, DockMode::Manual, None, false),
+        (
+            DockMode::Manual,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (DockMode::Manual, DockMode::Delegate, None, true),
+        (DockMode::Manual, DockMode::Automate, None, true),
+        (
+            DockMode::Assist,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (DockMode::Assist, DockMode::Assist, None, false),
+        (DockMode::Assist, DockMode::Delegate, None, true),
+        (DockMode::Assist, DockMode::Automate, None, true),
+        (
+            DockMode::Delegate,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (
+            DockMode::Delegate,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (DockMode::Delegate, DockMode::Delegate, None, false),
+        (DockMode::Delegate, DockMode::Automate, None, true),
+        (
+            DockMode::Automate,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (
+            DockMode::Automate,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (
+            DockMode::Automate,
+            DockMode::Delegate,
+            Some(DockMode::Delegate),
+            false,
+        ),
+        (DockMode::Automate, DockMode::Automate, None, false),
+    ];
+
+    for (from, target, expected_action, expected_dialog) in cases {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let mut snapshot = Shell::empty("Mode policy").projection_snapshot();
+        snapshot.product_mode = from;
+
+        let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        let target_label = target.label();
+        let (clicked, clicked_full) =
+            click_accessible_control(&ctx, &mut view, &snapshot, &full, target_label);
+
+        let expected_actions = expected_action
+            .map(|mode| vec![DesktopAction::SetProductMode { mode }])
+            .unwrap_or_default();
+        assert_eq!(
+            clicked.actions, expected_actions,
+            "unexpected renderer action for {from:?} -> {target:?}"
+        );
+        assert_eq!(
+            accesskit_has_role(&clicked_full, egui::accesskit::Role::Dialog),
+            expected_dialog,
+            "unexpected confirmation presentation for {from:?} -> {target:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_cancel_confirm_and_snapshot_normalization_preserve_app_authority() {
+    let mut snapshot = Shell::empty("Mode confirmation").projection_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let cancel_ctx = egui::Context::default();
+    cancel_ctx.enable_accesskit();
+    let mut cancel_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    let (opened, modal_full) =
+        click_accessible_control(&cancel_ctx, &mut cancel_view, &snapshot, &full, "Delegate");
+    assert!(opened.actions.is_empty());
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
+    ));
+    let (settled, modal_full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    assert!(settled.actions.is_empty());
+    let (cancelled, _cancelled_full) = click_accessible_control(
+        &cancel_ctx,
+        &mut cancel_view,
+        &snapshot,
+        &modal_full,
+        "Cancel",
+    );
+    assert!(cancelled.actions.is_empty());
+    let (_next, cancelled_full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    assert!(!accesskit_has_role(
+        &cancelled_full,
+        egui::accesskit::Role::Dialog
+    ));
+
+    let confirm_ctx = egui::Context::default();
+    confirm_ctx.enable_accesskit();
+    let mut confirm_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&confirm_ctx, &mut confirm_view, &snapshot);
+    let (_opened, _modal_full) = click_accessible_control(
+        &confirm_ctx,
+        &mut confirm_view,
+        &snapshot,
+        &full,
+        "Delegate",
+    );
+    let (_settled, modal_full) =
+        render_projection_frame(&confirm_ctx, &mut confirm_view, &snapshot);
+    let (confirmed, _) = click_accessible_control(
+        &confirm_ctx,
+        &mut confirm_view,
+        &snapshot,
+        &modal_full,
+        "Confirm",
+    );
+    assert_eq!(
+        confirmed.actions,
+        vec![DesktopAction::SetProductMode {
+            mode: DockMode::Delegate
+        }],
+        "confirmation alone should emit exactly one existing product-mode action"
+    );
+
+    let stale_ctx = egui::Context::default();
+    stale_ctx.enable_accesskit();
+    let mut stale_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    let (_opened, _modal_full) = click_accessible_control(
+        &stale_ctx,
+        &mut stale_view,
+        &snapshot,
+        &full,
+        "Legion Workflows",
+    );
+    let (_settled, modal_full) = render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
+    ));
+    snapshot.product_mode = DockMode::Assist;
+    let (normalized, normalized_full) =
+        render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    assert!(normalized.actions.is_empty());
+    assert!(
+        !accesskit_has_role(&normalized_full, egui::accesskit::Role::Dialog),
+        "a changed app snapshot must invalidate renderer-local pending presentation"
+    );
+}
+
+#[test]
+fn projection_rendering_onboarding_escalation_uses_the_shared_confirmation_policy() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Onboarding mode policy").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let (_initial, _full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let (_settled, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let delegate_id = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("onboarding should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            let bounds = node.bounds()?;
+            (node.label() == Some("Delegate")
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click)
+                && bounds.x0 >= 1_115.0)
+                .then_some(*id)
+        })
+        .expect("onboarding Delegate should be an accessible action");
+    let input = desktop_raw_input_at(
+        egui::vec2(1_440.0, 900.0),
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: delegate_id,
+                data: None,
+            },
+        )],
+    );
+    let mut clicked = None;
+    let modal_full = ctx.run_ui(input, |ui| {
+        clicked = Some(view.render_with_state(ui, &snapshot, &state));
+    });
+    let clicked = clicked.expect("clicked onboarding projection should render");
+
+    assert!(
+        clicked.actions.is_empty(),
+        "onboarding must not bypass the shared escalation policy"
+    );
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
     ));
 }
 
