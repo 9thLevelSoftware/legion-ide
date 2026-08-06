@@ -2548,6 +2548,20 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
         render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
     let predict = accesskit_bounds(&full, "Predict", true);
     assert!(predict.y1 - predict.y0 >= 24.0);
+    for label in [
+        "Auto (local-first)",
+        "Ollama",
+        "Anthropic",
+        "Fixture",
+        "Save Anthropic key",
+        "Clear Anthropic key",
+    ] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.y1 - bounds.y0 >= 24.0,
+            "{label} must retain a >=24px target; bounds={bounds:?}"
+        );
+    }
 
     snapshot.product_mode = DockMode::Manual;
     let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
@@ -2559,6 +2573,42 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
             "{label} must retain a >=24px target in the compact viewport; bounds={bounds:?}"
         );
     }
+}
+
+#[test]
+fn projection_rendering_compact_activity_labels_keep_full_accessible_names() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Activity rail").projection_snapshot();
+
+    let (_initial, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    for label in ["Files", "Search", "Symbols"] {
+        let bounds = accesskit_button_bounds_in_x_range(&full, label, 0.0..=46.0);
+        assert!(bounds.x1 - bounds.x0 <= 38.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+    }
+
+    let search = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
+    let (searched, _) = click_projection_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        egui::pos2(
+            ((search.x0 + search.x1) * 0.5) as f32,
+            ((search.y0 + search.y1) * 0.5) as f32,
+        ),
+        egui::vec2(960.0, 720.0),
+    );
+    assert_eq!(
+        searched.actions,
+        vec![DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }]
+    );
 }
 
 #[test]
@@ -2643,6 +2693,76 @@ fn projection_rendering_shell_panels_preserve_physical_prototype_edges() {
             ShellGeometry::for_available_size(size.x, size.y).bottom_height,
         );
     }
+}
+
+#[test]
+fn projection_rendering_mode_content_does_not_change_default_right_rail_width() {
+    let ctx = egui::Context::default();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(u128::MAX));
+    snapshot.active_buffer_projection.file_path = Some(CanonicalPath(
+        r"D:\legion-ide\.worktrees\ui-prototype-polish\crates\legion-desktop\src\view.rs"
+            .to_string(),
+    ));
+    let size = egui::vec2(1_440.0, 900.0);
+    let expected = ShellGeometry::for_available_size(size.x, size.y).right_width;
+    let mut observed = Vec::new();
+
+    for mode in [
+        DockMode::Manual,
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+    ] {
+        snapshot.product_mode = mode;
+        for _ in 0..3 {
+            let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        }
+        let rects = view
+            .last_shell_panel_rects()
+            .expect("the composed shell must record panel rectangles");
+        let editor = view
+            .last_editor_rect()
+            .expect("the real editor surface should record its allocation");
+        observed.push((mode, rects.right.width(), editor.width()));
+    }
+
+    for (mode, right_width, _editor_width) in &observed {
+        assert!(
+            (right_width - expected).abs() <= 2.0,
+            "{mode:?} content must not expand the default {expected}px right rail; observed={observed:?}"
+        );
+    }
+    let first_editor_width = observed[0].2;
+    for (mode, _right_width, editor_width) in &observed[1..] {
+        assert!(
+            (editor_width - first_editor_width).abs() <= 2.0,
+            "{mode:?} content must not shrink the editor relative to Manual; observed={observed:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_context_pills_wrap_as_atomic_readable_items() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(u128::MAX));
+    snapshot.active_buffer_projection.file_path = Some(CanonicalPath(
+        r"D:\legion-ide\.worktrees\ui-prototype-polish\crates\legion-desktop\src\view.rs"
+            .to_string(),
+    ));
+
+    let (_frame, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(1_440.0, 900.0));
+    let manifest = accesskit_bounds(&full, "manifest: 1 items", false);
+    assert!(
+        manifest.x1 - manifest.x0 >= 80.0 && manifest.y1 - manifest.y0 <= 30.0,
+        "the manifest context pill must remain a horizontal atomic item; bounds={manifest:?}"
+    );
 }
 
 #[test]

@@ -32,24 +32,99 @@ The exact launch and capture commands were:
 ```powershell
 $env:CARGO_BUILD_JOBS='1'
 cargo build -p legion-desktop
+$captureDir = 'D:\tmp\legion-native-capture-20260806-task6'
 $app = Start-Process .\target\debug\legion-desktop.exe -ArgumentList @(
   '--workspace', 'D:\legion-ide\.worktrees\ui-prototype-polish',
   '--file', 'crates/legion-desktop/src/view.rs',
-  '--session-state', 'D:\tmp\legion-native-capture-20260806-task6\session-final.json'
+  '--session-state', "$captureDir\session-final.json"
 ) -PassThru
 
-# After a DPI-aware Win32 resize/query, these values are the physical client origin.
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class NativeCapture {
+  public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr state);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after,
+    int x, int y, int width, int height, uint flags);
+  public static IntPtr FindTitledWindow(uint processId, string title) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows((hwnd, state) => {
+      GetWindowThreadProcessId(hwnd, out uint owner);
+      var text = new StringBuilder(256);
+      GetWindowText(hwnd, text, text.Capacity);
+      if (owner == processId && text.ToString() == title) { result = hwnd; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return result;
+  }
+}
+'@
+
+$app.WaitForInputIdle() | Out-Null
+$hwnd = [NativeCapture]::FindTitledWindow([uint32]$app.Id, 'Legion IDE')
+if ($hwnd -eq [IntPtr]::Zero) { throw 'visible Legion IDE HWND was not found' }
+$client = [NativeCapture+RECT]::new()
+$window = [NativeCapture+RECT]::new()
+[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
+[NativeCapture]::GetWindowRect($hwnd, [ref]$window) | Out-Null
+$chromeWidth = ($window.Right - $window.Left) - ($client.Right - $client.Left)
+$chromeHeight = ($window.Bottom - $window.Top) - ($client.Bottom - $client.Top)
+$dpi = [NativeCapture]::GetDpiForWindow($hwnd) # 144
+$scale = $dpi / 96.0 # 1.5
+
+# This caller receives logical Win32 coordinates. A 1440x900 logical client is
+# 2160x1350 physical at 150%; gdigrab requires the converted physical values.
+[NativeCapture]::SetWindowPos($hwnd, [IntPtr]::Zero, 180, 20,
+  1440 + $chromeWidth, 900 + $chromeHeight, 0x0040) | Out-Null
+Start-Sleep -Milliseconds 500
+$clientOrigin = [NativeCapture+POINT]::new()
+[NativeCapture]::ClientToScreen($hwnd, [ref]$clientOrigin) | Out-Null
+[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
+if ($client.Right -ne 1440 -or $client.Bottom -ne 900) { throw 'desktop client resize failed' }
+$physicalX = [math]::Floor($clientOrigin.X * $scale) # 280
+$physicalY = [math]::Floor($clientOrigin.Y * $scale) # 75
+$physicalWidth = [int]($client.Right * $scale) # 2160
+$physicalHeight = [int]($client.Bottom * $scale) # 1350
+$rawDesktop = "$captureDir\manual-final-2160x1350-raw.png"
+$desktopCapture = "$captureDir\manual-1440x900.png"
 ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
-  -offset_x $clientOrigin.X -offset_y $clientOrigin.Y -video_size 2160x1350 `
+  -offset_x $physicalX -offset_y $physicalY -video_size "${physicalWidth}x${physicalHeight}" `
   -i desktop -frames:v 1 -update 1 -y $rawDesktop
 ffmpeg -hide_banner -loglevel error -i $rawDesktop `
   -vf 'scale=1440:900:flags=lanczos' -frames:v 1 -update 1 -y $desktopCapture
 
+# The same two ffmpeg commands were repeated after real pointer mode changes,
+# assigning delegate/assist/workflows output names shown in the evidence list.
+
+# 960x720 logical at 150%: 1440x1080 physical.
+[NativeCapture]::SetWindowPos($hwnd, [IntPtr]::Zero, 500, 200,
+  960 + $chromeWidth, 720 + $chromeHeight, 0x0040) | Out-Null
+Start-Sleep -Milliseconds 500
+$clientOrigin = [NativeCapture+POINT]::new()
+[NativeCapture]::ClientToScreen($hwnd, [ref]$clientOrigin) | Out-Null
+[NativeCapture]::GetClientRect($hwnd, [ref]$client) | Out-Null
+if ($client.Right -ne 960 -or $client.Bottom -ne 720) { throw 'compact client resize failed' }
+$physicalX = [math]::Floor($clientOrigin.X * $scale)
+$physicalY = [math]::Floor($clientOrigin.Y * $scale)
+$physicalWidth = [int]($client.Right * $scale) # 1440
+$physicalHeight = [int]($client.Bottom * $scale) # 1080
+$rawCompact = "$captureDir\assist-final-1440x1080-raw.png"
+$compactCapture = "$captureDir\assist-960x720.png"
 ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
-  -offset_x 511 -offset_y 225 -video_size 1440x1080 `
-  -i desktop -frames:v 1 -update 1 -y assist-final-1440x1080-raw.png
-ffmpeg -hide_banner -loglevel error -i assist-final-1440x1080-raw.png `
-  -vf 'scale=960:720:flags=lanczos' -frames:v 1 -update 1 -y assist-960x720.png
+  -offset_x $physicalX -offset_y $physicalY -video_size "${physicalWidth}x${physicalHeight}" `
+  -i desktop -frames:v 1 -update 1 -y $rawCompact
+ffmpeg -hide_banner -loglevel error -i $rawCompact `
+  -vf 'scale=960:720:flags=lanczos' -frames:v 1 -update 1 -y $compactCapture
 ```
 
 Mode changes and onboarding dismissal were performed through real pointer clicks in the native window. The screenshots and session file remain temporary evidence and are deliberately not committed.
@@ -58,12 +133,12 @@ Mode changes and onboarding dismissal were performed through real pointer clicks
 
 | Area | Accepted behavior | Native evidence and disposition |
 | --- | --- | --- |
-| Shell geometry | 42px top bar; 46px activity rail plus approximately 248px explorer; approximately 325px right rail; 192px center console; 24px full-width status | Matched deterministically at 1440x900. Physical allocation tests verify the top and status span the viewport, both side rails span from top to status, and the console is limited to the center column. P1 closed. |
+| Shell geometry | 42px top bar; 46px activity rail plus approximately 248px explorer; approximately 325px right rail; 192px center console; 24px full-width status | Matched deterministically at 1440x900. Physical allocation tests verify the top and status span the viewport, both side rails span from top to status, and the console is limited to the center column. A same-view Manual→Assist→Delegate→Workflows test proves long projected IDs cannot make the default right rail drift across modes; desktop resizing remains bounded to 260–325px. P1 closed. |
 | Four-mode switch | Centered Manual, Assist, Delegate, and fourth-mode selector with command affordance at the right | Matched. Three disjoint top-bar regions prevent workspace text, switch, and Command from colliding. Compact labels remain readable. The fourth label intentionally reads `Legion Workflows`. P1 closed. |
 | Dark token palette | Near-black editor, blue-gray panels, subdued borders, amber manual/action accents, blue Assist, violet Delegate, workflow accent | Matched through shared native theme tokens. Native anti-aliasing and system font metrics create minor tone/weight differences (P2). |
-| Explorer/editor composition | Activity strip, repository tree, tabs/breadcrumb context, syntax editor as the dominant canvas | Structurally matched with live workspace projection. The native capture truthfully shows this worktree and file rather than the reference's illustrative repository. Activity controls use compact text rather than the artifact's icon set (P2; no licensed/bundled icon asset exists). |
+| Explorer/editor composition | Activity strip, repository tree, tabs/breadcrumb context, syntax editor as the dominant canvas | Structurally matched with live workspace projection. The native capture truthfully shows this worktree and file rather than the reference's illustrative repository. Activity controls use unwrapped `Files`/`Find`/`Sym` text with full accessible names rather than the artifact's icon set (P2; no licensed/bundled icon asset exists). |
 | Manual rail | Disengaged AI state with a clear route to Assist | Matched. Manual suppresses agent/presence surfaces and states zero-egress/local-only semantics. Settings remain reachable below it. |
-| Assist rail | Inline prediction, context/model controls, suggestions, explicit user acceptance | Matched to projected state. In-flight requests expose Cancel without a duplicate Predict action. The current empty provider/prediction state is intentionally truthful rather than inventing reference data. Long IDs and path chips are denser than the concept (P2). |
+| Assist rail | Inline prediction, context/model controls, suggestions, explicit user acceptance | Matched to projected state. In-flight requests expose Cancel without a duplicate Predict action. The current empty provider/prediction state is intentionally truthful rather than inventing reference data. Long IDs and path chips are middle-truncated to protect the 325px rail (P2). |
 | Delegate rail | Bounded task entry, sandbox/scope/budget context, staged proposal flow | Matched with a real draft control and proposal-mediated confirmation. Human Feedback has no fake Send action while no editable feedback draft exists. Empty permission/runtime projections remain explicit rather than fabricated. |
 | Legion Workflows rail | Multi-task command center, budgets, risk/gate visibility | Empty-state composition is matched, with settings reachable by scrolling. It does not invent running jobs, budgets, or approvals when none are projected. This is intentionally more conservative than the reference's illustrative cards. |
 | Terminal/status | Tabbed bottom console under the editor and mode/status context across the full bottom edge | Matched. Panel-order tests verify the console cannot extend under either side rail. Native content exposes current projected terminal/runtime metadata and is consequently more diagnostic than the concept (P2). |
@@ -81,6 +156,6 @@ Mode changes and onboarding dismissal were performed through real pointer clicks
 
 ## Gap disposition
 
-No P0 or P1 fidelity gap remains after the native comparison. The comparison found and closed stale cross-render-pass galley reuse (garbled native glyphs), panel ordering, compact rail reachability, top-bar region collision, duplicate Assist in-flight actions, undersized controls, inert settings selectors, and the untruthful Delegate feedback action.
+No P0 or P1 fidelity gap remains after the native comparison. The comparison found and closed stale/cumulatively unbounded galley reuse (garbled native glyphs), panel ordering, content-driven right-rail width drift, compact rail reachability, top-bar region collision, duplicate Assist in-flight actions, undersized provider/BYOK and shared controls, inert settings selectors, and the untruthful Delegate feedback action.
 
 The remaining P2 gaps are cosmetic or truthfulness-preserving: system font metrics, text activity controls in place of unbundled icons, denser diagnostic copy, compact wrapping of long IDs/paths, and absence of the reference's invented task/provider/terminal data. None obscures mode identity, overlaps a required control, makes a surface unreachable, or changes the authority model.

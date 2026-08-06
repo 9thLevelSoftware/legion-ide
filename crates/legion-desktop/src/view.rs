@@ -1110,6 +1110,7 @@ impl ProjectionView {
             right_panel
                 .default_size(geometry.right_width)
                 .min_size(geometry.right_min_width)
+                .max_size(geometry.right_width)
         };
         let right = right_panel
             .show_inside(ui, |ui| {
@@ -1481,15 +1482,20 @@ fn render_activity_rail(
     actions: &mut Vec<DesktopAction>,
 ) {
     let scope = snapshot.search_projection.scope;
-    for (label, mode, query) in [
-        ("Files", PaletteMode::File, ""),
-        ("Search", PaletteMode::Search, "/"),
-        ("Symbols", PaletteMode::Symbol, ""),
+    for (label, visual_label, mode, query) in [
+        ("Files", "Files", PaletteMode::File, ""),
+        ("Search", "Find", PaletteMode::Search, "/"),
+        ("Symbols", "Sym", PaletteMode::Symbol, ""),
     ] {
-        if ui
-            .add_sized([38.0, 28.0], egui::Button::new(theme::label(label)))
-            .clicked()
-        {
+        let response = ui
+            .push_id(("legion_desktop_activity", label), |ui| {
+                ui.add_sized([38.0, 28.0], egui::Button::new(theme::label(visual_label)))
+            })
+            .inner;
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_label(label);
+        });
+        if response.clicked() {
             actions.push(DesktopAction::OpenPalette {
                 mode,
                 query: query.to_string(),
@@ -2647,8 +2653,8 @@ fn code_line_galley_cache_key(
     }
 }
 
-fn code_line_galley_cache_id(buffer_id: legion_protocol::BufferId) -> egui::Id {
-    egui::Id::new(("legion_desktop_line_galley_cache", buffer_id.0))
+fn code_line_galley_cache_id(_buffer_id: legion_protocol::BufferId) -> egui::Id {
+    egui::Id::new("legion_desktop_line_galley_cache")
 }
 
 fn code_line_content_fingerprint(line: &DesktopCodeLineViewModel) -> u64 {
@@ -3000,14 +3006,15 @@ fn render_assisted_suggestion_panel(
             ui.horizontal_wrapped(|ui| {
                 pill(
                     ui,
-                    &format!("file: {}", trim_middle(current_path(snapshot), 36)),
+                    &format!("file: {}", trim_middle(current_path(snapshot), 18)),
                     theme::tokens().accent.blue,
                     true,
                 );
                 if let Some(workspace_id) = snapshot.active_buffer_projection.workspace_id {
+                    let workspace_id = workspace_id.0.to_string();
                     pill(
                         ui,
-                        &format!("workspace: {}", workspace_id.0),
+                        &format!("workspace: {}", trim_middle(&workspace_id, 18)),
                         theme::tokens().accent.cyan,
                         true,
                     );
@@ -4928,22 +4935,22 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
     } else {
         theme::dim(theme::tokens().text.primary, 10)
     };
-    egui::Frame::NONE
-        .fill(fill)
-        .stroke(egui::Stroke::new(
-            1.0_f32,
-            if active {
-                theme::dim(color, 90)
-            } else {
-                theme::tokens().border.default
-            },
-        ))
-        .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(7, 3))
-        .show(ui, |ui| {
-            ui.label(theme::accent(label, color));
-        })
-        .response
+    ui.add(
+        egui::Button::new(theme::accent(label, color))
+            .wrap_mode(egui::TextWrapMode::Extend)
+            .sense(egui::Sense::hover())
+            .fill(fill)
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                if active {
+                    theme::dim(color, 90)
+                } else {
+                    theme::tokens().border.default
+                },
+            ))
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(egui::vec2(0.0, 20.0)),
+    )
 }
 
 fn selectable_pill_button(
@@ -8898,11 +8905,32 @@ mod tests {
     }
 
     #[test]
-    fn code_line_cache_id_is_buffer_scoped() {
-        assert_ne!(
+    fn code_line_cache_id_is_shared_across_buffers() {
+        assert_eq!(
             code_line_galley_cache_id(legion_protocol::BufferId(1)),
             code_line_galley_cache_id(legion_protocol::BufferId(2))
         );
+    }
+
+    #[test]
+    fn code_line_galley_cache_has_one_total_bound_across_buffers() {
+        let mut cache = RenderPassCache::<CodeLineGalleyCacheKey, u8>::default();
+        cache.prepare_for_pass(1);
+        for buffer in 0..(CODE_LINE_GALLEY_CACHE_LIMIT * 2) {
+            cache.insert_bounded(
+                CodeLineGalleyCacheKey {
+                    buffer_id: buffer as u128,
+                    snapshot_id: 1,
+                    content_fingerprint: buffer as u64,
+                    font_size_bucket: 12,
+                    width_bucket: 800,
+                },
+                0,
+                CODE_LINE_GALLEY_CACHE_LIMIT,
+            );
+        }
+
+        assert!(cache.entries.len() <= CODE_LINE_GALLEY_CACHE_LIMIT);
     }
 
     #[test]

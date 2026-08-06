@@ -27,7 +27,11 @@ pub(crate) fn render_preferred_provider_picker(
         ] {
             let selected = active_preference.eq_ignore_ascii_case(id);
             if ui
-                .selectable_label(selected, label)
+                .add(
+                    egui::Button::new(theme::label(label))
+                        .selected(selected)
+                        .min_size(egui::vec2(24.0, 24.0)),
+                )
                 .on_hover_text(format!("Set preferred AI provider to {id}"))
                 .clicked()
             {
@@ -62,7 +66,7 @@ pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<De
         });
     }
     ui.horizontal(|ui| {
-        if ui.small_button("Save Anthropic key").clicked() {
+        if super::soft_button(ui, "Save Anthropic key").clicked() {
             let key = draft.trim().to_string();
             if !key.is_empty() {
                 actions.push(DesktopAction::SetProviderApiKey {
@@ -74,7 +78,7 @@ pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<De
                 });
             }
         }
-        if ui.small_button("Clear Anthropic key").clicked() {
+        if super::soft_button(ui, "Clear Anthropic key").clicked() {
             actions.push(DesktopAction::DeleteProviderApiKey {
                 provider_id: "anthropic".to_string(),
             });
