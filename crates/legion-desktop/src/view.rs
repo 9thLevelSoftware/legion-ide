@@ -1073,6 +1073,7 @@ impl ProjectionView {
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
         render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
+        model.bottom_tab_rows = bottom_tab_rows(snapshot, self.selected_bottom_panel);
 
         ProjectionViewOutput {
             needs_repaint: false,

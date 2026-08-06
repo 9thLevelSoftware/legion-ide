@@ -1910,21 +1910,20 @@ fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_s
     assert!(terminal.y1 - terminal.y0 >= 24.0);
     assert!(accesskit_has_label(&full, "Terminal / Runtime"));
 
-    let (_clicked, next) =
+    let (problems_click_frame, next) =
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "PROBLEMS (0)");
     full = next;
     assert_eq!(view.selected_bottom_panel(), BottomPanelTab::Problems);
     assert!(accesskit_has_label(&full, "Problems"));
     assert!(!accesskit_has_label(&full, "Terminal / Runtime"));
-    let (problems_frame, _) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(
-        problems_frame
+        problems_click_frame
             .bottom_tab_rows
             .iter()
             .any(|row| { row.contains("id=problems") && row.contains("active=true") })
     );
     assert!(
-        problems_frame
+        problems_click_frame
             .bottom_tab_rows
             .iter()
             .any(|row| { row.contains("id=term") && row.contains("active=false") })
@@ -1939,30 +1938,42 @@ fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_s
         "valid bottom-panel selection should survive mode changes"
     );
 
-    let (_clicked, next) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "AGENT LOG");
+    let (agent_click_frame, next) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "AGENT LOG");
     full = next;
     assert_eq!(view.selected_bottom_panel(), BottomPanelTab::AgentLog);
     assert!(accesskit_has_label(&full, "Agent Comm Stream"));
-    let (agent_frame, _) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(
-        agent_frame
+        agent_click_frame
             .bottom_tab_rows
             .iter()
             .any(|row| { row.contains("id=agent-log") && row.contains("active=true") })
     );
     assert!(
-        agent_frame
+        agent_click_frame
             .bottom_tab_rows
             .iter()
             .any(|row| { row.contains("id=term") && row.contains("active=false") })
     );
 
     snapshot.product_mode = DockMode::Manual;
-    let (_manual, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (manual_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert_eq!(view.selected_bottom_panel(), BottomPanelTab::Terminal);
     assert!(!accesskit_has_label(&full, "AGENT LOG"));
     assert!(!accesskit_has_label(&full, "Agent Comm Stream"));
     assert!(accesskit_has_label(&full, "Terminal / Runtime"));
+    assert!(
+        manual_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=true") })
+    );
+    assert!(
+        manual_frame
+            .bottom_tab_rows
+            .iter()
+            .all(|row| !row.contains("id=agent-log"))
+    );
 }
 
 #[test]
