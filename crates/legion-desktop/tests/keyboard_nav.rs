@@ -480,7 +480,7 @@ fn product_mode_changes_preserve_projected_editor_and_panel_state() {
     runtime
         .handle_action(DesktopAction::SetSelection {
             buffer_id: Some(buffer_id),
-            range: selection.clone(),
+            range: selection,
         })
         .expect("selection should update");
     runtime
