@@ -50,11 +50,15 @@ pub struct ConsistencyViolation {
 
 impl std::fmt::Display for ConsistencyViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}: {} (backlog says `{}`)",
-            self.task_id, self.line_number, self.message, self.backlog_status
-        )
+        if self.backlog_status == "missing" {
+            write!(f, "{}:{}: {}", self.task_id, self.line_number, self.message)
+        } else {
+            write!(
+                f,
+                "{}:{}: {} (backlog says `{}`)",
+                self.task_id, self.line_number, self.message, self.backlog_status
+            )
+        }
     }
 }
 
@@ -150,10 +154,11 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .map(|(index, _)| mention.end + index)
         .unwrap_or(line.len());
 
+    let coordinated = coordinated_list_bounds(line, mention, siblings);
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
-        .filter(|other| !mentions_are_coordinated(&line[other.end..mention.start]))
+        .filter(|other| coordinated.map_or(true, |(run_start, _)| other.start < run_start))
         .map(|other| other.end)
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
@@ -161,7 +166,7 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
-        .filter(|other| !mentions_are_coordinated(&line[mention.end..other.start]))
+        .filter(|other| coordinated.map_or(true, |(_, run_end)| other.end > run_end))
         .map(|other| other.start)
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
@@ -170,13 +175,53 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     line[start..end].to_lowercase()
 }
 
-/// Whether adjacent task IDs form a coordinated list that shares the claim
-/// before or after it (for example, `T1 and T2 remain outstanding`).
-fn mentions_are_coordinated(between: &str) -> bool {
+/// Return the span of a coordinated task-id list containing `mention`.
+///
+/// Commas may join adjacent list items only when the complete run also has an
+/// explicit `and`, `or`, or `&` connector. This preserves Oxford-comma
+/// lists without conflating independent claims such as `T1 landed, T2 open`.
+fn coordinated_list_bounds(
+    line: &str,
+    mention: &Mention,
+    siblings: &[&Mention],
+) -> Option<(usize, usize)> {
+    let mut mentions = siblings.to_vec();
+    mentions.push(mention);
+    mentions.sort_by_key(|item| item.start);
+    let index = mentions.iter().position(|item| *item == mention)?;
+
+    let mut first = index;
+    while first > 0 && is_list_separator(&line[mentions[first - 1].end..mentions[first].start]) {
+        first -= 1;
+    }
+    let mut last = index;
+    while last + 1 < mentions.len()
+        && is_list_separator(&line[mentions[last].end..mentions[last + 1].start])
+    {
+        last += 1;
+    }
+    if first == last
+        || !(first..last).any(|item| {
+            is_explicit_coordinator(&line[mentions[item].end..mentions[item + 1].start])
+        })
+    {
+        return None;
+    }
+
+    Some((mentions[first].start, mentions[last].end))
+}
+
+fn is_list_separator(between: &str) -> bool {
+    let connector = between.trim();
+    connector.chars().all(|ch| ch == ',')
+        || is_explicit_coordinator(connector)
+}
+
+fn is_explicit_coordinator(between: &str) -> bool {
     let connector = between
-        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | '&' | '/' | '(' | ')'))
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == ',')
         .to_ascii_lowercase();
-    matches!(connector.as_str(), "" | "and" | "or")
+    matches!(connector.as_str(), "and" | "or" | "&")
 }
 
 /// Separators that end a claim. `|` is a Markdown table cell wall; `. ` and
@@ -377,6 +422,45 @@ mod tests {
         );
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].task_id, "P1.F1.T2");
+    }
+
+    #[test]
+    fn three_task_coordinated_list_shares_a_trailing_predicate() {
+        let ledger = "P1.F1.T1, P1.F1.T2, and P1.F1.T3 remain outstanding.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[
+                ("P1.F1.T1", "done"),
+                ("P1.F1.T2", "todo"),
+                ("P1.F1.T3", "todo"),
+            ]),
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T1");
+    }
+
+    #[test]
+    fn comma_separated_independent_claims_do_not_share_predicates() {
+        let ledger = "P1.F1.T1 landed, P1.F1.T2 remains open.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
+        );
+        assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn missing_task_display_omits_synthetic_backlog_status() {
+        let violation = ConsistencyViolation {
+            task_id: "P1.F1.T9".to_string(),
+            backlog_status: "missing".to_string(),
+            line_number: 4,
+            message: "ledger cites a task absent from the backlog".to_string(),
+        };
+        assert_eq!(
+            violation.to_string(),
+            "P1.F1.T9:4: ledger cites a task absent from the backlog"
+        );
     }
 
     #[test]

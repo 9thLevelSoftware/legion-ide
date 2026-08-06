@@ -102,14 +102,26 @@ pub fn run_docs_hygiene(
     config: &DocsHygieneConfig,
 ) -> Result<(), Vec<DocsHygieneViolation>> {
     let mut violations = Vec::new();
-    let markdown_files: Vec<_> = collect_markdown_files(workspace_root)
-        .into_iter()
-        .filter(|path| !is_allowlisted(workspace_root, path, config))
+    let markdown_files = collect_markdown_files(workspace_root);
+    let adr_files: Vec<_> = markdown_files
+        .iter()
+        .filter(|path| {
+            let rel = path
+                .strip_prefix(workspace_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            !is_allowlisted(workspace_root, path, config) || path_has_prefix(&rel, ADR_DIR)
+        })
+        .cloned()
         .collect();
 
-    check_adr_locations_and_numbers(workspace_root, &markdown_files, &mut violations);
+    check_adr_locations_and_numbers(workspace_root, &adr_files, &mut violations);
 
     for path in markdown_files {
+        if is_allowlisted(workspace_root, &path, config) {
+            continue;
+        }
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) => {

@@ -424,7 +424,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
     acceptance = ["Streaming mode is visible in the UI with a plain-language explanation."]
     stop_condition = "Do not hide streaming-mode limitations from the user."
-    status = "done"
+    status = "todo"
     evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
     [[epics.features.tasks]]

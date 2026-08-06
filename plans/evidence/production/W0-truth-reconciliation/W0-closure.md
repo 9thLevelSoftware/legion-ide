@@ -41,7 +41,7 @@ After, all explicit:
 | Epic | done | in-progress | todo | blocked |
 | --- | --- | --- | --- | --- |
 | P0 | 11 | 0 | 0 | 0 |
-| P1 | 12 | 2 | 3 | 0 |
+| P1 | 11 | 2 | 4 | 0 |
 | P2 | 14 | 6 | 3 | 0 |
 | P3 | 16 | 0 | 0 | 0 |
 | P4 | 15 | 0 | 0 | 0 |
@@ -50,10 +50,10 @@ After, all explicit:
 | P7 | 1 | 3 | 4 | 0 |
 | P8 | 12 | 2 | 1 | 1 |
 | P9 | 3 | 5 | 6 | 0 |
-| **Total** | **108** | **18** | **19** | **1** |
+| **Total** | **107** | **18** | **20** | **1** |
 
-Thirty-three cards that the gate reported as outstanding were already delivered.
-Nineteen are genuinely not started. One is blocked on an external gate
+Thirty-two cards that the gate reported as outstanding were already delivered.
+Twenty are genuinely not started. One is blocked on an external gate
 (`P8.F1.T3`, `EXT-VM` — fresh-VM Gatekeeper/SmartScreen evidence).
 
 ## The P3.F1.T2 contradiction, resolved by test
@@ -79,9 +79,9 @@ remaining promotion blocker is 3-OS CI smoke.
   projection exists in `legion-protocol` or `legion-desktop`. Demoted to `todo`.
 - The PR-LANG-001 evidence cell's apply-activation blocker claim was stale.
   Corrected, with the test output that disproves it.
-- `P1.F4.T2` and `P1.F4.T3` were initially reconciled as done, but their
+- `P1.F4.T2`, `P1.F4.T3`, and the directly dependent UI task `P1.F4.T4` were initially reconciled as done, but their
   acceptance criteria require the still-missing 100MB streaming path and an
-  explicit streaming projection state. Both remain `todo` until those product
+  explicit streaming projection state. All three remain `todo` until those product
   behaviors and their non-ignored verification exist.
 
 ## Verification

@@ -617,7 +617,7 @@ struct CancelImmediatelyProvider {
 impl CancelImmediatelyProvider {
     fn new(flag: SharedCancellationFlag, cancelled_at: Arc<Mutex<Option<Instant>>>) -> Self {
         Self {
-            id: "provider:cancel-turn-two".to_string(),
+            id: "provider:cancel-immediately".to_string(),
             flag,
             cancelled_at,
             cursor: Mutex::new(0),
@@ -2238,12 +2238,18 @@ fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
             .map(|worker| (&worker.worker_id.0, worker.state))
             .collect::<Vec<_>>()
     );
+    let triggering_worker = stored
+        .worker_assignments
+        .iter()
+        .find(|worker| worker.worker_id.0 == "worker:cancelled")
+        .expect("cancellation-triggering worker should remain in the session");
     assert!(
-        stored.worker_assignments.iter().any(|worker| matches!(
-            worker.state,
+        matches!(
+            triggering_worker.state,
             LegionWorkflowWorkerState::Blocked | LegionWorkflowWorkerState::Cancelled
-        )),
-        "the kill-switch-triggering worker must not complete"
+        ),
+        "the kill-switch-triggering worker must not complete: {:?}",
+        triggering_worker.state
     );
     let cancelled_at = cancelled_at
         .lock()
