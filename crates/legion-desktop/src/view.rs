@@ -1173,7 +1173,7 @@ fn render_top_command_bar(
             egui::vec2(edge_width, geometry.top_bar_content_height()),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                if composition.shows_command_palette && soft_button(ui, "Command").clicked() {
+                if composition.shows_command_palette && top_bar_command_button(ui).clicked() {
                     actions.push(command_palette_control_action());
                 }
                 let presence_count = projected_presence_count_for_chrome(snapshot);
@@ -4833,6 +4833,16 @@ fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
+fn top_bar_command_button(ui: &mut egui::Ui) -> egui::Response {
+    ui.add(
+        egui::Button::new(theme::label("Command"))
+            .min_size(egui::vec2(72.0, 24.0))
+            .fill(theme::tokens().bg.card)
+            .stroke(egui::Stroke::new(1.0_f32, theme::tokens().border.default))
+            .corner_radius(egui::CornerRadius::same(6)),
+    )
+}
+
 fn primary_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
     primary_button_enabled(ui, label, color, true)
 }
@@ -5323,7 +5333,7 @@ fn product_mode_switch_specs() -> [ModeChromeSpec; 4] {
         ModeChromeSpec {
             mode: DesktopProductMode::LegionWorkflows,
             ordinal: 4,
-            compact_label: "LW",
+            compact_label: "W",
             icon: "network",
             micro: "A full agent fleet plans, executes, tests, and reports.",
         },

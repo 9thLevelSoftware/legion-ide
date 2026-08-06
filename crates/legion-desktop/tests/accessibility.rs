@@ -108,6 +108,32 @@ fn render_projection(
     })
 }
 
+fn logical_viewport_for_physical_size(physical_size: egui::Vec2, zoom_percent: u16) -> egui::Vec2 {
+    physical_size / (f32::from(zoom_percent) / 100.0)
+}
+
+fn top_bar_painted_text(output: &egui::FullOutput) -> Vec<String> {
+    fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) if text.pos.y < 42.0 => {
+                texts.push(text.galley.job.text.clone());
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut texts);
+    }
+    texts
+}
+
 fn click_projection_control(
     ctx: &egui::Context,
     view: &mut ProjectionView,
@@ -440,16 +466,18 @@ fn rendered_mode_switch_and_confirmation_dialog_expose_accessible_semantics() {
 }
 
 #[test]
-fn compact_mode_switch_keeps_full_accessible_names_at_two_hundred_percent_zoom() {
+fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let mut snapshot = Shell::empty("Compact accessible modes").projection_snapshot();
     snapshot.settings_projection.zoom_percent = 200;
-    let size = egui::vec2(960.0, 720.0);
+    let physical_size = egui::vec2(960.0, 720.0);
+    let logical_size = logical_viewport_for_physical_size(physical_size, 200);
+    assert_eq!(logical_size, egui::vec2(480.0, 360.0));
 
-    let _first = render_projection(&ctx, &mut view, &snapshot, size);
-    let full = render_projection(&ctx, &mut view, &snapshot, size);
+    let _first = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let full = render_projection(&ctx, &mut view, &snapshot, logical_size);
     let update = full
         .platform_output
         .accesskit_update
@@ -472,11 +500,56 @@ fn compact_mode_switch_keeps_full_accessible_names_at_two_hundred_percent_zoom()
     for bounds in &bounds {
         assert!(bounds.x1 - bounds.x0 >= 24.0);
         assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x0 >= 0.0 && bounds.x1 <= 480.0);
+        assert!(bounds.y0 >= 0.0 && bounds.y1 <= 42.0);
     }
     for pair in bounds.windows(2) {
         assert!(
             pair[0].x1 <= pair[1].x0,
             "compact accessible mode targets must not overlap at 200% zoom"
+        );
+    }
+
+    let command = update
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some("Command")
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click))
+            .then_some(node)
+        })
+        .expect("Command must remain reachable at physical 960x720 and 200% zoom");
+    let command_bounds = command.bounds().expect("Command should be allocated");
+    assert!(command_bounds.x0 >= 0.0 && command_bounds.x1 <= 480.0);
+    assert!(command_bounds.y0 >= 0.0 && command_bounds.y1 <= 42.0);
+    assert!(command_bounds.x1 - command_bounds.x0 >= 24.0);
+    assert!(command_bounds.y1 - command_bounds.y0 >= 24.0);
+
+    let painted = top_bar_painted_text(&full);
+    for shortcut in ["M", "A", "D", "W"] {
+        assert!(
+            painted.iter().any(|text| text == shortcut),
+            "ultra-compact switch should paint canonical shortcut `{shortcut}`; painted={painted:?}"
+        );
+    }
+}
+
+#[test]
+fn physical_960_by_720_at_one_hundred_percent_keeps_full_visible_mode_labels() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Normal compact modes").projection_snapshot();
+    let logical_size = logical_viewport_for_physical_size(egui::vec2(960.0, 720.0), 100);
+
+    let _first = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let full = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let painted = top_bar_painted_text(&full);
+    for label in ["Manual", "Assist", "Delegate", "Legion Workflows"] {
+        assert!(
+            painted.iter().any(|text| text == label),
+            "normal compact switch should paint full label `{label}`; painted={painted:?}"
         );
     }
 }
