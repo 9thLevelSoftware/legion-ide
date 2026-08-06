@@ -132,7 +132,7 @@ impl DockMode {
             Self::Manual => "Manual",
             Self::Assist => "Assist",
             Self::Delegate => "Delegate",
-            Self::Automate => "Automate",
+            Self::Automate => "Legion Workflows",
         }
     }
 
@@ -142,7 +142,7 @@ impl DockMode {
             Self::Manual => ProductMode::Manual,
             Self::Assist => ProductMode::Assist,
             Self::Delegate => ProductMode::Delegates,
-            Self::Automate => ProductMode::Automate,
+            Self::Automate => ProductMode::LegionWorkflows,
         }
     }
 
@@ -152,8 +152,8 @@ impl DockMode {
             "Manual" | "manual" => Some(Self::Manual),
             "Assist" | "assist" => Some(Self::Assist),
             "Delegate" | "Delegates" | "delegate" | "delegates" => Some(Self::Delegate),
-            "Automate" | "LegionWorkflows" | "Legion Workflows" | "automate"
-            | "legion_workflows" => Some(Self::Automate),
+            "Automate" | "Autonomous" | "LegionWorkflows" | "Legion Workflows" | "automate"
+            | "autonomous" | "legion_workflows" => Some(Self::Automate),
             _ => None,
         }
     }
@@ -5828,6 +5828,31 @@ mod tests {
     }
 
     #[test]
+    fn dock_mode_labels_are_canonical() {
+        assert_eq!(DockMode::Manual.label(), "Manual");
+        assert_eq!(DockMode::Assist.label(), "Assist");
+        assert_eq!(DockMode::Delegate.label(), "Delegate");
+        assert_eq!(DockMode::Automate.label(), "Legion Workflows");
+        assert_eq!(
+            DockMode::Automate.to_product_mode(),
+            ProductMode::LegionWorkflows
+        );
+
+        for legacy_label in [
+            "Automate",
+            "Autonomous",
+            "LegionWorkflows",
+            "Legion Workflows",
+        ] {
+            assert_eq!(
+                DockMode::parse(legacy_label),
+                Some(DockMode::Automate),
+                "legacy label {legacy_label} should retain the Automate compatibility binding"
+            );
+        }
+    }
+
+    #[test]
     fn settings_projection_parses_labels_and_normalizes_bounds() {
         let settings = SettingsProjection {
             theme_preference: ThemePreferenceProjection::parse("System")
@@ -6177,7 +6202,7 @@ mod tests {
                 },
                 display_safe_labels: vec![
                     "implementer.local".to_string(),
-                    "Autonomous merge unsupported until approval".to_string(),
+                    "Unattended merge unsupported until approval".to_string(),
                 ],
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,

@@ -66,7 +66,8 @@ use std::time::Duration;
 use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 
 use legion_protocol::{
-    BufferId, CanonicalPath, ContextManifestEgressStatus, ContextManifestInclusionState,
+    BufferId, CANONICAL_PRODUCT_MODES, CanonicalPath, CanonicalProductMode,
+    ContextManifestEgressStatus, ContextManifestInclusionState,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
     DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId, LegionToolKind,
     LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
@@ -836,7 +837,7 @@ impl ProjectionView {
             DesktopProductMode::Manual => 150.0,
             DesktopProductMode::Assist => 180.0,
             DesktopProductMode::LegionWorkflows => 240.0,
-            DesktopProductMode::Delegates => 200.0,
+            DesktopProductMode::Delegate => 200.0,
         };
         egui::Panel::bottom("legion_desktop_bottom_console")
             .default_size(bottom_height)
@@ -850,7 +851,7 @@ impl ProjectionView {
         let right_width = match projected_product_mode(snapshot) {
             DesktopProductMode::Manual => 260.0,
             DesktopProductMode::Assist => 340.0,
-            DesktopProductMode::Delegates | DesktopProductMode::LegionWorkflows => 380.0,
+            DesktopProductMode::Delegate | DesktopProductMode::LegionWorkflows => 380.0,
         };
         egui::Panel::right("legion_desktop_trust")
             .default_size(right_width)
@@ -957,7 +958,7 @@ fn render_top_command_bar(
                     },
                     // Tier 2: Delegate primary action hits the real agent loop path
                     // (Anthropic when credentials are available), not the deterministic assist fake.
-                    DesktopProductMode::Delegates => DesktopAction::StartDelegatedTask {
+                    DesktopProductMode::Delegate => DesktopAction::StartDelegatedTask {
                         task_description: "desktop delegated task".to_string(),
                         scope: desktop_default_delegated_scope(snapshot),
                     },
@@ -983,31 +984,18 @@ fn render_product_mode_switch(
     theme::card_frame_tinted(tokens.bg.input, tokens.border.default).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(theme::eyebrow("PRODUCT MODE"));
-            for (mode, level, label, color) in [
-                (DesktopProductMode::Manual, "M", "Manual", tokens.text.muted),
-                (
-                    DesktopProductMode::Assist,
-                    "A",
-                    "Assist",
-                    tokens.accent.cyan,
-                ),
-                (
-                    DesktopProductMode::Delegates,
-                    "D",
-                    "Delegates",
-                    tokens.accent.violet,
-                ),
-                (
-                    DesktopProductMode::LegionWorkflows,
-                    "W",
-                    "Legion Workflows",
-                    tokens.accent.purple,
-                ),
-            ] {
-                let response = level_pill(ui, level, label, color, mode == active_level);
-                if response.clicked() && mode != active_level {
+            for spec in product_mode_switch_specs() {
+                let canonical = canonical_mode_entry(spec.mode);
+                let response = level_pill(
+                    ui,
+                    canonical.shortcut_label,
+                    canonical.label,
+                    level_color(spec.mode),
+                    spec.mode == active_level,
+                );
+                if response.clicked() && spec.mode != active_level {
                     actions.push(DesktopAction::SetProductMode {
-                        mode: mode.to_dock_mode(),
+                        mode: spec.mode.to_dock_mode(),
                     });
                 }
             }
@@ -1040,7 +1028,7 @@ fn render_left_sidebar(
                 render_assistance_toggles(ui)
             }
         }
-        DesktopProductMode::Delegates => {
+        DesktopProductMode::Delegate => {
             if delegated_activity_projected(snapshot) {
                 render_agent_roster(ui, snapshot, model, level)
             } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
@@ -1108,7 +1096,7 @@ fn render_code_canvas(
                 render_editor_canvas(ui, snapshot, model, actions)
             }
         }
-        DesktopProductMode::Delegates => {
+        DesktopProductMode::Delegate => {
             if delegated_activity_projected(snapshot) {
                 render_delegated_canvas(ui, snapshot, model, actions)
             } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
@@ -1146,7 +1134,7 @@ fn render_right_dock(
                 render_assisted_inspector(ui, snapshot, model, actions)
             }
         }
-        DesktopProductMode::Delegates => {
+        DesktopProductMode::Delegate => {
             if delegated_activity_projected(snapshot) {
                 render_delegation_console(ui, snapshot, model, show_trust, actions)
             } else if snapshot.assisted_ai_projection.preview_ready_count > 0 {
@@ -1221,7 +1209,7 @@ fn render_bottom_console(
                 render_agent_stream(&mut columns[1], model);
             });
         }
-        DesktopProductMode::Delegates => {
+        DesktopProductMode::Delegate => {
             ui.columns(2, |columns| {
                 render_console_section(
                     &mut columns[0],
@@ -1689,7 +1677,7 @@ fn render_engine_status(
     let label = match level {
         DesktopProductMode::Manual => "Engine idle",
         DesktopProductMode::Assist => "Assist active",
-        DesktopProductMode::Delegates => "Delegates active",
+        DesktopProductMode::Delegate => "Delegate active",
         DesktopProductMode::LegionWorkflows => "Legion workflow online",
     };
     ui.horizontal(|ui| {
@@ -1838,7 +1826,7 @@ fn render_agent_roster(
     level: DesktopProductMode,
 ) {
     ui.add_space(8.0);
-    section_label(ui, "Active Delegates", Some(level_color(level)));
+    section_label(ui, "Active Delegation", Some(level_color(level)));
     let mut rendered = 0usize;
     for provider in snapshot.assisted_ai_projection.providers.iter().take(4) {
         let display = crate::cut_lines::provider_display_label(
@@ -3220,7 +3208,7 @@ fn render_onboarding_panel(
                     mode: DockMode::Assist,
                 });
             }
-            if soft_button(ui, "Delegates").clicked() {
+            if soft_button(ui, "Delegate").clicked() {
                 actions.push(DesktopAction::SetProductMode {
                     mode: DockMode::Delegate,
                 });
@@ -3445,7 +3433,7 @@ fn render_assisted_inspector(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Delegates", DesktopProductMode::Delegates);
+    inspector_header(ui, "Delegate", DesktopProductMode::Delegate);
     section_label(ui, "Current Selection", Some(theme::tokens().accent.cyan));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::code(current_path(snapshot)));
@@ -3479,7 +3467,7 @@ fn render_pair_session_panel(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Delegate Session", DesktopProductMode::Delegates);
+    inspector_header(ui, "Delegate Session", DesktopProductMode::Delegate);
     section_label(ui, "Current Objective", Some(theme::tokens().accent.blue));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
@@ -3507,7 +3495,7 @@ fn render_delegation_console(
     show_trust: &mut bool,
     actions: &mut Vec<DesktopAction>,
 ) {
-    inspector_header(ui, "Delegation Console", DesktopProductMode::Delegates);
+    inspector_header(ui, "Delegation Console", DesktopProductMode::Delegate);
     section_label(ui, "Task Scope", Some(theme::tokens().accent.violet));
     scope_picker::render_scope_picker(ui, &DesktopScopePickerViewModel::default());
     section_label(ui, "Delegate Task", Some(theme::tokens().accent.violet));
@@ -3841,7 +3829,7 @@ fn render_legion_workflow_tool_permission_controls(
 ) {
     let requests = &snapshot.legion_workflow_projection.tool_permission_requests;
     if requests.is_empty() {
-        ui.label(theme::muted("No Automate MCP tool permissions"));
+        ui.label(theme::muted("No Legion Workflows MCP tool permissions"));
         return;
     }
     for request in requests.iter().take(6) {
@@ -4673,7 +4661,7 @@ fn resource_load(snapshot: &ShellProjectionSnapshot, level: DesktopProductMode) 
     let base = match level {
         DesktopProductMode::Manual => 12,
         DesktopProductMode::Assist => 28,
-        DesktopProductMode::Delegates => 42,
+        DesktopProductMode::Delegate => 42,
         DesktopProductMode::LegionWorkflows => 82,
     };
     (base + snapshot.terminal_panel_projection.output_rows.len()).min(99)
@@ -4683,7 +4671,7 @@ fn level_primary_action(level: DesktopProductMode) -> &'static str {
     match level {
         DesktopProductMode::Manual => "Save All",
         DesktopProductMode::Assist => "Assist",
-        DesktopProductMode::Delegates => "Delegate",
+        DesktopProductMode::Delegate => "Delegate",
         DesktopProductMode::LegionWorkflows => "Run Workflow",
     }
 }
@@ -4692,7 +4680,7 @@ fn level_color(level: DesktopProductMode) -> egui::Color32 {
     match level {
         DesktopProductMode::Manual => theme::tokens().text.muted,
         DesktopProductMode::Assist => theme::tokens().accent.cyan,
-        DesktopProductMode::Delegates => theme::tokens().accent.violet,
+        DesktopProductMode::Delegate => theme::tokens().accent.violet,
         DesktopProductMode::LegionWorkflows => theme::tokens().accent.purple,
     }
 }
@@ -4896,25 +4884,20 @@ pub struct ProjectionViewOutput {
 enum DesktopProductMode {
     Manual,
     Assist,
-    Delegates,
+    Delegate,
     LegionWorkflows,
 }
 
 impl DesktopProductMode {
     fn label(self) -> &'static str {
-        match self {
-            Self::Manual => "Manual",
-            Self::Assist => "Assist",
-            Self::Delegates => "Delegates",
-            Self::LegionWorkflows => "Legion Workflows",
-        }
+        canonical_mode_entry(self).label
     }
 
     fn from_dock_mode(mode: DockMode) -> Self {
         match mode {
             DockMode::Manual => Self::Manual,
             DockMode::Assist => Self::Assist,
-            DockMode::Delegate => Self::Delegates,
+            DockMode::Delegate => Self::Delegate,
             DockMode::Automate => Self::LegionWorkflows,
         }
     }
@@ -4923,7 +4906,7 @@ impl DesktopProductMode {
         match self {
             Self::Manual => DockMode::Manual,
             Self::Assist => DockMode::Assist,
-            Self::Delegates => DockMode::Delegate,
+            Self::Delegate => DockMode::Delegate,
             Self::LegionWorkflows => DockMode::Automate,
         }
     }
@@ -4933,9 +4916,7 @@ impl DesktopProductMode {
 struct ModeChromeSpec {
     mode: DesktopProductMode,
     ordinal: u8,
-    label: &'static str,
     icon: &'static str,
-    key: &'static str,
     micro: &'static str,
     confirmation: Option<ModeConfirmationSpec>,
 }
@@ -4974,32 +4955,26 @@ impl BottomTabSpec {
     }
 }
 
-fn autonomy_mode_specs() -> [ModeChromeSpec; 4] {
+fn product_mode_switch_specs() -> [ModeChromeSpec; 4] {
     [
         ModeChromeSpec {
             mode: DesktopProductMode::Manual,
             ordinal: 1,
-            label: "Manual",
             icon: "keyboard",
-            key: "M",
             micro: "You write. AI stays quiet.",
             confirmation: None,
         },
         ModeChromeSpec {
             mode: DesktopProductMode::Assist,
             ordinal: 2,
-            label: "Assist",
             icon: "sparkles",
-            key: "A",
             micro: "AI completes inline as you type.",
             confirmation: None,
         },
         ModeChromeSpec {
-            mode: DesktopProductMode::Delegates,
+            mode: DesktopProductMode::Delegate,
             ordinal: 3,
-            label: "Delegate",
             icon: "layers",
-            key: "D",
             micro: "AI proposes multi-file diffs; you review and approve.",
             confirmation: Some(ModeConfirmationSpec {
                 title: "Enter Delegate Mode?",
@@ -5010,9 +4985,7 @@ fn autonomy_mode_specs() -> [ModeChromeSpec; 4] {
         ModeChromeSpec {
             mode: DesktopProductMode::LegionWorkflows,
             ordinal: 4,
-            label: "Automate",
             icon: "network",
-            key: "W",
             micro: "A full agent fleet plans, executes, tests, and reports.",
             confirmation: Some(ModeConfirmationSpec {
                 title: "Activate Legion Workflows?",
@@ -5023,6 +4996,13 @@ fn autonomy_mode_specs() -> [ModeChromeSpec; 4] {
     ]
 }
 
+fn canonical_mode_entry(mode: DesktopProductMode) -> &'static CanonicalProductMode {
+    CANONICAL_PRODUCT_MODES
+        .iter()
+        .find(|entry| entry.variant == mode.to_dock_mode().to_product_mode())
+        .expect("every renderer product mode maps to the canonical taxonomy")
+}
+
 fn projected_product_mode(snapshot: &ShellProjectionSnapshot) -> DesktopProductMode {
     DesktopProductMode::from_dock_mode(snapshot.product_mode)
 }
@@ -5031,7 +5011,7 @@ fn projected_dock_mode(snapshot: &ShellProjectionSnapshot) -> DockMode {
     match projected_product_mode(snapshot) {
         DesktopProductMode::Manual => DockMode::Manual,
         DesktopProductMode::Assist => DockMode::Assist,
-        DesktopProductMode::Delegates => DockMode::Delegate,
+        DesktopProductMode::Delegate => DockMode::Delegate,
         DesktopProductMode::LegionWorkflows => DockMode::Automate,
     }
 }
@@ -5169,7 +5149,14 @@ fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             "product mode: active={} app-owned projection",
             level.label()
         ),
-        "product modes: Manual | Assist | Delegates | Legion Workflows".to_string(),
+        format!(
+            "product modes: {}",
+            product_mode_switch_specs()
+                .iter()
+                .map(|spec| canonical_mode_entry(spec.mode).label)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
     ];
 
     match level {
@@ -5182,7 +5169,7 @@ fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
                     .to_string(),
             );
         }
-        DesktopProductMode::Delegates => {
+        DesktopProductMode::Delegate => {
             rows.push(
                 "product-mode safety: delegated work is approval-gated; direct workspace apply unsupported"
                     .to_string(),
@@ -5190,7 +5177,7 @@ fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         }
         DesktopProductMode::LegionWorkflows => {
             rows.push(format!(
-                "product-mode safety: Legion Workflow sessions={}; apply remains proposal-mediated; Autonomous merge unsupported until approval",
+                "product-mode safety: Legion Workflow sessions={}; apply remains proposal-mediated; unattended merge unsupported until approval",
                 snapshot.legion_workflow_projection.total_session_count
             ));
         }
@@ -5203,7 +5190,7 @@ fn product_mode_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 fn autonomy_scale_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let active = projected_product_mode(snapshot);
-    autonomy_mode_specs()
+    product_mode_switch_specs()
         .iter()
         .map(|spec| {
             let confirm = if spec.confirmation.is_some() {
@@ -5214,8 +5201,8 @@ fn autonomy_scale_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             format!(
                 "autonomy scale: n={} key={} label={} active={} icon={} confirm={} micro={}",
                 spec.ordinal,
-                spec.key,
-                spec.label,
+                canonical_mode_entry(spec.mode).shortcut_label,
+                canonical_mode_entry(spec.mode).label,
                 spec.mode == active,
                 spec.icon,
                 confirm,
@@ -5227,12 +5214,12 @@ fn autonomy_scale_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 fn mode_confirmation_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let active = projected_product_mode(snapshot);
-    autonomy_mode_specs()
+    product_mode_switch_specs()
         .iter()
         .map(|spec| match spec.confirmation {
             Some(confirmation) => format!(
                 "mode confirmation: target={} active={} required=true title=\"{}\" scope_default=module scope_options=[selected,module,repo] require_approval=true allow_tests=true allow_terminal=false allow_dependency_install={} protected=[.env,secrets/,*.pem] body=\"{}\"",
-                spec.label,
+                canonical_mode_entry(spec.mode).label,
                 spec.mode == active,
                 confirmation.title,
                 confirmation.allow_dependency_install,
@@ -5240,7 +5227,7 @@ fn mode_confirmation_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             ),
             None => format!(
                 "mode confirmation: target={} active={} required=false",
-                spec.label,
+                canonical_mode_entry(spec.mode).label,
                 spec.mode == active
             ),
         })
@@ -5416,7 +5403,7 @@ fn bottom_tab_specs(snapshot: &ShellProjectionSnapshot) -> Vec<BottomTabSpec> {
                 suggestions,
             ),
         ],
-        DesktopProductMode::Delegates => vec![
+        DesktopProductMode::Delegate => vec![
             BottomTabSpec::new(
                 "test",
                 "Test Runner",
@@ -7171,7 +7158,7 @@ fn legion_workflow_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         return Vec::new();
     }
     let mut rows = vec![format!(
-        "legion workflow command center: projection={} sessions={} mcp={} decisions={} risk_monitors={} kill_switches={} permissions={} omitted={} Autonomous merge unsupported until approval redaction={}",
+        "legion workflow command center: projection={} sessions={} mcp={} decisions={} risk_monitors={} kill_switches={} permissions={} omitted={} unattended merge unsupported until approval redaction={}",
         workflows.projection_id,
         workflows.total_session_count,
         workflows.mcp_registry_count,
@@ -7354,14 +7341,14 @@ fn onboarding_rows(
             "keybinding scheme: keep the keyboard reference handy and pick the shortcut workflow that matches your muscle memory"
         ),
         format!(
-            "mode switch tour: Manual -> Assist -> Delegates -> Automate; active mode is {}",
+            "mode switch tour: Manual -> Assist -> Delegate -> Legion Workflows; active mode is {}",
             level.label()
         ),
     ];
 
     if assisted.provider_count == 0 {
         rows.push(
-            "model picker: no providers are projected yet; configure a local provider before using Assist or Delegates"
+            "model picker: no providers are projected yet; configure a local provider before using Assist or Delegate"
                 .to_string(),
         );
     }

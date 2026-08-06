@@ -812,7 +812,7 @@ fn projection_rendering_models_read_only_product_mode_shell() {
         populated
             .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=Delegates app-owned projection"))
+            .any(|row| row.contains("active=Delegate app-owned projection"))
     );
     assert!(populated.product_mode_rows.iter().any(|row| {
         row.contains("approval-gated") && row.contains("direct workspace apply unsupported")
@@ -865,7 +865,7 @@ fn projection_rendering_models_wireframe_chrome_contract() {
             && row.contains("protected=[.env,secrets/,*.pem]")
     }));
     assert!(manual.mode_confirmation_rows.iter().any(|row| {
-        row.contains("target=Automate")
+        row.contains("target=Legion Workflows")
             && row.contains("required=true")
             && row.contains("allow_dependency_install=true")
     }));
@@ -902,11 +902,36 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     }));
     assert!(!delegated.command_palette_overlay.open);
     assert!(delegated.bottom_tab_rows.iter().any(|row| {
-        row.contains("mode=Delegates")
+        row.contains("mode=Delegate")
             && row.contains("id=test")
             && row.contains("label=Test Runner")
             && row.contains("active=true")
     }));
+}
+
+#[test]
+fn projection_rendering_uses_the_canonical_four_mode_switch() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+    let expected = [
+        ("n=1", "key=M", "label=Manual"),
+        ("n=2", "key=A", "label=Assist"),
+        ("n=3", "key=D", "label=Delegate"),
+        ("n=4", "key=W", "label=Legion Workflows"),
+    ];
+
+    assert_eq!(model.autonomy_scale_rows.len(), expected.len());
+    for (row, (ordinal, shortcut, label)) in model.autonomy_scale_rows.iter().zip(expected) {
+        assert!(row.contains(ordinal), "missing {ordinal} in {row}");
+        assert!(row.contains(shortcut), "missing {shortcut} in {row}");
+        assert!(row.contains(label), "missing {label} in {row}");
+    }
+    assert!(
+        model
+            .product_mode_rows
+            .iter()
+            .any(|row| row == "product modes: Manual | Assist | Delegate | Legion Workflows")
+    );
 }
 
 #[test]
