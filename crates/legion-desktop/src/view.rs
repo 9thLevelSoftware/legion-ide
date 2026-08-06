@@ -904,6 +904,19 @@ pub struct ProjectionView {
     show_trust: bool,
     show_auxiliary: bool,
     theme_preference: theme::ThemePreference,
+    selected_bottom_panel: BottomPanelTab,
+}
+
+/// Renderer-owned selection for the operational bottom panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BottomPanelTab {
+    /// Projected terminal/runtime stream.
+    #[default]
+    Terminal,
+    /// Projected language-tooling problems.
+    Problems,
+    /// Projected agent and product-AI activity. Unavailable in Manual mode.
+    AgentLog,
 }
 
 impl Default for ProjectionView {
@@ -919,7 +932,13 @@ impl ProjectionView {
             show_trust: true,
             show_auxiliary: true,
             theme_preference: theme::ThemePreference::all()[0],
+            selected_bottom_panel: BottomPanelTab::Terminal,
         }
+    }
+
+    /// Returns the renderer-local bottom-panel selection.
+    pub fn selected_bottom_panel(&self) -> BottomPanelTab {
+        self.selected_bottom_panel
     }
 
     /// Renders the current projection snapshot into egui panels.
@@ -938,6 +957,11 @@ impl ProjectionView {
         snapshot: &ShellProjectionSnapshot,
         state: &DesktopProjectionViewState,
     ) -> ProjectionViewOutput {
+        if projected_product_mode(snapshot) == DesktopProductMode::Manual
+            && self.selected_bottom_panel == BottomPanelTab::AgentLog
+        {
+            self.selected_bottom_panel = BottomPanelTab::Terminal;
+        }
         self.theme_preference =
             desktop_theme_preference(snapshot.settings_projection.theme_preference);
         let mut active_theme = self.theme_preference.resolve(ui.ctx());
@@ -992,7 +1016,14 @@ impl ProjectionView {
                 .min_size(geometry.bottom_min_height)
         };
         bottom_panel.show_inside(ui, |ui| {
-            render_bottom_console(ui, snapshot, &model, &mut actions);
+            render_bottom_console(
+                ui,
+                snapshot,
+                &model,
+                state.problems_selected_index,
+                &mut self.selected_bottom_panel,
+                &mut actions,
+            );
         });
 
         let right_panel = egui::Panel::right("legion_desktop_trust")
@@ -1173,6 +1204,7 @@ fn render_explorer_sidebar(
     actions: &mut Vec<DesktopAction>,
 ) {
     sidebar_header(ui, "EXPLORER ·", model.layout_title.clone());
+    render_workbench_toolbox(ui, snapshot, actions);
     render_project_tree_panel(ui, snapshot, state, actions);
 }
 
@@ -1182,8 +1214,27 @@ fn render_code_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    render_editor_canvas(ui, snapshot, model, actions);
     render_advanced_center_surface(ui, snapshot, model, actions);
+    render_editor_canvas(ui, snapshot, model, actions);
+}
+
+fn render_workbench_toolbox(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    egui::CollapsingHeader::new(theme::label("Workbench tools"))
+        .id_salt("legion_desktop_workbench_toolbox")
+        .default_open(false)
+        .show(ui, |ui| {
+            section_label(ui, "Git", Some(theme::tokens().accent.green));
+            render_git_controls(ui, snapshot, actions);
+            section_label(ui, "Tests", Some(theme::tokens().accent.violet));
+            render_test_controls(ui, snapshot, actions);
+            section_label(ui, "Debug", Some(theme::tokens().accent.orange));
+            render_debug_controls(ui, snapshot, actions);
+        });
+    ui.separator();
 }
 
 fn render_advanced_center_surface(
@@ -1269,25 +1320,40 @@ fn render_bottom_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    problems_selected_index: usize,
+    selected: &mut BottomPanelTab,
     actions: &mut Vec<DesktopAction>,
 ) {
     ui.horizontal(|ui| {
-        for tab in bottom_tab_specs(snapshot) {
+        for tab in bottom_tab_specs(snapshot, *selected) {
             let label = if let Some(count) = tab.count {
                 format!("{} ({count})", tab.label)
             } else {
                 tab.label.to_string()
             };
-            console_tab(ui, &label, tab.active, tab.color);
+            if console_tab(ui, &label, tab.active, tab.color).clicked() {
+                *selected = tab.selection;
+            }
         }
     });
     ui.separator();
-    render_terminal_stream(ui, snapshot, model, actions);
-    if projected_product_mode(snapshot) != DesktopProductMode::Manual {
-        egui::CollapsingHeader::new(theme::label("AGENT LOG"))
-            .id_salt("legion_desktop_agent_log")
-            .default_open(false)
-            .show(ui, |ui| render_agent_stream(ui, model));
+    match *selected {
+        BottomPanelTab::Terminal => render_terminal_stream(ui, snapshot, model, actions),
+        BottomPanelTab::Problems => {
+            section_label(ui, "Problems", Some(theme::tokens().accent.red));
+            theme::code_frame().show(ui, |ui| {
+                render_problem_rows(ui, snapshot, problems_selected_index, actions);
+            });
+        }
+        BottomPanelTab::AgentLog
+            if projected_product_mode(snapshot) != DesktopProductMode::Manual =>
+        {
+            render_agent_stream(ui, model);
+        }
+        BottomPanelTab::AgentLog => {
+            *selected = BottomPanelTab::Terminal;
+            render_terminal_stream(ui, snapshot, model, actions);
+        }
     }
 }
 
@@ -2956,34 +3022,7 @@ fn render_manual_context_inspector(
     render_compact_rows(ui, &model.language_rows, "No language symbols", 5);
     section_label(ui, "Tests", Some(theme::tokens().accent.green));
     render_compact_rows(ui, &model.test_rows, "No projected test explorer", 6);
-    if soft_button(ui, "Refresh tests").clicked() {
-        actions.push(DesktopAction::RefreshTestExplorer);
-    }
-    if let Some(item_id) = snapshot
-        .test_explorer_projection
-        .items
-        .first()
-        .map(|item| item.item_id.clone())
-        && soft_button(ui, "Run first listed test").clicked()
-    {
-        actions.push(DesktopAction::RunTestExplorerItem { item_id });
-    }
-    if let Some(parent) = snapshot
-        .test_explorer_projection
-        .items
-        .first()
-        .and_then(|item| item.parent_label.clone())
-        && soft_button(ui, "Run first group").clicked()
-    {
-        actions.push(DesktopAction::RunTestExplorerGroup {
-            parent_label: parent,
-        });
-    }
-    if soft_button(ui, "Run cargo test").clicked() {
-        actions.push(DesktopAction::TerminalLaunch {
-            command_label: "cargo test".to_string(),
-        });
-    }
+    render_test_controls(ui, snapshot, actions);
     section_label(ui, "Problems", None);
     // D3: clickable per-diagnostic rows with file:line navigation.
     // T4: pass keyboard-focused index for focus indicator rendering.
@@ -3025,14 +3064,83 @@ fn render_manual_context_inspector(
     );
     section_label(ui, "Git Changes", None);
     render_compact_rows(ui, &model.git_rows, "No projected git changes", 6);
-    if soft_button(ui, "Refresh Git").clicked() {
-        actions.push(DesktopAction::RefreshGit);
-    }
+    render_git_controls(ui, snapshot, actions);
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
         if soft_button(ui, "Save All").clicked() {
             actions.push(DesktopAction::SaveAll);
         }
     });
+}
+
+fn render_test_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if soft_button(ui, "Refresh tests").clicked() {
+            actions.push(DesktopAction::RefreshTestExplorer);
+        }
+        if let Some(item_id) = snapshot
+            .test_explorer_projection
+            .items
+            .first()
+            .map(|item| item.item_id.clone())
+            && soft_button(ui, "Run first listed test").clicked()
+        {
+            actions.push(DesktopAction::RunTestExplorerItem { item_id });
+        }
+        if let Some(parent) = snapshot
+            .test_explorer_projection
+            .items
+            .first()
+            .and_then(|item| item.parent_label.clone())
+            && soft_button(ui, "Run first group").clicked()
+        {
+            actions.push(DesktopAction::RunTestExplorerGroup {
+                parent_label: parent,
+            });
+        }
+        if soft_button(ui, "Run cargo test").clicked() {
+            actions.push(DesktopAction::TerminalLaunch {
+                command_label: "cargo test".to_string(),
+            });
+        }
+    });
+}
+
+fn render_git_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if soft_button(ui, "Refresh Git").clicked() {
+            actions.push(DesktopAction::RefreshGit);
+        }
+        if snapshot.git_projection.branch_label.is_some() {
+            if soft_button(ui, "Push").clicked() {
+                actions.push(DesktopAction::PushGitRemote);
+            }
+            if soft_button(ui, "Open PR").clicked() {
+                actions.push(DesktopAction::OpenGitPullRequestUrl);
+            }
+        }
+    });
+    if let Some(conflict) = snapshot.git_projection.conflicts.first() {
+        ui.horizontal_wrapped(|ui| {
+            if soft_button(ui, "Use Current").clicked() {
+                actions.push(DesktopAction::AcceptGitConflictCurrent {
+                    path: conflict.path.clone(),
+                });
+            }
+            if soft_button(ui, "Use Incoming").clicked() {
+                actions.push(DesktopAction::AcceptGitConflictIncoming {
+                    path: conflict.path.clone(),
+                });
+            }
+        });
+    }
 }
 
 fn render_onboarding_panel(
@@ -4226,12 +4334,35 @@ fn section_label(ui: &mut egui::Ui, label: &str, color: Option<egui::Color32>) {
     }
 }
 
-fn console_tab(ui: &mut egui::Ui, label: &str, active: bool, color: egui::Color32) {
-    if active {
-        pill(ui, label, color, true);
+fn console_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: bool,
+    color: egui::Color32,
+) -> egui::Response {
+    let text = if active {
+        theme::accent(label, color)
     } else {
-        ui.label(theme::muted(label));
-    }
+        theme::muted(label)
+    };
+    ui.add_sized(
+        [108.0, 24.0],
+        egui::Button::new(text)
+            .selected(active)
+            .fill(if active {
+                theme::dim(color, 28)
+            } else {
+                theme::tokens().bg.code
+            })
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                if active {
+                    theme::dim(color, 90)
+                } else {
+                    theme::tokens().border.subtle
+                },
+            )),
+    )
 }
 
 fn status_dot(ui: &mut egui::Ui, color: egui::Color32) {
@@ -4717,6 +4848,7 @@ struct BottomTabSpec {
     active: bool,
     color: egui::Color32,
     count: Option<usize>,
+    selection: BottomPanelTab,
 }
 
 impl BottomTabSpec {
@@ -4726,6 +4858,7 @@ impl BottomTabSpec {
         active: bool,
         color: egui::Color32,
         count: Option<usize>,
+        selection: BottomPanelTab,
     ) -> Self {
         Self {
             id,
@@ -4733,6 +4866,7 @@ impl BottomTabSpec {
             active,
             color,
             count,
+            selection,
         }
     }
 }
@@ -5136,7 +5270,7 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 }
 
 fn bottom_tab_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    bottom_tab_specs(snapshot)
+    bottom_tab_specs(snapshot, BottomPanelTab::Terminal)
         .into_iter()
         .map(|tab| {
             let count = tab
@@ -5155,25 +5289,37 @@ fn bottom_tab_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .collect()
 }
 
-fn bottom_tab_specs(snapshot: &ShellProjectionSnapshot) -> Vec<BottomTabSpec> {
+fn bottom_tab_specs(
+    snapshot: &ShellProjectionSnapshot,
+    selected: BottomPanelTab,
+) -> Vec<BottomTabSpec> {
     let problems = snapshot.language_tooling_projection.problems.len();
     let mut tabs = vec![
-        BottomTabSpec::new("term", "TERMINAL", true, theme::tokens().text.primary, None),
+        BottomTabSpec::new(
+            "term",
+            "TERMINAL",
+            selected == BottomPanelTab::Terminal,
+            theme::tokens().text.primary,
+            None,
+            BottomPanelTab::Terminal,
+        ),
         BottomTabSpec::new(
             "problems",
             "PROBLEMS",
-            false,
+            selected == BottomPanelTab::Problems,
             theme::tokens().accent.red,
             Some(problems),
+            BottomPanelTab::Problems,
         ),
     ];
     if projected_product_mode(snapshot) != DesktopProductMode::Manual {
         tabs.push(BottomTabSpec::new(
             "agent-log",
             "AGENT LOG",
-            false,
+            selected == BottomPanelTab::AgentLog,
             theme::tokens().accent.blue,
             None,
+            BottomPanelTab::AgentLog,
         ));
     }
     tabs

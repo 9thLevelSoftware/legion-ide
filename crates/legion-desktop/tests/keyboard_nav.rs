@@ -15,7 +15,8 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_ui::{DockMode, Shell};
+use legion_protocol::{ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll};
+use legion_ui::{DockLayout, DockMode, Shell};
 
 /// Build a five-target batch proposal suitable for seeding proposal_reviews in
 /// the desktop runtime's delegated-task projection.
@@ -214,6 +215,111 @@ fn product_mode_navigation_keeps_the_real_editor_as_the_center_surface() {
             "mode {mode:?} must preserve the projected editor surface and its stable egui ids"
         );
     }
+}
+
+#[test]
+fn product_mode_changes_preserve_projected_editor_and_panel_state() {
+    let workspace = TempWorkspace::new();
+    fs::write(
+        workspace.path().join("persistent.rs"),
+        (0..80)
+            .map(|line| format!("let value_{line} = {line};\n"))
+            .collect::<String>(),
+    )
+    .expect("fixture should be written");
+    let mut runtime = open_runtime(workspace.path());
+    runtime
+        .handle_action(DesktopAction::OpenPathText("persistent.rs".to_string()))
+        .expect("fixture should open");
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("opened fixture should have a buffer");
+    let selection = ProtocolTextRange {
+        start: TextCoordinate {
+            line: 12,
+            character: 4,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+        end: TextCoordinate {
+            line: 12,
+            character: 11,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    };
+    runtime
+        .handle_action(DesktopAction::SetSelection {
+            buffer_id: Some(buffer_id),
+            range: selection.clone(),
+        })
+        .expect("selection should update");
+    runtime
+        .handle_action(DesktopAction::SetViewportScroll {
+            buffer_id: Some(buffer_id),
+            scroll: ViewportScroll {
+                top_line: 10,
+                left_column: 2,
+            },
+        })
+        .expect("scroll should update");
+    runtime.set_panel_state(SessionPanelState {
+        bottom_visible: true,
+        side_visible: true,
+        active_panel: Some("problems".to_string()),
+        bottom_height_px: Some(236),
+        side_width_px: Some(312),
+    });
+    let dock_layouts = vec![
+        DockLayout::standard(DockMode::Manual),
+        DockLayout::standard(DockMode::Assist),
+        DockLayout::standard(DockMode::Delegate),
+        DockLayout::standard(DockMode::Automate),
+    ];
+    runtime.set_dock_layouts(dock_layouts.clone());
+    let before = runtime.projection_snapshot();
+    let before_viewport = before
+        .daily_editing_projection
+        .viewport_states
+        .iter()
+        .find(|state| state.buffer_id == buffer_id)
+        .cloned()
+        .expect("viewport state should be projected");
+    let before_settings = before.settings_projection.clone();
+
+    for mode in [
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+        DockMode::Manual,
+    ] {
+        runtime
+            .handle_action(DesktopAction::SetProductMode { mode })
+            .expect("mode should switch");
+    }
+
+    let after = runtime.projection_snapshot();
+    let after_viewport = after
+        .daily_editing_projection
+        .viewport_states
+        .iter()
+        .find(|state| state.buffer_id == buffer_id)
+        .expect("viewport state should remain projected");
+    assert_eq!(after.active_buffer_projection.buffer_id, Some(buffer_id));
+    assert_eq!(after_viewport.cursor, before_viewport.cursor);
+    assert_eq!(after_viewport.selections, before_viewport.selections);
+    assert_eq!(after_viewport.scroll, before_viewport.scroll);
+    assert_eq!(after.settings_projection, before_settings);
+    assert!(runtime.panel_state().bottom_visible);
+    assert_eq!(
+        runtime.panel_state().active_panel.as_deref(),
+        Some("problems")
+    );
+    assert_eq!(runtime.panel_state().bottom_height_px, Some(236));
+    assert_eq!(runtime.panel_state().side_width_px, Some(312));
+    assert_eq!(runtime.dock_layouts(), dock_layouts.as_slice());
 }
 
 // ─── T4: Problems panel keyboard navigation ───────────────────────────────────

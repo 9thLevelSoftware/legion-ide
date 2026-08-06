@@ -24,7 +24,6 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
-    view::command_palette_control_action,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
 use legion_ui::{DockMode, PaletteMode, SearchScopeProjection, SearchStatusKindProjection};
@@ -157,6 +156,18 @@ fn enter_input() -> egui::RawInput {
     }
 }
 
+fn full_frame_pointer_input(events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
 fn open_file_via_palette(app: &mut DesktopEframeApp, relative_path: &str) {
     let _ = app.run_headless_input(command_key_input(egui::Key::O));
     assert!(
@@ -246,8 +257,43 @@ fn headless_input_command_control_opens_the_command_region_palette_contract() {
     let runtime = open_runtime(workspace.path());
     let mut app = DesktopEframeApp::new(runtime);
 
-    app.handle_action(command_palette_control_action())
-        .expect("the rendered Command control action should dispatch");
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let bounds = primed
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("full headless frames should expose the accessibility tree")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some("Command")
+                && node.supports_action(egui::accesskit::Action::Click))
+            .then(|| node.bounds())
+            .flatten()
+        })
+        .expect("rendered Command button should be allocated");
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    );
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]));
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]));
 
     let palette = &app.runtime_snapshot().palette_projection;
     assert!(

@@ -3318,6 +3318,7 @@ impl DesktopEframeApp {
     /// or command-palette routing, prefer the lighter `run_headless_input`.
     pub fn run_headless_full_frame(&mut self, raw_input: egui::RawInput) -> egui::FullOutput {
         let ctx = self.ctx.clone();
+        ctx.enable_accesskit();
         ctx.run_ui(raw_input, |ui| {
             self.render_app_frame(ui);
         })
