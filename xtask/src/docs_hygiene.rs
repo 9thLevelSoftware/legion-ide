@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -12,7 +13,19 @@ pub enum DocsHygieneViolationKind {
     StaleModeTaxonomySection,
     StaleProductionPlanReference,
     UnreadableFile,
+    MisplacedAdr,
+    DuplicateAdrNumber,
 }
+
+/// The single directory ADRs live in. A second ADR directory is how
+/// `ADR-0044` came to name both the DAP client architecture and the
+/// collaboration operation layer, with `plans/dependency-policy.md` citing one
+/// of them and the backlog citing the other.
+const ADR_DIR: &str = "plans/adrs";
+
+/// Archive of records *about* decisions and milestones. Filenames here may
+/// carry an ADR number without being an ADR.
+const EVIDENCE_DIR: &str = "plans/evidence";
 
 const LATEST_PRODUCTION_MASTER_PLAN: &str = "legion-production-master-plan-v0.2.md";
 const PRODUCTION_PLAN_ENTRYPOINTS: [&str; 2] = ["README.md", "docs/INDEX.md"];
@@ -91,6 +104,8 @@ pub fn run_docs_hygiene(
     let mut violations = Vec::new();
     let markdown_files = collect_markdown_files(workspace_root);
 
+    check_adr_locations_and_numbers(workspace_root, &markdown_files, &mut violations);
+
     for path in markdown_files {
         if is_allowlisted(workspace_root, &path, config) {
             continue;
@@ -122,6 +137,72 @@ pub fn run_docs_hygiene(
         Ok(())
     } else {
         Err(violations)
+    }
+}
+
+/// Every ADR *decision document* must live in [`ADR_DIR`], and no two may
+/// share a number. An ADR that is misfiled or double-numbered makes every
+/// citation of it ambiguous, which defeats the point of ratifying decisions.
+///
+/// Files under [`EVIDENCE_DIR`] are exempt: a ratification record or milestone
+/// note names the ADR number it is *about* (`ADR-0033-ratification.md`) and is
+/// not itself an ADR.
+fn check_adr_locations_and_numbers(
+    root: &Path,
+    files: &[PathBuf],
+    violations: &mut Vec<DocsHygieneViolation>,
+) {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+
+    for path in files {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if path_has_prefix(&rel, EVIDENCE_DIR) {
+            continue;
+        }
+        let Some(name) = rel.rsplit('/').next() else {
+            continue;
+        };
+        let Some(number) = adr_number(name) else {
+            continue;
+        };
+
+        let rel_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+
+        if !path_has_prefix(&rel, ADR_DIR) {
+            violations.push(DocsHygieneViolation {
+                path: rel_path.clone(),
+                line: 0,
+                kind: DocsHygieneViolationKind::MisplacedAdr,
+                message: format!("ADR must live under `{ADR_DIR}/`, found at `{rel}`"),
+            });
+        }
+
+        if let Some(existing) = seen.insert(number.clone(), rel.clone()) {
+            violations.push(DocsHygieneViolation {
+                path: rel_path,
+                line: 0,
+                kind: DocsHygieneViolationKind::DuplicateAdrNumber,
+                message: format!(
+                    "ADR number `{number}` is used by both `{existing}` and `{rel}`; renumber one"
+                ),
+            });
+        }
+    }
+}
+
+/// Extract `0044` from `ADR-0044-dap-client-architecture.md`. Returns `None`
+/// for any filename that is not an ADR.
+fn adr_number(file_name: &str) -> Option<String> {
+    let rest = file_name.strip_prefix("ADR-")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() == 4 {
+        Some(digits)
+    } else {
+        None
     }
 }
 

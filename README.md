@@ -40,7 +40,7 @@ Use these docs first:
 
 ## Required Local Gates
 
-Run these 20 standing gates before claiming code work is complete:
+Run these 21 standing gates before claiming code work is complete:
 
 ```bash
 cargo run -p xtask -- check-deps
@@ -48,6 +48,7 @@ cargo run -p xtask -- docs-hygiene
 cargo run -p xtask -- claim-audit
 cargo run -p xtask -- no-egui-textedit
 cargo run -p xtask -- verify-kanban-backlog
+cargo run -p xtask -- verify-readiness-consistency
 cargo run -p xtask -- release-pipeline --dry-run
 cargo run -p xtask -- verify-release-pipeline
 cargo fmt --all --check

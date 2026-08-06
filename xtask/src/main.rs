@@ -617,6 +617,20 @@ enum Commands {
         #[arg(long, default_value = xtask::kanban_backlog::DEFAULT_BACKLOG_PATH)]
         backlog: String,
     },
+    /// Cross-check the product-readiness ledger against the Kanban backlog.
+    ///
+    /// Each file's own gate validates only itself, so the two can disagree
+    /// indefinitely — as they did when the ledger named a task a promotion
+    /// blocker that the backlog had recorded done, with passing tests, for a
+    /// full milestone.
+    VerifyReadinessConsistency {
+        /// Path to the product-readiness ledger Markdown.
+        #[arg(long, default_value = xtask::readiness_consistency::DEFAULT_LEDGER_PATH)]
+        ledger: String,
+        /// Path to the Kanban backlog TOML.
+        #[arg(long, default_value = xtask::kanban_backlog::DEFAULT_BACKLOG_PATH)]
+        backlog: String,
+    },
     /// Run the ignored rust-analyzer integration smoke tests against a real rust-analyzer binary.
     ///
     /// Executes:
@@ -855,6 +869,9 @@ fn main() {
             no_strict,
         } => run_verify_legion_bench_command(&out, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
+        Commands::VerifyReadinessConsistency { ledger, backlog } => {
+            run_verify_readiness_consistency_command(&ledger, &backlog)
+        }
         Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
         Commands::GoldenPath1 {
             fixture_dir,
@@ -1728,6 +1745,34 @@ fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
         }
         Err(err) => {
             eprintln!("kanban backlog verify failed: {err}");
+            1
+        }
+    }
+}
+
+fn run_verify_readiness_consistency_command(ledger_path: &str, backlog_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!(
+                "readiness consistency verify failed: unable to resolve current directory: {err}"
+            );
+            return 1;
+        }
+    };
+    let ledger = workspace_root.join(ledger_path);
+    let backlog = workspace_root.join(backlog_path);
+    match xtask::readiness_consistency::run_verify_readiness_consistency(&ledger, &backlog) {
+        Ok(task_count) => {
+            println!(
+                "readiness consistency ok: {} backlog task(s) cross-checked against {}",
+                task_count,
+                ledger.display()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("readiness consistency verify failed: {err}");
             1
         }
     }

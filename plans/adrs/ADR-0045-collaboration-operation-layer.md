@@ -1,7 +1,13 @@
-# ADR-0044: Collaboration Operation Layer Sits on the Accepted Collaboration Substrate
+# ADR-0045: Collaboration Operation Layer Sits on the Accepted Collaboration Substrate
 
 ## Status
 Accepted — ratified for P9.F3.T1.
+
+> Renumbered from ADR-0044 and moved out of `docs/adrs/` on 2026-08-05. It was
+> authored as ADR-0044 in a second ADR directory and collided with
+> `ADR-0044-dap-client-architecture.md`, which `plans/dependency-policy.md`
+> already cites. `plans/adrs/` is the single ADR directory; `docs-hygiene`
+> now enforces both the location and number uniqueness.
 
 ## Context
 Legion already has an accepted collaboration substrate in `legion-collaboration`: a deterministic, metadata-first operation log and replay runtime that handles collaboration state, presence, acknowledgements, and conflict handling. ADR-0040 ratified the stable position / operation-log substrate over `legion-text` and explicitly deferred the full CRDT choice, while ADR-0041 later ratified the anchor-layer strategy over the same existing runtime instead of adopting an external CRDT crate.
