@@ -483,30 +483,56 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
         .accesskit_update
         .as_ref()
         .expect("compact mode switch should expose AccessKit");
-    let mut bounds = ["Manual", "Assist", "Delegate", "Legion Workflows"].map(|label| {
-        update
+    let modes = [
+        ("Manual", true),
+        ("Assist", false),
+        ("Delegate", false),
+        ("Legion Workflows", false),
+    ]
+    .map(|(label, expected_selected)| {
+        let node = update
             .nodes
             .iter()
             .find_map(|(_id, node)| {
                 (node.label() == Some(label)
                     && node.role() == egui::accesskit::Role::Button
                     && node.bounds().is_some_and(|bounds| bounds.y1 <= 42.0))
-                .then(|| node.bounds())
-                .flatten()
+                .then_some(node)
             })
-            .unwrap_or_else(|| panic!("compact switch must retain full name `{label}`"))
+            .unwrap_or_else(|| panic!("compact switch must retain full name `{label}`"));
+        let bounds = node
+            .bounds()
+            .expect("compact mode button should have bounds");
+        (label, node, bounds, expected_selected)
     });
-    bounds.sort_by(|left, right| left.x0.total_cmp(&right.x0));
-    for bounds in &bounds {
+
+    for (label, node, bounds, expected_selected) in &modes {
         assert!(bounds.x1 - bounds.x0 >= 24.0);
         assert!(bounds.y1 - bounds.y0 >= 24.0);
         assert!(bounds.x0 >= 0.0 && bounds.x1 <= 480.0);
         assert!(bounds.y0 >= 0.0 && bounds.y1 <= 42.0);
+        assert_eq!(
+            node.is_selected(),
+            Some(*expected_selected),
+            "wrong selected state for compact `{label}` mode"
+        );
+        assert_eq!(
+            node.aria_current(),
+            expected_selected.then_some(egui::accesskit::AriaCurrent::True),
+            "wrong current state for compact `{label}` mode"
+        );
     }
-    for pair in bounds.windows(2) {
+
+    for pair in modes.windows(2) {
+        let (left_label, _left_node, left_bounds, _left_selected) = pair[0];
+        let (right_label, _right_node, right_bounds, _right_selected) = pair[1];
         assert!(
-            pair[0].x1 <= pair[1].x0,
-            "compact accessible mode targets must not overlap at 200% zoom"
+            left_bounds.x0 < right_bounds.x0,
+            "compact canonical order must be left-to-right: `{left_label}` before `{right_label}`"
+        );
+        assert!(
+            left_bounds.x1 <= right_bounds.x0,
+            "compact accessible targets `{left_label}` and `{right_label}` must not overlap"
         );
     }
 
