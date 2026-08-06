@@ -153,6 +153,7 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
+        .filter(|other| !mentions_are_coordinated(&line[other.end..mention.start]))
         .map(|other| other.end)
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
@@ -160,12 +161,22 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
+        .filter(|other| !mentions_are_coordinated(&line[mention.end..other.start]))
         .map(|other| other.start)
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
         .min(clause_end(line, mention.end));
 
     line[start..end].to_lowercase()
+}
+
+/// Whether adjacent task IDs form a coordinated list that shares the claim
+/// before or after it (for example, `T1 and T2 remain outstanding`).
+fn mentions_are_coordinated(between: &str) -> bool {
+    let connector = between
+        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | '&' | '/' | '(' | ')'))
+        .to_ascii_lowercase();
+    matches!(connector.as_str(), "" | "and" | "or")
 }
 
 /// Separators that end a claim. `|` is a Markdown table cell wall; `. ` and
@@ -200,9 +211,12 @@ pub fn check_consistency(
 
     for mention in &mentions {
         let Some(status) = statuses.get(&mention.id) else {
-            // A ledger citing an id the backlog does not define is its own
-            // problem, but it is a dangling-reference class the backlog's own
-            // dependency validation already owns. Skip rather than duplicate.
+            violations.push(ConsistencyViolation {
+                task_id: mention.id.clone(),
+                backlog_status: "missing".to_string(),
+                line_number: mention.line_number,
+                message: "ledger cites a task absent from the backlog".to_string(),
+            });
             continue;
         };
         let siblings: Vec<&Mention> = mentions
@@ -341,6 +355,40 @@ mod tests {
             ]),
         );
         assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn coordinated_task_ids_share_a_trailing_predicate() {
+        let ledger = "P1.F1.T1 and P1.F1.T2 remain outstanding.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T1");
+    }
+
+    #[test]
+    fn coordinated_task_ids_share_a_leading_predicate() {
+        let ledger = "Delivered P1.F1.T1 and P1.F1.T2.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T2");
+    }
+
+    #[test]
+    fn ledger_task_absent_from_backlog_is_reported() {
+        let violations = check_consistency(
+            "P1.F1.T9 remains outstanding.",
+            &statuses(&[("P1.F1.T1", "todo")]),
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T9");
+        assert_eq!(violations[0].backlog_status, "missing");
+        assert!(violations[0].message.contains("absent from the backlog"));
     }
 
     #[test]

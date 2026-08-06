@@ -398,7 +398,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-text", "cargo test -p legion-editor"]
     acceptance = ["100MB file opens within budget, scrolls, and does not block typing."]
     stop_condition = "Stop if full text is materialized for any file above the streaming threshold."
-    status = "done"
+    status = "todo"
     evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
     [[epics.features.tasks]]
@@ -411,7 +411,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-protocol", "cargo test -p legion-editor"]
     acceptance = ["Projection explicitly enumerates the three states and consumers branch on it."]
     stop_condition = "Do not add a fourth implicit state without updating tests."
-    status = "done"
+    status = "todo"
     evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
     [[epics.features.tasks]]
