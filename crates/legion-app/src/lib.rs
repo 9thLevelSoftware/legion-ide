@@ -987,8 +987,21 @@ struct PreparedLegionWorkflowWorkerRun {
 
 #[cfg(feature = "ai")]
 struct InFlightLegionWorkflowWorkerRun {
-    join_handle:
+    cancellation_flag: SharedCancellationFlag,
+    join_handle: Option<
         std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
+    >,
+}
+
+#[cfg(feature = "ai")]
+impl Drop for InFlightLegionWorkflowWorkerRun {
+    fn drop(&mut self) {
+        let Some(join_handle) = self.join_handle.take() else {
+            return;
+        };
+        self.cancellation_flag.cancel();
+        let _ = join_handle.join();
+    }
 }
 
 #[cfg(feature = "ai")]
@@ -1747,6 +1760,57 @@ struct LiveProductAiStreamSink {
     pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
 }
 
+struct ProductAiLaneReservation {
+    sink: Arc<LiveProductAiStreamSink>,
+    operation: &'static str,
+    armed: bool,
+}
+
+impl ProductAiLaneReservation {
+    fn try_acquire(
+        sink: Arc<LiveProductAiStreamSink>,
+        operation: &'static str,
+        provider_hint: &str,
+        model_hint: &str,
+    ) -> Option<Self> {
+        if !sink.try_begin(operation, provider_hint, model_hint) {
+            return None;
+        }
+        Some(Self {
+            sink,
+            operation,
+            armed: true,
+        })
+    }
+
+    fn sink(&self) -> Arc<LiveProductAiStreamSink> {
+        self.sink.clone()
+    }
+
+    fn finish(mut self, completion: Option<&ProductChatCompletion>) {
+        self.armed = false;
+        self.sink.finish(completion, self.operation);
+    }
+
+    fn finish_background(
+        mut self,
+        result: ProductAiBackgroundResult,
+        completion: Option<&ProductChatCompletion>,
+    ) {
+        self.armed = false;
+        self.sink
+            .finish_background(result, completion, self.operation);
+    }
+}
+
+impl Drop for ProductAiLaneReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.sink.finish(None, self.operation);
+        }
+    }
+}
+
 impl LiveProductAiStreamSink {
     fn try_begin(&self, operation: &str, provider_hint: &str, model_hint: &str) -> bool {
         let Ok(pending) = self.pending_results.lock() else {
@@ -2094,16 +2158,16 @@ pub struct SharedCancellationFlag {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ActiveWorkerKind {
-    DelegatedTask,
-    LegionWorkflow,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveWorkerIdentity {
+    DelegatedTask { run_id: String },
+    LegionWorkflow { session_id: LegionWorkflowSessionId },
 }
 
 #[derive(Clone)]
 struct ActiveWorkerRegistration {
     owner_id: uuid::Uuid,
-    kind: ActiveWorkerKind,
+    identity: ActiveWorkerIdentity,
     cancellation_flag: SharedCancellationFlag,
 }
 
@@ -3656,6 +3720,15 @@ impl AppProposalCoordinator {
         let next = self.next_proposal_id.get().saturating_add(1).max(1);
         self.next_proposal_id.set(next);
         legion_protocol::ProposalId(next)
+    }
+
+    fn next_available_id(&self) -> legion_protocol::ProposalId {
+        loop {
+            let candidate = self.next_id();
+            if !self.proposals.borrow().contains_key(&candidate) {
+                return candidate;
+            }
+        }
     }
 
     fn next_sequence(&self) -> EventSequence {
@@ -16697,7 +16770,7 @@ impl AppComposition {
 
     fn begin_active_worker(
         &mut self,
-        kind: ActiveWorkerKind,
+        identity: ActiveWorkerIdentity,
     ) -> Result<(uuid::Uuid, SharedCancellationFlag), AppCompositionError> {
         if self.active_worker.is_some() {
             return Err(AppCompositionError::AiRuntime(
@@ -16711,7 +16784,7 @@ impl AppComposition {
         let owner_id = uuid::Uuid::now_v7();
         self.active_worker = Some(ActiveWorkerRegistration {
             owner_id,
-            kind,
+            identity,
             cancellation_flag: cancellation_flag.clone(),
         });
         Ok((owner_id, cancellation_flag))
@@ -16737,17 +16810,17 @@ impl AppComposition {
         }
     }
 
-    fn mode_allows_active_worker(mode: AppProductMode, kind: ActiveWorkerKind) -> bool {
-        match kind {
-            ActiveWorkerKind::DelegatedTask => mode.allows_delegate(),
-            ActiveWorkerKind::LegionWorkflow => mode.allows_automate(),
+    fn mode_allows_active_worker(mode: AppProductMode, identity: &ActiveWorkerIdentity) -> bool {
+        match identity {
+            ActiveWorkerIdentity::DelegatedTask { .. } => mode.allows_delegate(),
+            ActiveWorkerIdentity::LegionWorkflow { .. } => mode.allows_automate(),
         }
     }
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
         if let Some(worker) = &self.active_worker
-            && !Self::mode_allows_active_worker(mode, worker.kind)
+            && !Self::mode_allows_active_worker(mode, &worker.identity)
         {
             worker.cancellation_flag.cancel();
             // Keep the current authority projection, and therefore its visible
@@ -16942,16 +17015,28 @@ impl AppComposition {
     /// Cancel the currently running delegated task loop by signalling the shared cancellation flag.
     ///
     /// This is a safety action and remains available even if a stale caller has
-    /// already projected a lower product mode. Returns an error if no delegated
-    /// task or workflow worker is currently running.
+    /// already projected a lower product mode. A Legion workflow registration
+    /// is a distinct authority owner and is never signalled by this action.
     pub fn cancel_delegated_task(&self) -> Result<(), AppCompositionError> {
-        if let Some(worker) = &self.active_worker {
-            worker.cancellation_flag.cancel();
-            Ok(())
-        } else {
-            Err(AppCompositionError::AiRuntime(
+        match &self.active_worker {
+            Some(ActiveWorkerRegistration {
+                identity: ActiveWorkerIdentity::DelegatedTask { .. },
+                cancellation_flag,
+                ..
+            }) => {
+                cancellation_flag.cancel();
+                Ok(())
+            }
+            Some(ActiveWorkerRegistration {
+                identity: ActiveWorkerIdentity::LegionWorkflow { session_id },
+                ..
+            }) => Err(AppCompositionError::AiRuntime(format!(
+                "cannot cancel delegated task: active worker belongs to workflow {}",
+                session_id.0
+            ))),
+            None => Err(AppCompositionError::AiRuntime(
                 "no delegated task running".to_string(),
-            ))
+            )),
         }
     }
 
@@ -16991,11 +17076,35 @@ impl AppComposition {
         let normalize_path = |path: &CanonicalPath,
                               label: &str|
          -> Result<std::path::PathBuf, AppCompositionError> {
-            let path = std::path::Path::new(&path.0);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
+            use std::path::Component;
+
+            let raw = std::path::Path::new(&path.0);
+            if raw.has_root() && !raw.is_absolute() {
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "delegated scope {label} uses a rooted or drive-relative path without an absolute prefix"
+                )));
+            }
+            let mut clean = std::path::PathBuf::new();
+            for component in raw.components() {
+                match component {
+                    Component::ParentDir => {
+                        return Err(AppCompositionError::AiRuntime(format!(
+                            "delegated scope {label} contains parent traversal"
+                        )));
+                    }
+                    Component::CurDir => {}
+                    Component::Prefix(_) | Component::RootDir if !raw.is_absolute() => {
+                        return Err(AppCompositionError::AiRuntime(format!(
+                            "delegated scope {label} contains a misplaced root or prefix"
+                        )));
+                    }
+                    _ => clean.push(component.as_os_str()),
+                }
+            }
+            let path = if raw.is_absolute() {
+                clean
             } else {
-                active_root.join(path)
+                active_root.join(clean)
             };
             resolve_existing_prefix(&path).ok_or_else(|| {
                 AppCompositionError::AiRuntime(format!(
@@ -17754,10 +17863,30 @@ impl AppComposition {
 
     /// Test-only: project a live workflow owner with an explicit cancellation flag.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn inject_active_workflow_for_test(&mut self, flag: SharedCancellationFlag) {
+    pub fn inject_active_workflow_for_test(
+        &mut self,
+        session_id: LegionWorkflowSessionId,
+        flag: SharedCancellationFlag,
+    ) {
         self.active_worker = Some(ActiveWorkerRegistration {
             owner_id: uuid::Uuid::now_v7(),
-            kind: ActiveWorkerKind::LegionWorkflow,
+            identity: ActiveWorkerIdentity::LegionWorkflow { session_id },
+            cancellation_flag: flag,
+        });
+    }
+
+    /// Test-only: project a live delegated-run owner with an explicit cancellation flag.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_active_delegate_for_test(
+        &mut self,
+        run_id: impl Into<String>,
+        flag: SharedCancellationFlag,
+    ) {
+        self.active_worker = Some(ActiveWorkerRegistration {
+            owner_id: uuid::Uuid::now_v7(),
+            identity: ActiveWorkerIdentity::DelegatedTask {
+                run_id: run_id.into(),
+            },
             cancellation_flag: flag,
         });
     }
@@ -20536,6 +20665,7 @@ impl AppComposition {
         let workspace_root = std::path::PathBuf::from(&scope.workspace_root.0);
         let task_id = uuid::Uuid::new_v4().to_string();
         let run_id = legion_protocol::AgentRunId(format!("run-{task_id}"));
+        let run_identity = run_id.0.clone();
         let mut agent_runtime = AgentRuntime::new(run_id);
         agent_runtime
             .transition(
@@ -20592,7 +20722,9 @@ impl AppComposition {
                 .collect(),
         };
         let (owner_id, cancellation_flag) =
-            self.begin_active_worker(ActiveWorkerKind::DelegatedTask)?;
+            self.begin_active_worker(ActiveWorkerIdentity::DelegatedTask {
+                run_id: run_identity,
+            })?;
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
         let worker_cancellation = cancellation_flag.clone();
@@ -20820,9 +20952,9 @@ impl AppComposition {
             .proposal_coordinator
             .proposal_lifecycle_recovery_snapshot();
         let registration = (|| {
-            let mut registered = Vec::with_capacity(proposals.len());
+            let mut staged = Vec::with_capacity(proposals.len());
             for mut proposal_output in proposals {
-                let proposal_id = self.proposal_coordinator.next_id();
+                let proposal_id = self.proposal_coordinator.next_available_id();
                 proposal_output.proposal_id = proposal_id;
                 let proposal = WorkspaceProposal {
                     proposal_id,
@@ -20835,6 +20967,42 @@ impl AppComposition {
                     expires_at: proposal_output.expires_at,
                     created_at: proposal_output.created_at,
                 };
+                staged.push((proposal_output, proposal));
+            }
+
+            // Run the exact lifecycle observer against isolated coordinator and
+            // storage instances before the real batch emits or persists anything.
+            // A protocol-invalid later proposal therefore cannot leak earlier
+            // Created events, metadata, or audit records.
+            let preflight_sink = SharedEventSink::default();
+            let mut preflight_coordinator = AppProposalCoordinator::new(preflight_sink.clone());
+            let preflight_storage = InMemoryStorageRepositoryPort::with_event_sink(preflight_sink);
+            for (_, proposal) in &staged {
+                preflight_coordinator.register_lifecycle_context(
+                    proposal.proposal_id,
+                    EventContext::new(proposal.correlation_id),
+                );
+                let response = preflight_coordinator.created_response(proposal);
+                if !matches!(response, ProposalResponse::Created(_)) {
+                    return Err(AppCompositionError::AiRuntime(format!(
+                        "delegated proposal registration preflight was rejected: {response:?}"
+                    )));
+                }
+                if let Err(response) = SaveWorkflowService::observe_proposal_response(
+                    &mut preflight_coordinator,
+                    &preflight_storage,
+                    proposal,
+                    &response,
+                    None,
+                ) {
+                    return Err(AppCompositionError::AiRuntime(format!(
+                        "delegated proposal observation preflight was rejected: {response:?}"
+                    )));
+                }
+            }
+
+            let mut registered = Vec::with_capacity(staged.len());
+            for (proposal_output, proposal) in staged {
                 match self.register_proposal_lifecycle(&proposal)? {
                     ProposalResponse::Created(_) => registered.push(proposal_output),
                     response => {
@@ -20890,6 +21058,7 @@ impl AppComposition {
 
         // Initialize the AgentRuntime state machine: Observing → Planning → Proposing.
         let run_id = legion_protocol::AgentRunId(format!("run-{task_id}"));
+        let run_identity = run_id.0.clone();
         let mut agent_runtime = AgentRuntime::new(run_id);
         agent_runtime
             .transition(
@@ -20957,7 +21126,9 @@ impl AppComposition {
         // Cancellation probe — reuse a pre-injected flag (e.g., from tests) or create a fresh one.
         // The UI kill switch calls `cancel_delegated_task` which sets the Arc<AtomicBool>.
         let (owner_id, cancellation_flag) =
-            self.begin_active_worker(ActiveWorkerKind::DelegatedTask)?;
+            self.begin_active_worker(ActiveWorkerIdentity::DelegatedTask {
+                run_id: run_identity,
+            })?;
 
         // Capability broker — scope enforcement is the primary gate inside
         // the loop; the loop's scope validator and containment checks enforce
@@ -21823,12 +21994,38 @@ impl AppComposition {
         reason_label: String,
     ) -> Result<LegionWorkflowProjection, AppCompositionError> {
         self.require_automate_mode()?;
+        let workflow_cancellation = match &self.active_worker {
+            Some(ActiveWorkerRegistration {
+                identity: ActiveWorkerIdentity::LegionWorkflow { session_id: active },
+                cancellation_flag,
+                ..
+            }) if active == session_id => Some(cancellation_flag.clone()),
+            Some(ActiveWorkerRegistration {
+                identity: ActiveWorkerIdentity::LegionWorkflow { session_id: active },
+                ..
+            }) => {
+                return Err(AppCompositionError::LegionWorkflow(format!(
+                    "kill switch for {} does not own active workflow {}",
+                    session_id.0, active.0
+                )));
+            }
+            Some(ActiveWorkerRegistration {
+                identity: ActiveWorkerIdentity::DelegatedTask { run_id },
+                ..
+            }) => {
+                return Err(AppCompositionError::LegionWorkflow(format!(
+                    "kill switch for {} cannot cancel delegated run {run_id}",
+                    session_id.0
+                )));
+            }
+            None => None,
+        };
         {
             let session = self.legion_workflow_session_mut(session_id)?;
             session.lifecycle_state = LegionWorkflowState::Cancelled;
         }
-        if let Some(worker) = &self.active_worker {
-            worker.cancellation_flag.cancel();
+        if let Some(cancellation_flag) = workflow_cancellation {
+            cancellation_flag.cancel();
         }
         let event_context = self.next_event_context();
         self.automate_workflow.trigger_kill_switch(
@@ -22170,6 +22367,7 @@ impl AppComposition {
         let config = prepared.config;
         let tool_host = prepared.tool_host;
         let provider = prepared.provider;
+        let worker_cancellation = cancellation_flag.clone();
         let join_handle = std::thread::spawn(move || {
             let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 Self::run_prepared_legion_workflow_worker(
@@ -22177,7 +22375,7 @@ impl AppComposition {
                     config,
                     tool_host,
                     provider,
-                    cancellation_flag,
+                    worker_cancellation,
                 )
             }));
             let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
@@ -22200,7 +22398,10 @@ impl AppComposition {
                 ))),
             }
         });
-        InFlightLegionWorkflowWorkerRun { join_handle }
+        InFlightLegionWorkflowWorkerRun {
+            cancellation_flag,
+            join_handle: Some(join_handle),
+        }
     }
 
     #[cfg(feature = "ai")]
@@ -22677,7 +22878,9 @@ impl AppComposition {
         }
 
         let (owner_id, cancellation_flag) =
-            self.begin_active_worker(ActiveWorkerKind::LegionWorkflow)?;
+            self.begin_active_worker(ActiveWorkerIdentity::LegionWorkflow {
+                session_id: session.session_id.clone(),
+            })?;
         let execution_result = (|| {
             #[cfg(feature = "ai")]
             let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
@@ -23011,8 +23214,12 @@ impl AppComposition {
                 }
 
                 #[cfg(feature = "ai")]
-                for worker_run in in_flight {
-                    let joined = worker_run.join_handle.join();
+                for mut worker_run in in_flight {
+                    let joined = worker_run
+                        .join_handle
+                        .take()
+                        .expect("workflow worker owns its join handle")
+                        .join();
                     let completion = match joined {
                         Ok(Ok(completion)) => completion,
                         Ok(Err(error)) => {
@@ -26586,6 +26793,18 @@ impl AppComposition {
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
         let prompt_label = bounded_label(prompt_label.into(), 240);
+        let lane_reservation = ProductAiLaneReservation::try_acquire(
+            self.live_product_ai_stream.clone(),
+            "delegate.chat",
+            "pending",
+            "",
+        )
+        .ok_or_else(|| {
+            AppCompositionError::AiRuntime(
+                "product AI provider lane is busy; poll the active result before dispatching another request"
+                    .to_string(),
+            )
+        })?;
         let buffer_id = self.active_documents.require_active_buffer()?;
         let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let event_context = self.next_event_context();
@@ -26735,14 +26954,6 @@ impl AppComposition {
             route_completed && product_ai_will_attempt_live(self.preferred_ai_provider);
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
-        let sink = self.live_product_ai_stream.clone();
-        if route_completed && !sink.try_begin("delegate.chat", "pending", "") {
-            return Err(AppCompositionError::AiRuntime(
-                "product AI provider lane is busy; poll the active result before dispatching another request"
-                    .to_string(),
-            ));
-        }
-
         let user_message_id = self
             .delegate_workflow
             .next_message_id(DelegatedTaskChatRole::User);
@@ -26768,6 +26979,7 @@ impl AppComposition {
             });
 
         let assistant_content_label = if !route_completed {
+            lane_reservation.finish(None);
             format!(
                 "Delegate provider refused; citation(s)={} route={} reason={}",
                 citation_ids.len(),
@@ -26789,40 +27001,46 @@ impl AppComposition {
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
-            std::thread::spawn(move || {
-                let sink_delta = sink.clone();
-                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-                let (label, stream) = resolve_delegate_chat_reply(
-                    preference,
-                    &prompt_for_worker,
-                    &excerpt_for_worker,
-                    &file_path,
-                    citation_count,
-                    &route_id,
-                    &route_labels,
-                    Some(&mut on_delta),
-                );
-                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-                    provider_id: stream.provider_id.clone(),
-                    model: stream.model.clone(),
-                    text: stream.text_preview.clone(),
-                    stream_chunks: stream.chunks.clone(),
-                    streamed: stream.streamed,
-                });
-                sink.finish_background(
-                    ProductAiBackgroundResult {
-                        assistant_message_id: assistant_id,
-                        content_label: label,
-                        stream,
-                        assist_proposal: None,
-                    },
-                    completion.as_ref(),
-                    "delegate.chat",
-                );
-            });
+            let sink_delta = lane_reservation.sink();
+            std::thread::Builder::new()
+                .name("legion-delegate-chat".to_string())
+                .spawn(move || {
+                    let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                    let (label, stream) = resolve_delegate_chat_reply(
+                        preference,
+                        &prompt_for_worker,
+                        &excerpt_for_worker,
+                        &file_path,
+                        citation_count,
+                        &route_id,
+                        &route_labels,
+                        Some(&mut on_delta),
+                    );
+                    let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                        provider_id: stream.provider_id.clone(),
+                        model: stream.model.clone(),
+                        text: stream.text_preview.clone(),
+                        stream_chunks: stream.chunks.clone(),
+                        streamed: stream.streamed,
+                    });
+                    lane_reservation.finish_background(
+                        ProductAiBackgroundResult {
+                            assistant_message_id: assistant_id,
+                            content_label: label,
+                            stream,
+                            assist_proposal: None,
+                        },
+                        completion.as_ref(),
+                    );
+                })
+                .map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "failed to spawn Delegate chat worker: {error}"
+                    ))
+                })?;
             "Streaming response…".to_string()
         } else {
-            let sink_delta = sink.clone();
+            let sink_delta = lane_reservation.sink();
             let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
             let (label, stream) = resolve_delegate_chat_reply(
                 self.preferred_ai_provider,
@@ -26835,19 +27053,16 @@ impl AppComposition {
                 Some(&mut on_delta),
             );
             if let Some(stream) = stream {
-                sink.finish(
-                    Some(&ProductChatCompletion {
-                        provider_id: stream.provider_id.clone(),
-                        model: stream.model.clone(),
-                        text: stream.text_preview.clone(),
-                        stream_chunks: stream.chunks.clone(),
-                        streamed: stream.streamed,
-                    }),
-                    "delegate.chat",
-                );
+                lane_reservation.finish(Some(&ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
+                }));
                 self.last_product_ai_stream = Some(stream);
             } else {
-                sink.finish(None, "delegate.chat");
+                lane_reservation.finish(None);
             }
             label
         };
@@ -33495,13 +33710,8 @@ mod tests {
             }
         }
 
-        let mut app = AppComposition::new();
-        let existing = save_proposal(ProposalId(2));
-        assert!(matches!(
-            app.register_proposal_lifecycle(&existing),
-            Ok(ProposalResponse::Created(_))
-        ));
-
+        let event_sink = legion_observability::InMemoryEventSink::new();
+        let mut app = AppComposition::with_event_sink(SharedEventSink::new(event_sink.clone()));
         let mut rejected = output_from(save_proposal(ProposalId(101)), "second");
         rejected.correlation_id = CorrelationId(0);
         let error = app
@@ -33511,7 +33721,7 @@ mod tests {
             ])
             .expect_err("the invalid second proposal must reject the full batch");
 
-        assert!(error.to_string().contains("registration was rejected"));
+        assert!(error.to_string().contains("preflight was rejected"));
         assert_eq!(
             app.delegate_workflow.runtime_activation,
             DelegatedTaskRuntimeActivationState::Failed
@@ -33519,17 +33729,30 @@ mod tests {
         let ledger = app
             .proposal_coordinator
             .proposal_ledger_projection(TimestampMillis(99));
-        assert_eq!(ledger.rows.len(), 1);
-        assert_eq!(ledger.rows[0].proposal_id, existing.proposal_id);
-        assert_eq!(
-            app.proposal_coordinator
-                .proposal(existing.proposal_id)
-                .expect("pre-existing proposal must survive rollback")
-                .preview
-                .summary,
-            existing.preview.summary
+        assert!(ledger.rows.is_empty());
+        assert!(
+            event_sink.events().expect("event snapshot").is_empty(),
+            "preflight rejection must not emit an earlier Created event"
         );
         assert!(app.proposal_coordinator.proposal(ProposalId(1)).is_none());
+        for proposal_id in [ProposalId(1), ProposalId(2)] {
+            assert!(matches!(
+                app.storage
+                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                        proposal_id
+                    ))
+                    .expect("read audit record"),
+                StorageRepositoryResponse::ProposalAuditRecord(None)
+            ));
+        }
+
+        let registered = app
+            .register_delegated_task_proposals(vec![output_from(
+                save_proposal(ProposalId(102)),
+                "retry",
+            )])
+            .expect("a valid retry should register after rollback");
+        assert_eq!(registered[0].proposal_id, ProposalId(1));
     }
 
     #[test]
@@ -34491,6 +34714,76 @@ mod pkt_worker_tests {
     }
 
     #[test]
+    fn armed_product_lane_reservation_releases_on_early_error_drop() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let reservation = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "delegate.chat",
+            "provider:a",
+            "model:a",
+        )
+        .expect("reserve product lane");
+
+        drop(reservation);
+
+        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+    }
+
+    #[test]
+    fn delegate_chat_busy_preserves_active_stream_and_all_app_owned_chat_state() {
+        let root =
+            std::env::temp_dir().join(format!("legion-delegate-busy-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).expect("create workspace");
+        std::fs::write(root.join("lib.rs"), "pub fn marker() -> u32 { 1 }\n")
+            .expect("write source");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("delegate-busy-test".to_string()),
+        )
+        .expect("open workspace");
+        app.open_file("lib.rs").expect("open source");
+        app.set_product_mode(AppProductMode::Delegate);
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("delegate.chat", "provider:a", "model:a")
+        );
+        app.live_product_ai_stream.push_delta("stream-a");
+
+        let stream_before = app.live_product_ai_stream.snapshot();
+        let semantic_index_before = format!("{:?}", app.language_tooling.semantic_index);
+        let citations_before = app.delegate_workflow.context_citations.clone();
+        let permissions_before = app.delegate_workflow.tool_permission_requests.clone();
+        let chat_before = app.delegate_workflow.chat_messages.clone();
+        let sequence_before = app.delegate_workflow.next_message_sequence;
+
+        let error = app
+            .send_delegate_chat("request b must be rejected")
+            .expect_err("second product request must report Busy");
+
+        assert!(error.to_string().contains("lane is busy"));
+        assert_eq!(app.live_product_ai_stream.snapshot(), stream_before);
+        assert_eq!(
+            format!("{:?}", app.language_tooling.semantic_index),
+            semantic_index_before
+        );
+        assert_eq!(
+            app.delegate_workflow.context_citations, citations_before,
+            "Busy must not append citations"
+        );
+        assert_eq!(
+            app.delegate_workflow.tool_permission_requests, permissions_before,
+            "Busy must not record a permission decision"
+        );
+        assert_eq!(app.delegate_workflow.chat_messages, chat_before);
+        assert_eq!(app.delegate_workflow.next_message_sequence, sequence_before);
+
+        app.live_product_ai_stream.finish(None, "delegate.chat");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
@@ -34569,17 +34862,33 @@ mod pkt_worker_tests {
     }
 
     #[test]
-    fn cancellation_safety_action_is_allowed_after_mode_downgrade_edge() {
+    fn delegated_cancel_rejects_workflow_owner_without_signalling_it() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
         let flag = SharedCancellationFlag::new();
-        app.inject_active_workflow_for_test(flag.clone());
-        // Simulate a stale downgraded projection: cancellation must remain a
-        // safety action even though the authority mode is already Manual.
+        app.inject_active_workflow_for_test(
+            LegionWorkflowSessionId("session:owned-workflow".to_string()),
+            flag.clone(),
+        );
+
+        let error = app
+            .cancel_delegated_task()
+            .expect_err("delegated cancellation must reject a workflow owner");
+
+        assert!(error.to_string().contains("belongs to workflow"));
+        assert!(!flag.is_cancelled());
+    }
+
+    #[test]
+    fn delegated_cancel_remains_available_for_matching_owner_after_stale_manual_projection() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Delegate);
+        let flag = SharedCancellationFlag::new();
+        app.inject_active_delegate_for_test("run:stale-manual", flag.clone());
         app.product_mode = AppProductMode::Manual;
 
         app.cancel_delegated_task()
-            .expect("cancellation remains available after a downgrade edge");
+            .expect("matching delegated owner remains cancellable");
 
         assert!(flag.is_cancelled());
     }

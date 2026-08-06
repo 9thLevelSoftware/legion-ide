@@ -1347,6 +1347,71 @@ fn windows_scope_alias_and_case_are_normalized_before_forbidden_path_checks() {
     }));
 }
 
+#[test]
+fn delegated_scope_rejects_dot_traversal_in_nonexistent_target_suffix() {
+    let root = temp_workspace("scope-dot-target");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("scope-dot-target-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Module,
+        target_path: Some(CanonicalPath(
+            root.join("missing")
+                .join("..")
+                .join("outside")
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        ..test_scope(&root)
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("scope-dot-target-provider");
+
+    let error = app
+        .start_delegated_task("reject traversal".to_string(), scope, &provider)
+        .expect_err("parent traversal must be rejected before prefix resolution");
+
+    assert!(error.to_string().contains("parent traversal"));
+}
+
+#[test]
+fn delegated_scope_rejects_dot_traversal_in_forbidden_path_alias() {
+    let root = temp_workspace("scope-dot-forbidden");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("scope-dot-forbidden-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        forbidden_paths: vec![CanonicalPath(
+            root.join("nonexistent")
+                .join("..")
+                .join("secrets.txt")
+                .to_string_lossy()
+                .into_owned(),
+        )],
+        ..test_scope(&root)
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("scope-dot-forbidden-provider");
+
+    let error = app
+        .start_delegated_task("reject forbidden alias".to_string(), scope, &provider)
+        .expect_err("forbidden path alias must be rejected before prefix resolution");
+
+    assert!(error.to_string().contains("parent traversal"));
+}
+
 /// End-to-end integration test for the proposal surface path:
 /// scripted provider → edit-as-proposal → proposals.len()==1 →
 /// id resolves in the ledger projection → review_delegate_proposal_hunk succeeds.
