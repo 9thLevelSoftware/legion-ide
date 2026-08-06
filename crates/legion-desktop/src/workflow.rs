@@ -20,12 +20,12 @@ use legion_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationOperationId, CollaborationParticipantId,
     CollaborationSessionId, CollaborationSharedProposalApproval, CollaborationTransportEnvelope,
     DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
-    LegionWorkflowMergeReadinessState, LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason,
-    PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
-    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
-    RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, ViewportScroll,
-    WorkspaceSessionRecord, WorkspaceTrustState,
+    DelegatedTaskRuntimeActivationState, LegionWorkflowMergeReadinessState,
+    LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason, PluginHostCallResponse, PluginId,
+    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
+    ProposalResponse, ProtocolTextRange, RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor,
+    RemoteWorkspaceSessionId, SessionDockLayout, SessionDockSideLayout, SessionPanelState,
+    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
@@ -57,7 +57,7 @@ use crate::{
     smoke::{self, RendererSmokeConfig},
     theme,
     view::{
-        DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
+        BottomPanelTab, DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
         ime_composition_state, ime_composition_state_id,
         proposal_review::DesktopCheckpointTimelineRow,
     },
@@ -514,6 +514,8 @@ pub enum DesktopDelegatedTaskStatus {
     ProposalHunkReviewed,
     /// Delegate tool permission decision was recorded.
     ToolPermissionRecorded,
+    /// Delegated task loop was accepted for app-owned background execution.
+    TaskLoopStarted,
     /// Delegated task loop completed (may have completed, blocked, or been cancelled).
     TaskLoopCompleted,
 }
@@ -1162,6 +1164,32 @@ impl DesktopRuntime {
         self.app.poll_product_ai_stream()
     }
 
+    /// Poll an app-owned delegated worker and merge completion on the app thread.
+    pub fn poll_delegated_task(&mut self) -> bool {
+        #[cfg(feature = "ai")]
+        match self.app.poll_delegated_task() {
+            Ok(Some(outcome)) => {
+                let mapped = self.map_app_outcome(
+                    AppCommandOutcome::DelegatedTaskCompleted(Box::new(outcome)),
+                    None,
+                );
+                self.last_outcome = mapped;
+                let _ = self.refresh_projection();
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                let message = format!("Delegated task failed: {error}");
+                self.set_status(StatusSeverity::Error, message.clone());
+                self.last_outcome = DesktopWorkflowOutcome::Error(message);
+                let _ = self.refresh_projection();
+                true
+            }
+        }
+        #[cfg(not(feature = "ai"))]
+        false
+    }
+
     /// Whether a product AI stream is currently receiving deltas.
     pub fn product_ai_stream_in_flight(&self) -> bool {
         self.app.product_ai_stream_in_flight()
@@ -1219,6 +1247,12 @@ impl DesktopRuntime {
     /// Set the app-owned product mode used by AI dispatch authority.
     pub fn set_product_mode(&mut self, mode: AppProductMode) -> Result<()> {
         self.app.set_product_mode(mode);
+        if self.app.product_mode() != mode {
+            anyhow::bail!(
+                "product mode change to {} deferred until active AI/workflow egress stops",
+                mode.to_dock_mode().label()
+            );
+        }
         self.set_status(
             StatusSeverity::Info,
             format!("Product mode changed to {}", mode.to_dock_mode().label()),
@@ -1483,6 +1517,7 @@ impl DesktopRuntime {
             .ok_or_else(|| anyhow!("manual perf renderer did not produce a projection frame"))?;
 
         let needs_repaint = output.needs_repaint;
+        self.persist_bottom_panel_selection(output.selected_bottom_panel);
         for action in output.actions {
             self.handle_action(action)?;
         }
@@ -1498,6 +1533,10 @@ impl DesktopRuntime {
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
+            selected_bottom_panel: bottom_panel_tab_from_session(&self.panel_state),
+            canonical_workspace_root: Some(CanonicalPath(
+                self.workspace_root.to_string_lossy().into_owned(),
+            )),
             first_run_onboarding_visible: self.onboarding_visible,
             completion_popup_open: self.completion_popup_open,
             completion_selected_index: self.completion_selected_index,
@@ -1536,6 +1575,14 @@ impl DesktopRuntime {
                     .last_product_ai_stream()
                     .map(|s| s.in_flight)
                     .unwrap_or(false),
+        }
+    }
+
+    fn persist_bottom_panel_selection(&mut self, selected: BottomPanelTab) {
+        let active_panel = panel_id_for_bottom_tab(selected);
+        if self.panel_state.active_panel.as_ref() != Some(&active_panel) {
+            self.panel_state.active_panel = Some(active_panel);
+            self.persist_session_if_configured();
         }
     }
 
@@ -2251,6 +2298,16 @@ impl DesktopRuntime {
                 );
                 DesktopWorkflowOutcome::ProductModeChanged { mode: dock_mode }
             }
+            AppCommandOutcome::DelegatedTaskStarted => {
+                let message = "Delegated task started".to_string();
+                self.set_status(StatusSeverity::Info, message.clone());
+                DesktopWorkflowOutcome::DelegatedTaskReviewed {
+                    plan_id: None,
+                    proposal_id: None,
+                    status: DesktopDelegatedTaskStatus::TaskLoopStarted,
+                    message,
+                }
+            }
             AppCommandOutcome::Edited(_) => {
                 self.set_status(StatusSeverity::Info, "Edited");
                 DesktopWorkflowOutcome::Edited
@@ -2927,6 +2984,24 @@ fn default_panel_state() -> SessionPanelState {
     }
 }
 
+fn bottom_panel_tab_from_session(panel_state: &SessionPanelState) -> BottomPanelTab {
+    match panel_state.active_panel.as_deref().and_then(PanelId::parse) {
+        Some(PanelId::Diagnostics) => BottomPanelTab::Problems,
+        Some(PanelId::AgentLogs) => BottomPanelTab::AgentLog,
+        _ => BottomPanelTab::Terminal,
+    }
+}
+
+fn panel_id_for_bottom_tab(tab: BottomPanelTab) -> String {
+    match tab {
+        BottomPanelTab::Terminal => PanelId::Terminal,
+        BottomPanelTab::Problems => PanelId::Diagnostics,
+        BottomPanelTab::AgentLog => PanelId::AgentLogs,
+    }
+    .as_str()
+    .to_string()
+}
+
 fn restore_dock_layouts(record: &WorkspaceSessionRecord) -> Vec<DockLayout> {
     if record.dock_layouts.is_empty() {
         return DockLayout::standard_all_modes();
@@ -3401,12 +3476,28 @@ impl DesktopEframeApp {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
+        // Delegated providers and agent loops run off the render thread. Poll
+        // their app-owned join handle so completion/proposals merge here while
+        // the Cancel action remains usable on intervening frames.
+        if self.runtime.poll_delegated_task()
+            || self
+                .runtime
+                .projection_snapshot()
+                .delegated_task_projection
+                .runtime_activation
+                == DelegatedTaskRuntimeActivationState::Executing
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
         let snapshot = self.runtime.projection_snapshot();
         let view_state = self.runtime.projection_view_state();
         let output = self
             .runtime
             .view
             .render_with_state(ui, &snapshot, &view_state);
+        self.runtime
+            .persist_bottom_panel_selection(output.selected_bottom_panel);
         for action in output.actions {
             self.runtime.dispatch_ui_action(action);
         }
@@ -4629,6 +4720,31 @@ mod tests {
     use super::*;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn projection_view_state_uses_runtime_root_and_persisted_bottom_panel() {
+        let workspace = TempWorkspace::new();
+        let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            None,
+        ))
+        .expect("runtime opens");
+        runtime.persist_bottom_panel_selection(BottomPanelTab::AgentLog);
+
+        let state = runtime.projection_view_state();
+
+        assert_eq!(state.selected_bottom_panel, BottomPanelTab::AgentLog);
+        assert_eq!(
+            state.canonical_workspace_root,
+            Some(CanonicalPath(
+                workspace.path().to_string_lossy().into_owned()
+            ))
+        );
+        assert_eq!(
+            runtime.panel_state().active_panel.as_deref(),
+            Some(PanelId::AgentLogs.as_str())
+        );
+    }
 
     struct TempWorkspace {
         root: PathBuf,

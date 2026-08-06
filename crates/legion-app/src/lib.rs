@@ -1803,12 +1803,40 @@ impl LiveProductAiStreamSink {
         self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn push_background_result(&self, result: ProductAiBackgroundResult) {
-        if let Ok(mut queue) = self.pending_results.lock() {
-            queue.push_back(result);
+    fn has_pending_results(&self) -> bool {
+        self.pending_results
+            .lock()
+            .map(|queue| !queue.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Publish the final stream projection and enqueue its app-thread result
+    /// before making the operation observable as no longer in flight. This
+    /// ordering closes the Manual-transition race between provider completion
+    /// and result handoff.
+    fn finish_background(
+        &self,
+        result: ProductAiBackgroundResult,
+        completion: Option<&ProductChatCompletion>,
+        operation: &str,
+    ) {
+        if let Ok(mut guard) = self.projection.lock() {
+            if let Some(completion) = completion {
+                *guard = product_stream_from_completion(completion, operation);
+            } else {
+                guard.in_flight = false;
+            }
         }
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let queued = if let Ok(mut queue) = self.pending_results.lock() {
+            queue.push_back(result);
+            true
+        } else {
+            false
+        };
+        if queued {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
@@ -1951,6 +1979,20 @@ pub enum AppDelegatedTaskOutcome {
         /// Human-readable reason label.
         reason: String,
     },
+}
+
+#[cfg(feature = "ai")]
+struct InFlightDelegatedTaskRun {
+    cancellation_flag: SharedCancellationFlag,
+    join_handle: std::thread::JoinHandle<Result<DelegatedTaskRunCompletion, AppCompositionError>>,
+}
+
+#[cfg(feature = "ai")]
+struct DelegatedTaskRunCompletion {
+    audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    loop_result: Option<legion_agent::agent_loop::DelegatedTaskLoopResult>,
+    sandbox_allocation_failure: Option<String>,
+    sandbox_enforcement_label: Option<String>,
 }
 
 /// Thread-safe cancellation flag shared between the UI kill switch and the delegated task loop.
@@ -13876,6 +13918,8 @@ pub enum AppCommandOutcome {
     CollaborationOperationApplied(TextTransactionDescriptor),
     /// Delegate chat turn completed with metadata-only context citations.
     DelegateChatCompleted(Box<AppDelegateChatOutcome>),
+    /// Delegated task worker was accepted and is running outside the app thread.
+    DelegatedTaskStarted,
     /// Delegated task loop completed with outcome, proposals, and audit steps.
     DelegatedTaskCompleted(Box<AppDelegatedTaskOutcome>),
     /// Delegate proposal hunk review changed after human input.
@@ -15868,6 +15912,10 @@ pub struct AppComposition {
     /// loop returns. The UI kill switch calls `cancel_delegated_task` which sets the flag to
     /// signal the loop to stop before its next model turn or tool execution.
     active_cancellation_flag: Option<SharedCancellationFlag>,
+    /// App-owned worker for a Desktop-started delegated loop. Completion is
+    /// merged on the app thread so proposal registration never moves into the renderer.
+    #[cfg(feature = "ai")]
+    in_flight_delegated_task: Option<InFlightDelegatedTaskRun>,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
     #[cfg(any(test, feature = "test-helpers"))]
     acp_host_command: Option<AcpHostCommand>,
@@ -16138,6 +16186,8 @@ impl AppComposition {
             legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
             active_cancellation_flag: None,
+            #[cfg(feature = "ai")]
+            in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
             #[cfg(any(test, feature = "test-helpers"))]
             acp_host_command: None,
@@ -16542,6 +16592,35 @@ impl AppComposition {
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        if mode == AppProductMode::Manual && self.product_mode != AppProductMode::Manual {
+            if let Some(flag) = &self.active_cancellation_flag {
+                flag.cancel();
+                // Stay in the current authority mode until the app thread has
+                // observed and merged the cancellation acknowledgement.
+                return;
+            }
+            // Persisted/projected workflow activity without a live worker can
+            // be acknowledged synchronously. A real worker always owns the
+            // cancellation flag handled above.
+            for session in &mut self.legion_workflow_sessions {
+                if matches!(
+                    session.lifecycle_state,
+                    LegionWorkflowState::Planning
+                        | LegionWorkflowState::Executing
+                        | LegionWorkflowState::Verifying
+                ) {
+                    session.lifecycle_state = LegionWorkflowState::Cancelled;
+                }
+            }
+            if self.live_product_ai_stream.is_in_flight()
+                || self.live_product_ai_stream.has_pending_results()
+            {
+                // Product provider calls do not yet expose a transport-level
+                // cancellation handle. Refuse the downgrade rather than claim
+                // Manual's zero-egress boundary while the request continues.
+                return;
+            }
+        }
         self.product_mode = mode;
         if !mode.allows_assist() {
             self.phase4_projection_state.assisted_ai_projection = None;
@@ -16701,10 +16780,10 @@ impl AppComposition {
 
     /// Cancel the currently running delegated task loop by signalling the shared cancellation flag.
     ///
-    /// Intended to be called from the UI thread while `start_delegated_task` is blocking on a
-    /// background thread. Returns an error if no delegated task is currently running.
+    /// This is a safety action and remains available even if a stale caller has
+    /// already projected a lower product mode. Returns an error if no delegated
+    /// task or workflow worker is currently running.
     pub fn cancel_delegated_task(&self) -> Result<(), AppCompositionError> {
-        self.require_delegate_mode()?;
         if let Some(flag) = &self.active_cancellation_flag {
             flag.cancel();
             Ok(())
@@ -16724,6 +16803,66 @@ impl AppComposition {
             .as_ref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().expect("current dir accessible"))
+    }
+
+    #[cfg(feature = "ai")]
+    fn validate_delegated_task_scope_root(
+        &self,
+        scope: &legion_protocol::DelegatedTaskScope,
+    ) -> Result<(), AppCompositionError> {
+        let active_root = std::fs::canonicalize(self.workspace_root_path()).map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "active workspace root could not be canonicalized: {error}"
+            ))
+        })?;
+        let selected_root = std::fs::canonicalize(&scope.workspace_root.0).map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "delegated scope workspace root could not be canonicalized: {error}"
+            ))
+        })?;
+        if selected_root != active_root {
+            return Err(AppCompositionError::AiRuntime(
+                "delegated scope workspace root does not match the active workspace".to_string(),
+            ));
+        }
+
+        match (scope.target_kind, scope.target_path.as_ref()) {
+            (legion_protocol::DelegatedTaskScopeTargetKind::Repo, None) => {}
+            (
+                legion_protocol::DelegatedTaskScopeTargetKind::File
+                | legion_protocol::DelegatedTaskScopeTargetKind::Module,
+                Some(target),
+            ) => {
+                let target = std::fs::canonicalize(&target.0).map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "delegated scope target could not be canonicalized: {error}"
+                    ))
+                })?;
+                if !target.starts_with(&active_root) {
+                    return Err(AppCompositionError::AiRuntime(
+                        "delegated scope target is outside the active workspace".to_string(),
+                    ));
+                }
+            }
+            (legion_protocol::DelegatedTaskScopeTargetKind::Repo, Some(target)) => {
+                let target = std::fs::canonicalize(&target.0).map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "delegated scope target could not be canonicalized: {error}"
+                    ))
+                })?;
+                if !target.starts_with(&active_root) {
+                    return Err(AppCompositionError::AiRuntime(
+                        "delegated scope target is outside the active workspace".to_string(),
+                    ));
+                }
+            }
+            (_, None) => {
+                return Err(AppCompositionError::AiRuntime(
+                    "file/module delegated scope requires a target path".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn require_automate_mode(&self) -> Result<(), AppCompositionError> {
@@ -18589,7 +18728,14 @@ impl AppComposition {
         match request {
             AppCommandRequest::SetProductMode { mode } => {
                 self.set_product_mode(mode);
-                Ok(AppCommandOutcome::ProductModeChanged(mode))
+                if self.product_mode == mode {
+                    Ok(AppCommandOutcome::ProductModeChanged(mode))
+                } else {
+                    Err(AppCompositionError::AiRuntime(format!(
+                        "product mode change to {} deferred until active AI/workflow egress stops",
+                        mode.to_dock_mode().label()
+                    )))
+                }
             }
             AppCommandRequest::Save { buffer_id } => {
                 self.active_documents.ensure_active_buffer(buffer_id)?;
@@ -19334,9 +19480,12 @@ impl AppComposition {
                 {
                     // Prefer env credentials; fall back to OS keyring BYOK (Tier 2).
                     let provider = anthropic_client_with_keyring_fallback();
-                    Ok(AppCommandOutcome::DelegatedTaskCompleted(Box::new(
-                        self.start_delegated_task(task_description, scope, &provider)?,
-                    )))
+                    self.start_delegated_task_background(
+                        task_description,
+                        scope,
+                        Box::new(provider),
+                    )?;
+                    Ok(AppCommandOutcome::DelegatedTaskStarted)
                 }
                 #[cfg(not(feature = "ai"))]
                 {
@@ -20166,18 +20315,300 @@ impl AppComposition {
         )))
     }
 
-    /// Run a delegated task loop to completion inside an allocated sandbox.
-    ///
-    /// # Blocking
-    ///
-    /// This method blocks the calling thread until the loop terminates (completion,
-    /// budget exhaustion, cancellation, or scope denial). Callers must run it off
-    /// the main/UI thread. Async dispatch and cancellation wiring land in PKT-WORKER.
-    ///
-    /// Accepts a `&dyn ToolCallingProvider` so tests can inject a scripted
-    /// provider while the production call site wires in the Anthropic client.
-    /// MCP passthrough is not yet available; the tool host returns an honest
-    /// error for any `mcp-passthrough` calls.
+    /// Prepare and submit a delegated task to an app-owned worker thread.
+    /// Provider execution and the agent loop never block the caller; callers
+    /// merge completion with [`Self::poll_delegated_task`].
+    #[cfg(feature = "ai")]
+    pub fn start_delegated_task_background(
+        &mut self,
+        task_description: String,
+        scope: legion_protocol::DelegatedTaskScope,
+        provider: Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>,
+    ) -> Result<(), AppCompositionError> {
+        use legion_agent::agent_loop::{
+            DelegatedTaskAuditSink, DelegatedTaskLoopConfig, run_delegated_task_loop,
+        };
+        use legion_protocol::DelegatedTaskLoopBudget;
+
+        self.require_delegate_mode()?;
+        self.validate_delegated_task_scope_root(&scope)?;
+        if self.in_flight_delegated_task.is_some() {
+            return Err(AppCompositionError::AiRuntime(
+                "a delegated task is already running".to_string(),
+            ));
+        }
+
+        let event_context = self.next_event_context();
+        let correlation_id = event_context.correlation_id;
+        let causality_id = event_context.causality_id;
+        let event_sequence = self.event_sequence_generator.next();
+        let workspace_root = self.workspace_root_path();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = legion_protocol::AgentRunId(format!("run-{task_id}"));
+        let mut agent_runtime = AgentRuntime::new(run_id);
+        agent_runtime
+            .transition(
+                legion_protocol::AgentRunState::Planning,
+                "task.start",
+                correlation_id,
+                causality_id,
+                event_sequence,
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        agent_runtime
+            .transition(
+                legion_protocol::AgentRunState::Proposing,
+                "task.propose",
+                correlation_id,
+                causality_id,
+                self.event_sequence_generator.next(),
+            )
+            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+
+        let mut orchestrator =
+            DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &task_id);
+        let implicit_permission =
+            delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
+                request_id: format!("start.delegated.{task_id}"),
+                profile: DelegatedTaskToolPermissionProfile::Write,
+                action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
+                capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
+                target_id: Some(task_id),
+                decision: DelegatedTaskToolPermissionDecision::Allow,
+                labels: vec![],
+                schema_version: 1,
+            });
+        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+        let config = DelegatedTaskLoopConfig {
+            system_prompt: concat!(
+                "You are a focused, proposal-mediated coding agent running inside a sandbox. ",
+                "Use the available tools to read the codebase and emit edit proposals. ",
+                "Do not attempt network access or writes outside the worktree. ",
+                "Complete the task and call end_turn when done."
+            )
+            .to_string(),
+            initial_message: task_description,
+            model: "claude-sonnet-4-20250514".to_string(),
+            provider: "anthropic".to_string(),
+            budget: DelegatedTaskLoopBudget::default(),
+            workspace_root,
+            worktree_root: sandbox_path,
+            scope: scope.clone(),
+            forbidden_paths: scope
+                .forbidden_paths
+                .iter()
+                .map(|path| path.0.clone())
+                .collect(),
+        };
+        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
+        self.active_cancellation_flag = Some(cancellation_flag.clone());
+        self.delegate_workflow
+            .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
+        let worker_cancellation = cancellation_flag.clone();
+        let join_handle = std::thread::spawn(move || {
+            struct VecAuditSink {
+                steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+            }
+            impl DelegatedTaskAuditSink for VecAuditSink {
+                fn record_step(&mut self, step: legion_protocol::DelegatedTaskLoopStepRecord) {
+                    self.steps.push(step);
+                }
+            }
+            struct AllowAllCapabilityBroker;
+            impl legion_protocol::CapabilityBrokerPort for AllowAllCapabilityBroker {
+                fn handle(&self, request: CapabilityRequest) -> ProtocolResult<CapabilityResponse> {
+                    let capability = match request {
+                        CapabilityRequest::Request { capability_id, .. } => capability_id,
+                        _ => CapabilityId("unknown".to_string()),
+                    };
+                    Ok(CapabilityResponse::Decision(CapabilityDecision {
+                        decision_id: CapabilityDecisionId(1),
+                        granted: true,
+                        capability,
+                        reason: None,
+                    }))
+                }
+            }
+
+            if worker_cancellation.is_cancelled() {
+                return Ok(DelegatedTaskRunCompletion {
+                    audit_steps: Vec::new(),
+                    loop_result: Some(legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled),
+                    sandbox_allocation_failure: None,
+                    sandbox_enforcement_label: None,
+                });
+            }
+            if let Err(error) = orchestrator.initialize(&implicit_permission) {
+                return Ok(DelegatedTaskRunCompletion {
+                    audit_steps: Vec::new(),
+                    loop_result: None,
+                    sandbox_allocation_failure: Some(error.to_string()),
+                    sandbox_enforcement_label: None,
+                });
+            }
+            let tool_host = AppDelegatedToolHost::new(
+                config.worktree_root.clone(),
+                std::collections::BTreeSet::new(),
+            );
+            let mut audit_sink = VecAuditSink { steps: Vec::new() };
+            let loop_result = run_delegated_task_loop(
+                &config,
+                provider.as_ref(),
+                &tool_host,
+                &mut audit_sink,
+                &worker_cancellation,
+                &AllowAllCapabilityBroker,
+            )
+            .map_err(|error| {
+                AppCompositionError::AiRuntime(format!("delegated loop error: {error}"))
+            });
+            let sandbox_enforcement_label = tool_host.last_enforcement_summary();
+            if let Err(_cleanup_error) = orchestrator.cleanup(&implicit_permission) {}
+            Ok(DelegatedTaskRunCompletion {
+                audit_steps: audit_sink.steps,
+                loop_result: Some(loop_result?),
+                sandbox_allocation_failure: None,
+                sandbox_enforcement_label,
+            })
+        });
+        self.in_flight_delegated_task = Some(InFlightDelegatedTaskRun {
+            cancellation_flag,
+            join_handle,
+        });
+        Ok(())
+    }
+
+    /// Merge a completed delegated worker into app-owned lifecycle and proposal state.
+    /// Returns immediately with `None` while the provider/agent loop is still running.
+    #[cfg(feature = "ai")]
+    pub fn poll_delegated_task(
+        &mut self,
+    ) -> Result<Option<AppDelegatedTaskOutcome>, AppCompositionError> {
+        let Some(run) = self.in_flight_delegated_task.as_ref() else {
+            return Ok(None);
+        };
+        if !run.join_handle.is_finished() {
+            return Ok(None);
+        }
+        let run = self
+            .in_flight_delegated_task
+            .take()
+            .expect("checked in-flight delegated task");
+        let joined = run.join_handle.join();
+        self.active_cancellation_flag = None;
+        let completion = match joined {
+            Ok(Ok(completion)) => completion,
+            Ok(Err(error)) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                return Err(error);
+            }
+            Err(_) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                return Err(AppCompositionError::AiRuntime(
+                    "delegated loop worker thread panicked".to_string(),
+                ));
+            }
+        };
+        self.delegate_workflow.last_sandbox_enforcement_label =
+            completion.sandbox_enforcement_label;
+        if let Some(reason) = completion.sandbox_allocation_failure {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+            return Ok(Some(AppDelegatedTaskOutcome::SandboxAllocationFailed {
+                reason,
+            }));
+        }
+        let loop_result = if run.cancellation_flag.is_cancelled() {
+            legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled
+        } else {
+            completion.loop_result.ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "delegated worker finished without a loop outcome".to_string(),
+                )
+            })?
+        };
+        Ok(Some(self.finish_background_delegated_task(
+            loop_result,
+            completion.audit_steps,
+        )?))
+    }
+
+    #[cfg(feature = "ai")]
+    fn finish_background_delegated_task(
+        &mut self,
+        loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
+        use legion_agent::agent_loop::DelegatedTaskLoopResult;
+        match &loop_result {
+            DelegatedTaskLoopResult::Completed { .. } => self
+                .delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::WaitingForApproval),
+            DelegatedTaskLoopResult::Cancelled => self
+                .delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Cancelled),
+            _ => self
+                .delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Blocked),
+        }
+
+        Ok(match loop_result {
+            DelegatedTaskLoopResult::Completed {
+                final_message,
+                proposals,
+            } => {
+                let mut registered = Vec::new();
+                for mut proposal_output in proposals {
+                    let proposal_id = self.proposal_coordinator.next_id();
+                    proposal_output.proposal_id = proposal_id;
+                    let proposal = WorkspaceProposal {
+                        proposal_id,
+                        principal: proposal_output.principal.clone(),
+                        capability: proposal_output.capability.clone(),
+                        correlation_id: proposal_output.correlation_id,
+                        payload: proposal_output.payload.clone(),
+                        preconditions: proposal_output.preconditions.clone(),
+                        preview: proposal_output.preview.clone(),
+                        expires_at: proposal_output.expires_at,
+                        created_at: proposal_output.created_at,
+                    };
+                    if matches!(
+                        self.register_proposal_lifecycle(&proposal)?,
+                        ProposalResponse::Created(_)
+                    ) {
+                        registered.push(proposal_output);
+                    }
+                }
+                AppDelegatedTaskOutcome::Completed {
+                    final_message,
+                    proposals: registered,
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::BudgetExhausted { reason } => {
+                AppDelegatedTaskOutcome::BudgetExhausted {
+                    reason,
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::MaxTokensExhausted => {
+                AppDelegatedTaskOutcome::BudgetExhausted {
+                    reason: "max tokens exhausted on every model turn".to_string(),
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::Cancelled => AppDelegatedTaskOutcome::Cancelled,
+            DelegatedTaskLoopResult::Blocked { reason } => AppDelegatedTaskOutcome::Blocked {
+                reason,
+                audit_steps,
+            },
+        })
+    }
+
+    /// Run one delegated task synchronously for headless callers and tests.
+    /// Desktop actions use [`Self::start_delegated_task_background`] instead.
     #[cfg(feature = "ai")]
     pub fn start_delegated_task(
         &mut self,
@@ -20192,6 +20623,7 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
+        self.validate_delegated_task_scope_root(&scope)?;
 
         let event_context = self.next_event_context();
         let correlation_id = event_context.correlation_id;
@@ -23591,26 +24023,23 @@ impl AppComposition {
                     &file_path,
                     Some(&mut on_delta),
                 );
-                if let Some(ref stream) = stream {
-                    sink.finish(
-                        Some(&ProductChatCompletion {
-                            provider_id: stream.provider_id.clone(),
-                            model: stream.model.clone(),
-                            text: stream.text_preview.clone(),
-                            stream_chunks: stream.chunks.clone(),
-                            streamed: stream.streamed,
-                        }),
-                        "assist.proposal",
-                    );
-                } else {
-                    sink.finish(None, "assist.proposal");
-                }
-                sink.push_background_result(ProductAiBackgroundResult {
-                    assistant_message_id: String::new(),
-                    content_label: String::new(),
-                    stream,
-                    assist_proposal: Some(proposal_source),
+                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
                 });
+                sink.finish_background(
+                    ProductAiBackgroundResult {
+                        assistant_message_id: String::new(),
+                        content_label: String::new(),
+                        stream,
+                        assist_proposal: Some(proposal_source),
+                    },
+                    completion.as_ref(),
+                    "assist.proposal",
+                );
             });
             // Streaming outcome: proposal_id arrives on the next poll cycle(s).
             return Ok(AppAiRunOutcome {
@@ -26101,26 +26530,23 @@ impl AppComposition {
                     &route_labels,
                     Some(&mut on_delta),
                 );
-                if let Some(ref stream) = stream {
-                    sink.finish(
-                        Some(&ProductChatCompletion {
-                            provider_id: stream.provider_id.clone(),
-                            model: stream.model.clone(),
-                            text: stream.text_preview.clone(),
-                            stream_chunks: stream.chunks.clone(),
-                            streamed: stream.streamed,
-                        }),
-                        "delegate.chat",
-                    );
-                } else {
-                    sink.finish(None, "delegate.chat");
-                }
-                sink.push_background_result(ProductAiBackgroundResult {
-                    assistant_message_id: assistant_id,
-                    content_label: label,
-                    stream,
-                    assist_proposal: None,
+                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
                 });
+                sink.finish_background(
+                    ProductAiBackgroundResult {
+                        assistant_message_id: assistant_id,
+                        content_label: label,
+                        stream,
+                        assist_proposal: None,
+                    },
+                    completion.as_ref(),
+                    "delegate.chat",
+                );
             });
             "Streaming response…".to_string()
         } else {
@@ -33677,6 +34103,81 @@ mod pkt_worker_tests {
         // Default product mode is Manual, not Delegate.
         let result = app.cancel_delegated_task();
         assert!(result.is_err(), "must fail outside delegate mode");
+    }
+
+    #[test]
+    fn manual_mode_is_refused_while_product_provider_stream_is_in_flight() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Assist);
+        app.live_product_ai_stream
+            .begin("assist.proposal", "provider:test", "model:test");
+
+        app.set_product_mode(AppProductMode::Manual);
+
+        assert_eq!(app.product_mode(), AppProductMode::Assist);
+        assert!(app.product_ai_stream_in_flight());
+
+        app.live_product_ai_stream.finish(None, "assist.proposal");
+        app.set_product_mode(AppProductMode::Manual);
+        assert_eq!(app.product_mode(), AppProductMode::Manual);
+    }
+
+    #[test]
+    fn manual_dispatch_does_not_report_mode_changed_while_provider_is_in_flight() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Assist);
+        app.live_product_ai_stream
+            .begin("assist.proposal", "provider:test", "model:test");
+
+        let outcome = app.dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
+            mode: DockMode::Manual,
+        });
+
+        assert!(outcome.is_err());
+        assert_eq!(app.product_mode(), AppProductMode::Assist);
+        app.live_product_ai_stream.finish(None, "assist.proposal");
+    }
+
+    #[test]
+    fn manual_mode_waits_until_completed_provider_result_is_merged() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Assist);
+        app.live_product_ai_stream
+            .begin("delegate.chat", "provider:test", "model:test");
+        app.live_product_ai_stream.finish_background(
+            ProductAiBackgroundResult {
+                assistant_message_id: String::new(),
+                content_label: "finished".to_string(),
+                stream: None,
+                assist_proposal: None,
+            },
+            None,
+            "delegate.chat",
+        );
+        assert!(!app.product_ai_stream_in_flight());
+
+        app.set_product_mode(AppProductMode::Manual);
+
+        assert_eq!(app.product_mode(), AppProductMode::Assist);
+        let _ = app.poll_product_ai_stream();
+        app.set_product_mode(AppProductMode::Manual);
+        assert_eq!(app.product_mode(), AppProductMode::Manual);
+    }
+
+    #[test]
+    fn cancellation_safety_action_is_allowed_after_mode_downgrade_edge() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Delegate);
+        let flag = SharedCancellationFlag::new();
+        app.active_cancellation_flag = Some(flag.clone());
+        // Simulate a stale downgraded projection: cancellation must remain a
+        // safety action even though the authority mode is already Manual.
+        app.product_mode = AppProductMode::Manual;
+
+        app.cancel_delegated_task()
+            .expect("cancellation remains available after a downgrade edge");
+
+        assert!(flag.is_cancelled());
     }
 
     // ── D3: pre-cancelled flag → Cancelled activation state ─────────────────

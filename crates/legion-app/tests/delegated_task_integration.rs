@@ -1,6 +1,21 @@
 use std::{fs, path::PathBuf};
 
+#[cfg(feature = "ai")]
+use std::{
+    sync::{Arc, Condvar, Mutex, mpsc},
+    time::{Duration, Instant},
+};
+
 use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+#[cfg(feature = "ai")]
+use legion_ai::{
+    ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest, EmbeddingResponse,
+    ModelProvider, ProviderCapabilities, ProviderError, ProviderId,
+    tool_calls::{
+        ToolCallingProvider, ToolCompletionRequest, ToolCompletionResponse,
+        ToolCompletionStopReason, ToolTurnBlock,
+    },
+};
 #[cfg(feature = "ai")]
 use legion_app::AppDelegatedToolHost;
 use legion_app::{
@@ -133,6 +148,184 @@ fn temp_workspace(label: &str) -> TempWorkspace {
     ));
     fs::create_dir(&root).expect("temp workspace should be created");
     TempWorkspace { root }
+}
+
+#[cfg(feature = "ai")]
+struct BlockingDelegatedProvider {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[cfg(feature = "ai")]
+impl ModelProvider for BlockingDelegatedProvider {
+    fn provider_id(&self) -> ProviderId {
+        "provider:blocking-delegated".to_string()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+#[cfg(feature = "ai")]
+impl ToolCallingProvider for BlockingDelegatedProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+            let _ = entered.send(());
+        }
+        let (released, wake) = &*self.release;
+        let mut released = released.lock().expect("release lock");
+        while !*released {
+            released = wake.wait(released).expect("release wait");
+        }
+        Ok(ToolCompletionResponse {
+            provider: self.provider_id(),
+            model: request.model,
+            blocks: vec![ToolTurnBlock::Text("cancel checkpoint".to_string())],
+            stop_reason: ToolCompletionStopReason::EndTurn,
+        })
+    }
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_submit_stays_responsive_and_manual_waits_for_cancel_ack() {
+    let workspace_root = temp_workspace("background-cancel");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-background-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let provider = BlockingDelegatedProvider {
+        entered: Mutex::new(Some(entered_tx)),
+        release: release.clone(),
+    };
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(workspace_root.to_string_lossy().into_owned()),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![LegionToolKind::Read],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    };
+
+    let submitted_at = Instant::now();
+    app.start_delegated_task_background(
+        "wait until cancelled".to_string(),
+        scope,
+        Box::new(provider),
+    )
+    .expect("background submit");
+    assert!(
+        submitted_at.elapsed() < Duration::from_secs(1),
+        "submission must return without waiting for the provider"
+    );
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must enter provider call");
+
+    app.cancel_delegated_task()
+        .expect("cancel remains available while provider call is blocked");
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Delegate,
+        "Manual must not be projected before delegated cancellation is acknowledged"
+    );
+
+    let (released, wake) = &*release;
+    *released.lock().expect("release lock") = true;
+    wake.notify_all();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let outcome = loop {
+        if let Some(outcome) = app
+            .poll_delegated_task()
+            .expect("poll delegated completion")
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "delegated task did not finish");
+        std::thread::yield_now();
+    };
+    assert!(matches!(outcome, AppDelegatedTaskOutcome::Cancelled));
+
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(app.product_mode(), AppProductMode::Manual);
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_submit_rejects_scope_from_another_workspace() {
+    let workspace_root = temp_workspace("canonical-root");
+    let other_root = temp_workspace("mismatched-root");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-root-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(other_root.to_string_lossy().into_owned()),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![LegionToolKind::Read],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("mismatched-root");
+
+    let result = app.start_delegated_task_background(
+        "must remain in canonical workspace".to_string(),
+        scope,
+        Box::new(provider),
+    );
+
+    assert!(
+        result.is_err(),
+        "mismatched workspace root must fail closed"
+    );
+    assert_eq!(
+        app.shell_projection_snapshot("Legion")
+            .expect("projection")
+            .delegated_task_projection
+            .runtime_activation,
+        DelegatedTaskRuntimeActivationState::NotEncoded,
+    );
 }
 
 #[test]

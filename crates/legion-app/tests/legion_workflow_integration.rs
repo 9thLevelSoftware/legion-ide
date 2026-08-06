@@ -273,6 +273,45 @@ fn local_session(
     (session, plan_id)
 }
 
+#[test]
+fn manual_mode_refuses_active_workflow_and_signals_cancellation() {
+    let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Automate);
+    let (session, _) = local_session("manual-transition", true);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed executing workflow");
+    let cancellation = SharedCancellationFlag::new();
+    app.inject_cancellation_flag_for_test(cancellation.clone());
+
+    app.set_product_mode(AppProductMode::Manual);
+
+    assert_eq!(app.product_mode(), AppProductMode::Automate);
+    assert!(
+        cancellation.is_cancelled(),
+        "Manual request must signal the active workflow cancellation probe"
+    );
+}
+
+#[test]
+fn manual_mode_acknowledges_projected_workflow_when_no_worker_is_running() {
+    let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Automate);
+    let (session, _) = local_session("manual-projected-only", true);
+    let session_id = session.session_id.clone();
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed projected workflow");
+
+    app.set_product_mode(AppProductMode::Manual);
+
+    assert_eq!(app.product_mode(), AppProductMode::Manual);
+    assert_eq!(
+        app.legion_workflow_session(&session_id)
+            .expect("workflow remains inspectable")
+            .lifecycle_state,
+        LegionWorkflowState::Cancelled,
+    );
+}
+
 /// Drop-guarded temporary workspace rooted in the system temp dir. Removes the directory
 /// on drop with a prefix/location check so a panic mid-test never leaks the workspace.
 struct TempWorkspace {
