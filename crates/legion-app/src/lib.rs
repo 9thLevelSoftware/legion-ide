@@ -515,7 +515,7 @@ impl AppProductMode {
             Self::Manual => legion_protocol::ProductMode::Manual,
             Self::Assist => legion_protocol::ProductMode::Assist,
             Self::Delegate => legion_protocol::ProductMode::Delegates,
-            Self::Automate => legion_protocol::ProductMode::Automate,
+            Self::Automate => legion_protocol::ProductMode::LegionWorkflows,
         }
     }
 
@@ -2634,7 +2634,7 @@ pub struct AppAutomateMcpToolInvocationReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AppAutomateMcpToolRuntimeError {
     /// Runtime transport, authorization, or protocol handling failed.
-    #[error("Automate MCP tool runtime failed: {reason_label}")]
+    #[error("Legion Workflows MCP tool runtime failed: {reason_label}")]
     Runtime {
         /// Display-safe failure reason.
         reason_label: String,
@@ -16997,7 +16997,7 @@ impl AppComposition {
             Ok(())
         } else {
             Err(AppCompositionError::AiRuntime(
-                "AI dispatch requires Assist, Delegate, or Automate mode".to_string(),
+                "AI dispatch requires Assist, Delegate, or Legion Workflows mode".to_string(),
             ))
         }
     }
@@ -17007,7 +17007,7 @@ impl AppComposition {
             Ok(())
         } else {
             Err(AppCompositionError::AiRuntime(
-                "Delegate dispatch requires Delegate or Automate mode".to_string(),
+                "Delegate dispatch requires Delegate or Legion Workflows mode".to_string(),
             ))
         }
     }
@@ -17159,7 +17159,7 @@ impl AppComposition {
             Ok(())
         } else {
             Err(AppCompositionError::AiRuntime(
-                "Automate workflow dispatch requires Automate mode".to_string(),
+                "Legion workflow dispatch requires Legion Workflows mode".to_string(),
             ))
         }
     }
@@ -21851,7 +21851,8 @@ impl AppComposition {
                     session_id: session_id.clone(),
                     worker_id: None,
                     kind: LegionWorkflowDecisionKind::RiskMonitorHalted,
-                    summary_label: "MCP tool call halted by Automate risk monitor".to_string(),
+                    summary_label: "MCP tool call halted by Legion Workflows risk monitor"
+                        .to_string(),
                     risk_label: ProposalRiskLabel::High,
                     mcp_server_id: Some(server_id.clone()),
                     mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
@@ -22040,7 +22041,7 @@ impl AppComposition {
                 session_id: session_id.clone(),
                 worker_id: None,
                 kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
-                summary_label: "Automate kill switch triggered".to_string(),
+                summary_label: "Legion Workflows kill switch triggered".to_string(),
                 risk_label: ProposalRiskLabel::High,
                 mcp_server_id: None,
                 mcp_primitive_kind: None,

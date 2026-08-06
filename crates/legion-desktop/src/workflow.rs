@@ -2209,7 +2209,7 @@ impl DesktopRuntime {
                     None,
                     status,
                     format!(
-                        "Legion workflow merge readiness requested: {readiness_state:?}; Autonomous merge unsupported until approval"
+                        "Legion workflow merge readiness requested: {readiness_state:?}; Legion Workflows merge unsupported until approval"
                     ),
                 ))
             }

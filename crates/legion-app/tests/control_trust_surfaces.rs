@@ -244,7 +244,7 @@ fn manual_mode_rejects_assisted_ai_dispatch() {
     assert!(matches!(
         error,
         AppCompositionError::AiRuntime(message)
-            if message.contains("requires Assist, Delegate, or Automate")
+            if message.contains("requires Assist, Delegate, or Legion Workflows")
     ));
 
     let shell = app

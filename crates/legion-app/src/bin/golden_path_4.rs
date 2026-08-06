@@ -1739,7 +1739,7 @@ fn main() {
         || run_s1(&args.fixture_dir),
         |ctx| {
             format!(
-                "workspace opened in Automate mode at {}",
+                "workspace opened in Legion Workflows mode at {}",
                 ctx.temp_dir.display()
             )
         },

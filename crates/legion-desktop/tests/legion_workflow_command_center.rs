@@ -169,7 +169,7 @@ fn legion_projection(state: LegionWorkflowMergeReadinessState) -> LegionWorkflow
                 "verification:unit".to_string(),
                 "signoff:reviewer".to_string(),
                 "conflict:shared".to_string(),
-                "Autonomous merge unsupported until approval".to_string(),
+                "Legion Workflows merge unsupported until approval".to_string(),
             ],
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -548,7 +548,7 @@ fn legion_workflow_kill_switch_acknowledgement_surfaces_in_decision_feed() {
             session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
             worker_id: None,
             kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
-            summary_label: "Automate kill switch triggered".to_string(),
+            summary_label: "Legion Workflows kill switch triggered".to_string(),
             rationale_labels: vec!["operator_ack".to_string()],
             risk_label: ProposalRiskLabel::High,
             mcp_server_id: None,
@@ -566,7 +566,8 @@ fn legion_workflow_kill_switch_acknowledgement_surfaces_in_decision_feed() {
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
 
     assert!(model.legion_workflow_rows.iter().any(|row| {
-        row.contains("KillSwitchTriggered") && row.contains("Automate kill switch triggered")
+        row.contains("KillSwitchTriggered")
+            && row.contains("Legion Workflows kill switch triggered")
     }));
 }
 
@@ -714,7 +715,7 @@ fn legion_workflow_health_keeps_autonomous_merge_unsupported() {
     assert!(
         health
             .unsupported_surfaces
-            .contains(&"Autonomous merge: unsupported until approval".to_string())
+            .contains(&"Legion Workflows merge: unsupported until approval".to_string())
     );
 }
 

@@ -1070,7 +1070,7 @@ fn manual_mode_rejects_local_legion_workflow_execution() {
 
     assert!(
         err.to_string()
-            .contains("Automate workflow dispatch requires")
+            .contains("Legion workflow dispatch requires Legion Workflows")
     );
 }
 
