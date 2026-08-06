@@ -550,7 +550,7 @@ pub struct EventEnvelopeBuilder {
     correlation_id: CorrelationId,
     principal_id: Option<PrincipalId>,
     sequence: EventSequence,
-    occurred_at: TimestampMillis,
+    occurred_at: Option<TimestampMillis>,
     payload: Map<String, Value>,
 }
 
@@ -573,7 +573,7 @@ impl EventEnvelopeBuilder {
             correlation_id: CorrelationId(1),
             principal_id: None,
             sequence: EventSequence(1),
-            occurred_at: TimestampMillis::now(),
+            occurred_at: None,
             payload,
         }
     }
@@ -643,7 +643,7 @@ impl EventEnvelopeBuilder {
 
     /// Bind the envelope timestamp to the operation or transition it records.
     pub fn occurred_at(mut self, occurred_at: TimestampMillis) -> Self {
-        self.occurred_at = occurred_at;
+        self.occurred_at = Some(occurred_at);
         self
     }
 
@@ -668,7 +668,7 @@ impl EventEnvelopeBuilder {
             workspace_id: self.workspace_id,
             sequence: self.sequence,
             principal_id: self.principal_id,
-            occurred_at: self.occurred_at,
+            occurred_at: self.occurred_at.unwrap_or_else(TimestampMillis::now),
             payload: Value::Object(self.payload),
         }
     }

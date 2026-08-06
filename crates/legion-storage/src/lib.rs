@@ -34,17 +34,18 @@ use legion_observability::{
 };
 use legion_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
-    CollaborationAuditRecord, CollaborationSessionId, CorrelationId, DebugAdapterAuditRecord,
-    DebugBreakpointRecord, DebugSessionId, DelegatedTaskAuditLinkageRecord,
-    EditablePlanRevisionArtifact, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
-    EventSinkPort, EventSinkRequest, FileId, FileMetadata, HostedTelemetrySpoolRecord,
-    Phase4RuntimeAuditRecord, PluginDenialReason, PluginStorageOperation, PluginStorageRecord,
-    PrincipalId, ProposalAuditRecord, ProposalId, ProposalLifecycleState, ProtocolError,
-    ProtocolResult, RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
-    RemoteWorkspaceSessionId, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
-    SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
-    SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker,
-    StorageChecksum, StorageMigrationDryRunReport, StorageMigrationStep, StorageRecoveryOutcome,
+    CheckpointRollbackLimitation, CheckpointRollbackProjection, CollaborationAuditRecord,
+    CollaborationSessionId, CorrelationId, DebugAdapterAuditRecord, DebugBreakpointRecord,
+    DebugSessionId, DelegatedTaskAuditLinkageRecord, EditablePlanRevisionArtifact, EventEnvelope,
+    EventId, EventMetadataRecord, EventSequence, EventSinkPort, EventSinkRequest, FileFingerprint,
+    FileId, FileMetadata, HostedTelemetrySpoolRecord, Phase4RuntimeAuditRecord, PluginDenialReason,
+    PluginStorageOperation, PluginStorageRecord, PrincipalId, ProposalAuditRecord, ProposalId,
+    ProposalLifecycleState, ProtocolError, ProtocolResult, RawSourceRetentionAccessAudit,
+    RemoteAuditRecord, RemoteTransportAuditSummary, RemoteWorkspaceSessionId,
+    SemanticMetadataBatch, SemanticMetadataFreshnessKey, SemanticMetadataQuery,
+    SemanticMetadataReadResult, SemanticMetadataRecord, SemanticMetadataTombstone,
+    SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker, StorageChecksum,
+    StorageMigrationDryRunReport, StorageMigrationStep, StorageRecoveryOutcome,
     StorageRepairRequest, StorageRepositoryPort, StorageRepositoryRequest,
     StorageRepositoryResponse, StorageSchemaManifest, TerminalAuditRecord, TerminalSessionId,
     TrustRecord, WorkspaceConfigSnapshot, WorkspaceId, WorkspaceSessionRecord, WorkspaceTrustState,
@@ -1779,8 +1780,179 @@ impl InMemoryStorageRepositoryPort {
                 .as_ref()
                 .map(|path| CanonicalPath(Self::metadata_only_storage_summary(path.0.as_str())));
         }
+        if let Some(projection) = &mut audit.checkpoint_rollback_projection {
+            Self::sanitize_checkpoint_rollback_projection(projection)?;
+        }
         audit.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
         Ok(audit)
+    }
+
+    fn sanitize_checkpoint_rollback_projection(
+        projection: &mut CheckpointRollbackProjection,
+    ) -> ProtocolResult<()> {
+        let declares_metadata_only = |hints: &[legion_protocol::RedactionHint]| {
+            hints.contains(&legion_protocol::RedactionHint::MetadataOnly)
+        };
+        if !declares_metadata_only(&projection.redaction_hints)
+            || !declares_metadata_only(&projection.checkpoint.redaction_hints)
+            || !declares_metadata_only(&projection.rollback.redaction_hints)
+            || projection
+                .targets
+                .iter()
+                .any(|target| !declares_metadata_only(&target.redaction_hints))
+            || projection
+                .checkpoint
+                .limitations
+                .iter()
+                .chain(&projection.rollback.limitations)
+                .any(|limitation| !declares_metadata_only(&limitation.redaction_hints))
+        {
+            return Err(ProtocolError {
+                code: "proposal_audit_invalid".to_string(),
+                message: "checkpoint/rollback projection requires MetadataOnly at every level"
+                    .to_string(),
+            });
+        }
+        projection.checkpoint.labels = projection
+            .checkpoint
+            .labels
+            .iter()
+            .map(|label| Self::metadata_only_storage_summary(label))
+            .collect();
+        projection.rollback.labels = projection
+            .rollback
+            .labels
+            .iter()
+            .map(|label| Self::metadata_only_storage_summary(label))
+            .collect();
+        for target in &mut projection.targets {
+            target.labels = target
+                .labels
+                .iter()
+                .map(|label| Self::metadata_only_storage_summary(label))
+                .collect();
+            target.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
+        }
+        for limitation in projection
+            .checkpoint
+            .limitations
+            .iter_mut()
+            .chain(projection.rollback.limitations.iter_mut())
+        {
+            limitation.label = Self::metadata_only_storage_summary(&limitation.label);
+            limitation.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
+        }
+        projection.checkpoint.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
+        projection.rollback.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
+        projection.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
+        Self::validate_checkpoint_rollback_projection_structure(projection)
+    }
+
+    fn validate_checkpoint_rollback_projection_structure(
+        projection: &CheckpointRollbackProjection,
+    ) -> ProtocolResult<()> {
+        let metadata_only = vec![legion_protocol::RedactionHint::MetadataOnly];
+        let preconditions = &projection.checkpoint.expected_preconditions;
+        let mut target_ids = HashSet::new();
+        let invalid_target = projection.targets.iter().any(|target| {
+            !Self::is_safe_audit_identifier(&target.target_id)
+                || !target_ids.insert(target.target_id.as_str())
+                || target.schema_version == 0
+                || target.redaction_hints != metadata_only
+                || target
+                    .labels
+                    .iter()
+                    .any(|label| !Self::is_storage_redaction_marker(label))
+                || target
+                    .terminal_session_id
+                    .is_some_and(|session_id| session_id.0 == 0)
+                || target.plugin_id.is_some_and(|plugin_id| plugin_id.0 == 0)
+                || target.ranges.iter().any(|range| range.start > range.end)
+                || target
+                    .hashes
+                    .iter()
+                    .any(|fingerprint| !Self::is_safe_fingerprint(fingerprint))
+        });
+        let invalid_limitation = projection
+            .checkpoint
+            .limitations
+            .iter()
+            .chain(&projection.rollback.limitations)
+            .any(|limitation| {
+                !Self::is_safe_checkpoint_limitation(limitation)
+                    || limitation
+                        .target_id
+                        .as_deref()
+                        .is_some_and(|target_id| !target_ids.contains(target_id))
+            });
+        let target_count = projection.targets.len() as u64;
+        let rollback_classified_count = u64::from(projection.rollback.reversible_target_count)
+            .saturating_add(u64::from(projection.rollback.irreversible_target_count));
+        if projection.schema_version == 0
+            || projection.generated_at.0 == 0
+            || !Self::is_safe_audit_identifier(&projection.projection_id)
+            || projection.redaction_hints != metadata_only
+            || projection.checkpoint.schema_version == 0
+            || !Self::is_safe_audit_identifier(&projection.checkpoint.checkpoint_id)
+            || projection.checkpoint.redaction_hints != metadata_only
+            || projection.checkpoint.target_count as u64 != target_count
+            || projection
+                .checkpoint
+                .labels
+                .iter()
+                .any(|label| !Self::is_storage_redaction_marker(label))
+            || projection
+                .checkpoint
+                .hashes
+                .iter()
+                .any(|fingerprint| !Self::is_safe_fingerprint(fingerprint))
+            || preconditions.schema_version == 0
+            || preconditions
+                .risk_reasons
+                .iter()
+                .any(|reason| !Self::is_safe_audit_identifier(reason))
+            || preconditions
+                .expected_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| !Self::is_safe_fingerprint(fingerprint))
+            || projection.rollback.schema_version == 0
+            || projection.rollback.redaction_hints != metadata_only
+            || rollback_classified_count != target_count
+            || projection
+                .rollback
+                .labels
+                .iter()
+                .any(|label| !Self::is_storage_redaction_marker(label))
+            || invalid_target
+            || invalid_limitation
+        {
+            return Err(ProtocolError {
+                code: "proposal_audit_invalid".to_string(),
+                message: "checkpoint/rollback projection must be complete structural metadata only"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn is_safe_checkpoint_limitation(limitation: &CheckpointRollbackLimitation) -> bool {
+        limitation.schema_version != 0
+            && Self::is_safe_audit_identifier(&limitation.reason_code)
+            && Self::is_storage_redaction_marker(&limitation.label)
+            && limitation
+                .target_id
+                .as_deref()
+                .is_none_or(Self::is_safe_audit_identifier)
+            && limitation.redaction_hints == vec![legion_protocol::RedactionHint::MetadataOnly]
+    }
+
+    fn is_safe_fingerprint(fingerprint: &FileFingerprint) -> bool {
+        Self::is_safe_audit_identifier(&fingerprint.algorithm)
+            && !fingerprint.value.is_empty()
+            && fingerprint.value.len() <= 256
+            && fingerprint.value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'=')
+            })
     }
 
     fn validate_persisted_proposal_audit(audit: &ProposalAuditRecord) -> ProtocolResult<()> {
@@ -1812,6 +1984,21 @@ impl InMemoryStorageRepositoryPort {
                 message: "proposal audit must contain only canonical metadata-only fields"
                     .to_string(),
             });
+        }
+        if let Some(projection) = &audit.checkpoint_rollback_projection {
+            Self::validate_checkpoint_rollback_projection_structure(projection)?;
+            if projection.proposal_id != audit.proposal_id
+                || projection.payload_kind != audit.payload_summary.kind
+                || projection.lifecycle_state != audit.lifecycle_state
+                || projection.correlation_id != audit.correlation_id
+                || projection.causality_id != Some(audit.causality_id)
+            {
+                return Err(ProtocolError {
+                    code: "proposal_audit_invalid".to_string(),
+                    message: "checkpoint/rollback projection identity must match its audit"
+                        .to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -4145,17 +4332,18 @@ mod tests {
         AgentReplayManifest, AgentRunId, AgentStateTransitionRecord,
         AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition,
         AssistedAiAuditRedactionState, AssistedAiProviderInvocationState, ByteRange, CapabilityId,
-        DebugBreakpointId, DebugBreakpointRecord, EventId, FileContentVersion, FileFingerprint,
-        LanguageId, LineIndexRange, PermissionBudgetEvaluationDisposition,
-        Phase4RuntimeAuditRecord, ProposalLifecycleState, ProposalPayloadKind,
-        ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel, ProtocolDiagnostic,
-        ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, RetentionLabel,
-        SemanticFileFingerprintIdentity, SemanticFreshnessState, SemanticGrammarVersion,
-        SemanticMetadataChunkReference, SemanticMetadataDescriptorIdentity,
-        SemanticMetadataDiagnosticSummary, SemanticMetadataFreshnessKey,
-        SemanticMetadataSourceKind, SemanticMetadataSymbolRecord, SemanticModelVersion,
-        SemanticRecordId, SemanticRecordProvenance, SemanticRecordSource, SemanticSymbolId,
-        SnapshotId, TextCoordinate, WorkspaceGeneration,
+        DebugBreakpointId, DebugBreakpointRecord, EditBatch, EventId, FileContentVersion,
+        FileFingerprint, LanguageId, LineIndexRange, PermissionBudgetEvaluationDisposition,
+        Phase4RuntimeAuditRecord, PreviewSummary, ProposalLifecycleState, ProposalPayload,
+        ProposalPayloadKind, ProposalPayloadSummary, ProposalPrivacyLabel, ProposalRiskLabel,
+        ProposalVersionPreconditions, ProtocolDiagnostic, ProtocolDiagnosticSeverity,
+        ProtocolTextRange, RedactionHint, RetentionLabel, SemanticFileFingerprintIdentity,
+        SemanticFreshnessState, SemanticGrammarVersion, SemanticMetadataChunkReference,
+        SemanticMetadataDescriptorIdentity, SemanticMetadataDiagnosticSummary,
+        SemanticMetadataFreshnessKey, SemanticMetadataSourceKind, SemanticMetadataSymbolRecord,
+        SemanticModelVersion, SemanticRecordId, SemanticRecordProvenance, SemanticRecordSource,
+        SemanticSymbolId, SnapshotId, TextCoordinate, TextEditProposal, WorkspaceGeneration,
+        WorkspaceProposal, checkpoint_rollback_projection_from_proposal,
     };
     use serde_json::json;
 
@@ -5877,6 +6065,195 @@ mod tests {
             other => panic!("unexpected proposal audit response: {other:?}"),
         }
         let _ = fs::remove_dir_all(base_dir);
+    }
+
+    fn audit_with_official_checkpoint_projection() -> ProposalAuditRecord {
+        let mut audit = audit_record();
+        let proposal = WorkspaceProposal {
+            proposal_id: audit.proposal_id,
+            principal: audit.principal.clone(),
+            capability: audit.capability.clone(),
+            correlation_id: audit.correlation_id,
+            payload: ProposalPayload::TextEdit(TextEditProposal {
+                file_id: FileId(3),
+                edits: EditBatch { edits: Vec::new() },
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: Some(FileContentVersion(4)),
+                workspace_generation: Some(WorkspaceGeneration(5)),
+                expected_fingerprint: Some(FileFingerprint {
+                    algorithm: "sha256".to_string(),
+                    value: "abc123".to_string(),
+                }),
+                expected_file_length: Some(4),
+                expected_modified_at: Some(legion_protocol::TimestampMillis(1)),
+            },
+            preview: PreviewSummary {
+                summary: "not persisted by audit".to_string(),
+                details: Vec::new(),
+            },
+            expires_at: None,
+            created_at: legion_protocol::TimestampMillis(1),
+        };
+        audit.checkpoint_rollback_projection = Some(checkpoint_rollback_projection_from_proposal(
+            "checkpoint-rollback:audit-1",
+            &proposal,
+            audit.lifecycle_state,
+            None,
+            legion_protocol::CheckpointRollbackAuditStatus::Available,
+            Some(audit.causality_id),
+            audit.timestamp,
+            1,
+        ));
+        audit
+    }
+
+    #[test]
+    fn generic_proposal_audit_recursively_sanitizes_checkpoint_projection_on_restart() {
+        let base_dir = temp_storage_path("proposal-audit-checkpoint-sanitize")
+            .with_extension("proposal-audit-dir");
+        let mut audit = audit_with_official_checkpoint_projection();
+        let projection = audit
+            .checkpoint_rollback_projection
+            .as_mut()
+            .expect("checkpoint projection");
+        let projection_id = projection.projection_id.clone();
+        let checkpoint_id = projection.checkpoint.checkpoint_id.clone();
+        let target_id = projection.targets[0].target_id.clone();
+        let expected_hashes = projection.targets[0].hashes.clone();
+        projection.checkpoint.labels = vec!["raw checkpoint label /private".to_string()];
+        projection.rollback.labels = vec!["raw rollback label /private".to_string()];
+        projection.targets[0].labels = vec!["raw target label /private".to_string()];
+        projection.checkpoint.limitations[0].label =
+            "raw checkpoint limitation /private".to_string();
+        projection.rollback.limitations[0].label = "raw rollback limitation /private".to_string();
+        let raw_values = [
+            "raw checkpoint label /private",
+            "raw rollback label /private",
+            "raw target label /private",
+            "raw checkpoint limitation /private",
+            "raw rollback limitation /private",
+        ];
+
+        {
+            let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+            port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(
+                audit.clone(),
+            ))
+            .expect("save recursively sanitized audit");
+            let stored = match port
+                .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                    audit.proposal_id,
+                ))
+                .expect("read sanitized checkpoint audit")
+            {
+                StorageRepositoryResponse::ProposalAuditRecord(Some(record)) => record,
+                other => panic!("unexpected proposal audit response: {other:?}"),
+            };
+            let stored_projection = stored
+                .checkpoint_rollback_projection
+                .expect("stored checkpoint projection");
+            assert_eq!(stored_projection.projection_id, projection_id);
+            assert_eq!(stored_projection.checkpoint.checkpoint_id, checkpoint_id);
+            assert_eq!(stored_projection.targets[0].target_id, target_id);
+            assert_eq!(stored_projection.targets[0].hashes, expected_hashes);
+            assert_eq!(
+                stored_projection.checkpoint.target_count as usize,
+                stored_projection.targets.len()
+            );
+            assert!(
+                stored_projection
+                    .checkpoint
+                    .labels
+                    .iter()
+                    .chain(&stored_projection.rollback.labels)
+                    .chain(&stored_projection.targets[0].labels)
+                    .chain(
+                        stored_projection
+                            .checkpoint
+                            .limitations
+                            .iter()
+                            .map(|limitation| &limitation.label)
+                    )
+                    .chain(
+                        stored_projection
+                            .rollback
+                            .limitations
+                            .iter()
+                            .map(|limitation| &limitation.label)
+                    )
+                    .all(|label| InMemoryStorageRepositoryPort::is_storage_redaction_marker(label))
+            );
+        }
+
+        let audit_path = base_dir
+            .join("proposal-audit")
+            .join(format!("{}.json", audit.proposal_id.0));
+        let disk = fs::read_to_string(&audit_path).expect("read sanitized projection audit");
+        for raw in raw_values {
+            assert!(!disk.contains(raw), "raw nested value leaked: {raw}");
+        }
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert!(reopened.proposal_observation_startup_error().is_none());
+        let reopened_record = match reopened
+            .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                audit.proposal_id,
+            ))
+            .expect("read checkpoint audit after restart")
+        {
+            StorageRepositoryResponse::ProposalAuditRecord(Some(record)) => record,
+            other => panic!("unexpected proposal audit response: {other:?}"),
+        };
+        let reopened_projection = reopened_record
+            .checkpoint_rollback_projection
+            .expect("reopened checkpoint projection");
+        assert_eq!(reopened_projection.projection_id, projection_id);
+        assert_eq!(reopened_projection.checkpoint.checkpoint_id, checkpoint_id);
+        assert_eq!(reopened_projection.targets[0].target_id, target_id);
+        assert_eq!(reopened_projection.targets[0].hashes, expected_hashes);
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn generic_proposal_audit_rejects_invalid_nested_checkpoint_structure() {
+        for case in [
+            "projection_id",
+            "fingerprint",
+            "schema",
+            "redaction",
+            "target",
+        ] {
+            let port = InMemoryStorageRepositoryPort::new();
+            let mut audit = audit_with_official_checkpoint_projection();
+            let projection = audit
+                .checkpoint_rollback_projection
+                .as_mut()
+                .expect("checkpoint projection");
+            match case {
+                "projection_id" => projection.projection_id = "../private/path".to_string(),
+                "fingerprint" => {
+                    projection.targets[0].hashes[0].value = "C:/private/source.rs".to_string()
+                }
+                "schema" => projection.checkpoint.schema_version = 0,
+                "redaction" => projection.targets[0].redaction_hints = vec![RedactionHint::Full],
+                "target" => {
+                    projection.rollback.limitations[0].target_id =
+                        Some("missing-target".to_string())
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
+                    .expect_err("invalid nested checkpoint projection")
+                    .code,
+                "proposal_audit_invalid",
+                "case={case}"
+            );
+        }
     }
 
     #[test]
