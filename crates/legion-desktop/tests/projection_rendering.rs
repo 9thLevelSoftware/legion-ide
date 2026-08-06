@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use legion_desktop::view::ShellGeometry;
 use legion_desktop::view::{
     DesktopCodeHighlightSpan, DesktopCodeLineViewModel, DesktopProjectionViewModel,
     DesktopProjectionViewState, drag_anchor_for_line_pointer, drag_selection_range,
@@ -932,6 +933,25 @@ fn projection_rendering_uses_the_canonical_four_mode_switch() {
             .iter()
             .any(|row| row == "product modes: Manual | Assist | Delegate | Legion Workflows")
     );
+}
+
+#[test]
+fn projection_rendering_uses_stable_responsive_shell_geometry() {
+    let desktop = ShellGeometry::for_available_size(1440.0, 900.0);
+    assert_eq!(desktop.top_bar_height, 42.0);
+    assert_eq!(desktop.activity_rail_width, 46.0);
+    assert_eq!(desktop.explorer_width, 248.0);
+    assert_eq!(desktop.left_width, 294.0);
+    assert_eq!(desktop.right_width, 325.0);
+    assert_eq!(desktop.bottom_height, 192.0);
+    assert_eq!(desktop.status_bar_height, 24.0);
+    assert!(!desktop.compact);
+
+    let compact = ShellGeometry::for_available_size(960.0, 720.0);
+    assert!(compact.compact);
+    assert_eq!(compact.left_width, 250.0);
+    assert_eq!(compact.right_width, 325.0);
+    assert!(compact.editor_width(960.0) >= 360.0);
 }
 
 #[test]

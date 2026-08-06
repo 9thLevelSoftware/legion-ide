@@ -57,41 +57,41 @@ impl Theme {
         Self {
             variant: ThemeVariant::Dark,
             bg: BackgroundTokens {
-                surface: Color32::from_rgb(13, 13, 18),
-                panel: Color32::from_rgb(17, 17, 24),
-                toolbar: Color32::from_rgb(17, 17, 24),
-                card: Color32::from_rgb(21, 21, 31),
-                code: Color32::from_rgb(11, 11, 16),
-                input: Color32::from_rgb(16, 16, 24),
-                hover: Color32::from_rgb(32, 32, 43),
-                active: Color32::from_rgb(37, 37, 53),
-                overlay: Color32::from_rgb(26, 26, 36),
+                surface: Color32::from_rgb(0x16, 0x20, 0x2b),
+                panel: Color32::from_rgb(0x1d, 0x2a, 0x38),
+                toolbar: Color32::from_rgb(0x16, 0x20, 0x2b),
+                card: Color32::from_rgb(0x22, 0x31, 0x41),
+                code: Color32::from_rgb(0x12, 0x1a, 0x23),
+                input: Color32::from_rgb(0x1a, 0x26, 0x33),
+                hover: Color32::from_rgb(0x25, 0x35, 0x46),
+                active: Color32::from_rgb(0x2a, 0x3d, 0x50),
+                overlay: Color32::from_rgb(0x20, 0x2e, 0x3d),
                 scrim: Color32::from_rgba_unmultiplied_const(0, 0, 0, 138),
-                canvas: Color32::from_rgb(8, 8, 12),
+                canvas: Color32::from_rgb(0x12, 0x1a, 0x23),
                 ghost: Color32::from_rgba_unmultiplied_const(255, 255, 255, 8),
             },
             border: BorderTokens {
-                subtle: Color32::from_rgba_unmultiplied_const(255, 255, 255, 13),
-                default: Color32::from_rgba_unmultiplied_const(255, 255, 255, 20),
-                strong: Color32::from_rgba_unmultiplied_const(255, 255, 255, 36),
-                focus: Color32::from_rgba_unmultiplied_const(107, 92, 255, 166),
+                subtle: Color32::from_rgb(0x24, 0x32, 0x41),
+                default: Color32::from_rgb(0x2c, 0x3a, 0x4a),
+                strong: Color32::from_rgb(0x3b, 0x4d, 0x60),
+                focus: Color32::from_rgb(0x55, 0xa7, 0xd8),
             },
             text: TextTokens {
-                primary: Color32::from_rgb(244, 244, 246),
-                secondary: Color32::from_rgb(182, 183, 195),
-                muted: Color32::from_rgb(126, 129, 144),
-                disabled: Color32::from_rgb(85, 88, 104),
-                inverted: Color32::from_rgb(9, 9, 13),
+                primary: Color32::from_rgb(0xf4, 0xf1, 0xeb),
+                secondary: Color32::from_rgb(0xc4, 0xcc, 0xd6),
+                muted: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                disabled: Color32::from_rgb(0x5d, 0x6a, 0x79),
+                inverted: Color32::from_rgb(0x12, 0x1a, 0x23),
             },
             accent: AccentTokens {
-                cyan: Color32::from_rgb(57, 215, 255),
-                blue: Color32::from_rgb(75, 140, 255),
-                violet: Color32::from_rgb(139, 92, 255),
-                purple: Color32::from_rgb(177, 108, 255),
-                amber: Color32::from_rgb(255, 204, 102),
-                orange: Color32::from_rgb(255, 184, 107),
-                green: Color32::from_rgb(74, 222, 128),
-                red: Color32::from_rgb(255, 92, 122),
+                cyan: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                blue: Color32::from_rgb(0x2e, 0x7f, 0xb8),
+                violet: Color32::from_rgb(0x9b, 0x86, 0xdc),
+                purple: Color32::from_rgb(0xb2, 0x7d, 0xc4),
+                amber: Color32::from_rgb(0xcf, 0x81, 0x36),
+                orange: Color32::from_rgb(0xdc, 0x9a, 0x50),
+                green: Color32::from_rgb(0x4f, 0xae, 0x6d),
+                red: Color32::from_rgb(0xd2, 0x3b, 0x2e),
             },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
@@ -120,7 +120,7 @@ impl Theme {
                 subtle: Color32::from_rgba_unmultiplied_const(0, 0, 0, 13),
                 default: Color32::from_rgba_unmultiplied_const(0, 0, 0, 26),
                 strong: Color32::from_rgba_unmultiplied_const(0, 0, 0, 46),
-                focus: Color32::from_rgba_unmultiplied_const(107, 92, 255, 166),
+                focus: Color32::from_rgb(0x1e, 0x70, 0xaa),
             },
             text: TextTokens {
                 primary: Color32::from_rgb(3, 2, 19),
@@ -130,14 +130,14 @@ impl Theme {
                 inverted: Color32::from_rgb(255, 255, 255),
             },
             accent: AccentTokens {
-                cyan: Color32::from_rgb(0, 122, 153),
-                blue: Color32::from_rgb(38, 100, 214),
+                cyan: Color32::from_rgb(22, 113, 158),
+                blue: Color32::from_rgb(31, 105, 158),
                 violet: Color32::from_rgb(111, 76, 219),
                 purple: Color32::from_rgb(145, 83, 220),
-                amber: Color32::from_rgb(156, 104, 0),
+                amber: Color32::from_rgb(158, 88, 22),
                 orange: Color32::from_rgb(180, 91, 18),
-                green: Color32::from_rgb(31, 128, 73),
-                red: Color32::from_rgb(212, 24, 61),
+                green: Color32::from_rgb(35, 125, 72),
+                red: Color32::from_rgb(190, 48, 38),
             },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
@@ -245,7 +245,7 @@ pub(crate) struct TypographyScale {
 impl TypographyScale {
     const fn standard() -> Self {
         Self {
-            eyebrow: 10,
+            eyebrow: 11,
             label: 11,
             body: 12,
             heading: 13,
@@ -580,5 +580,21 @@ mod tests {
         assert_ne!(dark.accent.red, light.accent.red);
         assert_eq!(dark.spacing.md, light.spacing.md);
         assert_eq!(dark.radius.md, light.radius.md);
+    }
+
+    #[test]
+    fn dark_tokens_match_the_accepted_blue_slate_palette() {
+        let dark = Theme::dark();
+
+        assert_eq!(dark.bg.surface, Color32::from_rgb(0x16, 0x20, 0x2b));
+        assert_eq!(dark.bg.code, Color32::from_rgb(0x12, 0x1a, 0x23));
+        assert_eq!(dark.bg.panel, Color32::from_rgb(0x1d, 0x2a, 0x38));
+        assert_eq!(dark.border.default, Color32::from_rgb(0x2c, 0x3a, 0x4a));
+        assert_eq!(dark.text.primary, Color32::from_rgb(0xf4, 0xf1, 0xeb));
+        assert_eq!(dark.text.muted, Color32::from_rgb(0x7e, 0x8a, 0x9b));
+        assert_eq!(dark.accent.amber, Color32::from_rgb(0xcf, 0x81, 0x36));
+        assert_eq!(dark.accent.blue, Color32::from_rgb(0x2e, 0x7f, 0xb8));
+        assert_eq!(dark.accent.green, Color32::from_rgb(0x4f, 0xae, 0x6d));
+        assert_eq!(dark.accent.red, Color32::from_rgb(0xd2, 0x3b, 0x2e));
     }
 }

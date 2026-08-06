@@ -91,6 +91,85 @@ use crate::{
 
 const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
 
+/// Responsive outer-shell dimensions derived from the available viewport.
+///
+/// The policy intentionally contains every viewport threshold used by the
+/// renderer so product-mode rendering cannot move the editor between modes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShellGeometry {
+    /// Whether the viewport uses deterministic compact panel dimensions.
+    pub compact: bool,
+    /// Fixed top command-bar height.
+    pub top_bar_height: f32,
+    /// Width reserved for the left activity rail.
+    pub activity_rail_width: f32,
+    /// Width reserved for the explorer beside the activity rail.
+    pub explorer_width: f32,
+    /// Combined activity-rail and explorer width.
+    pub left_width: f32,
+    /// Minimum left-panel width at desktop sizes.
+    pub left_min_width: f32,
+    /// Right inspector width.
+    pub right_width: f32,
+    /// Minimum right-inspector width at desktop sizes.
+    pub right_min_width: f32,
+    /// Bottom console height.
+    pub bottom_height: f32,
+    /// Minimum bottom-console height at desktop sizes.
+    pub bottom_min_height: f32,
+    /// Fixed status-bar height.
+    pub status_bar_height: f32,
+}
+
+impl ShellGeometry {
+    const COMPACT_WIDTH: f32 = 1_100.0;
+    const MIN_EDITOR_WIDTH: f32 = 360.0;
+    const TOP_BAR_HEIGHT: f32 = 42.0;
+    const STATUS_BAR_HEIGHT: f32 = 24.0;
+    const ACTIVITY_RAIL_WIDTH: f32 = 46.0;
+    const DESKTOP_EXPLORER_WIDTH: f32 = 248.0;
+    const COMPACT_EXPLORER_WIDTH: f32 = 204.0;
+    const RIGHT_WIDTH: f32 = 325.0;
+    const BOTTOM_HEIGHT: f32 = 192.0;
+
+    /// Derives deterministic shell dimensions from the available viewport.
+    pub fn for_available_size(available_width: f32, available_height: f32) -> Self {
+        let compact = available_width < Self::COMPACT_WIDTH;
+        let desired_explorer_width = if compact {
+            Self::COMPACT_EXPLORER_WIDTH
+        } else {
+            Self::DESKTOP_EXPLORER_WIDTH
+        };
+        let desired_left_width = Self::ACTIVITY_RAIL_WIDTH + desired_explorer_width;
+        let left_width = desired_left_width.min(
+            (available_width - Self::RIGHT_WIDTH - Self::MIN_EDITOR_WIDTH)
+                .max(Self::ACTIVITY_RAIL_WIDTH),
+        );
+        let bottom_height = Self::BOTTOM_HEIGHT.min(
+            (available_height - Self::TOP_BAR_HEIGHT - Self::STATUS_BAR_HEIGHT - 180.0).max(112.0),
+        );
+
+        Self {
+            compact,
+            top_bar_height: Self::TOP_BAR_HEIGHT,
+            activity_rail_width: Self::ACTIVITY_RAIL_WIDTH,
+            explorer_width: (left_width - Self::ACTIVITY_RAIL_WIDTH).max(0.0),
+            left_width,
+            left_min_width: Self::ACTIVITY_RAIL_WIDTH + 160.0,
+            right_width: Self::RIGHT_WIDTH,
+            right_min_width: 260.0,
+            bottom_height,
+            bottom_min_height: 112.0,
+            status_bar_height: Self::STATUS_BAR_HEIGHT,
+        }
+    }
+
+    /// Returns the editor canvas width remaining after the side regions.
+    pub fn editor_width(self, available_width: f32) -> f32 {
+        (available_width - self.left_width - self.right_width).max(0.0)
+    }
+}
+
 /// Adapter-local view state layered over app-owned projections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopProjectionViewState {
@@ -803,72 +882,79 @@ impl ProjectionView {
         let mut active_theme = self.theme_preference.resolve(ui.ctx());
         let settings = snapshot.settings_projection.clone().normalized();
         active_theme.typography.code = settings.editor_font_size_pt as u8;
-        active_theme.typography.code_muted = settings.editor_font_size_pt.saturating_sub(1) as u8;
+        active_theme.typography.code_muted =
+            settings.editor_font_size_pt.saturating_sub(1).max(11) as u8;
         ui.ctx()
             .set_zoom_factor(settings.zoom_percent as f32 / 100.0);
         theme::install(ui.ctx(), &active_theme);
         let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         let mut actions = Vec::new();
+        let geometry =
+            ShellGeometry::for_available_size(ui.available_width(), ui.available_height());
 
         egui::Panel::top("legion_desktop_top")
-            .exact_size(52.0)
+            .exact_size(geometry.top_bar_height)
             .frame(theme::toolbar_frame())
             .show_inside(ui, |ui| {
                 render_top_command_bar(ui, snapshot, &model, &mut actions);
             });
 
-        egui::Panel::left("legion_desktop_explorer")
-            .default_size(272.0)
-            .min_size(236.0)
-            .resizable(true)
+        let left_panel = egui::Panel::left("legion_desktop_explorer")
             .frame(theme::pane_frame(theme::tokens().bg.panel))
-            .show_inside(ui, |ui| {
-                render_left_sidebar(ui, snapshot, state, &model, &mut actions);
-            });
+            .resizable(!geometry.compact);
+        let left_panel = if geometry.compact {
+            left_panel.exact_size(geometry.left_width)
+        } else {
+            left_panel
+                .default_size(geometry.left_width)
+                .min_size(geometry.left_min_width)
+        };
+        left_panel.show_inside(ui, |ui| {
+            render_left_sidebar(ui, snapshot, state, &model, geometry, &mut actions);
+        });
 
         egui::Panel::bottom("legion_desktop_status")
-            .exact_size(24.0)
+            .exact_size(geometry.status_bar_height)
             .frame(theme::panel_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
                 render_status_bar(ui, &model);
             });
 
-        let bottom_height = match projected_product_mode(snapshot) {
-            DesktopProductMode::Manual => 150.0,
-            DesktopProductMode::Assist => 180.0,
-            DesktopProductMode::LegionWorkflows => 240.0,
-            DesktopProductMode::Delegate => 200.0,
-        };
-        egui::Panel::bottom("legion_desktop_bottom_console")
-            .default_size(bottom_height)
-            .min_size(112.0)
-            .resizable(true)
+        let bottom_panel = egui::Panel::bottom("legion_desktop_bottom_console")
             .frame(theme::pane_frame(theme::tokens().bg.code))
-            .show_inside(ui, |ui| {
-                render_bottom_console(ui, snapshot, &model, &mut actions);
-            });
-
-        let right_width = match projected_product_mode(snapshot) {
-            DesktopProductMode::Manual => 260.0,
-            DesktopProductMode::Assist => 340.0,
-            DesktopProductMode::Delegate | DesktopProductMode::LegionWorkflows => 380.0,
+            .resizable(!geometry.compact);
+        let bottom_panel = if geometry.compact {
+            bottom_panel.exact_size(geometry.bottom_height)
+        } else {
+            bottom_panel
+                .default_size(geometry.bottom_height)
+                .min_size(geometry.bottom_min_height)
         };
-        egui::Panel::right("legion_desktop_trust")
-            .default_size(right_width)
-            .min_size(260.0)
-            .resizable(true)
+        bottom_panel.show_inside(ui, |ui| {
+            render_bottom_console(ui, snapshot, &model, &mut actions);
+        });
+
+        let right_panel = egui::Panel::right("legion_desktop_trust")
             .frame(theme::pane_frame(theme::tokens().bg.panel))
-            .show_inside(ui, |ui| {
-                render_right_dock(
-                    ui,
-                    snapshot,
-                    state,
-                    &model,
-                    &mut self.show_trust,
-                    &mut self.show_auxiliary,
-                    &mut actions,
-                );
-            });
+            .resizable(!geometry.compact);
+        let right_panel = if geometry.compact {
+            right_panel.exact_size(geometry.right_width)
+        } else {
+            right_panel
+                .default_size(geometry.right_width)
+                .min_size(geometry.right_min_width)
+        };
+        right_panel.show_inside(ui, |ui| {
+            render_right_dock(
+                ui,
+                snapshot,
+                state,
+                &model,
+                &mut self.show_trust,
+                &mut self.show_auxiliary,
+                &mut actions,
+            );
+        });
 
         egui::CentralPanel::default()
             .frame(theme::pane_frame(theme::tokens().bg.code))
@@ -895,7 +981,7 @@ fn render_top_command_bar(
     actions: &mut Vec<DesktopAction>,
 ) {
     let level = projected_product_mode(snapshot);
-    ui.set_height(52.0);
+    ui.set_height(ShellGeometry::TOP_BAR_HEIGHT);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         render_window_controls(ui);
@@ -1004,6 +1090,49 @@ fn render_product_mode_switch(
 }
 
 fn render_left_sidebar(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    model: &DesktopProjectionViewModel,
+    geometry: ShellGeometry,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(geometry.activity_rail_width, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| render_activity_rail(ui, snapshot, actions),
+        );
+        ui.separator();
+        ui.vertical(|ui| render_explorer_sidebar(ui, snapshot, state, model, actions));
+    });
+}
+
+fn render_activity_rail(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let scope = snapshot.search_projection.scope;
+    for (label, mode, query) in [
+        ("Files", PaletteMode::File, ""),
+        ("Search", PaletteMode::Search, "/"),
+        ("Symbols", PaletteMode::Symbol, ""),
+    ] {
+        if ui
+            .add_sized([38.0, 28.0], egui::Button::new(theme::label(label)))
+            .clicked()
+        {
+            actions.push(DesktopAction::OpenPalette {
+                mode,
+                query: query.to_string(),
+                scope,
+            });
+        }
+    }
+}
+
+fn render_explorer_sidebar(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     state: &DesktopProjectionViewState,
