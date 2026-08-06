@@ -16,7 +16,7 @@ use legion_desktop::{
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_protocol::{ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll};
-use legion_ui::{DockLayout, DockMode, Shell};
+use legion_ui::{DockLayout, DockMode, PanelId, Shell};
 
 /// Build a five-target batch proposal suitable for seeding proposal_reviews in
 /// the desktop runtime's delegated-task projection.
@@ -498,7 +498,7 @@ fn product_mode_changes_preserve_projected_editor_and_panel_state() {
     runtime.set_panel_state(SessionPanelState {
         bottom_visible: true,
         side_visible: true,
-        active_panel: Some("problems".to_string()),
+        active_panel: Some(PanelId::Diagnostics.as_str().to_string()),
         bottom_height_px: Some(236),
         side_width_px: Some(312),
     });
@@ -534,6 +534,11 @@ fn product_mode_changes_preserve_projected_editor_and_panel_state() {
     assert!(
         app.last_editor_rect_for_test().is_some(),
         "the full frame should allocate the real editor"
+    );
+    assert_eq!(
+        app.panel_state_for_test().active_panel.as_deref(),
+        Some(PanelId::Diagnostics.as_str()),
+        "the canonical Problems panel id must survive the priming frame"
     );
     let before = app.runtime_snapshot();
     assert_eq!(
@@ -584,7 +589,7 @@ fn product_mode_changes_preserve_projected_editor_and_panel_state() {
     assert!(app.panel_state_for_test().bottom_visible);
     assert_eq!(
         app.panel_state_for_test().active_panel.as_deref(),
-        Some("problems")
+        Some(PanelId::Diagnostics.as_str())
     );
     assert_eq!(app.panel_state_for_test().bottom_height_px, Some(236));
     assert_eq!(app.panel_state_for_test().side_width_px, Some(312));
