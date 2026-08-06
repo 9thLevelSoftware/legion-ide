@@ -283,7 +283,13 @@ pub fn prepare_event_batch(
 #[derive(Debug, Clone)]
 pub struct InMemoryEventSink {
     config: EventSinkConfig,
-    events: Arc<Mutex<Vec<EventEnvelope>>>,
+    state: Arc<Mutex<InMemoryEventSinkState>>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryEventSinkState {
+    events: Vec<EventEnvelope>,
+    raw_fingerprints: HashMap<EventId, String>,
 }
 
 impl InMemoryEventSink {
@@ -296,7 +302,7 @@ impl InMemoryEventSink {
     pub fn with_config(config: EventSinkConfig) -> Self {
         Self {
             config,
-            events: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(Mutex::new(InMemoryEventSinkState::default())),
         }
     }
 
@@ -304,15 +310,27 @@ impl InMemoryEventSink {
     pub fn try_emit(&self, request: EventSinkRequest) -> Result<(), ObservabilityError> {
         let mut envelope = request.envelope;
         validate_envelope(&envelope, self.config)?;
+        let raw_fingerprint = raw_event_fingerprint(&envelope)?;
 
         if self.config.metadata_only_by_default || envelope.redaction != RedactionHint::None {
             envelope.payload = redact_payload(&envelope.payload, envelope.redaction);
         }
 
-        self.events
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| ObservabilityError::StorageUnavailable)?
-            .push(envelope);
+            .map_err(|_| ObservabilityError::StorageUnavailable)?;
+        if let Some(existing) = state.raw_fingerprints.get(&envelope.event_id) {
+            return if existing == &raw_fingerprint {
+                Ok(())
+            } else {
+                Err(ObservabilityError::EventIdConflict)
+            };
+        }
+        state
+            .raw_fingerprints
+            .insert(envelope.event_id, raw_fingerprint);
+        state.events.push(envelope);
         Ok(())
     }
 
@@ -322,41 +340,44 @@ impl InMemoryEventSink {
         &self,
         requests: Vec<EventSinkRequest>,
     ) -> Result<(), ObservabilityError> {
+        let raw_fingerprints = requests
+            .iter()
+            .map(|request| raw_event_fingerprint(&request.envelope))
+            .collect::<Result<Vec<_>, _>>()?;
         let prepared = prepare_event_batch(requests, self.config)?;
 
-        let mut events = self
-            .events
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| ObservabilityError::StorageUnavailable)?;
-        let mut known = HashMap::with_capacity(events.len().saturating_add(prepared.len()));
-        for event in events.iter() {
-            let serialized =
-                serde_json::to_vec(event).map_err(|_| ObservabilityError::InvalidPayload)?;
-            known.insert(event.event_id, serialized);
-        }
+        let mut known = state.raw_fingerprints.clone();
         let mut additions = Vec::new();
-        for envelope in prepared {
-            let serialized =
-                serde_json::to_vec(&envelope).map_err(|_| ObservabilityError::InvalidPayload)?;
+        for (envelope, raw_fingerprint) in prepared.into_iter().zip(raw_fingerprints) {
             if let Some(existing) = known.get(&envelope.event_id) {
-                if existing != &serialized {
+                if existing != &raw_fingerprint {
                     return Err(ObservabilityError::EventIdConflict);
                 }
             } else {
-                known.insert(envelope.event_id, serialized);
-                additions.push(envelope);
+                known.insert(envelope.event_id, raw_fingerprint.clone());
+                additions.push((envelope, raw_fingerprint));
             }
         }
-        events.extend(additions);
+        for (envelope, raw_fingerprint) in additions {
+            state
+                .raw_fingerprints
+                .insert(envelope.event_id, raw_fingerprint);
+            state.events.push(envelope);
+        }
         Ok(())
     }
 
     /// Return a cloned snapshot of stored envelopes.
     pub fn events(&self) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         Ok(self
-            .events
+            .state
             .lock()
             .map_err(|_| ObservabilityError::StorageUnavailable)?
+            .events
             .clone())
     }
 }
@@ -440,10 +461,6 @@ pub struct NoopEventSink;
 
 impl EventSinkPort for NoopEventSink {
     fn emit(&self, _request: EventSinkRequest) -> ProtocolResult<()> {
-        Ok(())
-    }
-
-    fn emit_batch(&self, _requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
         Ok(())
     }
 }
@@ -1997,6 +2014,15 @@ fn redact_payload(payload: &Value, hint: RedactionHint) -> Value {
 
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    // These are schema-level classifiers/counts, not proposal payload content.
+    // Keep the exception list exact so a similarly named free-form field still
+    // fails closed through the broad `payload` sensitivity check below.
+    if matches!(
+        lower.as_str(),
+        "payload_class" | "payload_kind" | "payload_byte_count"
+    ) {
+        return false;
+    }
     lower.contains("text")
         || lower.contains("source")
         || lower.contains("secret")
@@ -2018,7 +2044,9 @@ fn redact_metadata_value(key: &str, value: &Value) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
         Value::String(text) => {
-            if is_safe_metadata_key(key) && !contains_forbidden_assisted_ai_marker(text) {
+            if is_canonical_redaction_marker(text)
+                || (is_safe_metadata_key(key) && !contains_forbidden_assisted_ai_marker(text))
+            {
                 value.clone()
             } else {
                 Value::String(format!("hash={};len={}", metadata_hash(text), text.len()))
@@ -2026,6 +2054,24 @@ fn redact_metadata_value(key: &str, value: &Value) -> Value {
         }
         Value::Array(_) | Value::Object(_) => Value::String("<metadata-only>".to_string()),
     }
+}
+
+fn is_canonical_redaction_marker(value: &str) -> bool {
+    if matches!(value, "<metadata-only>" | "<redacted>") {
+        return true;
+    }
+    let Some((digest, length)) = value
+        .strip_prefix("hash=")
+        .and_then(|value| value.split_once(";len="))
+    else {
+        return false;
+    };
+    digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && digest.bytes().all(|byte| !byte.is_ascii_uppercase())
+        && !length.is_empty()
+        && length.bytes().all(|byte| byte.is_ascii_digit())
+        && length.parse::<u64>().is_ok()
 }
 
 /// Allowlist of metadata keys whose string values are known-safe to retain
@@ -2075,10 +2121,27 @@ fn is_safe_metadata_key(key: &str) -> bool {
 }
 
 fn protocol_error(error: ObservabilityError) -> ProtocolError {
+    let code = match error {
+        ObservabilityError::EventIdConflict => "event_id_conflict",
+        ObservabilityError::StorageUnavailable => "event_sink_unavailable",
+        ObservabilityError::InvalidSchemaVersion
+        | ObservabilityError::MissingEventName
+        | ObservabilityError::InvalidPayload
+        | ObservabilityError::InvalidCausalityId
+        | ObservabilityError::InvalidCorrelationId
+        | ObservabilityError::InvalidSequence
+        | ObservabilityError::MismatchedProposalTransition => "event_batch_invalid",
+    };
     ProtocolError {
-        code: "observability_error".to_string(),
+        code: code.to_string(),
         message: error.to_string(),
     }
+}
+
+fn raw_event_fingerprint(envelope: &EventEnvelope) -> Result<String, ObservabilityError> {
+    let serialized =
+        serde_json::to_vec(envelope).map_err(|_| ObservabilityError::InvalidPayload)?;
+    Ok(sha256_hex(&serialized))
 }
 
 #[cfg(test)]
@@ -2117,6 +2180,17 @@ mod tests {
 
         assert_eq!(error.code, "event_batch_unsupported");
         assert_eq!(sink.emitted.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn noop_sink_does_not_acknowledge_atomic_batch_delivery() {
+        let error = NoopEventSink
+            .emit_batch(vec![EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            }])
+            .expect_err("no-op sink cannot prove atomic batch delivery");
+
+        assert_eq!(error.code, "event_batch_unsupported");
     }
 
     fn save_proposal() -> WorkspaceProposal {
@@ -2307,7 +2381,7 @@ mod tests {
             ])
             .expect_err("invalid second item must reject the whole batch");
 
-        assert_eq!(error.code, "observability_error");
+        assert_eq!(error.code, "event_batch_invalid");
         assert!(sink.events().expect("event snapshot").is_empty());
     }
 
@@ -2353,10 +2427,108 @@ mod tests {
             ])
             .expect_err("conflicting retry must reject the whole batch");
 
-        assert_eq!(error.code, "observability_error");
+        assert_eq!(error.code, "event_id_conflict");
         let events = sink.events().expect("event snapshot");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["item"], 1);
+    }
+
+    #[test]
+    fn in_memory_sink_rejects_raw_secret_conflicts_across_single_and_batch_apis() {
+        let sink = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret alpha")
+            .build();
+        let mut conflicting = original.clone();
+        conflicting.payload["source_text"] = json!("secret beta");
+        sink.emit(EventSinkRequest {
+            envelope: original.clone(),
+        })
+        .expect("initial single emit");
+
+        let error = sink
+            .emit(EventSinkRequest {
+                envelope: conflicting.clone(),
+            })
+            .expect_err("different raw secret must conflict after identical redaction");
+        assert_eq!(error.code, "event_id_conflict");
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest {
+                    envelope: event_with_payload(json!({"new": true})),
+                },
+                EventSinkRequest {
+                    envelope: conflicting,
+                },
+            ])
+            .expect_err("later raw conflict rejects the complete batch");
+        assert_eq!(error.code, "event_id_conflict");
+        assert_eq!(sink.events().expect("event snapshot").len(), 1);
+
+        sink.emit_batch(vec![EventSinkRequest {
+            envelope: original.clone(),
+        }])
+        .expect("exact single-to-batch retry is idempotent");
+        sink.emit(EventSinkRequest { envelope: original })
+            .expect("exact batch-to-single retry is idempotent");
+        assert_eq!(sink.events().expect("event snapshot").len(), 1);
+
+        let batch_first = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret gamma")
+            .build();
+        let mut conflicting = original.clone();
+        conflicting.payload["source_text"] = json!("secret delta");
+        batch_first
+            .emit_batch(vec![EventSinkRequest { envelope: original }])
+            .expect("initial batch emit");
+        assert_eq!(
+            batch_first
+                .emit(EventSinkRequest {
+                    envelope: conflicting,
+                })
+                .expect_err("batch-to-single raw conflict")
+                .code,
+            "event_id_conflict"
+        );
+        assert_eq!(batch_first.events().expect("event snapshot").len(), 1);
+    }
+
+    #[test]
+    fn metadata_redaction_is_idempotent_and_rejects_malformed_markers() {
+        let canonical_hash = format!("hash={};len=6", metadata_hash("secret"));
+        let malformed_hash = format!("hash={};len=6", metadata_hash("secret").to_uppercase());
+        let envelope = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("summary", "free-form secret")
+            .metadata("nested", json!({"raw": "value"}))
+            .metadata("redacted_marker", "<redacted>")
+            .metadata("metadata_marker", "<metadata-only>")
+            .metadata("hash_marker", canonical_hash.clone())
+            .metadata("malformed_marker", malformed_hash.clone())
+            .build();
+
+        let first = prepare_event_batch(
+            vec![EventSinkRequest { envelope }],
+            EventSinkConfig::default(),
+        )
+        .expect("first preparation");
+        let second = prepare_event_batch(
+            vec![EventSinkRequest {
+                envelope: first[0].clone(),
+            }],
+            EventSinkConfig::default(),
+        )
+        .expect("second preparation");
+
+        assert_eq!(
+            serde_json::to_vec(&first[0]).expect("serialize first"),
+            serde_json::to_vec(&second[0]).expect("serialize second")
+        );
+        assert_eq!(first[0].payload["redacted_marker"], "<redacted>");
+        assert_eq!(first[0].payload["metadata_marker"], "<metadata-only>");
+        assert_eq!(first[0].payload["hash_marker"], canonical_hash);
+        assert_ne!(first[0].payload["malformed_marker"], malformed_hash);
     }
 
     #[test]
@@ -2981,6 +3153,8 @@ mod tests {
             .metadata("summary", "raw user prose that must not leak")
             .metadata("reason", "blocked because /secret/source.rs")
             .metadata("lifecycle_state", "Applied")
+            .metadata("payload_kind", "TextEdit")
+            .metadata("payload_byte_count", json!(128))
             .metadata("affected_file_count", json!(3))
             .build();
 
@@ -3000,6 +3174,8 @@ mod tests {
 
         // Allowlisted classifier keys and numeric metadata pass through verbatim.
         assert_eq!(payload["lifecycle_state"], "Applied");
+        assert_eq!(payload["payload_kind"], "TextEdit");
+        assert_eq!(payload["payload_byte_count"], 128);
         assert_eq!(payload["affected_file_count"], 3);
         assert_eq!(payload["metadata_only"], true);
     }
