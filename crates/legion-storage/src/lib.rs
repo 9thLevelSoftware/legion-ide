@@ -2092,6 +2092,21 @@ impl InMemoryStorageRepositoryPort {
         Ok(records)
     }
 
+    /// Return the highest proposal id owned by any validated persisted audit.
+    ///
+    /// This includes generic lifecycle audits as well as outbox-owned Created
+    /// audits so restart-time allocators cannot reuse a historical id merely
+    /// because it has no proposal-observation batch.
+    pub fn max_proposal_audit_id(&self) -> ProtocolResult<Option<ProposalId>> {
+        self.ensure_proposal_observation_outbox_healthy()?;
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        Ok(storage
+            .protocol_proposal_audit
+            .keys()
+            .copied()
+            .max_by_key(|proposal_id| proposal_id.0))
+    }
+
     /// Compare a replay candidate with its stored outbox record after applying
     /// the same event preparation and audit sanitization as the write path.
     ///
@@ -6142,6 +6157,12 @@ mod tests {
 
         let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
         assert!(reopened.proposal_observation_startup_error().is_none());
+        assert_eq!(
+            reopened
+                .max_proposal_audit_id()
+                .expect("read generic audit proposal high-watermark"),
+            Some(audit.proposal_id)
+        );
         match reopened
             .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
                 audit.proposal_id,

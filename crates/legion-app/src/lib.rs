@@ -16831,7 +16831,13 @@ impl AppComposition {
             .flat_map(|record| &record.batch.proposal_audits)
             .map(|audit| audit.proposal_id.0)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(
+                self.storage
+                    .max_proposal_audit_id()?
+                    .map(|proposal_id| proposal_id.0)
+                    .unwrap_or(0),
+            );
         let sequence_floor = records
             .iter()
             .flat_map(|record| &record.batch.events)
@@ -35366,6 +35372,71 @@ mod tests {
         );
 
         fs::remove_dir_all(&workspace_root).expect("remove advanced replay workspace");
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_registration_allocates_above_generic_persisted_audit_floor() {
+        let workspace_root = unique_temp_dir("delegated-generic-audit-floor");
+        let historical_id = ProposalId(7);
+        {
+            let mut first = AppComposition::new();
+            first
+                .enable_proposal_audit_persistence(&workspace_root)
+                .expect("enable generic proposal audit persistence");
+            let historical = save_proposal(historical_id);
+            let transition = ProposalLifecycleTransition {
+                proposal_id: historical_id,
+                lifecycle_state: ProposalLifecycleState::Created,
+                timestamp: TimestampMillis(7),
+                principal: historical.principal.clone(),
+                capability: historical.capability.clone(),
+                correlation_id: historical.correlation_id,
+                causality_id: CausalityId(uuid::Uuid::now_v7()),
+                diagnostics: Vec::new(),
+            };
+            let audit = proposal_audit_record(&historical, &transition)
+                .expect("build historical generic audit");
+            first
+                .storage
+                .handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
+                .expect("persist generic proposal audit without an outbox batch");
+            assert!(
+                first
+                    .storage
+                    .proposal_observation_batches()
+                    .expect("no first-process outbox")
+                    .is_empty()
+            );
+        }
+
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
+        recovered
+            .enable_proposal_audit_persistence(&workspace_root)
+            .expect("reload generic proposal audit floor");
+        assert_eq!(
+            recovered
+                .storage
+                .max_proposal_audit_id()
+                .expect("read generic proposal audit high-watermark"),
+            Some(historical_id)
+        );
+        assert_eq!(
+            recovered.proposal_coordinator.next_proposal_id.get(),
+            historical_id.0
+        );
+
+        let registered = recovered
+            .register_delegated_task_proposals(vec![delegated_output_from(
+                save_proposal(ProposalId(100)),
+                "after-generic-audit",
+            )])
+            .expect("delegated registration allocates above historical audit id");
+        assert_eq!(registered[0].proposal_id, ProposalId(8));
+        assert_eq!(recorder.events().expect("created event").len(), 1);
+
+        fs::remove_dir_all(&workspace_root).expect("remove generic audit floor workspace");
     }
 
     #[cfg(feature = "ai")]
