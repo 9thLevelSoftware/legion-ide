@@ -544,6 +544,14 @@ pub struct ProposalObservationBatch {
     pub schema_version: u16,
 }
 
+/// Strict proposal-observation schema written by current producers.
+pub const PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION: u16 = 2;
+
+// Schema 1 was briefly written before full event/audit field binding shipped.
+// It remains readable through a bounded compatibility validator because a
+// Pending record may already have been accepted by a sink under its EventId.
+const LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION: u16 = 1;
+
 /// Delivery state for a proposal observation outbox record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalObservationDeliveryState {
@@ -1133,6 +1141,7 @@ pub struct InMemoryStorageRepositoryPort {
     fail_next_event_metadata_write: AtomicBool,
     fail_next_plan_revision_write: AtomicBool,
     fail_proposal_observation_batch_at_item: AtomicUsize,
+    fail_next_proposal_observation_delivery_persist: AtomicBool,
     proposal_observation_delivery: Mutex<()>,
     proposal_observation_startup_error: Option<ProtocolError>,
 }
@@ -1153,6 +1162,7 @@ impl InMemoryStorageRepositoryPort {
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
             proposal_observation_delivery: Mutex::new(()),
             proposal_observation_startup_error: None,
         }
@@ -1168,6 +1178,7 @@ impl InMemoryStorageRepositoryPort {
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
             proposal_observation_delivery: Mutex::new(()),
             proposal_observation_startup_error: None,
         }
@@ -1186,6 +1197,7 @@ impl InMemoryStorageRepositoryPort {
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
             proposal_observation_delivery: Mutex::new(()),
             proposal_observation_startup_error: None,
         }
@@ -1213,13 +1225,16 @@ impl InMemoryStorageRepositoryPort {
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
             proposal_observation_delivery: Mutex::new(()),
             proposal_observation_startup_error: None,
         };
-        if let Err(error) = port.load_proposal_observation_outbox_from_disk() {
+        if let Err(error) = port
+            .load_proposal_observation_outbox_from_disk()
+            .and_then(|()| port.load_proposal_audit_from_disk())
+        {
             port.proposal_observation_startup_error = Some(error);
         }
-        port.load_proposal_audit_from_disk();
         port
     }
 
@@ -1227,10 +1242,12 @@ impl InMemoryStorageRepositoryPort {
     pub fn enable_base_dir(&mut self, base_dir: impl AsRef<Path>) {
         self.base_dir = Some(base_dir.as_ref().to_path_buf());
         self.proposal_observation_startup_error = None;
-        if let Err(error) = self.load_proposal_observation_outbox_from_disk() {
+        if let Err(error) = self
+            .load_proposal_observation_outbox_from_disk()
+            .and_then(|()| self.load_proposal_audit_from_disk())
+        {
             self.proposal_observation_startup_error = Some(error);
         }
-        self.load_proposal_audit_from_disk();
     }
 
     fn proposal_audit_dir(&self) -> Option<PathBuf> {
@@ -1245,29 +1262,79 @@ impl InMemoryStorageRepositoryPort {
             .map(|base| base.join("proposal-observation-outbox"))
     }
 
-    fn load_proposal_audit_from_disk(&mut self) {
+    fn load_proposal_audit_from_disk(&mut self) -> ProtocolResult<()> {
         let Some(dir) = self.proposal_audit_dir() else {
-            return;
+            return Ok(());
         };
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Self::outbox_startup_error(format!(
+                    "read proposal audit directory failed: {error}"
+                )));
+            }
         };
-        let Ok(mut storage) = self.storage.lock() else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let mut paths = entries
+            .map(|entry| {
+                entry.map(|entry| entry.path()).map_err(|error| {
+                    Self::outbox_startup_error(format!(
+                        "read proposal audit directory entry failed: {error}"
+                    ))
+                })
+            })
+            .collect::<ProtocolResult<Vec<_>>>()?;
+        paths.sort();
+
+        let mut loaded = HashMap::new();
+        for path in paths {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(bytes) = fs::read(&path)
-                && let Ok(record) = serde_json::from_slice::<ProposalAuditRecord>(&bytes)
+            let bytes = fs::read(&path).map_err(|error| {
+                Self::outbox_startup_error(format!(
+                    "read proposal audit {} failed: {error}",
+                    path.display()
+                ))
+            })?;
+            let record =
+                serde_json::from_slice::<ProposalAuditRecord>(&bytes).map_err(|error| {
+                    Self::outbox_startup_error(format!(
+                        "decode proposal audit {} failed: {error}",
+                        path.display()
+                    ))
+                })?;
+            Self::validate_persisted_proposal_audit(&record).map_err(|error| {
+                Self::outbox_startup_error(format!(
+                    "invalid proposal audit {}: {}",
+                    path.display(),
+                    error.message
+                ))
+            })?;
+            let expected_stem = record.proposal_id.0.to_string();
+            if path.file_stem().and_then(|stem| stem.to_str()) != Some(expected_stem.as_str())
+                || loaded.insert(record.proposal_id, record).is_some()
             {
-                storage
-                    .protocol_proposal_audit
-                    .insert(record.proposal_id, record);
+                return Err(Self::outbox_startup_error(format!(
+                    "proposal audit identity collision at {}",
+                    path.display()
+                )));
             }
         }
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let mut audits = storage.protocol_proposal_audit.clone();
+        for (proposal_id, audit) in loaded {
+            if let Some(created) = audits.get(&proposal_id)
+                && !Self::proposal_audit_identity_matches(created, &audit)
+            {
+                return Err(Self::outbox_startup_error(format!(
+                    "proposal audit {proposal_id:?} conflicts with outbox identity"
+                )));
+            }
+            audits.insert(proposal_id, audit);
+        }
+        storage.protocol_proposal_audit = audits;
+        Ok(())
     }
 
     fn persist_proposal_audit(&self, record: &ProposalAuditRecord) -> Result<(), ProtocolError> {
@@ -1336,6 +1403,7 @@ impl InMemoryStorageRepositoryPort {
         paths.sort();
 
         let mut records = Vec::new();
+        let mut legacy_rewrites = Vec::new();
         let mut loaded_event_ids = HashSet::new();
         let mut loaded_proposal_ids = HashSet::new();
         let mut loaded_batch_ids = HashSet::new();
@@ -1349,20 +1417,54 @@ impl InMemoryStorageRepositoryPort {
                     path.display()
                 ))
             })?;
-            let record = serde_json::from_slice::<ProposalObservationOutboxRecord>(&bytes)
+            let mut record = serde_json::from_slice::<ProposalObservationOutboxRecord>(&bytes)
                 .map_err(|error| {
                     Self::outbox_startup_error(format!(
                         "decode proposal observation outbox {} failed: {error}",
                         path.display()
                     ))
                 })?;
-            Self::validate_proposal_observation_batch(&record.batch).map_err(|error| {
-                Self::outbox_startup_error(format!(
-                    "invalid proposal observation outbox {}: {}",
-                    path.display(),
-                    error.message
-                ))
-            })?;
+            match record.batch.schema_version {
+                PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION => {
+                    Self::validate_proposal_observation_batch(&record.batch).map_err(|error| {
+                        Self::outbox_startup_error(format!(
+                            "invalid proposal observation outbox {}: {}",
+                            path.display(),
+                            error.message
+                        ))
+                    })?;
+                }
+                LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION => {
+                    record.batch.proposal_audits =
+                        std::mem::take(&mut record.batch.proposal_audits)
+                            .into_iter()
+                            .map(Self::sanitize_proposal_observation_audit)
+                            .collect::<ProtocolResult<Vec<_>>>()
+                            .map_err(|error| {
+                                Self::outbox_startup_error(format!(
+                                    "sanitize legacy proposal observation outbox {} failed: {}",
+                                    path.display(),
+                                    error.message
+                                ))
+                            })?;
+                    Self::validate_legacy_proposal_observation_batch(&record.batch).map_err(
+                        |error| {
+                            Self::outbox_startup_error(format!(
+                                "invalid legacy proposal observation outbox {}: {}",
+                                path.display(),
+                                error.message
+                            ))
+                        },
+                    )?;
+                    legacy_rewrites.push(record.clone());
+                }
+                schema_version => {
+                    return Err(Self::outbox_startup_error(format!(
+                        "proposal observation outbox {} has unsupported schema {schema_version}",
+                        path.display()
+                    )));
+                }
+            }
             let file_stem = path.file_stem().and_then(|stem| stem.to_str());
             if file_stem != Some(record.batch.batch_id.as_str())
                 || !loaded_batch_ids.insert(record.batch.batch_id.clone())
@@ -1383,6 +1485,18 @@ impl InMemoryStorageRepositoryPort {
                 )));
             }
             records.push(record);
+        }
+        // Canonicalize only audit-at-rest fields in legacy records. Event and
+        // metadata identities remain unchanged because a Pending event may
+        // already have been accepted by the sink under its EventId.
+        for record in &legacy_rewrites {
+            self.persist_proposal_observation_outbox(record)
+                .map_err(|error| {
+                    Self::outbox_startup_error(format!(
+                        "rewrite legacy proposal observation outbox {} failed: {}",
+                        record.batch.batch_id, error.message
+                    ))
+                })?;
         }
         let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
         let mut events = storage.protocol_proposal_observation_events.clone();
@@ -1472,6 +1586,12 @@ impl InMemoryStorageRepositoryPort {
     pub fn fail_proposal_observation_batch_at_item_for_test(&self, item_index: usize) {
         self.fail_proposal_observation_batch_at_item
             .store(item_index.saturating_add(1), Ordering::SeqCst);
+    }
+
+    /// Cause the next Delivered-marker persistence to fail after sink acknowledgement.
+    pub fn fail_next_proposal_observation_delivery_persist_for_test(&self) {
+        self.fail_next_proposal_observation_delivery_persist
+            .store(true, Ordering::SeqCst);
     }
 
     /// Validate and atomically commit a proposal-created observation as Pending.
@@ -1609,6 +1729,23 @@ impl InMemoryStorageRepositoryPort {
     }
 
     fn sanitize_proposal_observation_audit(
+        audit: ProposalAuditRecord,
+    ) -> ProtocolResult<ProposalAuditRecord> {
+        let audit = Self::sanitize_proposal_audit(audit)?;
+        if audit.lifecycle_state != ProposalLifecycleState::Created
+            || audit.checkpoint_rollback_projection.is_some()
+        {
+            return Err(ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message:
+                    "Created proposal observation audits cannot contain checkpoint projections"
+                        .to_string(),
+            });
+        }
+        Ok(audit)
+    }
+
+    fn sanitize_proposal_audit(
         mut audit: ProposalAuditRecord,
     ) -> ProtocolResult<ProposalAuditRecord> {
         if !audit
@@ -1630,14 +1767,6 @@ impl InMemoryStorageRepositoryPort {
                 message: "proposal observation audit contains an unsafe risk rule id".to_string(),
             });
         }
-        if audit.checkpoint_rollback_projection.is_some() {
-            return Err(ProtocolError {
-                code: "proposal_observation_batch_invalid".to_string(),
-                message:
-                    "Created proposal observation audits cannot contain checkpoint projections"
-                        .to_string(),
-            });
-        }
         audit.payload_summary.title = audit
             .payload_summary
             .title
@@ -1652,6 +1781,54 @@ impl InMemoryStorageRepositoryPort {
         }
         audit.redaction_hints = vec![legion_protocol::RedactionHint::MetadataOnly];
         Ok(audit)
+    }
+
+    fn validate_persisted_proposal_audit(audit: &ProposalAuditRecord) -> ProtocolResult<()> {
+        InMemoryStorage::validate_audit_record(audit).map_err(InMemoryStorage::protocol_error)?;
+        if audit.proposal_id.0 == 0
+            || !Self::is_safe_audit_identifier(&audit.principal.0)
+            || !Self::is_safe_audit_identifier(&audit.capability.0)
+            || audit.redaction_hints != vec![legion_protocol::RedactionHint::MetadataOnly]
+            || audit
+                .payload_summary
+                .title
+                .as_deref()
+                .is_some_and(|title| !Self::is_storage_redaction_marker(title))
+            || audit.diagnostics.iter().any(|diagnostic| {
+                !Self::is_safe_audit_identifier(&diagnostic.code)
+                    || !Self::is_storage_redaction_marker(&diagnostic.message)
+                    || diagnostic
+                        .path
+                        .as_ref()
+                        .is_some_and(|path| !Self::is_storage_redaction_marker(path.0.as_str()))
+            })
+            || audit
+                .risk_rule_ids
+                .iter()
+                .any(|rule_id| !Self::is_safe_audit_identifier(rule_id))
+        {
+            return Err(ProtocolError {
+                code: "proposal_audit_invalid".to_string(),
+                message: "proposal audit must contain only canonical metadata-only fields"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn proposal_audit_identity_matches(
+        created: &ProposalAuditRecord,
+        candidate: &ProposalAuditRecord,
+    ) -> bool {
+        created.proposal_id == candidate.proposal_id
+            && created.principal == candidate.principal
+            && created.capability == candidate.capability
+            && created.correlation_id == candidate.correlation_id
+            && created.causality_id == candidate.causality_id
+            && created.payload_summary.kind == candidate.payload_summary.kind
+            && created.payload_summary.affected_files == candidate.payload_summary.affected_files
+            && created.payload_summary.title == candidate.payload_summary.title
+            && created.payload_summary.byte_count == candidate.payload_summary.byte_count
     }
 
     fn metadata_only_storage_summary(value: &str) -> String {
@@ -1729,6 +1906,15 @@ impl InMemoryStorageRepositoryPort {
             delivery_state: ProposalObservationDeliveryState::Delivered,
             ..existing
         };
+        if self
+            .fail_next_proposal_observation_delivery_persist
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(ProtocolError {
+                code: "storage_failed".to_string(),
+                message: "injected Delivered-marker persistence failure".to_string(),
+            });
+        }
         self.persist_proposal_observation_outbox(&delivered)?;
         storage
             .protocol_proposal_observation_outbox
@@ -1840,6 +2026,7 @@ impl InMemoryStorageRepositoryPort {
                 | "proposal_observation_batch_conflict"
                 | "proposal_observation_record_conflict"
                 | "proposal_observation_outbox_corrupt"
+                | "storage_lock_poisoned"
         ) {
             ProposalObservationRetryErrorKind::Permanent
         } else {
@@ -1874,14 +2061,91 @@ impl InMemoryStorageRepositoryPort {
         Ok(left == right)
     }
 
-    fn validate_proposal_observation_batch(batch: &ProposalObservationBatch) -> ProtocolResult<()> {
-        if !Self::is_safe_proposal_observation_batch_id(&batch.batch_id)
-            || batch.schema_version == 0
+    fn validate_legacy_proposal_observation_batch(
+        batch: &ProposalObservationBatch,
+    ) -> ProtocolResult<()> {
+        if batch.schema_version != LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+            || !Self::is_safe_proposal_observation_batch_id(&batch.batch_id)
+            || batch.events.is_empty()
+            || batch.events.len() != batch.event_metadata.len()
+            || batch.events.len() != batch.proposal_audits.len()
         {
             return Err(ProtocolError {
                 code: "proposal_observation_batch_invalid".to_string(),
-                message: "proposal observation batch requires a safe id and non-zero schema"
-                    .to_string(),
+                message: "legacy proposal observation batch shape is invalid".to_string(),
+            });
+        }
+
+        let mut event_ids = HashSet::new();
+        let mut proposal_ids = HashSet::new();
+        for ((event, metadata), audit) in batch
+            .events
+            .iter()
+            .zip(&batch.event_metadata)
+            .zip(&batch.proposal_audits)
+        {
+            validate_envelope(event, EventSinkConfig::default()).map_err(|error| {
+                ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message: format!("legacy proposal observation event is invalid: {error}"),
+                }
+            })?;
+            let prepared = prepare_event_batch(
+                vec![EventSinkRequest {
+                    envelope: event.clone(),
+                }],
+                EventSinkConfig::default(),
+            )
+            .map_err(|error| ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message: format!("legacy proposal event preparation failed: {error}"),
+            })?;
+            if !Self::serialized_records_equal(event, &prepared[0])?
+                || event.event_id.0.is_nil()
+                || event.event != "proposal.created"
+                || event.severity != legion_protocol::EventSeverity::Info
+                || event.retention != legion_protocol::RetentionLabel::Audit
+                || event.redaction != legion_protocol::RedactionHint::MetadataOnly
+                || audit.proposal_id.0 == 0
+                || audit.lifecycle_state != ProposalLifecycleState::Created
+                || audit.checkpoint_rollback_projection.is_some()
+                || event.payload["proposal_id"].as_u64() != Some(audit.proposal_id.0)
+                || event.payload["lifecycle_state"].as_str() != Some("Created")
+                || event.payload["capability"].as_str() != Some(audit.capability.0.as_str())
+                || event.principal_id.as_ref() != Some(&audit.principal)
+                || event.correlation_id != audit.correlation_id
+                || event.causality_id != audit.causality_id
+                || !event_ids.insert(event.event_id)
+                || !proposal_ids.insert(audit.proposal_id)
+            {
+                return Err(ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message: "legacy proposal observation identities are invalid".to_string(),
+                });
+            }
+            Self::validate_persisted_proposal_audit(audit)?;
+            InMemoryStorage::validate_event_metadata(metadata)
+                .map_err(InMemoryStorage::protocol_error)?;
+            if !Self::serialized_records_equal(&event_metadata_record(event), metadata)? {
+                return Err(ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message: "legacy proposal event metadata does not match".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_proposal_observation_batch(batch: &ProposalObservationBatch) -> ProtocolResult<()> {
+        if !Self::is_safe_proposal_observation_batch_id(&batch.batch_id)
+            || batch.schema_version != PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+        {
+            return Err(ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message: format!(
+                    "proposal observation batch requires a safe id and schema {}",
+                    PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+                ),
             });
         }
         let item_count = batch.events.len();
@@ -1931,10 +2195,22 @@ impl InMemoryStorageRepositoryPort {
                 }
                 _ => false,
             };
+            let title_matches = match (
+                event.payload.get("title"),
+                audit.payload_summary.title.as_deref(),
+            ) {
+                (None, None) => true,
+                (Some(serde_json::Value::String(event_title)), Some(audit_title)) => {
+                    event_title == audit_title && Self::is_storage_redaction_marker(event_title)
+                }
+                _ => false,
+            };
             if !Self::serialized_records_equal(event, &prepared[0])?
                 || event.event_id.0.is_nil()
                 || event.event != "proposal.created"
-                || event.redaction == legion_protocol::RedactionHint::None
+                || event.severity != legion_protocol::EventSeverity::Info
+                || event.retention != legion_protocol::RetentionLabel::Audit
+                || event.redaction != legion_protocol::RedactionHint::MetadataOnly
                 || audit.proposal_id.0 == 0
                 || audit.lifecycle_state != ProposalLifecycleState::Created
                 || audit.principal.0.trim().is_empty()
@@ -1967,6 +2243,7 @@ impl InMemoryStorageRepositoryPort {
                 || event.payload["affected_file_count"].as_u64()
                     != Some(audit.payload_summary.affected_files.len() as u64)
                 || !byte_count_matches
+                || !title_matches
                 || event.principal_id.as_ref() != Some(&audit.principal)
                 || event.occurred_at != audit.timestamp
                 || !event_ids.insert(event.event_id)
@@ -2110,6 +2387,7 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
         &self,
         request: StorageRepositoryRequest,
     ) -> ProtocolResult<StorageRepositoryResponse> {
+        self.ensure_proposal_observation_outbox_healthy()?;
         if matches!(
             request,
             StorageRepositoryRequest::SaveProposalAuditRecord(_)
@@ -2122,12 +2400,6 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected proposal audit write failure".to_string(),
             });
         }
-        // Validate → durable write → memory, so rejected / failed records never
-        // leave an invalid blob on disk or advance in-process state first.
-        let durable_audit = match &request {
-            StorageRepositoryRequest::SaveProposalAuditRecord(record) => Some(record.clone()),
-            _ => None,
-        };
         if matches!(request, StorageRepositoryRequest::SaveEventMetadata(_))
             && self
                 .fail_next_event_metadata_write
@@ -2138,15 +2410,64 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                 message: "injected event metadata write failure".to_string(),
             });
         }
-        if let Some(record) = durable_audit.as_ref() {
-            InMemoryStorage::validate_audit_record(record)
-                .map_err(InMemoryStorage::protocol_error)?;
-            self.persist_proposal_audit(record)?;
+
+        match request {
+            StorageRepositoryRequest::SaveProposalAuditRecord(record) => {
+                let record = Self::sanitize_proposal_audit(record)?;
+                Self::validate_persisted_proposal_audit(&record)?;
+                let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+                if let Some(created) = storage
+                    .protocol_proposal_observation_outbox
+                    .values()
+                    .flat_map(|outbox| &outbox.batch.proposal_audits)
+                    .find(|created| created.proposal_id == record.proposal_id)
+                    && !Self::proposal_audit_identity_matches(created, &record)
+                {
+                    return Err(ProtocolError {
+                        code: "proposal_observation_record_conflict".to_string(),
+                        message: format!(
+                            "proposal audit {:?} conflicts with its outbox-owned identity",
+                            record.proposal_id
+                        ),
+                    });
+                }
+                // Validate → durable write → memory while holding the repository
+                // lock, so concurrent lifecycle writes cannot race the identity check.
+                self.persist_proposal_audit(&record)?;
+                storage
+                    .handle_protocol_request(StorageRepositoryRequest::SaveProposalAuditRecord(
+                        record,
+                    ))
+                    .map_err(InMemoryStorage::protocol_error)
+            }
+            StorageRepositoryRequest::SaveEventMetadata(metadata) => {
+                InMemoryStorage::validate_event_metadata(&metadata)
+                    .map_err(InMemoryStorage::protocol_error)?;
+                let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+                if let Some(event) = storage
+                    .protocol_proposal_observation_events
+                    .get(&metadata.event_id)
+                    && !Self::serialized_records_equal(&event_metadata_record(event), &metadata)?
+                {
+                    return Err(ProtocolError {
+                        code: "proposal_observation_record_conflict".to_string(),
+                        message: format!(
+                            "event metadata {:?} conflicts with its outbox-owned event",
+                            metadata.event_id
+                        ),
+                    });
+                }
+                storage
+                    .handle_protocol_request(StorageRepositoryRequest::SaveEventMetadata(metadata))
+                    .map_err(InMemoryStorage::protocol_error)
+            }
+            request => {
+                let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+                storage
+                    .handle_protocol_request(request)
+                    .map_err(InMemoryStorage::protocol_error)
+            }
         }
-        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
-        storage
-            .handle_protocol_request(request)
-            .map_err(InMemoryStorage::protocol_error)
     }
 }
 
@@ -4132,6 +4453,7 @@ mod tests {
                 .metadata("payload_kind", "TextEdit")
                 .metadata("affected_file_count", 1)
                 .metadata("payload_byte_count", 4)
+                .metadata("title", format!("proposal-{index}"))
                 .metadata("source_text", "do not persist this source")
                 .build();
             event_metadata.push(legion_observability::event_metadata_record(&event));
@@ -4162,7 +4484,7 @@ mod tests {
             events,
             event_metadata,
             proposal_audits,
-            schema_version: 1,
+            schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
         }
     }
 
@@ -4321,11 +4643,49 @@ mod tests {
         assert_eq!(recorder.events().expect("event snapshot").len(), 2);
 
         let mut divergent = batch;
+        divergent.events[0].payload["title"] = json!("different");
         divergent.proposal_audits[0].payload_summary.title = Some("different".to_string());
         let error = port
             .store_proposal_observation_batch(divergent)
             .expect_err("same batch id with different content must conflict");
         assert_eq!(error.code, "proposal_observation_batch_conflict");
+    }
+
+    #[test]
+    fn proposal_observation_sink_ack_with_delivery_persist_failure_retries_idempotently() {
+        let recorder = InMemoryEventSink::new();
+        let port =
+            InMemoryStorageRepositoryPort::with_event_sink(SharedEventSink::new(recorder.clone()));
+        port.store_proposal_observation_batch(proposal_observation_batch("ack-persist", 1))
+            .expect("store pending batch");
+        port.fail_next_proposal_observation_delivery_persist_for_test();
+
+        let error = port
+            .deliver_proposal_observation_batch("ack-persist")
+            .expect_err("delivery marker failure leaves batch pending");
+        assert_eq!(error.code, "storage_failed");
+        assert_eq!(recorder.events().expect("sink events").len(), 1);
+        assert_eq!(
+            port.pending_proposal_observation_batches()
+                .expect("pending after marker failure")
+                .len(),
+            1
+        );
+
+        let report = port
+            .retry_pending_proposal_observations()
+            .expect("retry acknowledged event idempotently");
+        assert_eq!(report.delivered_count, 1);
+        assert_eq!(report.pending_count, 0);
+        assert_eq!(
+            recorder.events().expect("deduplicated sink events").len(),
+            1
+        );
+        assert!(
+            port.pending_proposal_observation_batches()
+                .expect("no pending batches")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4577,11 +4937,139 @@ mod tests {
     }
 
     #[test]
+    fn proposal_observation_loader_rejects_well_formed_invalid_record_without_partial_load() {
+        let base_dir =
+            temp_storage_path("proposal-observation-invalid-json").with_extension("outbox-dir");
+        {
+            let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+            port.store_proposal_observation_batch(proposal_observation_batch("aaa-valid", 1))
+                .expect("persist valid outbox record");
+        }
+        let outbox_dir = base_dir.join("proposal-observation-outbox");
+        let mut invalid: ProposalObservationOutboxRecord = serde_json::from_slice(
+            &fs::read(outbox_dir.join("aaa-valid.json")).expect("read valid record"),
+        )
+        .expect("decode valid record");
+        invalid.batch.batch_id = "zzz-invalid".to_string();
+        invalid.batch.events[0].retention = RetentionLabel::Hot;
+        fs::write(
+            outbox_dir.join("zzz-invalid.json"),
+            serde_json::to_vec_pretty(&invalid).expect("serialize invalid record"),
+        )
+        .expect("write structurally invalid record");
+
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert_eq!(
+            reopened
+                .proposal_observation_startup_error()
+                .expect("recorded startup error")
+                .code,
+            "proposal_observation_outbox_corrupt"
+        );
+        let counts = reopened
+            .with_storage(|storage| {
+                (
+                    storage.protocol_proposal_observation_events.len(),
+                    storage.protocol_event_metadata.len(),
+                    storage.protocol_proposal_audit.len(),
+                    storage.protocol_proposal_observation_outbox.len(),
+                )
+            })
+            .expect("storage counts");
+        assert_eq!(counts, (0, 0, 0, 0));
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_observation_loader_sanitizes_legacy_v1_without_mutating_event_identity() {
+        let base_dir =
+            temp_storage_path("proposal-observation-legacy-v1").with_extension("outbox-dir");
+        let mut legacy = proposal_observation_batch("legacy-v1", 1);
+        legacy.schema_version = LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION;
+        legacy.events[0].payload["title"] = json!("legacy raw title");
+        legacy.proposal_audits[0].payload_summary.title = Some("legacy raw title".to_string());
+        legacy.events = prepare_event_batch(
+            legacy
+                .events
+                .into_iter()
+                .map(|envelope| EventSinkRequest { envelope })
+                .collect(),
+            EventSinkConfig::default(),
+        )
+        .expect("prepare legacy envelope");
+        // Schema 1's redaction order collapsed these structural payload fields,
+        // and its producer stamped the event independently of the audit.
+        legacy.events[0].payload["payload_kind"] = json!("<redacted>");
+        legacy.events[0].payload["payload_byte_count"] = json!("<redacted>");
+        legacy.events[0].occurred_at = legion_protocol::TimestampMillis(
+            legacy.proposal_audits[0].timestamp.0.saturating_add(1),
+        );
+        legacy.event_metadata[0] = legion_observability::event_metadata_record(&legacy.events[0]);
+        let original_event = serde_json::to_value(&legacy.events[0]).expect("serialize event");
+        let original_metadata =
+            serde_json::to_value(&legacy.event_metadata[0]).expect("serialize metadata");
+        let record = ProposalObservationOutboxRecord {
+            batch: legacy,
+            delivery_state: ProposalObservationDeliveryState::Pending,
+        };
+        let outbox_dir = base_dir.join("proposal-observation-outbox");
+        fs::create_dir_all(&outbox_dir).expect("create outbox directory");
+        fs::write(
+            outbox_dir.join("legacy-v1.json"),
+            serde_json::to_vec_pretty(&record).expect("serialize legacy record"),
+        )
+        .expect("write legacy record");
+
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert!(reopened.proposal_observation_startup_error().is_none());
+        let pending = reopened
+            .pending_proposal_observation_batches()
+            .expect("read migrated legacy record");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].batch.schema_version,
+            LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+        );
+        assert_eq!(
+            serde_json::to_value(&pending[0].batch.events[0]).expect("serialize loaded event"),
+            original_event
+        );
+        assert_eq!(
+            serde_json::to_value(&pending[0].batch.event_metadata[0])
+                .expect("serialize loaded metadata"),
+            original_metadata
+        );
+        assert!(
+            pending[0].batch.proposal_audits[0]
+                .payload_summary
+                .title
+                .as_deref()
+                .is_some_and(InMemoryStorageRepositoryPort::is_storage_redaction_marker)
+        );
+
+        let disk = fs::read_to_string(outbox_dir.join("legacy-v1.json"))
+            .expect("read rewritten legacy record");
+        assert!(!disk.contains("legacy raw title"));
+        let rewritten: ProposalObservationOutboxRecord =
+            serde_json::from_str(&disk).expect("decode rewritten legacy record");
+        assert_eq!(
+            rewritten.batch.schema_version,
+            LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+        );
+        assert_eq!(
+            serde_json::to_value(&rewritten.batch.events[0]).expect("serialize rewritten event"),
+            original_event
+        );
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
     fn proposal_observation_audit_is_sanitized_before_memory_and_disk_commit() {
         let base_dir =
             temp_storage_path("proposal-observation-sanitize").with_extension("outbox-dir");
         let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
         let mut batch = proposal_observation_batch("sanitize-audit", 1);
+        batch.events[0].payload["title"] = json!("raw proposal title");
         batch.proposal_audits[0].payload_summary.title = Some("raw proposal title".to_string());
         batch.proposal_audits[0].risk_rule_ids = vec!["risk.safe-1".to_string()];
         batch.proposal_audits[0].diagnostics = vec![ProtocolDiagnostic {
@@ -4644,6 +5132,128 @@ mod tests {
                 .code,
             "proposal_observation_batch_invalid"
         );
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn outbox_owned_metadata_and_audit_identity_cannot_be_overwritten() {
+        let base_dir = temp_storage_path("proposal-observation-owned").with_extension("outbox-dir");
+        let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        let stored = port
+            .store_proposal_observation_batch(proposal_observation_batch("owned", 1))
+            .expect("store outbox batch");
+        let expected_metadata = stored.batch.event_metadata[0].clone();
+        let created_audit = stored.batch.proposal_audits[0].clone();
+
+        port.handle(StorageRepositoryRequest::SaveEventMetadata(
+            expected_metadata.clone(),
+        ))
+        .expect("byte-identical metadata retry");
+        let mut conflicting_metadata = expected_metadata.clone();
+        conflicting_metadata.event = "proposal.applied".to_string();
+        assert_eq!(
+            port.handle(StorageRepositoryRequest::SaveEventMetadata(
+                conflicting_metadata
+            ))
+            .expect_err("outbox-owned metadata cannot diverge")
+            .code,
+            "proposal_observation_record_conflict"
+        );
+
+        let mut applied = created_audit.clone();
+        applied.lifecycle_state = ProposalLifecycleState::Applied;
+        applied.timestamp = legion_protocol::TimestampMillis(applied.timestamp.0.saturating_add(1));
+        applied.diagnostics = vec![ProtocolDiagnostic {
+            code: "proposal.applied".to_string(),
+            message: "raw lifecycle diagnostic".to_string(),
+            severity: ProtocolDiagnosticSeverity::Info,
+            path: Some(CanonicalPath("C:/private/source.rs".to_string())),
+            range: None,
+        }];
+        port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(
+            applied.clone(),
+        ))
+        .expect("identity-preserving lifecycle audit");
+
+        let mut raw_title_overwrite = applied.clone();
+        raw_title_overwrite.payload_summary.title = Some("different raw title".to_string());
+        assert_eq!(
+            port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(
+                raw_title_overwrite
+            ))
+            .expect_err("bound title cannot be replaced")
+            .code,
+            "proposal_observation_record_conflict"
+        );
+        let mut principal_overwrite = applied;
+        principal_overwrite.principal = PrincipalId("different-principal".to_string());
+        assert_eq!(
+            port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(
+                principal_overwrite
+            ))
+            .expect_err("bound principal cannot be replaced")
+            .code,
+            "proposal_observation_record_conflict"
+        );
+
+        match port
+            .handle(StorageRepositoryRequest::ReadEventMetadata(
+                expected_metadata.event_id,
+            ))
+            .expect("read owned metadata")
+        {
+            StorageRepositoryResponse::EventMetadata(Some(actual)) => {
+                assert!(
+                    InMemoryStorageRepositoryPort::serialized_records_equal(
+                        &actual,
+                        &expected_metadata
+                    )
+                    .expect("compare metadata")
+                );
+            }
+            other => panic!("unexpected metadata response: {other:?}"),
+        }
+        match port
+            .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                created_audit.proposal_id,
+            ))
+            .expect("read lifecycle audit")
+        {
+            StorageRepositoryResponse::ProposalAuditRecord(Some(actual)) => {
+                assert_eq!(actual.lifecycle_state, ProposalLifecycleState::Applied);
+                assert!(InMemoryStorageRepositoryPort::is_storage_redaction_marker(
+                    &actual.diagnostics[0].message
+                ));
+                assert!(actual.diagnostics[0].path.as_ref().is_some_and(|path| {
+                    InMemoryStorageRepositoryPort::is_storage_redaction_marker(&path.0)
+                }));
+            }
+            other => panic!("unexpected audit response: {other:?}"),
+        }
+        drop(port);
+
+        let audit_disk = fs::read_to_string(
+            base_dir
+                .join("proposal-audit")
+                .join(format!("{}.json", created_audit.proposal_id.0)),
+        )
+        .expect("read persisted lifecycle audit");
+        assert!(!audit_disk.contains("raw lifecycle diagnostic"));
+        assert!(!audit_disk.contains("C:/private/source.rs"));
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert!(reopened.proposal_observation_startup_error().is_none());
+        assert!(matches!(
+            reopened
+                .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                    created_audit.proposal_id
+                ))
+                .expect("read sanitized audit after restart"),
+            StorageRepositoryResponse::ProposalAuditRecord(Some(record))
+                if record.lifecycle_state == ProposalLifecycleState::Applied
+                    && InMemoryStorageRepositoryPort::is_storage_redaction_marker(
+                        &record.diagnostics[0].message
+                    )
+        ));
         let _ = fs::remove_dir_all(base_dir);
     }
 
@@ -4744,6 +5354,12 @@ mod tests {
             "affected_file_count",
             "byte_count",
             "byte_count_type",
+            "title_value",
+            "title_missing_event",
+            "title_missing_audit",
+            "retention",
+            "severity",
+            "schema",
             "lifecycle",
         ] {
             let port = InMemoryStorageRepositoryPort::new();
@@ -4782,6 +5398,18 @@ mod tests {
                     batch.proposal_audits[0].payload_summary.byte_count = None;
                     batch.events[0].payload["payload_byte_count"] = json!("4");
                 }
+                "title_value" => batch.events[0].payload["title"] = json!("different title"),
+                "title_missing_event" => {
+                    batch.events[0]
+                        .payload
+                        .as_object_mut()
+                        .expect("object payload")
+                        .remove("title");
+                }
+                "title_missing_audit" => batch.proposal_audits[0].payload_summary.title = None,
+                "retention" => batch.events[0].retention = RetentionLabel::Hot,
+                "severity" => batch.events[0].severity = legion_protocol::EventSeverity::Warning,
+                "schema" => batch.schema_version = LEGACY_PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
                 "lifecycle" => batch.events[0].payload["lifecycle_state"] = json!("Applied"),
                 _ => unreachable!(),
             }
@@ -5191,6 +5819,64 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn generic_proposal_audit_save_sanitizes_raw_fields_before_restart() {
+        let base_dir = temp_storage_path("generic-proposal-audit-sanitize")
+            .with_extension("proposal-audit-dir");
+        let mut audit = audit_record();
+        audit.payload_summary.title = Some("raw generic audit title".to_string());
+        audit.diagnostics = vec![ProtocolDiagnostic {
+            code: "proposal.generic".to_string(),
+            message: "raw generic diagnostic".to_string(),
+            severity: ProtocolDiagnosticSeverity::Warning,
+            path: Some(CanonicalPath("C:/private/generic.rs".to_string())),
+            range: None,
+        }];
+        {
+            let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+            port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(
+                audit.clone(),
+            ))
+            .expect("save sanitized generic audit");
+            let disk = fs::read_to_string(
+                base_dir
+                    .join("proposal-audit")
+                    .join(format!("{}.json", audit.proposal_id.0)),
+            )
+            .expect("read generic audit disk record");
+            assert!(!disk.contains("raw generic audit title"));
+            assert!(!disk.contains("raw generic diagnostic"));
+            assert!(!disk.contains("C:/private/generic.rs"));
+        }
+
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert!(reopened.proposal_observation_startup_error().is_none());
+        match reopened
+            .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                audit.proposal_id,
+            ))
+            .expect("read generic audit after restart")
+        {
+            StorageRepositoryResponse::ProposalAuditRecord(Some(record)) => {
+                assert!(
+                    record
+                        .payload_summary
+                        .title
+                        .as_deref()
+                        .is_some_and(InMemoryStorageRepositoryPort::is_storage_redaction_marker)
+                );
+                assert!(InMemoryStorageRepositoryPort::is_storage_redaction_marker(
+                    &record.diagnostics[0].message
+                ));
+                assert!(record.diagnostics[0].path.as_ref().is_some_and(|path| {
+                    InMemoryStorageRepositoryPort::is_storage_redaction_marker(&path.0)
+                }));
+            }
+            other => panic!("unexpected proposal audit response: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(base_dir);
     }
 
     #[test]

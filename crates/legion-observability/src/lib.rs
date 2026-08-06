@@ -61,8 +61,8 @@ pub enum ObservabilityError {
     /// Event sequence is missing or zero.
     #[error("event envelope sequence must be non-zero")]
     InvalidSequence,
-    /// Proposal lifecycle transition referenced a different proposal than the audit subject.
-    #[error("proposal audit record requires transition.proposal_id == proposal.proposal_id")]
+    /// Proposal lifecycle transition identity did not match the audit subject.
+    #[error("proposal audit record requires transition identity == proposal identity")]
     MismatchedProposalTransition,
     /// Event sink storage lock was poisoned.
     #[error("event sink storage lock poisoned")]
@@ -550,6 +550,7 @@ pub struct EventEnvelopeBuilder {
     correlation_id: CorrelationId,
     principal_id: Option<PrincipalId>,
     sequence: EventSequence,
+    occurred_at: TimestampMillis,
     payload: Map<String, Value>,
 }
 
@@ -572,6 +573,7 @@ impl EventEnvelopeBuilder {
             correlation_id: CorrelationId(1),
             principal_id: None,
             sequence: EventSequence(1),
+            occurred_at: TimestampMillis::now(),
             payload,
         }
     }
@@ -639,6 +641,12 @@ impl EventEnvelopeBuilder {
         self
     }
 
+    /// Bind the envelope timestamp to the operation or transition it records.
+    pub fn occurred_at(mut self, occurred_at: TimestampMillis) -> Self {
+        self.occurred_at = occurred_at;
+        self
+    }
+
     /// Add metadata payload key.
     pub fn metadata(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.payload.insert(key.into(), value.into());
@@ -660,7 +668,7 @@ impl EventEnvelopeBuilder {
             workspace_id: self.workspace_id,
             sequence: self.sequence,
             principal_id: self.principal_id,
-            occurred_at: TimestampMillis::now(),
+            occurred_at: self.occurred_at,
             payload: Value::Object(self.payload),
         }
     }
@@ -689,12 +697,7 @@ pub fn proposal_audit_record(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
 ) -> Result<ProposalAuditRecord, ObservabilityError> {
-    // Fail closed on a mismatched proposal/transition pairing: emitting a record
-    // that stamps `proposal.proposal_id` onto a different proposal's lifecycle
-    // data would silently corrupt the audit trail.
-    if transition.proposal_id != proposal.proposal_id {
-        return Err(ObservabilityError::MismatchedProposalTransition);
-    }
+    validate_proposal_transition_identity(proposal, transition)?;
     Ok(ProposalAuditRecord {
         proposal_id: proposal.proposal_id,
         lifecycle_state: transition.lifecycle_state,
@@ -710,6 +713,23 @@ pub fn proposal_audit_record(
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     })
+}
+
+fn validate_proposal_transition_identity(
+    proposal: &WorkspaceProposal,
+    transition: &ProposalLifecycleTransition,
+) -> Result<(), ObservabilityError> {
+    // Fail closed before building either side of an observation pair. Otherwise
+    // an event and audit can each be internally valid while describing different
+    // principals, capabilities, correlations, or proposals.
+    if transition.proposal_id != proposal.proposal_id
+        || transition.principal != proposal.principal
+        || transition.capability != proposal.capability
+        || transition.correlation_id != proposal.correlation_id
+    {
+        return Err(ObservabilityError::MismatchedProposalTransition);
+    }
+    Ok(())
 }
 
 /// Build an envelope-ready metadata DTO proving that proposal audit storage completed.
@@ -1239,20 +1259,13 @@ pub fn watcher_recovery_event(
 /// Build a proposal-created lifecycle event.
 pub fn proposal_created_event(
     proposal: &WorkspaceProposal,
-    causality_id: CausalityId,
+    transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
 ) -> Result<EventEnvelope, ObservabilityError> {
-    proposal_lifecycle_event(
-        "proposal.created",
-        proposal,
-        ProposalLifecycleState::Created,
-        proposal.correlation_id,
-        causality_id,
-        sequence,
-        EventSeverity::Info,
-        None,
-        &[],
-    )
+    if transition.lifecycle_state != ProposalLifecycleState::Created {
+        return Err(ObservabilityError::MismatchedProposalTransition);
+    }
+    proposal_transition_event("proposal.created", proposal, transition, sequence, None)
 }
 
 /// Build a proposal-validated lifecycle event.
@@ -1561,6 +1574,7 @@ fn proposal_transition_event(
     sequence: EventSequence,
     reason: Option<String>,
 ) -> Result<EventEnvelope, ObservabilityError> {
+    validate_proposal_transition_identity(proposal, transition)?;
     let severity = match transition.lifecycle_state {
         ProposalLifecycleState::Failed => EventSeverity::Error,
         ProposalLifecycleState::Denied
@@ -1577,6 +1591,7 @@ fn proposal_transition_event(
         transition.correlation_id,
         transition.causality_id,
         sequence,
+        transition.timestamp,
         severity,
         reason.as_deref(),
         &transition.diagnostics,
@@ -1591,6 +1606,7 @@ fn proposal_lifecycle_event(
     correlation_id: CorrelationId,
     causality_id: CausalityId,
     sequence: EventSequence,
+    occurred_at: TimestampMillis,
     severity: EventSeverity,
     reason: Option<&str>,
     diagnostics: &[ProtocolDiagnostic],
@@ -1600,6 +1616,7 @@ fn proposal_lifecycle_event(
     let mut builder = EventEnvelopeBuilder::new(event, causality_id)
         .correlation_id(correlation_id)
         .sequence(sequence)
+        .occurred_at(occurred_at)
         .principal_id(proposal.principal.clone())
         .severity(severity)
         .retention(RetentionLabel::Audit)
@@ -2663,8 +2680,8 @@ mod tests {
     #[test]
     fn proposal_lifecycle_helpers_are_metadata_only_and_orderable() {
         let proposal = save_proposal();
-        let created_causality = CausalityId(Uuid::now_v7());
-        let created = proposal_created_event(&proposal, created_causality, EventSequence(1))
+        let created_transition = transition(ProposalLifecycleState::Created);
+        let created = proposal_created_event(&proposal, &created_transition, EventSequence(1))
             .expect("valid ids");
         let validated_transition = transition(ProposalLifecycleState::Validated);
         let validated =
@@ -2699,6 +2716,23 @@ mod tests {
             assert_eq!(event.redaction, RedactionHint::MetadataOnly);
             assert_ne!(event.payload.to_string(), "/secret/source.rs");
         }
+        assert_eq!(events[0].occurred_at, created_transition.timestamp);
+    }
+
+    #[test]
+    fn proposal_created_event_and_audit_share_the_exact_transition_timestamp() {
+        let proposal = save_proposal();
+        let mut created = transition(ProposalLifecycleState::Created);
+        created.timestamp = TimestampMillis(1_234_567_890);
+
+        let event =
+            proposal_created_event(&proposal, &created, EventSequence(1)).expect("created event");
+        let audit = proposal_audit_record(&proposal, &created).expect("created audit");
+
+        assert_eq!(event.occurred_at, created.timestamp);
+        assert_eq!(event.occurred_at, audit.timestamp);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.severity, EventSeverity::Info);
     }
 
     #[test]
@@ -3226,6 +3260,33 @@ mod tests {
     }
 
     #[test]
+    fn proposal_created_producer_rejects_every_mismatched_transition_identity() {
+        for case in ["proposal", "principal", "capability", "correlation"] {
+            let proposal = save_proposal();
+            let mut created = transition(ProposalLifecycleState::Created);
+            match case {
+                "proposal" => created.proposal_id = legion_protocol::ProposalId(9999),
+                "principal" => created.principal = PrincipalId("different-principal".to_string()),
+                "capability" => {
+                    created.capability = CapabilityId("different.capability".to_string())
+                }
+                "correlation" => created.correlation_id = CorrelationId(9999),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                proposal_created_event(&proposal, &created, EventSequence(1)).unwrap_err(),
+                ObservabilityError::MismatchedProposalTransition,
+                "case={case}"
+            );
+            assert_eq!(
+                proposal_audit_record(&proposal, &created).unwrap_err(),
+                ObservabilityError::MismatchedProposalTransition,
+                "case={case}"
+            );
+        }
+    }
+
+    #[test]
     fn envelope_helpers_reject_invalid_ids_instead_of_panicking() {
         // Zero correlation id.
         assert_eq!(
@@ -3271,14 +3332,15 @@ mod tests {
 
         // Lifecycle helpers validate caller-supplied ids too.
         let proposal = save_proposal();
-        let transition = transition(ProposalLifecycleState::Applied);
+        let applied_transition = transition(ProposalLifecycleState::Applied);
+        let mut invalid_created = transition(ProposalLifecycleState::Created);
+        invalid_created.causality_id = CausalityId(Uuid::nil());
         assert_eq!(
-            proposal_created_event(&proposal, CausalityId(Uuid::nil()), EventSequence(1))
-                .unwrap_err(),
+            proposal_created_event(&proposal, &invalid_created, EventSequence(1)).unwrap_err(),
             ObservabilityError::InvalidCausalityId
         );
         assert_eq!(
-            proposal_applied_event(&proposal, &transition, EventSequence(0)).unwrap_err(),
+            proposal_applied_event(&proposal, &applied_transition, EventSequence(0)).unwrap_err(),
             ObservabilityError::InvalidSequence
         );
     }
