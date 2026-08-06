@@ -210,6 +210,8 @@ use legion_storage::{
     load_provider_api_key,
     plan::PlanRevisionLedger,
 };
+#[cfg(feature = "ai")]
+use legion_storage::{PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION, ProposalObservationBatch};
 use legion_terminal::{
     TerminalRuntime, TerminalRuntimeConfig, TerminalRuntimeError, TerminalRuntimeLaunchRequest,
     TerminalRuntimeOutputPollRequest,
@@ -13582,7 +13584,7 @@ impl SaveWorkflowService {
         Ok(match response {
             ProposalResponse::Created(transition) => vec![proposal_created_event(
                 proposal,
-                transition.causality_id,
+                transition,
                 proposal_coordinator.next_sequence(),
             )?],
             ProposalResponse::Validated(transition) => vec![proposal_validated_event(
@@ -21253,13 +21255,20 @@ impl AppComposition {
         &mut self,
         proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     ) -> Result<Vec<legion_protocol::AssistedAiEditProposalOutput>, AppCompositionError> {
+        if proposals.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let snapshot = self
             .proposal_coordinator
             .proposal_lifecycle_recovery_snapshot();
-        let registration = (|| {
+        let mut staging_coordinator = AppProposalCoordinator::new(SharedEventSink::default());
+        staging_coordinator.recover_lifecycle_from_snapshot(snapshot);
+
+        let staged = (|| {
             let mut staged = Vec::with_capacity(proposals.len());
             for mut proposal_output in proposals {
-                let proposal_id = self.proposal_coordinator.next_available_id();
+                let proposal_id = staging_coordinator.next_available_id();
                 proposal_output.proposal_id = proposal_id;
                 let proposal = WorkspaceProposal {
                     proposal_id,
@@ -21272,64 +21281,129 @@ impl AppComposition {
                     expires_at: proposal_output.expires_at,
                     created_at: proposal_output.created_at,
                 };
-                staged.push((proposal_output, proposal));
-            }
-
-            // Run the exact lifecycle observer against isolated coordinator and
-            // storage instances before the real batch emits or persists anything.
-            // A protocol-invalid later proposal therefore cannot leak earlier
-            // Created events, metadata, or audit records.
-            let preflight_sink = SharedEventSink::default();
-            let mut preflight_coordinator = AppProposalCoordinator::new(preflight_sink.clone());
-            let preflight_storage = InMemoryStorageRepositoryPort::with_event_sink(preflight_sink);
-            for (_, proposal) in &staged {
-                preflight_coordinator.register_lifecycle_context(
+                staging_coordinator.register_lifecycle_context(
                     proposal.proposal_id,
-                    EventContext::new(proposal.correlation_id),
+                    EventContext {
+                        correlation_id: proposal_output.correlation_id,
+                        causality_id: proposal_output.causality_id,
+                    },
                 );
-                let response = preflight_coordinator.created_response(proposal);
-                if !matches!(response, ProposalResponse::Created(_)) {
-                    return Err(AppCompositionError::AiRuntime(format!(
-                        "delegated proposal registration preflight was rejected: {response:?}"
-                    )));
-                }
-                if let Err(response) = SaveWorkflowService::observe_proposal_response(
-                    &mut preflight_coordinator,
-                    &preflight_storage,
-                    proposal,
-                    &response,
-                    None,
-                ) {
-                    return Err(AppCompositionError::AiRuntime(format!(
-                        "delegated proposal observation preflight was rejected: {response:?}"
-                    )));
-                }
-            }
-
-            let mut registered = Vec::with_capacity(staged.len());
-            for (proposal_output, proposal) in staged {
-                match self.register_proposal_lifecycle(&proposal)? {
-                    ProposalResponse::Created(_) => registered.push(proposal_output),
+                let response = staging_coordinator.created_response(&proposal);
+                let transition = match &response {
+                    ProposalResponse::Created(transition) => transition,
                     response => {
                         return Err(AppCompositionError::AiRuntime(format!(
                             "delegated proposal registration was rejected: {response:?}"
                         )));
                     }
-                }
+                };
+                let events = SaveWorkflowService::events_for_response(
+                    &mut staging_coordinator,
+                    &proposal,
+                    &response,
+                )
+                .map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "delegated proposal Created event was rejected: {error}"
+                    ))
+                })?;
+                let [event] = events.as_slice() else {
+                    return Err(AppCompositionError::AiRuntime(format!(
+                        "delegated proposal registration expected one Created event, got {}",
+                        events.len()
+                    )));
+                };
+                let metadata = event_metadata_record(event);
+                let audit = proposal_audit_record(&proposal, transition).map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "delegated proposal Created audit was rejected: {error}"
+                    ))
+                })?;
+                staged.push((proposal_output, event.clone(), metadata, audit));
             }
-            Ok(registered)
+
+            Ok::<_, AppCompositionError>(staged)
         })();
 
-        match registration {
-            Ok(registered) => Ok(registered),
+        let staged = match staged {
+            Ok(staged) => staged,
             Err(error) => {
-                self.proposal_coordinator
-                    .recover_lifecycle_from_snapshot(snapshot);
                 self.delegate_workflow
                     .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                Err(error)
+                return Err(error);
             }
+        };
+
+        use sha2::{Digest, Sha256};
+        let mut batch_id_hasher = Sha256::new();
+        batch_id_hasher.update(b"delegated-proposal-created-v2\0");
+        for (proposal, _, _, _) in &staged {
+            batch_id_hasher.update(proposal.output_id.as_bytes());
+            batch_id_hasher.update(b"\0");
+            batch_id_hasher.update(proposal.request_id.as_bytes());
+            batch_id_hasher.update(b"\0");
+            batch_id_hasher.update(proposal.proposal_id.0.to_le_bytes());
+            batch_id_hasher.update(proposal.correlation_id.0.to_le_bytes());
+            batch_id_hasher.update(proposal.causality_id.0.as_bytes());
         }
+        let digest = hex::encode(batch_id_hasher.finalize());
+        let first_proposal_id = staged
+            .first()
+            .map(|(proposal, _, _, _)| proposal.proposal_id.0)
+            .unwrap_or(0);
+        let last_proposal_id = staged
+            .last()
+            .map(|(proposal, _, _, _)| proposal.proposal_id.0)
+            .unwrap_or(0);
+        let batch_id = format!(
+            "delegated-created-v2-{first_proposal_id}-{last_proposal_id}-{}-{}",
+            staged.len(),
+            &digest[..16]
+        );
+        let batch = ProposalObservationBatch {
+            batch_id: batch_id.clone(),
+            events: staged
+                .iter()
+                .map(|(_, event, _, _)| event.clone())
+                .collect(),
+            event_metadata: staged
+                .iter()
+                .map(|(_, _, metadata, _)| metadata.clone())
+                .collect(),
+            proposal_audits: staged
+                .iter()
+                .map(|(_, _, _, audit)| audit.clone())
+                .collect(),
+            schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
+        };
+
+        if let Err(error) = self.storage.store_proposal_observation_batch(batch) {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+            return Err(AppCompositionError::Protocol(error));
+        }
+
+        // The durable Pending record is authoritative. Publish the staged
+        // lifecycle state only after that commit; delivery failure is retryable
+        // and must not roll back the now-registered proposals.
+        let staged_snapshot = staging_coordinator.proposal_lifecycle_recovery_snapshot();
+        self.proposal_coordinator
+            .recover_lifecycle_from_snapshot(staged_snapshot);
+        let _ = self.storage.deliver_proposal_observation_batch(&batch_id);
+
+        Ok(staged
+            .into_iter()
+            .map(|(proposal, _, _, _)| proposal)
+            .collect())
+    }
+
+    /// Retry proposal-created event batches that were durably registered but
+    /// whose atomic event-sink delivery has not yet been acknowledged.
+    pub fn retry_pending_proposal_observations(&self) -> Result<usize, AppCompositionError> {
+        self.storage
+            .retry_pending_proposal_observations()
+            .map(|report| report.delivered_count)
+            .map_err(AppCompositionError::Protocol)
     }
 
     /// Run one delegated task synchronously for headless callers and tests.
@@ -33084,6 +33158,11 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(feature = "ai")]
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(feature = "ai")]
@@ -34073,64 +34152,107 @@ mod tests {
     }
 
     #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_proposal_batch_rolls_back_when_any_registration_is_rejected() {
-        fn output_from(
-            proposal: WorkspaceProposal,
-            suffix: &str,
-        ) -> legion_protocol::AssistedAiEditProposalOutput {
-            legion_protocol::AssistedAiEditProposalOutput {
-                output_id: format!("delegated-output-{suffix}"),
-                request_id: format!("delegated-request-{suffix}"),
-                provider_id: "provider:test".to_string(),
-                proposal_id: ProposalId(0),
-                principal: proposal.principal,
-                capability: proposal.capability,
-                correlation_id: proposal.correlation_id,
-                causality_id: CausalityId(uuid::Uuid::now_v7()),
-                payload: proposal.payload,
-                preconditions: proposal.preconditions,
-                preview: proposal.preview,
-                expires_at: proposal.expires_at,
-                created_at: proposal.created_at,
-                context_manifest: trust_reference(
-                    "delegated-context-test",
-                    legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-                ),
-                approval_checklist: trust_reference(
-                    "delegated-approval-test",
-                    legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
-                ),
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }
+    fn delegated_output_from(
+        proposal: WorkspaceProposal,
+        suffix: &str,
+    ) -> legion_protocol::AssistedAiEditProposalOutput {
+        legion_protocol::AssistedAiEditProposalOutput {
+            output_id: format!("delegated-output-{suffix}"),
+            request_id: format!("delegated-request-{suffix}"),
+            provider_id: "provider:test".to_string(),
+            proposal_id: ProposalId(0),
+            principal: proposal.principal,
+            capability: proposal.capability,
+            correlation_id: proposal.correlation_id,
+            causality_id: CausalityId(uuid::Uuid::now_v7()),
+            payload: proposal.payload,
+            preconditions: proposal.preconditions,
+            preview: proposal.preview,
+            expires_at: proposal.expires_at,
+            created_at: proposal.created_at,
+            context_manifest: trust_reference(
+                "delegated-context-test",
+                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            approval_checklist: trust_reference(
+                "delegated-approval-test",
+                legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    #[derive(Clone)]
+    struct FailSecondAtomicBatchSink {
+        recorder: legion_observability::InMemoryEventSink,
+        fail_second: Arc<AtomicBool>,
+        legacy_emit_calls: Arc<AtomicUsize>,
+        batch_emit_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "ai")]
+    impl EventSinkPort for FailSecondAtomicBatchSink {
+        fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
+            self.legacy_emit_calls.fetch_add(1, Ordering::SeqCst);
+            self.recorder.emit(request)
         }
 
+        fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+            self.batch_emit_calls.fetch_add(1, Ordering::SeqCst);
+            for (index, request) in requests.iter().enumerate() {
+                legion_observability::validate_envelope(
+                    &request.envelope,
+                    legion_observability::EventSinkConfig::default(),
+                )
+                .map_err(|error| ProtocolError {
+                    code: "test_sink_validation_failed".to_string(),
+                    message: error.to_string(),
+                })?;
+                if index == 1 && self.fail_second.load(Ordering::SeqCst) {
+                    return Err(ProtocolError {
+                        code: "test_sink_validation_failed".to_string(),
+                        message: "injected validation failure at second batch item".to_string(),
+                    });
+                }
+            }
+            self.recorder.emit_batch(requests)
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_proposal_preflight_failure_keeps_ledger_and_storage_unchanged() {
         let event_sink = legion_observability::InMemoryEventSink::new();
         let mut app = AppComposition::with_event_sink(SharedEventSink::new(event_sink.clone()));
-        let mut rejected = output_from(save_proposal(ProposalId(101)), "second");
+        let mut rejected = delegated_output_from(save_proposal(ProposalId(101)), "second");
         rejected.correlation_id = CorrelationId(0);
+
         let error = app
             .register_delegated_task_proposals(vec![
-                output_from(save_proposal(ProposalId(100)), "first"),
+                delegated_output_from(save_proposal(ProposalId(100)), "first"),
                 rejected,
             ])
-            .expect_err("the invalid second proposal must reject the full batch");
-
-        assert!(error.to_string().contains("preflight was rejected"));
+            .expect_err("invalid second proposal rejects the staged batch");
+        assert!(matches!(error, AppCompositionError::AiRuntime(_)));
         assert_eq!(
             app.delegate_workflow.runtime_activation,
             DelegatedTaskRuntimeActivationState::Failed
         );
-        let ledger = app
-            .proposal_coordinator
-            .proposal_ledger_projection(TimestampMillis(99));
-        assert!(ledger.rows.is_empty());
         assert!(
-            event_sink.events().expect("event snapshot").is_empty(),
-            "preflight rejection must not emit an earlier Created event"
+            app.proposal_coordinator
+                .proposal_ledger_projection(TimestampMillis(99))
+                .rows
+                .is_empty()
         );
-        assert!(app.proposal_coordinator.proposal(ProposalId(1)).is_none());
+        assert!(event_sink.events().expect("event snapshot").is_empty());
+        assert!(
+            app.storage
+                .pending_proposal_observation_batches()
+                .expect("pending batches")
+                .is_empty()
+        );
         for proposal_id in [ProposalId(1), ProposalId(2)] {
             assert!(matches!(
                 app.storage
@@ -34143,12 +34265,193 @@ mod tests {
         }
 
         let registered = app
-            .register_delegated_task_proposals(vec![output_from(
+            .register_delegated_task_proposals(vec![delegated_output_from(
+                save_proposal(ProposalId(102)),
+                "retry",
+            )])
+            .expect("valid retry after staged rollback");
+        assert_eq!(registered[0].proposal_id, ProposalId(1));
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_proposal_storage_failure_keeps_ledger_and_ids_unchanged() {
+        let event_sink = legion_observability::InMemoryEventSink::new();
+        let mut app = AppComposition::with_event_sink(SharedEventSink::new(event_sink.clone()));
+        app.storage
+            .fail_proposal_observation_batch_at_item_for_test(1);
+        let error = app
+            .register_delegated_task_proposals(vec![
+                delegated_output_from(save_proposal(ProposalId(100)), "first"),
+                delegated_output_from(save_proposal(ProposalId(101)), "second"),
+            ])
+            .expect_err("the injected second-item storage failure rejects the full batch");
+
+        assert!(matches!(
+            error,
+            AppCompositionError::Protocol(ProtocolError { code, .. }) if code == "storage_failed"
+        ));
+        assert_eq!(
+            app.delegate_workflow.runtime_activation,
+            DelegatedTaskRuntimeActivationState::Failed
+        );
+        let ledger = app
+            .proposal_coordinator
+            .proposal_ledger_projection(TimestampMillis(99));
+        assert!(ledger.rows.is_empty());
+        assert!(
+            event_sink.events().expect("event snapshot").is_empty(),
+            "storage rejection must not emit any Created event"
+        );
+        assert!(app.proposal_coordinator.proposal(ProposalId(1)).is_none());
+        assert!(
+            app.storage
+                .pending_proposal_observation_batches()
+                .expect("pending batches")
+                .is_empty()
+        );
+        for proposal_id in [ProposalId(1), ProposalId(2)] {
+            assert!(matches!(
+                app.storage
+                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                        proposal_id
+                    ))
+                    .expect("read audit record"),
+                StorageRepositoryResponse::ProposalAuditRecord(None)
+            ));
+        }
+        let storage_debug = app
+            .storage
+            .with_storage(|storage| format!("{storage:?}"))
+            .expect("storage snapshot");
+        assert!(storage_debug.contains("protocol_event_metadata: {}"));
+        assert!(storage_debug.contains("protocol_proposal_audit: {}"));
+        assert!(storage_debug.contains("protocol_proposal_observation_outbox: {}"));
+
+        let registered = app
+            .register_delegated_task_proposals(vec![delegated_output_from(
                 save_proposal(ProposalId(102)),
                 "retry",
             )])
             .expect("a valid retry should register after rollback");
         assert_eq!(registered[0].proposal_id, ProposalId(1));
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_proposal_sink_failure_registers_pending_batch_then_retries_atomically() {
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let fail_second = Arc::new(AtomicBool::new(true));
+        let legacy_emit_calls = Arc::new(AtomicUsize::new(0));
+        let batch_emit_calls = Arc::new(AtomicUsize::new(0));
+        let sink = FailSecondAtomicBatchSink {
+            recorder: recorder.clone(),
+            fail_second: Arc::clone(&fail_second),
+            legacy_emit_calls: Arc::clone(&legacy_emit_calls),
+            batch_emit_calls: Arc::clone(&batch_emit_calls),
+        };
+        let mut app = AppComposition::with_event_sink(SharedEventSink::new(sink));
+
+        let registered = app
+            .register_delegated_task_proposals(vec![
+                delegated_output_from(save_proposal(ProposalId(100)), "first"),
+                delegated_output_from(save_proposal(ProposalId(101)), "second"),
+            ])
+            .expect("sink delivery failure must not undo durable registration");
+
+        assert_eq!(
+            registered
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect::<Vec<_>>(),
+            vec![ProposalId(1), ProposalId(2)]
+        );
+        let ledger = app
+            .proposal_coordinator
+            .proposal_ledger_projection(TimestampMillis(99));
+        assert_eq!(ledger.rows.len(), 2);
+        assert!(recorder.events().expect("event snapshot").is_empty());
+        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 1);
+
+        let pending = app
+            .storage
+            .pending_proposal_observation_batches()
+            .expect("pending batch");
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .batch
+                .batch_id
+                .starts_with("delegated-created-v2-1-2-2-")
+        );
+        assert_eq!(pending[0].batch.event_metadata.len(), 2);
+        assert_eq!(pending[0].batch.proposal_audits.len(), 2);
+        assert_eq!(
+            pending[0].batch.schema_version,
+            PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
+        );
+        for ((event, metadata), audit) in pending[0]
+            .batch
+            .events
+            .iter()
+            .zip(&pending[0].batch.event_metadata)
+            .zip(&pending[0].batch.proposal_audits)
+        {
+            assert_eq!(event.event_id, metadata.event_id);
+            assert_eq!(
+                event.payload["proposal_id"].as_u64(),
+                Some(audit.proposal_id.0)
+            );
+            assert_eq!(event.correlation_id, audit.correlation_id);
+            assert_eq!(event.causality_id, audit.causality_id);
+            assert_eq!(event.occurred_at, audit.timestamp);
+            assert_eq!(audit.lifecycle_state, ProposalLifecycleState::Created);
+            assert!(matches!(
+                app.storage
+                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                        audit.proposal_id
+                    ))
+                    .expect("read audit record"),
+                StorageRepositoryResponse::ProposalAuditRecord(Some(stored))
+                    if stored.lifecycle_state == ProposalLifecycleState::Created
+            ));
+        }
+        for metadata in &pending[0].batch.event_metadata {
+            assert!(matches!(
+                app.storage
+                    .handle(StorageRepositoryRequest::ReadEventMetadata(
+                        metadata.event_id
+                    ))
+                    .expect("read event metadata"),
+                StorageRepositoryResponse::EventMetadata(Some(_))
+            ));
+        }
+
+        fail_second.store(false, Ordering::SeqCst);
+        assert_eq!(
+            app.retry_pending_proposal_observations()
+                .expect("retry pending proposal observations"),
+            1
+        );
+        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
+        assert!(
+            app.storage
+                .pending_proposal_observation_batches()
+                .expect("pending batches after retry")
+                .is_empty()
+        );
+        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            app.retry_pending_proposal_observations()
+                .expect("idempotent empty retry"),
+            0
+        );
+        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
+        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
