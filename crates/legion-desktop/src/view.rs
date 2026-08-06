@@ -73,9 +73,10 @@ use legion_protocol::{
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
     DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId, LegionToolKind,
     LineWrappingPolicy, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    PrivacyInspectorRedactionState, ProposalId, ProposalLifecycleState, ProposalRejectionReason,
-    ProposalRiskLabel, ProtocolTextRange, TextCoordinate, ViewportLineTruncationState,
-    ViewportProjectionMode, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    PrivacyInspectorRedactionState, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
+    ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
@@ -909,7 +910,6 @@ impl DesktopProjectionViewModel {
 pub struct ProjectionView {
     show_trust: bool,
     show_auxiliary: bool,
-    delegate_task_draft: String,
     theme_preference: theme::ThemePreference,
     selected_bottom_panel: BottomPanelTab,
     last_editor_rect: Option<egui::Rect>,
@@ -939,7 +939,6 @@ impl ProjectionView {
         Self {
             show_trust: true,
             show_auxiliary: true,
-            delegate_task_draft: String::new(),
             theme_preference: theme::ThemePreference::all()[0],
             selected_bottom_panel: BottomPanelTab::Terminal,
             last_editor_rect: None,
@@ -1061,7 +1060,6 @@ impl ProjectionView {
                 &model,
                 &mut self.show_trust,
                 &mut self.show_auxiliary,
-                &mut self.delegate_task_draft,
                 &mut actions,
             );
         });
@@ -1326,7 +1324,6 @@ fn render_right_dock(
     model: &DesktopProjectionViewModel,
     show_trust: &mut bool,
     _show_auxiliary: &mut bool,
-    delegate_task_draft: &mut String,
     actions: &mut Vec<DesktopAction>,
 ) {
     match projected_product_mode(snapshot) {
@@ -1336,7 +1333,7 @@ fn render_right_dock(
             if delegated_activity_projected(snapshot) {
                 render_delegation_console(ui, snapshot, model, show_trust, actions)
             } else {
-                render_delegate_draft_rail(ui, snapshot, model, delegate_task_draft, actions)
+                render_delegate_draft_rail(ui, snapshot, model, actions)
             }
         }
         DesktopProductMode::LegionWorkflows => render_fleet_console(ui, snapshot, model, actions),
@@ -1358,7 +1355,9 @@ fn render_right_dock(
                 }
             });
     }
-    render_onboarding_panel(ui, snapshot, state, model, actions);
+    if projected_product_mode(snapshot) != DesktopProductMode::Manual {
+        render_onboarding_panel(ui, snapshot, state, model, actions);
+    }
     render_settings_panel(ui, model, actions);
 }
 
@@ -2798,17 +2797,12 @@ fn render_assisted_suggestion_panel(
             .take(4)
             .cloned()
             .collect::<Vec<_>>();
-        if inline_rows.is_empty() {
-            for action in [
-                "Refactor validation into helper",
-                "Add null-check for selected value",
-                "Generate unit test",
-            ] {
-                ui.label(theme::body(action));
-            }
-        } else {
-            render_compact_rows(ui, &inline_rows, "No projected inline predictions", 4);
-        }
+        render_compact_rows(
+            ui,
+            &inline_rows,
+            "No projected next-edit predictions",
+            4,
+        );
     });
 }
 
@@ -3543,7 +3537,6 @@ fn render_delegate_draft_rail(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
-    delegate_task_draft: &mut String,
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegate", DesktopProductMode::Delegate);
@@ -3551,11 +3544,10 @@ fn render_delegate_draft_rail(
         "Describe a bounded task. Delegate plans and edits in an isolated scope, then stages proposals for review.",
     ));
     ui.add_space(6.0);
-    if interactive_fields::render_delegate_task_draft(ui, delegate_task_draft)
-        && let Some(action) = desktop_delegated_task_action(snapshot, delegate_task_draft)
+    if let Some(task_draft) = interactive_fields::render_delegate_task_draft(ui)
+        && let Some(action) = desktop_delegated_task_action(snapshot, &task_draft)
     {
         actions.push(action);
-        delegate_task_draft.clear();
     }
 
     let scope = desktop_default_delegated_scope(snapshot);
@@ -3610,8 +3602,7 @@ fn render_delegation_console(
             snapshot.delegated_task_projection.blocked_plan_count,
             snapshot.delegated_task_projection.refused_plan_count
         )));
-        if snapshot.delegated_task_projection.runtime_activation
-            == legion_protocol::DelegatedTaskRuntimeActivationState::Executing
+        if delegated_runtime_is_cancellable(snapshot.delegated_task_projection.runtime_activation)
             && primary_button(ui, "Cancel task", theme::tokens().accent.red).clicked()
         {
             actions.push(DesktopAction::CancelDelegatedTask);
@@ -3815,6 +3806,13 @@ fn render_proposal_cards(
                 | ProposalLifecycleState::Validated
                 | ProposalLifecycleState::Previewed
         );
+        let cancellable = matches!(
+            row.lifecycle.state,
+            ProposalLifecycleState::Created
+                | ProposalLifecycleState::Validated
+                | ProposalLifecycleState::Previewed
+                | ProposalLifecycleState::Approved
+        );
         theme::card_frame_tinted(
             theme::tokens().bg.card,
             theme::dim(theme::tokens().accent.orange, 48),
@@ -3851,6 +3849,14 @@ fn render_proposal_cards(
                         actions.push(DesktopAction::RejectProposal {
                             proposal_id: row.proposal_id,
                             reason: ProposalRejectionReason::UserRejected,
+                        });
+                    }
+                });
+                ui.add_enabled_ui(cancellable, |ui| {
+                    if soft_button(ui, "Cancel proposal").clicked() && cancellable {
+                        actions.push(DesktopAction::CancelProposal {
+                            proposal_id: row.proposal_id,
+                            reason: ProposalCancellationReason::UserCancelled,
                         });
                     }
                 });
@@ -4606,12 +4612,24 @@ fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 fn primary_button(ui: &mut egui::Ui, label: &str, color: egui::Color32) -> egui::Response {
-    ui.add(
-        egui::Button::new(theme::inverse(label))
-            .fill(color)
-            .stroke(egui::Stroke::new(1.0_f32, theme::dim(color, 180)))
-            .corner_radius(egui::CornerRadius::same(6)),
-    )
+    primary_button_enabled(ui, label, color, true)
+}
+
+fn primary_button_enabled(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: egui::Color32,
+    enabled: bool,
+) -> egui::Response {
+    let button = egui::Button::new(theme::inverse(label))
+        .fill(color)
+        .stroke(egui::Stroke::new(1.0_f32, theme::dim(color, 180)))
+        .corner_radius(egui::CornerRadius::same(6));
+    if enabled {
+        ui.add(button)
+    } else {
+        ui.add_enabled(false, button.sense(egui::Sense::hover()))
+    }
 }
 
 fn current_path(snapshot: &ShellProjectionSnapshot) -> &str {
@@ -5519,22 +5537,33 @@ fn bottom_tab_specs(
 }
 
 fn delegated_activity_projected(snapshot: &ShellProjectionSnapshot) -> bool {
-    snapshot.delegated_task_projection.plan_count > 0
-        || !snapshot.delegated_task_projection.plan_rows.is_empty()
-        || !snapshot.delegated_task_projection.step_summaries.is_empty()
-        || !snapshot.delegated_task_projection.chat_messages.is_empty()
-        || !snapshot
-            .delegated_task_projection
-            .context_citations
-            .is_empty()
-        || !snapshot
-            .delegated_task_projection
-            .proposal_reviews
-            .is_empty()
-        || !snapshot
-            .delegated_task_projection
-            .tool_permission_requests
-            .is_empty()
+    let delegated = &snapshot.delegated_task_projection;
+    delegated.runtime_activation != legion_protocol::DelegatedTaskRuntimeActivationState::NotEncoded
+        || delegated.plan_count > 0
+        || !delegated.plan_rows.is_empty()
+        || !delegated.step_summaries.is_empty()
+        || !delegated.blockers.is_empty()
+        || !delegated.refusals.is_empty()
+        || !delegated.required_approvals.is_empty()
+        || !delegated.proposal_preview_links.is_empty()
+        || !delegated.audit_readiness.is_empty()
+        || !delegated.chat_messages.is_empty()
+        || !delegated.context_citations.is_empty()
+        || !delegated.proposal_reviews.is_empty()
+        || !delegated.tool_permission_requests.is_empty()
+        || !snapshot.proposal_ledger_projection.rows.is_empty()
+        || !snapshot.artifact_ledger_projection.rows.is_empty()
+        || !snapshot.verification_run_projection.rows.is_empty()
+}
+
+fn delegated_runtime_is_cancellable(
+    activation: legion_protocol::DelegatedTaskRuntimeActivationState,
+) -> bool {
+    matches!(
+        activation,
+        legion_protocol::DelegatedTaskRuntimeActivationState::Executing
+            | legion_protocol::DelegatedTaskRuntimeActivationState::Verifying
+    )
 }
 
 fn top_bar_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

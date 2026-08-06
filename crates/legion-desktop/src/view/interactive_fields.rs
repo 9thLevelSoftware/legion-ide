@@ -117,13 +117,17 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
 
 /// Render the adapter-local, unsent Delegate task draft.
 ///
-/// The returned value is true only when the user activates the CTA with a
-/// non-empty draft. The caller remains responsible for constructing the
-/// projected scope and dispatching the product action.
-pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui, draft: &mut String) -> bool {
+/// The returned value contains the trimmed task only when the user activates
+/// the CTA with a non-empty draft. The caller remains responsible for
+/// constructing the projected scope and dispatching the product action.
+pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui) -> Option<String> {
+    let draft_id = egui::Id::new("legion-delegate-task-draft-value");
+    let mut draft = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
     let label = ui.label(theme::label("Task description"));
     let response = ui.add(
-        egui::TextEdit::multiline(draft)
+        egui::TextEdit::multiline(&mut draft)
             .id_source("legion-delegate-task-draft")
             .desired_rows(3)
             .desired_width(ui.available_width())
@@ -131,21 +135,17 @@ pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui, draft: &mut String) 
     );
     response.labelled_by(label.id);
     let ready = !draft.trim().is_empty();
-    let color = if ready {
-        theme::tokens().accent.amber
-    } else {
-        theme::tokens().text.muted
-    };
     let submitted = ui
         .push_id("legion-delegate-task-submit", |ui| {
-            super::primary_button(ui, "Delegate task", color)
-                .on_hover_text(if ready {
-                    "Start a proposal-mediated delegated task"
-                } else {
-                    "Enter a task description first"
-                })
+            super::primary_button_enabled(ui, "Delegate task", theme::tokens().accent.amber, ready)
+                .on_hover_text("Start a proposal-mediated delegated task")
                 .clicked()
         })
         .inner;
-    submitted && ready
+    let task = (submitted && ready).then(|| draft.trim().to_string());
+    if task.is_some() {
+        draft.clear();
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
+    task
 }

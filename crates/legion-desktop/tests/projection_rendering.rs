@@ -1762,6 +1762,25 @@ fn render_projection_frame_at(
     )
 }
 
+fn render_projection_frame_with_state(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let mut projection_output = None;
+    let full_output = ctx.run_ui(
+        desktop_raw_input_at(egui::vec2(1_440.0, 900.0), Vec::new()),
+        |ui| {
+            projection_output = Some(view.render_with_state(ui, snapshot, state));
+        },
+    );
+    (
+        projection_output.expect("projection view with state should render"),
+        full_output,
+    )
+}
+
 fn accesskit_bounds(
     output: &egui::FullOutput,
     label: &str,
@@ -1816,6 +1835,53 @@ fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
                 .nodes
                 .iter()
                 .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+        })
+}
+
+fn accesskit_has_clickable_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click)
+            })
+        })
+}
+
+fn accesskit_label_is_disabled(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.label() == Some(label) && node.is_disabled())
+        })
+}
+
+fn accesskit_contains_text_in_x_range(
+    output: &egui::FullOutput,
+    text: &str,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+                x_range.contains(&center_x)
+                    && (node.label().is_some_and(|label| label.contains(text))
+                        || node.value().is_some_and(|value| value.contains(text)))
+            })
         })
 }
 
@@ -1897,29 +1963,13 @@ fn click_projection_at(
     )
 }
 
-fn type_into_accessible_control(
-    ctx: &egui::Context,
-    view: &mut ProjectionView,
-    snapshot: &legion_ui::ShellProjectionSnapshot,
-    primed: &egui::FullOutput,
-    label: &str,
-    text: &str,
-) -> (ProjectionViewOutput, egui::FullOutput) {
-    let (_focused, _) = click_accessible_control(ctx, view, snapshot, primed, label);
-    let mut projection_output = None;
-    let full_output = ctx.run_ui(
-        desktop_raw_input_at(
-            egui::vec2(1_440.0, 900.0),
-            vec![egui::Event::Text(text.to_string())],
-        ),
-        |ui| {
-            projection_output = Some(view.render(ui, snapshot));
-        },
-    );
-    (
-        projection_output.expect("typed projection frame should render"),
-        full_output,
-    )
+fn seed_delegate_task_draft(ctx: &egui::Context, draft: &str) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("legion-delegate-task-draft-value"),
+            draft.to_string(),
+        );
+    });
 }
 
 #[test]
@@ -1948,6 +1998,45 @@ fn projection_rendering_manual_rail_is_ai_disengaged_and_enable_assist_is_mode_o
             mode: DockMode::Assist
         }]
     );
+}
+
+#[test]
+fn projection_rendering_manual_rail_suppresses_generic_onboarding_even_when_requested() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let right_rail = 1_115.0..=1_440.0;
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "AI engine disengaged",
+        right_rail.clone()
+    ));
+    for forbidden in [
+        "provider setup",
+        "Agent Comm Stream",
+        "present",
+        "First-run onboarding",
+        "Delegate",
+        "Legion Workflows",
+    ] {
+        assert!(
+            !accesskit_contains_text_in_x_range(&full, forbidden, right_rail.clone()),
+            "Manual right rail must suppress `{forbidden}` even when onboarding is requested"
+        );
+    }
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "Enable Assist",
+        right_rail
+    ));
 }
 
 #[test]
@@ -2025,29 +2114,101 @@ fn projection_rendering_assist_lists_only_projected_next_edit_rows() {
 }
 
 #[test]
+fn projection_rendering_assist_empty_predictions_do_not_invent_suggestion_rows() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Empty Assist").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(
+        &full,
+        "No projected next-edit predictions"
+    ));
+    for invented in [
+        "Refactor validation into helper",
+        "Add null-check for selected value",
+        "Generate unit test",
+    ] {
+        assert!(!accesskit_has_label(&full, invented));
+    }
+}
+
+#[test]
+fn projection_rendering_blank_delegate_draft_is_semantically_disabled() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Idle Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+
+    seed_delegate_task_draft(&ctx, "   ");
+    let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+}
+
+#[test]
+fn projection_rendering_delegate_runtime_proposal_and_evidence_each_activate_real_console() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+
+    let mut runtime_only = Shell::empty("Runtime Delegate").projection_snapshot();
+    runtime_only.product_mode = DockMode::Delegate;
+    runtime_only.delegated_task_projection.runtime_activation =
+        legion_protocol::DelegatedTaskRuntimeActivationState::Verifying;
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &runtime_only);
+    assert!(accesskit_has_label(&full, "Phase"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+    let (cancelled, _) =
+        click_accessible_control(&ctx, &mut view, &runtime_only, &full, "Cancel task");
+    assert_eq!(cancelled.actions, vec![DesktopAction::CancelDelegatedTask]);
+
+    let mut proposal_only = populated_snapshot();
+    proposal_only.product_mode = DockMode::Delegate;
+    proposal_only.delegated_task_projection.plan_count = 0;
+    proposal_only.artifact_ledger_projection.rows.clear();
+    proposal_only.verification_run_projection.rows.clear();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &proposal_only);
+    assert!(accesskit_has_label(&full, "Proposal review"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+
+    let mut evidence_only = populated_snapshot();
+    evidence_only.product_mode = DockMode::Delegate;
+    evidence_only.delegated_task_projection.plan_count = 0;
+    evidence_only.proposal_ledger_projection.rows.clear();
+    evidence_only
+        .proposal_ledger_projection
+        .selected_proposal_id = None;
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &evidence_only);
+    assert!(accesskit_has_label(&full, "Task graph and evidence"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+}
+
+#[test]
 fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
-    let mut snapshot = populated_snapshot();
+    let mut snapshot = Shell::empty("Draft Delegate").projection_snapshot();
     snapshot.product_mode = DockMode::Delegate;
-    snapshot.delegated_task_projection.plan_count = 0;
     let expected_scope = desktop_default_delegated_scope(&snapshot);
     assert_eq!(
         expected_scope.workspace_root,
         CanonicalPath(".".to_string())
     );
 
+    seed_delegate_task_draft(&ctx, "Fix the delegated task rail");
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(&full, "Task description"));
-    let (_typed, _typed_full) = type_into_accessible_control(
-        &ctx,
-        &mut view,
-        &snapshot,
-        &full,
-        "Task description",
-        "Fix the delegated task rail",
-    );
     let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     let cta = accesskit_bounds(&full, "Delegate task", true);
     assert!(cta.y1 - cta.y0 >= 18.0);
