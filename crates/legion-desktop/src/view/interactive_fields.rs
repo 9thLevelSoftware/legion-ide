@@ -103,7 +103,7 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
                 .hint_text("type and press Enter to send to the PTY"),
         );
         let submit = (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-            || ui.small_button("Send").clicked();
+            || super::soft_button(ui, "Send").clicked();
         if submit && !draft.is_empty() {
             let mut payload = draft.clone();
             if !payload.ends_with('\n') {
@@ -124,11 +124,15 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
 /// The returned value contains the trimmed task only when the user activates
 /// the CTA with a non-empty draft. The caller remains responsible for
 /// constructing the projected scope and dispatching the product action.
-pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui) -> Option<String> {
+pub(crate) fn render_delegate_task_draft(
+    ui: &mut egui::Ui,
+    canonical_scope_available: bool,
+) -> Option<String> {
     let draft_id = egui::Id::new("legion-delegate-task-draft-value");
     let mut draft = ui
         .ctx()
         .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
+    draft = bounded_delegate_task_draft(&draft);
     let label = ui.label(theme::label("Task description"));
     let response = ui.add(
         egui::TextEdit::multiline(&mut draft)
@@ -138,7 +142,8 @@ pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui) -> Option<String> {
             .hint_text("Describe a bounded task for Delegate"),
     );
     response.labelled_by(label.id);
-    let ready = !draft.trim().is_empty();
+    draft = bounded_delegate_task_draft(&draft);
+    let ready = canonical_scope_available && !draft.trim().is_empty();
     let submitted = ui
         .push_id("legion-delegate-task-submit", |ui| {
             super::primary_button_enabled(ui, "Delegate task", theme::tokens().accent.amber, ready)
@@ -152,4 +157,46 @@ pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui) -> Option<String> {
     }
     ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
     task
+}
+
+/// Return the longest valid UTF-8 prefix inside both Delegate draft budgets.
+///
+/// This boundary is applied before retaining an adapter-local draft and again
+/// before the caller constructs a dispatch action.
+pub(crate) fn bounded_delegate_task_draft(value: &str) -> String {
+    let char_end = value
+        .char_indices()
+        .nth(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
+        .map_or(value.len(), |(index, _)| index);
+    let mut end = char_end.min(super::DELEGATE_TASK_DRAFT_MAX_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_delegate_task_draft;
+    use crate::view::{DELEGATE_TASK_DRAFT_MAX_BYTES, DELEGATE_TASK_DRAFT_MAX_CHARS};
+
+    #[test]
+    fn delegate_draft_bound_preserves_a_valid_utf8_prefix() {
+        let oversized = "🦀".repeat(DELEGATE_TASK_DRAFT_MAX_CHARS + 10);
+
+        let bounded = bounded_delegate_task_draft(&oversized);
+
+        assert_eq!(bounded.chars().count(), DELEGATE_TASK_DRAFT_MAX_CHARS);
+        assert_eq!(bounded.len(), DELEGATE_TASK_DRAFT_MAX_BYTES);
+        assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[test]
+    fn delegate_draft_bound_limits_ascii_by_character_budget() {
+        let oversized = "x".repeat(DELEGATE_TASK_DRAFT_MAX_CHARS + 10);
+
+        let bounded = bounded_delegate_task_draft(&oversized);
+
+        assert_eq!(bounded.len(), DELEGATE_TASK_DRAFT_MAX_CHARS);
+    }
 }

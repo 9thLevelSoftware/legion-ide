@@ -142,52 +142,29 @@ fn click_projection_control(
     label: &str,
     size: egui::Vec2,
 ) -> egui::FullOutput {
-    let bounds = primed
+    let target = primed
         .platform_output
         .accesskit_update
         .as_ref()
         .expect("projection should expose AccessKit")
         .nodes
         .iter()
-        .find_map(|(_id, node)| {
+        .find_map(|(id, node)| {
             (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
-                .then(|| node.bounds())
-                .flatten()
+                .then_some(*id)
         })
         .unwrap_or_else(|| panic!("{label} should be a clickable accessible control"));
-    let pos = egui::pos2(
-        ((bounds.x0 + bounds.x1) * 0.5) as f32,
-        ((bounds.y0 + bounds.y1) * 0.5) as f32,
-    );
-    let _ = ctx.run_ui(
-        desktop_raw_input(
-            size,
-            vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::default(),
-                },
-            ],
-        ),
-        |ui| {
-            let _ = view.render(ui, snapshot);
-        },
-    );
     ctx.run_ui(
         desktop_raw_input(
             size,
-            vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::default(),
+            vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Click,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: target,
+                    data: None,
                 },
-            ],
+            )],
         ),
         |ui| {
             let _ = view.render(ui, snapshot);
@@ -476,8 +453,8 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
     let logical_size = logical_viewport_for_physical_size(physical_size, 200);
     assert_eq!(logical_size, egui::vec2(480.0, 360.0));
 
-    let _first = render_projection(&ctx, &mut view, &snapshot, logical_size);
-    let full = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let _first = render_projection(&ctx, &mut view, &snapshot, physical_size);
+    let full = render_projection(&ctx, &mut view, &snapshot, physical_size);
     let update = full
         .platform_output
         .accesskit_update
@@ -553,12 +530,70 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
     assert!(command_bounds.y1 - command_bounds.y0 >= 24.0);
 
     let painted = top_bar_painted_text(&full);
-    for shortcut in ["M", "A", "D", "W"] {
+    for label in ["Manual", "Assist", "Delegate", "Legion Workflows"] {
         assert!(
-            painted.iter().any(|text| text == shortcut),
-            "ultra-compact switch should paint canonical shortcut `{shortcut}`; painted={painted:?}"
+            painted.iter().any(|text| text == label),
+            "ultra-compact switch should paint full canonical label `{label}`; painted={painted:?}"
         );
     }
+
+    let editor = view
+        .last_editor_rect()
+        .expect("ultra-compact render should retain a real editor allocation")
+        .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, logical_size));
+    assert!(
+        editor.width() >= 360.0 && editor.height() >= 160.0,
+        "200% zoom must collapse secondary panes and preserve a usable editor; editor={editor:?}"
+    );
+
+    for label in ["Explorer drawer", "Mode rail drawer", "Bottom panel drawer"] {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("ultra-compact layout must expose `{label}`"));
+        let bounds = node.bounds().expect("drawer control should have bounds");
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+    }
+
+    let _opened = click_projection_control(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &full,
+        "Mode rail drawer",
+        physical_size,
+    );
+    let opened = render_projection(&ctx, &mut view, &snapshot, physical_size);
+    let opened_labels = opened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter_map(|(_id, node)| node.label().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        opened
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some("Enable Assist")
+                    && node.supports_action(egui::accesskit::Action::Click)
+            })),
+        "the compact mode-rail drawer must make its hidden mode action reachable; labels={opened_labels:?}"
+    );
 }
 
 #[test]
