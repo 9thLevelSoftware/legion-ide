@@ -429,11 +429,11 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
     ctx.set_visuals(visuals);
 }
 
-pub(crate) fn panel_frame(fill: Color32) -> Frame {
+pub(crate) fn status_frame(fill: Color32) -> Frame {
     Frame::NONE
         .fill(fill)
         .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
-        .inner_margin(Margin::same(tokens().spacing.md))
+        .inner_margin(Margin::symmetric(tokens().spacing.lg, 1))
 }
 
 pub(crate) fn pane_frame(fill: Color32) -> Frame {

@@ -168,6 +168,61 @@ impl ShellGeometry {
     pub fn editor_width(self, available_width: f32) -> f32 {
         (available_width - self.left_width - self.right_width).max(0.0)
     }
+
+    fn top_bar_content_height(self) -> f32 {
+        self.top_bar_height - 2.0 * 6.0
+    }
+
+    fn status_bar_content_height(self) -> f32 {
+        self.status_bar_height - 2.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopBarDensity {
+    Desktop,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TopBarComposition {
+    density: TopBarDensity,
+    shows_mode_switch: bool,
+    shows_command_palette: bool,
+    shows_window_controls: bool,
+    shows_workspace_context: bool,
+    shows_engine_status: bool,
+    shows_resource_strip: bool,
+    shows_primary_action: bool,
+    shows_secondary_commands: bool,
+}
+
+fn top_bar_composition(geometry: ShellGeometry) -> TopBarComposition {
+    if geometry.compact {
+        TopBarComposition {
+            density: TopBarDensity::Compact,
+            shows_mode_switch: true,
+            shows_command_palette: true,
+            shows_window_controls: false,
+            shows_workspace_context: false,
+            shows_engine_status: false,
+            shows_resource_strip: false,
+            shows_primary_action: false,
+            shows_secondary_commands: false,
+        }
+    } else {
+        TopBarComposition {
+            density: TopBarDensity::Desktop,
+            shows_mode_switch: true,
+            shows_command_palette: true,
+            shows_window_controls: true,
+            shows_workspace_context: true,
+            shows_engine_status: true,
+            shows_resource_strip: true,
+            shows_primary_action: true,
+            shows_secondary_commands: true,
+        }
+    }
 }
 
 /// Adapter-local view state layered over app-owned projections.
@@ -896,7 +951,7 @@ impl ProjectionView {
             .exact_size(geometry.top_bar_height)
             .frame(theme::toolbar_frame())
             .show_inside(ui, |ui| {
-                render_top_command_bar(ui, snapshot, &model, &mut actions);
+                render_top_command_bar(ui, snapshot, &model, geometry, &mut actions);
             });
 
         let left_panel = egui::Panel::left("legion_desktop_explorer")
@@ -915,9 +970,9 @@ impl ProjectionView {
 
         egui::Panel::bottom("legion_desktop_status")
             .exact_size(geometry.status_bar_height)
-            .frame(theme::panel_frame(theme::tokens().bg.code))
+            .frame(theme::status_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
-                render_status_bar(ui, &model);
+                render_status_bar(ui, &model, geometry);
             });
 
         let bottom_panel = egui::Panel::bottom("legion_desktop_bottom_console")
@@ -978,72 +1033,95 @@ fn render_top_command_bar(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
+    geometry: ShellGeometry,
     actions: &mut Vec<DesktopAction>,
 ) {
     let level = projected_product_mode(snapshot);
-    ui.set_height(ShellGeometry::TOP_BAR_HEIGHT);
+    let composition = top_bar_composition(geometry);
+    ui.set_max_height(geometry.top_bar_content_height());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        render_window_controls(ui);
+        if composition.shows_window_controls {
+            render_window_controls(ui);
+        }
         ui.label(theme::title(PRODUCT_NAME));
-        ui.separator();
-        ui.label(theme::body_strong(&model.layout_title));
-        render_branch_pill(ui, snapshot);
-        render_engine_status(ui, snapshot, level);
-        ui.add_space(12.0);
-        render_product_mode_switch(ui, level, actions);
+        if composition.shows_workspace_context {
+            ui.separator();
+            ui.label(theme::body_strong(&model.layout_title));
+            render_branch_pill(ui, snapshot);
+        }
+        if composition.shows_engine_status {
+            render_engine_status(ui, snapshot, level);
+        }
+        if composition.shows_mode_switch {
+            ui.add_space(if composition.density == TopBarDensity::Compact {
+                2.0
+            } else {
+                12.0
+            });
+            render_product_mode_switch(ui, level, composition.density, actions);
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            avatar(ui, "MK", theme::tokens().text.secondary);
-            if soft_button(ui, "Open").clicked() {
+            if composition.shows_command_palette && soft_button(ui, "Command").clicked() {
                 actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::File,
-                    query: String::new(),
-                    scope: SearchScopeProjection::ActiveFile,
-                });
-            }
-            if soft_button(ui, "Symbols").clicked() {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::Symbol,
-                    query: String::new(),
+                    mode: PaletteMode::Command,
+                    query: ">".to_string(),
                     scope: SearchScopeProjection::Workspace,
                 });
             }
-            if soft_button(ui, "Recent").clicked() {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::RecentBuffers,
-                    query: String::new(),
-                    scope: SearchScopeProjection::Workspace,
-                });
+            if composition.shows_secondary_commands {
+                avatar(ui, "MK", theme::tokens().text.secondary);
+                if soft_button(ui, "Open").clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::File,
+                        query: String::new(),
+                        scope: SearchScopeProjection::ActiveFile,
+                    });
+                }
+                if soft_button(ui, "Symbols").clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::Symbol,
+                        query: String::new(),
+                        scope: SearchScopeProjection::Workspace,
+                    });
+                }
+                if soft_button(ui, "Recent").clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::RecentBuffers,
+                        query: String::new(),
+                        scope: SearchScopeProjection::Workspace,
+                    });
+                }
+                if soft_button(ui, "Search").clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::Search,
+                        query: "/".to_string(),
+                        scope: snapshot.search_projection.scope,
+                    });
+                }
+                if soft_button(ui, "SSR").clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::StructuralSearch,
+                        query: "#".to_string(),
+                        scope: snapshot.structural_search_projection.scope,
+                    });
+                }
+                if soft_button(ui, "Git").clicked() {
+                    actions.push(DesktopAction::RefreshGit);
+                }
+                if soft_button(ui, "Settings").clicked() {
+                    actions.push(DesktopAction::OpenSettings);
+                }
             }
-            if soft_button(ui, "Search").clicked() {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::Search,
-                    query: "/".to_string(),
-                    scope: snapshot.search_projection.scope,
-                });
-            }
-            if soft_button(ui, "SSR").clicked() {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::StructuralSearch,
-                    query: "#".to_string(),
-                    scope: snapshot.structural_search_projection.scope,
-                });
-            }
-            if soft_button(ui, "Git").clicked() {
-                actions.push(DesktopAction::RefreshGit);
-            }
-            if soft_button(ui, "Settings").clicked() {
-                actions.push(DesktopAction::OpenSettings);
-            }
-            if primary_button(ui, level_primary_action(level), level_color(level)).clicked() {
+            if composition.shows_primary_action
+                && primary_button(ui, level_primary_action(level), level_color(level)).clicked()
+            {
                 actions.push(match level {
                     DesktopProductMode::Manual => DesktopAction::SaveAll,
                     DesktopProductMode::Assist => DesktopAction::StartAiProposal {
                         instruction_label: "desktop assist".to_string(),
                     },
-                    // Tier 2: Delegate primary action hits the real agent loop path
-                    // (Anthropic when credentials are available), not the deterministic assist fake.
                     DesktopProductMode::Delegate => DesktopAction::StartDelegatedTask {
                         task_description: "desktop delegated task".to_string(),
                         scope: desktop_default_delegated_scope(snapshot),
@@ -1053,8 +1131,10 @@ fn render_top_command_bar(
                     },
                 });
             }
-            render_resource_strip(ui, snapshot, level);
-            if soft_button(ui, "Save All").clicked() {
+            if composition.shows_resource_strip {
+                render_resource_strip(ui, snapshot, level);
+            }
+            if composition.shows_primary_action && soft_button(ui, "Save All").clicked() {
                 actions.push(DesktopAction::SaveAll);
             }
         });
@@ -1064,29 +1144,37 @@ fn render_top_command_bar(
 fn render_product_mode_switch(
     ui: &mut egui::Ui,
     active_level: DesktopProductMode,
+    density: TopBarDensity,
     actions: &mut Vec<DesktopAction>,
 ) {
     let tokens = theme::tokens();
-    theme::card_frame_tinted(tokens.bg.input, tokens.border.default).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(theme::eyebrow("PRODUCT MODE"));
-            for spec in product_mode_switch_specs() {
-                let canonical = canonical_mode_entry(spec.mode);
-                let response = level_pill(
-                    ui,
-                    canonical.shortcut_label,
-                    canonical.label,
-                    level_color(spec.mode),
-                    spec.mode == active_level,
-                );
-                if response.clicked() && spec.mode != active_level {
-                    actions.push(DesktopAction::SetProductMode {
-                        mode: spec.mode.to_dock_mode(),
-                    });
+    egui::Frame::NONE
+        .fill(tokens.bg.input)
+        .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+        .corner_radius(egui::CornerRadius::same(tokens.radius.md))
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if density == TopBarDensity::Desktop {
+                    ui.label(theme::eyebrow("PRODUCT MODE"));
                 }
-            }
+                for spec in product_mode_switch_specs() {
+                    let canonical = canonical_mode_entry(spec.mode);
+                    let response = level_pill(
+                        ui,
+                        canonical.shortcut_label,
+                        canonical.label,
+                        level_color(spec.mode),
+                        spec.mode == active_level,
+                    );
+                    if response.clicked() && spec.mode != active_level {
+                        actions.push(DesktopAction::SetProductMode {
+                            mode: spec.mode.to_dock_mode(),
+                        });
+                    }
+                }
+            });
         });
-    });
 }
 
 fn render_left_sidebar(
@@ -1358,9 +1446,13 @@ fn render_bottom_console(
     }
 }
 
-fn render_status_bar(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+fn render_status_bar(
+    ui: &mut egui::Ui,
+    model: &DesktopProjectionViewModel,
+    geometry: ShellGeometry,
+) {
     let status = &model.status_bar;
-    ui.set_height(24.0);
+    ui.set_max_height(geometry.status_bar_content_height());
     ui.horizontal(|ui| {
         if let Some(connection) = &status.connection {
             ui.label(theme::accent(connection, theme::tokens().accent.green));
@@ -8428,6 +8520,26 @@ mod tests {
             code_line_content_fingerprint(&line),
             code_line_content_fingerprint(&line)
         );
+    }
+
+    #[test]
+    fn shell_geometry_compact_top_bar_keeps_modes_and_command_palette_without_bar_overflow() {
+        let desktop = ShellGeometry::for_available_size(1440.0, 900.0);
+        let compact = ShellGeometry::for_available_size(960.0, 720.0);
+
+        let desktop_top_bar = top_bar_composition(desktop);
+        assert_eq!(desktop_top_bar.density, TopBarDensity::Desktop);
+        assert!(desktop_top_bar.shows_workspace_context);
+        assert!(desktop_top_bar.shows_primary_action);
+
+        let compact_top_bar = top_bar_composition(compact);
+        assert_eq!(compact_top_bar.density, TopBarDensity::Compact);
+        assert!(compact_top_bar.shows_mode_switch);
+        assert!(compact_top_bar.shows_command_palette);
+        assert!(!compact_top_bar.shows_workspace_context);
+        assert!(!compact_top_bar.shows_primary_action);
+        assert_eq!(compact.top_bar_content_height(), 30.0);
+        assert_eq!(compact.status_bar_content_height(), 22.0);
     }
 
     #[test]
