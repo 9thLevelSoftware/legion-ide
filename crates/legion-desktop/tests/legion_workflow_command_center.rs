@@ -324,7 +324,7 @@ fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     assert!(model.legion_workflow_rows.iter().any(|row| {
         row.contains("legion workflow command center")
             && row.contains("sessions=1")
-            && row.contains("Autonomous merge unsupported until approval")
+            && row.contains("unattended merge unsupported until approval")
     }));
     assert!(model.legion_workflow_rows.iter().any(|row| {
         row.contains("workers=4")
@@ -336,7 +336,7 @@ fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     }));
     assert!(model.product_mode_rows.iter().any(|row| {
         row.contains("Legion Workflow")
-            && row.contains("Autonomous merge unsupported until approval")
+            && row.contains("unattended merge unsupported until approval")
     }));
 }
 

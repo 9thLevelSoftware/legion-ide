@@ -114,3 +114,38 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
         });
     });
 }
+
+/// Render the adapter-local, unsent Delegate task draft.
+///
+/// The returned value is true only when the user activates the CTA with a
+/// non-empty draft. The caller remains responsible for constructing the
+/// projected scope and dispatching the product action.
+pub(crate) fn render_delegate_task_draft(ui: &mut egui::Ui, draft: &mut String) -> bool {
+    let label = ui.label(theme::label("Task description"));
+    let response = ui.add(
+        egui::TextEdit::multiline(draft)
+            .id_source("legion-delegate-task-draft")
+            .desired_rows(3)
+            .desired_width(ui.available_width())
+            .hint_text("Describe a bounded task for Delegate"),
+    );
+    response.labelled_by(label.id);
+    let ready = !draft.trim().is_empty();
+    let color = if ready {
+        theme::tokens().accent.amber
+    } else {
+        theme::tokens().text.muted
+    };
+    let submitted = ui
+        .push_id("legion-delegate-task-submit", |ui| {
+            super::primary_button(ui, "Delegate task", color)
+                .on_hover_text(if ready {
+                    "Start a proposal-mediated delegated task"
+                } else {
+                    "Enter a task description first"
+                })
+                .clicked()
+        })
+        .inner;
+    submitted && ready
+}

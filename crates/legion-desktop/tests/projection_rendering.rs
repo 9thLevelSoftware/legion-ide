@@ -4,7 +4,8 @@ use legion_desktop::bridge::DesktopAction;
 use legion_desktop::view::ShellGeometry;
 use legion_desktop::view::{
     BottomPanelTab, DesktopCodeHighlightSpan, DesktopCodeLineViewModel, DesktopProjectionViewModel,
-    DesktopProjectionViewState, ProjectionView, ProjectionViewOutput, drag_anchor_for_line_pointer,
+    DesktopProjectionViewState, ProjectionView, ProjectionViewOutput,
+    desktop_default_delegated_scope, desktop_delegated_task_action, drag_anchor_for_line_pointer,
     drag_selection_range, editor_coordinate_from_pointer, line_range_for_code_line,
     word_range_for_coordinate,
 };
@@ -1896,6 +1897,191 @@ fn click_projection_at(
     )
 }
 
+fn type_into_accessible_control(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+    text: &str,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let (_focused, _) = click_accessible_control(ctx, view, snapshot, primed, label);
+    let mut projection_output = None;
+    let full_output = ctx.run_ui(
+        desktop_raw_input_at(
+            egui::vec2(1_440.0, 900.0),
+            vec![egui::Event::Text(text.to_string())],
+        ),
+        |ui| {
+            projection_output = Some(view.render(ui, snapshot));
+        },
+    );
+    (
+        projection_output.expect("typed projection frame should render"),
+        full_output,
+    )
+}
+
+#[test]
+fn projection_rendering_manual_rail_is_ai_disengaged_and_enable_assist_is_mode_only() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "AI engine disengaged"));
+    assert!(accesskit_has_label(
+        &full,
+        "Zero egress · local-only editing intelligence"
+    ));
+    assert!(!accesskit_has_label(&full, "Delegation Console"));
+    assert!(!accesskit_has_label(&full, "Legion Workflow Control"));
+    assert!(!accesskit_has_label(&full, "Agent Comm Stream"));
+    assert!(!accesskit_has_label(&full, "Current File"));
+
+    let (clicked, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Enable Assist");
+    assert_eq!(
+        clicked.actions,
+        vec![DesktopAction::SetProductMode {
+            mode: DockMode::Assist
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_active_prediction_routes_accept_and_dismiss() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = assist_inline_prediction_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(accesskit_has_label(&full, ".await"));
+    assert!(!accesskit_has_label(&full, "Predict"));
+    let (accepted, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Accept");
+    assert_eq!(
+        accepted.actions,
+        vec![DesktopAction::AcceptCurrentAssistInlinePrediction]
+    );
+
+    let (_next, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (dismissed, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Dismiss");
+    assert_eq!(
+        dismissed.actions,
+        vec![DesktopAction::DismissCurrentAssistInlinePrediction]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_idle_and_in_flight_controls_route_existing_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = assist_inline_prediction_snapshot();
+    snapshot
+        .assist_inline_prediction_projection
+        .active_prediction = None;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (predicted, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Predict");
+    assert!(matches!(
+        predicted.actions.as_slice(),
+        [DesktopAction::RequestAssistInlinePrediction { .. }]
+    ));
+
+    snapshot
+        .assist_inline_prediction_projection
+        .request_in_flight = true;
+    let (_next, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (cancelled, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Cancel");
+    assert_eq!(
+        cancelled.actions,
+        vec![DesktopAction::CancelAssistInlinePrediction]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_lists_only_projected_next_edit_rows() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = assist_inline_prediction_snapshot();
+    let mut next_edit = snapshot
+        .assist_inline_prediction_projection
+        .active_prediction
+        .clone()
+        .expect("active fixture prediction");
+    next_edit.prediction_id = "assist:prediction:next-edit".to_string();
+    next_edit.ghost_text_label = "Update proposal.rs:74".to_string();
+    snapshot.assist_inline_prediction_projection.rows = vec![next_edit];
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Next-edit predictions"));
+    assert!(accesskit_has_label(&full, "Update proposal.rs:74"));
+    assert!(!accesskit_has_label(&full, "Add Autonomous arm"));
+}
+
+#[test]
+fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.plan_count = 0;
+    let expected_scope = desktop_default_delegated_scope(&snapshot);
+    assert_eq!(
+        expected_scope.workspace_root,
+        CanonicalPath(".".to_string())
+    );
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Task description"));
+    let (_typed, _typed_full) = type_into_accessible_control(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &full,
+        "Task description",
+        "Fix the delegated task rail",
+    );
+    let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let cta = accesskit_bounds(&full, "Delegate task", true);
+    assert!(cta.y1 - cta.y0 >= 18.0);
+    let delegated = desktop_delegated_task_action(&snapshot, " Fix the delegated task rail ")
+        .expect("non-empty draft should create one delegated task action");
+    assert_eq!(
+        delegated,
+        DesktopAction::StartDelegatedTask {
+            task_description: "Fix the delegated task rail".to_string(),
+            scope: expected_scope,
+        }
+    );
+    assert!(
+        !matches!(delegated, DesktopAction::StartAiProposal { .. }),
+        "Delegate CTA mapping must never use the proposal-only action"
+    );
+    assert_eq!(desktop_delegated_task_action(&snapshot, "   "), None);
+}
+
+#[test]
+fn projection_rendering_empty_workflows_do_not_invent_running_or_budget_state() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Empty workflow").projection_snapshot();
+    snapshot.product_mode = DockMode::Automate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Legion Workflows"));
+    assert!(accesskit_has_label(&full, "No workflow sessions projected"));
+    assert!(!accesskit_has_label(&full, "Running"));
+    assert!(!accesskit_has_label(&full, "96k / 250k"));
+}
+
 #[test]
 fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_state() {
     let ctx = egui::Context::default();
@@ -2068,7 +2254,10 @@ fn projection_rendering_advanced_disclosure_precedes_editor_and_routes_mode_acti
     );
 
     snapshot.product_mode = DockMode::Automate;
-    let (_workflows, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_workflows, mut full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for _ in 0..8 {
+        full = render_projection_frame(&ctx, &mut view, &snapshot).1;
+    }
     let (workflow_action, _) =
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "Force Review");
     assert_eq!(
