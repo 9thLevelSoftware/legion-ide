@@ -1087,10 +1087,10 @@ fn run_legion_workflow_worker_handle_supervisor(
         while index < pending.len() {
             if pending[index].join_handle.is_finished() {
                 let run = pending.swap_remove(index);
-                let completion_id = run.completion_id;
+                let _completion_id = run.completion_id;
                 let _ = run.join_handle.join();
                 #[cfg(any(test, feature = "test-helpers"))]
-                record_legion_workflow_worker_reaped(completion_id);
+                record_legion_workflow_worker_reaped(_completion_id);
             } else {
                 index += 1;
             }
