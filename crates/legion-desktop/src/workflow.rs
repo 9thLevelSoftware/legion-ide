@@ -612,7 +612,7 @@ impl DesktopRuntime {
         // Workspace-local durability under `.legion/`: palette usage, checkpoints,
         // and proposal audit blobs. The renderer edge only requests enablement;
         // storage paths stay owned by app composition (Tier 1 A10).
-        app.enable_workspace_state_persistence(&config.workspace_root);
+        app.enable_workspace_state_persistence(&config.workspace_root)?;
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();

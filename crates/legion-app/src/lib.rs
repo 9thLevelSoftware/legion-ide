@@ -3961,13 +3961,14 @@ impl AppProposalCoordinator {
         legion_protocol::ProposalId(next)
     }
 
-    fn next_available_id(&self) -> legion_protocol::ProposalId {
-        loop {
-            let candidate = self.next_id();
-            if !self.proposals.borrow().contains_key(&candidate) {
-                return candidate;
-            }
-        }
+    fn reserve_proposal_ids_through(&self, proposal_id: u64) {
+        self.next_proposal_id
+            .set(self.next_proposal_id.get().max(proposal_id));
+    }
+
+    fn reserve_event_sequences_through(&self, sequence: u64) {
+        self.next_event_sequence
+            .set(self.next_event_sequence.get().max(sequence));
     }
 
     fn next_sequence(&self) -> EventSequence {
@@ -4089,6 +4090,10 @@ impl AppProposalCoordinator {
 
     fn proposal(&self, proposal_id: ProposalId) -> Option<WorkspaceProposal> {
         self.proposals.borrow().get(&proposal_id).cloned()
+    }
+
+    fn lifecycle_context(&self, proposal_id: ProposalId) -> Option<EventContext> {
+        self.proposal_contexts.borrow().get(&proposal_id).copied()
     }
 
     fn proposal_for_id(&self, proposal_id: ProposalId) -> Option<WorkspaceProposal> {
@@ -6255,6 +6260,10 @@ impl EventSequenceGenerator {
     fn next(&mut self) -> EventSequence {
         self.next = self.next.saturating_add(1).max(1);
         EventSequence(self.next)
+    }
+
+    fn reserve_through(&mut self, sequence: u64) {
+        self.next = self.next.max(sequence);
     }
 }
 
@@ -16310,6 +16319,8 @@ pub struct AppComposition {
     event_sequence_generator: EventSequenceGenerator,
     storage: InMemoryStorageRepositoryPort,
     event_sink: SharedEventSink,
+    published_proposal_observation_batches:
+        HashMap<String, PublishedProposalObservationAssociation>,
     ai_registry: ProviderRegistry,
     tracker_ledger: TrackerLedger,
     legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger,
@@ -16334,6 +16345,10 @@ pub struct AppComposition {
     injected_cancellation_flag: Option<SharedCancellationFlag>,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_workflow_spawn_failure_after: Option<usize>,
+    /// Test-only interruption seam after a Pending proposal observation is
+    /// durable but before its proposals are published to the live ledger.
+    #[cfg(any(test, feature = "test-helpers"))]
+    interrupt_after_proposal_observation_store: bool,
     /// App-owned worker for a Desktop-started delegated loop. Completion is
     /// merged on the app thread so proposal registration never moves into the renderer.
     #[cfg(feature = "ai")]
@@ -16415,6 +16430,21 @@ struct AppDocumentResolver {
     /// Maps file URI (e.g. `file:///C:/path/main.rs`) → resolved context.
     by_uri: HashMap<String, crate::language::ResolvedDocument>,
 }
+
+/// Exact in-process proof that one durable observation batch has been
+/// published to the live coordinator with the expected apply-authority
+/// proposals. The commitments are SHA-256 over length-delimited serialized
+/// `WorkspaceProposal` values and never persist proposal/source content.
+#[derive(Debug, Clone)]
+struct PublishedProposalObservationAssociation {
+    proposal_ids: Vec<ProposalId>,
+    proposal_commitments: Vec<String>,
+}
+
+// Durable workspace state is untrusted input. Refuse implausibly high floors
+// with half of the u64 space still unused so the app's long-lived allocators
+// can never be driven into their saturating terminal value by a stored record.
+const MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR: u64 = u64::MAX / 2;
 
 #[derive(Debug, Clone)]
 struct LegionWorkflowPlanArtifacts {
@@ -16595,6 +16625,7 @@ impl AppComposition {
             event_sequence_generator: EventSequenceGenerator::default(),
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
             event_sink,
+            published_proposal_observation_batches: HashMap::new(),
             ai_registry: default_ai_registry(),
             tracker_ledger: TrackerLedger::new(),
             legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger::new(),
@@ -16614,6 +16645,8 @@ impl AppComposition {
             injected_cancellation_flag: None,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_workflow_spawn_failure_after: None,
+            #[cfg(any(test, feature = "test-helpers"))]
+            interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
@@ -16755,18 +16788,87 @@ impl AppComposition {
     ///
     /// Complements checkpoint persistence (PKT-CKPT I4). Safe to call after
     /// [`Self::enable_checkpoint_persistence`]; both share the `.legion/` root.
-    pub fn enable_proposal_audit_persistence(&mut self, workspace_root: &std::path::Path) {
+    /// This must be enabled before any live proposal is registered because
+    /// caller-assisted replay input is required to reconcile durable ids.
+    pub fn enable_proposal_audit_persistence(
+        &mut self,
+        workspace_root: &std::path::Path,
+    ) -> Result<(), AppCompositionError> {
+        if !self
+            .proposal_coordinator
+            .proposal_lifecycle_recovery_snapshot()
+            .records
+            .is_empty()
+        {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_publication_conflict".to_string(),
+                message:
+                    "proposal persistence must be enabled before live proposals are registered"
+                        .to_string(),
+            }));
+        }
         let legion_dir = workspace_root.join(".legion");
-        let _ = std::fs::create_dir_all(&legion_dir);
-        self.storage.enable_base_dir(legion_dir);
+        std::fs::create_dir_all(&legion_dir).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "storage_failed".to_string(),
+                message: format!("create workspace state directory failed: {error}"),
+            })
+        })?;
+        self.storage
+            .enable_base_dir(legion_dir)
+            .map_err(AppCompositionError::Protocol)?;
+        self.reserve_durable_proposal_observation_identities()
+            .map_err(AppCompositionError::Protocol)?;
+        Ok(())
+    }
+
+    fn reserve_durable_proposal_observation_identities(
+        &mut self,
+    ) -> ProtocolResult<Vec<legion_storage::ProposalObservationOutboxRecord>> {
+        let records = self.storage.proposal_observation_batches()?;
+        let proposal_floor = records
+            .iter()
+            .flat_map(|record| &record.batch.proposal_audits)
+            .map(|audit| audit.proposal_id.0)
+            .max()
+            .unwrap_or(0);
+        let sequence_floor = records
+            .iter()
+            .flat_map(|record| &record.batch.events)
+            .map(|event| event.sequence.0)
+            .max()
+            .unwrap_or(0);
+        if proposal_floor >= MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR
+            || sequence_floor >= MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR
+        {
+            return Err(ProtocolError {
+                code: "proposal_observation_identity_exhausted".to_string(),
+                message: "durable proposal or event-sequence identity space is exhausted"
+                    .to_string(),
+            });
+        }
+        self.proposal_coordinator
+            .reserve_proposal_ids_through(proposal_floor);
+        self.proposal_coordinator
+            .reserve_event_sequences_through(sequence_floor);
+        self.event_sequence_generator
+            .reserve_through(sequence_floor);
+        Ok(records)
     }
 
     /// Enable the full workspace-local state suite under `.legion/`:
     /// palette usage, checkpoints, and proposal audit durability.
-    pub fn enable_workspace_state_persistence(&mut self, workspace_root: &std::path::Path) {
+    pub fn enable_workspace_state_persistence(
+        &mut self,
+        workspace_root: &std::path::Path,
+    ) -> Result<(), AppCompositionError> {
+        // Bind the fallible proposal/outbox authority first. A rejected root
+        // switch must not leave palette/checkpoint services rebound while the
+        // proposal authority remains on the previous workspace.
+        self.enable_proposal_audit_persistence(workspace_root)?;
         self.enable_palette_usage_persistence(workspace_root);
         self.enable_checkpoint_persistence(workspace_root);
-        self.enable_proposal_audit_persistence(workspace_root);
+        Ok(())
     }
 
     /// List durable checkpoints newest-first.
@@ -21250,8 +21352,173 @@ impl AppComposition {
         })
     }
 
+    fn canonicalize_registration_json(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    Self::canonicalize_registration_json(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                let mut sorted = values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                sorted.sort_by(|left, right| left.0.cmp(&right.0));
+                values.clear();
+                for (key, mut value) in sorted {
+                    Self::canonicalize_registration_json(&mut value);
+                    values.insert(key, value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn delegated_registration_keys(
+        proposals: &[AssistedAiEditProposalOutput],
+    ) -> Result<(String, String), AppCompositionError> {
+        use sha2::{Digest, Sha256};
+
+        const MAX_REPLAY_INPUT_BYTES: usize = 16 * 1024 * 1024;
+        let mut authority = Sha256::new();
+        authority.update(b"legion.delegated-proposal-registration.authority\0v3\0");
+        authority.update((proposals.len() as u64).to_be_bytes());
+        let mut identity = Sha256::new();
+        identity.update(b"legion.delegated-proposal-registration.identity\0v3\0");
+        identity.update((proposals.len() as u64).to_be_bytes());
+        let mut total_bytes = 0usize;
+
+        for proposal in proposals {
+            let mut normalized = proposal.clone();
+            // Proposal ids are app-owned allocation results, not provider
+            // authority. Every other semantic/authority field remains exact.
+            normalized.proposal_id = ProposalId(0);
+            let mut value = serde_json::to_value(&normalized).map_err(|error| {
+                AppCompositionError::AiRuntime(format!(
+                    "serialize delegated proposal replay authority failed: {error}"
+                ))
+            })?;
+            Self::canonicalize_registration_json(&mut value);
+            let encoded = serde_json::to_vec(&value).map_err(|error| {
+                AppCompositionError::AiRuntime(format!(
+                    "encode delegated proposal replay authority failed: {error}"
+                ))
+            })?;
+            total_bytes = total_bytes.checked_add(encoded.len()).ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "delegated proposal replay authority exceeded the bounded input size"
+                        .to_string(),
+                )
+            })?;
+            if total_bytes > MAX_REPLAY_INPUT_BYTES {
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "delegated proposal replay authority exceeds {MAX_REPLAY_INPUT_BYTES} bytes"
+                )));
+            }
+            authority.update((encoded.len() as u64).to_be_bytes());
+            authority.update(&encoded);
+
+            for identifier in [&proposal.output_id, &proposal.request_id] {
+                identity.update((identifier.len() as u64).to_be_bytes());
+                identity.update(identifier.as_bytes());
+            }
+        }
+
+        // These hashes are non-disclosing commitments, not secrecy for
+        // low-entropy values; callers must retain the exact original outputs
+        // to perform a replay after restart.
+        Ok((
+            format!("dpr3-{}", hex::encode(identity.finalize())),
+            hex::encode(authority.finalize()),
+        ))
+    }
+
+    fn workspace_proposal_commitment(
+        proposal: &WorkspaceProposal,
+    ) -> Result<String, AppCompositionError> {
+        use sha2::{Digest, Sha256};
+        let mut value = serde_json::to_value(proposal).map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "serialize delegated proposal commitment failed: {error}"
+            ))
+        })?;
+        Self::canonicalize_registration_json(&mut value);
+        let encoded = serde_json::to_vec(&value).map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "encode delegated proposal commitment failed: {error}"
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"legion.delegated-proposal-registration.proposal\0v3\0");
+        hasher.update((encoded.len() as u64).to_be_bytes());
+        hasher.update(encoded);
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    #[cfg(feature = "ai")]
+    fn proposal_observation_integrity_hash(
+        batch_id: &str,
+        authority_hash: &str,
+        proposal_ids: &[ProposalId],
+        events: &[EventEnvelope],
+    ) -> Result<String, AppCompositionError> {
+        use sha2::{Digest, Sha256};
+        if proposal_ids.len() != events.len() {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_replay_mismatch".to_string(),
+                message: "proposal observation integrity inputs have different lengths".to_string(),
+            }));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"legion.delegated-proposal-registration.observation\0v3\0");
+        for value in [batch_id.as_bytes(), authority_hash.as_bytes()] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value);
+        }
+        hasher.update((events.len() as u64).to_be_bytes());
+        for (proposal_id, event) in proposal_ids.iter().zip(events) {
+            hasher.update(proposal_id.0.to_be_bytes());
+            hasher.update(event.event_id.0.as_bytes());
+            hasher.update(event.sequence.0.to_be_bytes());
+            hasher.update(event.occurred_at.0.to_be_bytes());
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    #[cfg(feature = "ai")]
+    fn delegated_workspace_proposal(
+        proposal_output: &AssistedAiEditProposalOutput,
+    ) -> WorkspaceProposal {
+        WorkspaceProposal {
+            proposal_id: proposal_output.proposal_id,
+            principal: proposal_output.principal.clone(),
+            capability: proposal_output.capability.clone(),
+            correlation_id: proposal_output.correlation_id,
+            payload: proposal_output.payload.clone(),
+            preconditions: proposal_output.preconditions.clone(),
+            preview: proposal_output.preview.clone(),
+            expires_at: proposal_output.expires_at,
+            created_at: proposal_output.created_at,
+        }
+    }
+
     #[cfg(feature = "ai")]
     fn register_delegated_task_proposals(
+        &mut self,
+        proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
+    ) -> Result<Vec<legion_protocol::AssistedAiEditProposalOutput>, AppCompositionError> {
+        let result = self.try_register_delegated_task_proposals(proposals);
+        if result.is_err() {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+        }
+        result
+    }
+
+    #[cfg(feature = "ai")]
+    fn try_register_delegated_task_proposals(
         &mut self,
         proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     ) -> Result<Vec<legion_protocol::AssistedAiEditProposalOutput>, AppCompositionError> {
@@ -21259,28 +21526,216 @@ impl AppComposition {
             return Ok(Vec::new());
         }
 
+        let (batch_id, authority_hash) = Self::delegated_registration_keys(&proposals)?;
+        let durable_records = self
+            .reserve_durable_proposal_observation_identities()
+            .map_err(AppCompositionError::Protocol)?;
+        let matching = durable_records
+            .iter()
+            .filter(|record| record.batch.batch_id == batch_id)
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_replay_ambiguous".to_string(),
+                message: "multiple durable records claim the delegated proposal replay key"
+                    .to_string(),
+            }));
+        }
+        let recovery_record = matching.first().copied();
+        if recovery_record.is_some_and(|record| {
+            record.batch.events.first().and_then(|event| {
+                event
+                    .payload
+                    .get("registration_authority_hash")
+                    .and_then(serde_json::Value::as_str)
+            }) != Some(authority_hash.as_str())
+        }) {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_replay_mismatch".to_string(),
+                message: "durable proposal observation registration key is missing or invalid"
+                    .to_string(),
+            }));
+        }
+        if let Some(record) = recovery_record {
+            let record_proposal_ids = record
+                .batch
+                .proposal_audits
+                .iter()
+                .map(|audit| audit.proposal_id)
+                .collect::<Vec<_>>();
+            let expected_record_hash = Self::proposal_observation_integrity_hash(
+                &batch_id,
+                &authority_hash,
+                &record_proposal_ids,
+                &record.batch.events,
+            )?;
+            let identity_hash = batch_id.trim_start_matches("dpr3-");
+            let record_hashes_match = record.batch.events.iter().all(|event| {
+                event
+                    .payload
+                    .get("registration_identity_hash")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(identity_hash)
+                    && event
+                        .payload
+                        .get("registration_authority_hash")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(authority_hash.as_str())
+                    && event
+                        .payload
+                        .get("registration_record_hash")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(expected_record_hash.as_str())
+            });
+            if !record_hashes_match {
+                return Err(AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal_observation_replay_mismatch".to_string(),
+                    message: "durable proposal observation identity checksum is invalid"
+                        .to_string(),
+                }));
+            }
+        }
+
         let snapshot = self
             .proposal_coordinator
             .proposal_lifecycle_recovery_snapshot();
+        let proposal_floor = durable_records
+            .iter()
+            .flat_map(|record| &record.batch.proposal_audits)
+            .map(|audit| audit.proposal_id.0)
+            .max()
+            .unwrap_or(0)
+            .max(snapshot.next_proposal_id);
+        let sequence_floor = durable_records
+            .iter()
+            .flat_map(|record| &record.batch.events)
+            .map(|event| event.sequence.0)
+            .max()
+            .unwrap_or(0)
+            .max(snapshot.next_event_sequence);
+        if proposal_floor >= MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR
+            || sequence_floor >= MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR
+            || (recovery_record.is_none()
+                && (proposal_floor.checked_add(proposals.len() as u64).is_none()
+                    || sequence_floor.checked_add(proposals.len() as u64).is_none()))
+        {
+            self.delegate_workflow
+                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_identity_exhausted".to_string(),
+                message: "durable proposal or event-sequence identity space is exhausted"
+                    .to_string(),
+            }));
+        }
+
+        let assigned_ids = if let Some(record) = recovery_record {
+            if record.batch.proposal_audits.len() != proposals.len() {
+                return Err(AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal_observation_replay_mismatch".to_string(),
+                    message: "durable proposal observation item count does not match replay inputs"
+                        .to_string(),
+                }));
+            }
+            record
+                .batch
+                .proposal_audits
+                .iter()
+                .map(|audit| audit.proposal_id)
+                .collect::<Vec<_>>()
+        } else {
+            (1..=proposals.len())
+                .map(|offset| ProposalId(proposal_floor + offset as u64))
+                .collect::<Vec<_>>()
+        };
+
+        let mut proposal_outputs = proposals;
+        let workspace_proposals = proposal_outputs
+            .iter_mut()
+            .zip(&assigned_ids)
+            .map(|(output, proposal_id)| {
+                output.proposal_id = *proposal_id;
+                Self::delegated_workspace_proposal(output)
+            })
+            .collect::<Vec<_>>();
+        let proposal_commitments = workspace_proposals
+            .iter()
+            .map(Self::workspace_proposal_commitment)
+            .collect::<Result<Vec<_>, _>>()?;
+        let existing_association_matches = self
+            .published_proposal_observation_batches
+            .get(&batch_id)
+            .is_some_and(|association| {
+                association.proposal_ids == assigned_ids
+                    && association.proposal_commitments == proposal_commitments
+            });
+
+        let live = workspace_proposals
+            .iter()
+            .map(|proposal| self.proposal_coordinator.proposal(proposal.proposal_id))
+            .collect::<Vec<_>>();
+        let live_count = live.iter().filter(|proposal| proposal.is_some()).count();
+        if live_count != 0 && live_count != workspace_proposals.len() {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "proposal_observation_publication_conflict".to_string(),
+                message: "only part of a durable proposal batch is present in the live ledger"
+                    .to_string(),
+            }));
+        }
+        if live_count == workspace_proposals.len() {
+            for ((live, expected_commitment), proposal_id) in
+                live.iter().zip(&proposal_commitments).zip(&assigned_ids)
+            {
+                let live_commitment = Self::workspace_proposal_commitment(
+                    live.as_ref()
+                        .expect("live count proved every proposal exists"),
+                )?;
+                let expected_context = EventContext {
+                    correlation_id: workspace_proposals
+                        .iter()
+                        .find(|proposal| proposal.proposal_id == *proposal_id)
+                        .expect("assigned proposal exists")
+                        .correlation_id,
+                    causality_id: proposal_outputs
+                        .iter()
+                        .find(|proposal| proposal.proposal_id == *proposal_id)
+                        .expect("assigned proposal output exists")
+                        .causality_id,
+                };
+                let context_matches = self
+                    .proposal_coordinator
+                    .lifecycle_context(*proposal_id)
+                    .is_some_and(|context| {
+                        context.correlation_id == expected_context.correlation_id
+                            && context.causality_id == expected_context.causality_id
+                    });
+                let lifecycle_matches = self
+                    .proposal_coordinator
+                    .current_lifecycle_state(*proposal_id)
+                    == Some(ProposalLifecycleState::Created)
+                    || existing_association_matches;
+                if &live_commitment != expected_commitment || !context_matches || !lifecycle_matches
+                {
+                    return Err(AppCompositionError::Protocol(ProtocolError {
+                        code: "proposal_observation_publication_conflict".to_string(),
+                        message: "a durable proposal id is bound to different live authority"
+                            .to_string(),
+                    }));
+                }
+            }
+        }
+
         let mut staging_coordinator = AppProposalCoordinator::new(SharedEventSink::default());
         staging_coordinator.recover_lifecycle_from_snapshot(snapshot);
-
-        let staged = (|| {
-            let mut staged = Vec::with_capacity(proposals.len());
-            for mut proposal_output in proposals {
-                let proposal_id = staging_coordinator.next_available_id();
-                proposal_output.proposal_id = proposal_id;
-                let proposal = WorkspaceProposal {
-                    proposal_id,
-                    principal: proposal_output.principal.clone(),
-                    capability: proposal_output.capability.clone(),
-                    correlation_id: proposal_output.correlation_id,
-                    payload: proposal_output.payload.clone(),
-                    preconditions: proposal_output.preconditions.clone(),
-                    preview: proposal_output.preview.clone(),
-                    expires_at: proposal_output.expires_at,
-                    created_at: proposal_output.created_at,
-                };
+        staging_coordinator.reserve_proposal_ids_through(proposal_floor);
+        staging_coordinator.reserve_event_sequences_through(sequence_floor);
+        let mut generated_events = Vec::new();
+        let mut generated_audits = Vec::new();
+        if live_count == 0 {
+            for (proposal_output, proposal) in proposal_outputs.iter().zip(&workspace_proposals) {
                 staging_coordinator.register_lifecycle_context(
                     proposal.proposal_id,
                     EventContext {
@@ -21288,122 +21743,301 @@ impl AppComposition {
                         causality_id: proposal_output.causality_id,
                     },
                 );
-                let response = staging_coordinator.created_response(&proposal);
+                let response = staging_coordinator.created_response(proposal);
                 let transition = match &response {
                     ProposalResponse::Created(transition) => transition,
                     response => {
+                        self.delegate_workflow
+                            .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
                         return Err(AppCompositionError::AiRuntime(format!(
                             "delegated proposal registration was rejected: {response:?}"
                         )));
                     }
                 };
-                let events = SaveWorkflowService::events_for_response(
-                    &mut staging_coordinator,
-                    &proposal,
-                    &response,
-                )
-                .map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "delegated proposal Created event was rejected: {error}"
+                if recovery_record.is_none() {
+                    let events = SaveWorkflowService::events_for_response(
+                        &mut staging_coordinator,
+                        proposal,
+                        &response,
+                    )
+                    .map_err(|error| {
+                        AppCompositionError::AiRuntime(format!(
+                            "delegated proposal Created event was rejected: {error}"
+                        ))
+                    })?;
+                    let [mut event] = events.try_into().map_err(|events: Vec<EventEnvelope>| {
+                        AppCompositionError::AiRuntime(format!(
+                            "delegated proposal registration expected one Created event, got {}",
+                            events.len()
+                        ))
+                    })?;
+                    event.payload["registration_identity_hash"] =
+                        serde_json::Value::String(batch_id.trim_start_matches("dpr3-").to_string());
+                    event.payload["registration_authority_hash"] =
+                        serde_json::Value::String(authority_hash.clone());
+                    generated_audits.push(proposal_audit_record(proposal, transition).map_err(
+                        |error| {
+                            AppCompositionError::AiRuntime(format!(
+                                "delegated proposal Created audit was rejected: {error}"
+                            ))
+                        },
+                    )?);
+                    generated_events.push(event);
+                }
+            }
+        }
+
+        if let Some(record) = recovery_record {
+            for audit in &record.batch.proposal_audits {
+                let latest = self
+                    .storage
+                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                        audit.proposal_id,
                     ))
-                })?;
-                let [event] = events.as_slice() else {
-                    return Err(AppCompositionError::AiRuntime(format!(
-                        "delegated proposal registration expected one Created event, got {}",
-                        events.len()
-                    )));
-                };
-                let metadata = event_metadata_record(event);
-                let audit = proposal_audit_record(&proposal, transition).map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "delegated proposal Created audit was rejected: {error}"
-                    ))
-                })?;
-                staged.push((proposal_output, event.clone(), metadata, audit));
+                    .map_err(AppCompositionError::Protocol)?;
+                if !existing_association_matches
+                    && !matches!(
+                        latest,
+                        StorageRepositoryResponse::ProposalAuditRecord(Some(ref latest))
+                            if latest.lifecycle_state == ProposalLifecycleState::Created
+                    )
+                {
+                    return Err(AppCompositionError::Protocol(ProtocolError {
+                        code: "proposal_observation_replay_lifecycle_advanced".to_string(),
+                        message: "durable proposal lifecycle advanced beyond Created and cannot be replayed as new"
+                            .to_string(),
+                    }));
+                }
             }
 
-            Ok::<_, AppCompositionError>(staged)
-        })();
-
-        let staged = match staged {
-            Ok(staged) => staged,
-            Err(error) => {
+            let mut expected_events = Vec::with_capacity(workspace_proposals.len());
+            let mut expected_audits = Vec::with_capacity(workspace_proposals.len());
+            for (((proposal_output, proposal), stored_event), stored_audit) in proposal_outputs
+                .iter()
+                .zip(&workspace_proposals)
+                .zip(&record.batch.events)
+                .zip(&record.batch.proposal_audits)
+            {
+                let transition = ProposalLifecycleTransition {
+                    proposal_id: proposal.proposal_id,
+                    lifecycle_state: ProposalLifecycleState::Created,
+                    timestamp: stored_audit.timestamp,
+                    principal: proposal.principal.clone(),
+                    capability: proposal.capability.clone(),
+                    correlation_id: proposal.correlation_id,
+                    causality_id: proposal_output.causality_id,
+                    diagnostics: Vec::new(),
+                };
+                let mut event =
+                    proposal_created_event(proposal, &transition, stored_event.sequence).map_err(
+                        |error| {
+                            AppCompositionError::AiRuntime(format!(
+                                "rebuild delegated proposal Created event failed: {error}"
+                            ))
+                        },
+                    )?;
+                event.event_id = stored_event.event_id;
+                event.payload["registration_identity_hash"] =
+                    serde_json::Value::String(batch_id.trim_start_matches("dpr3-").to_string());
+                event.payload["registration_authority_hash"] =
+                    serde_json::Value::String(authority_hash.clone());
+                expected_audits.push(proposal_audit_record(proposal, &transition).map_err(
+                    |error| {
+                        AppCompositionError::AiRuntime(format!(
+                            "rebuild delegated proposal Created audit failed: {error}"
+                        ))
+                    },
+                )?);
+                expected_events.push(event);
+            }
+            let record_hash = Self::proposal_observation_integrity_hash(
+                &batch_id,
+                &authority_hash,
+                &assigned_ids,
+                &expected_events,
+            )?;
+            for event in &mut expected_events {
+                event.payload["registration_record_hash"] =
+                    serde_json::Value::String(record_hash.clone());
+            }
+            let expected_metadata = expected_events.iter().map(event_metadata_record).collect();
+            let candidate = ProposalObservationBatch {
+                batch_id: batch_id.clone(),
+                events: expected_events,
+                event_metadata: expected_metadata,
+                proposal_audits: expected_audits,
+                schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
+            };
+            if !self
+                .storage
+                .proposal_observation_batch_matches_stored(candidate)
+                .map_err(AppCompositionError::Protocol)?
+            {
+                return Err(AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal_observation_replay_mismatch".to_string(),
+                    message:
+                        "trusted replay inputs do not reproduce the exact durable observation batch"
+                            .to_string(),
+                }));
+            }
+        } else {
+            let record_hash = Self::proposal_observation_integrity_hash(
+                &batch_id,
+                &authority_hash,
+                &assigned_ids,
+                &generated_events,
+            )?;
+            for event in &mut generated_events {
+                event.payload["registration_record_hash"] =
+                    serde_json::Value::String(record_hash.clone());
+            }
+            let generated_metadata = generated_events.iter().map(event_metadata_record).collect();
+            let batch = ProposalObservationBatch {
+                batch_id: batch_id.clone(),
+                events: generated_events,
+                event_metadata: generated_metadata,
+                proposal_audits: generated_audits,
+                schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
+            };
+            if let Err(error) = self.storage.store_proposal_observation_batch(batch) {
                 self.delegate_workflow
                     .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                return Err(error);
+                return Err(AppCompositionError::Protocol(error));
             }
-        };
-
-        use sha2::{Digest, Sha256};
-        let mut batch_id_hasher = Sha256::new();
-        batch_id_hasher.update(b"delegated-proposal-created-v2\0");
-        for (proposal, _, _, _) in &staged {
-            batch_id_hasher.update(proposal.output_id.as_bytes());
-            batch_id_hasher.update(b"\0");
-            batch_id_hasher.update(proposal.request_id.as_bytes());
-            batch_id_hasher.update(b"\0");
-            batch_id_hasher.update(proposal.proposal_id.0.to_le_bytes());
-            batch_id_hasher.update(proposal.correlation_id.0.to_le_bytes());
-            batch_id_hasher.update(proposal.causality_id.0.as_bytes());
+            #[cfg(any(test, feature = "test-helpers"))]
+            if self.interrupt_after_proposal_observation_store {
+                self.interrupt_after_proposal_observation_store = false;
+                return Err(AppCompositionError::Protocol(ProtocolError {
+                    code: "proposal_observation_post_commit_interrupted".to_string(),
+                    message: "injected interruption after durable Pending commit".to_string(),
+                }));
+            }
         }
-        let digest = hex::encode(batch_id_hasher.finalize());
-        let first_proposal_id = staged
-            .first()
-            .map(|(proposal, _, _, _)| proposal.proposal_id.0)
-            .unwrap_or(0);
-        let last_proposal_id = staged
-            .last()
-            .map(|(proposal, _, _, _)| proposal.proposal_id.0)
-            .unwrap_or(0);
-        let batch_id = format!(
-            "delegated-created-v2-{first_proposal_id}-{last_proposal_id}-{}-{}",
-            staged.len(),
-            &digest[..16]
+
+        if live_count == 0 {
+            self.proposal_coordinator.recover_lifecycle_from_snapshot(
+                staging_coordinator.proposal_lifecycle_recovery_snapshot(),
+            );
+        }
+        self.published_proposal_observation_batches.insert(
+            batch_id.clone(),
+            PublishedProposalObservationAssociation {
+                proposal_ids: assigned_ids,
+                proposal_commitments,
+            },
         );
-        let batch = ProposalObservationBatch {
-            batch_id: batch_id.clone(),
-            events: staged
-                .iter()
-                .map(|(_, event, _, _)| event.clone())
-                .collect(),
-            event_metadata: staged
-                .iter()
-                .map(|(_, _, metadata, _)| metadata.clone())
-                .collect(),
-            proposal_audits: staged
-                .iter()
-                .map(|(_, _, _, audit)| audit.clone())
-                .collect(),
-            schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
-        };
-
-        if let Err(error) = self.storage.store_proposal_observation_batch(batch) {
-            self.delegate_workflow
-                .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-            return Err(AppCompositionError::Protocol(error));
-        }
-
-        // The durable Pending record is authoritative. Publish the staged
-        // lifecycle state only after that commit; delivery failure is retryable
-        // and must not roll back the now-registered proposals.
-        let staged_snapshot = staging_coordinator.proposal_lifecycle_recovery_snapshot();
-        self.proposal_coordinator
-            .recover_lifecycle_from_snapshot(staged_snapshot);
         let _ = self.storage.deliver_proposal_observation_batch(&batch_id);
 
-        Ok(staged
-            .into_iter()
-            .map(|(proposal, _, _, _)| proposal)
-            .collect())
+        Ok(proposal_outputs)
     }
 
     /// Retry proposal-created event batches that were durably registered but
     /// whose atomic event-sink delivery has not yet been acknowledged.
-    pub fn retry_pending_proposal_observations(&self) -> Result<usize, AppCompositionError> {
-        self.storage
-            .retry_pending_proposal_observations()
-            .map(|report| report.delivered_count)
-            .map_err(AppCompositionError::Protocol)
+    pub fn retry_pending_proposal_observations(
+        &self,
+    ) -> Result<legion_storage::ProposalObservationRetryReport, AppCompositionError> {
+        let pending = self
+            .storage
+            .pending_proposal_observation_batches()
+            .map_err(AppCompositionError::Protocol)?;
+        let mut attempts = Vec::with_capacity(pending.len());
+        let mut delivered_count = 0usize;
+        let mut pending_count = 0usize;
+        for record in pending {
+            let batch_id = record.batch.batch_id.clone();
+            let published = self.published_proposal_observation_batches.get(&batch_id);
+            let durable_ids = record
+                .batch
+                .proposal_audits
+                .iter()
+                .map(|audit| audit.proposal_id)
+                .collect::<Vec<_>>();
+            let publication_matches = published.is_some_and(|association| {
+                association.proposal_ids == durable_ids
+                    && association.proposal_ids.len() == association.proposal_commitments.len()
+                    && association
+                        .proposal_ids
+                        .iter()
+                        .zip(&association.proposal_commitments)
+                        .zip(&record.batch.proposal_audits)
+                        .all(|((proposal_id, commitment), audit)| {
+                            let Some(proposal) = self.proposal_coordinator.proposal(*proposal_id)
+                            else {
+                                return false;
+                            };
+                            let Some(context) =
+                                self.proposal_coordinator.lifecycle_context(*proposal_id)
+                            else {
+                                return false;
+                            };
+                            context.correlation_id == audit.correlation_id
+                                && context.causality_id == audit.causality_id
+                                && Self::workspace_proposal_commitment(&proposal)
+                                    .is_ok_and(|actual| &actual == commitment)
+                        })
+            });
+            if !publication_matches {
+                pending_count = pending_count.saturating_add(1);
+                attempts.push(legion_storage::ProposalObservationRetryAttempt {
+                    batch_id,
+                    delivery_state: legion_storage::ProposalObservationDeliveryState::Pending,
+                    error_code: Some("proposal_observation_publication_missing".to_string()),
+                    error_kind: Some(legion_storage::ProposalObservationRetryErrorKind::Permanent),
+                    schema_version: 1,
+                });
+                continue;
+            }
+
+            match self.storage.deliver_proposal_observation_batch(&batch_id) {
+                Ok(delivered) => {
+                    delivered_count = delivered_count.saturating_add(1);
+                    attempts.push(legion_storage::ProposalObservationRetryAttempt {
+                        batch_id,
+                        delivery_state: delivered.delivery_state,
+                        error_code: None,
+                        error_kind: None,
+                        schema_version: 1,
+                    });
+                }
+                Err(error) => {
+                    pending_count = pending_count.saturating_add(1);
+                    attempts.push(legion_storage::ProposalObservationRetryAttempt {
+                        batch_id,
+                        delivery_state: legion_storage::ProposalObservationDeliveryState::Pending,
+                        error_kind: Some(Self::proposal_observation_retry_error_kind(&error.code)),
+                        error_code: Some(error.code),
+                        schema_version: 1,
+                    });
+                }
+            }
+        }
+        Ok(legion_storage::ProposalObservationRetryReport {
+            attempts,
+            delivered_count,
+            pending_count,
+            schema_version: 1,
+        })
+    }
+
+    fn proposal_observation_retry_error_kind(
+        code: &str,
+    ) -> legion_storage::ProposalObservationRetryErrorKind {
+        if matches!(
+            code,
+            "event_batch_unsupported"
+                | "event_id_conflict"
+                | "event_batch_invalid"
+                | "proposal_observation_batch_invalid"
+                | "proposal_observation_batch_conflict"
+                | "proposal_observation_record_conflict"
+                | "proposal_observation_outbox_corrupt"
+                | "storage_lock_poisoned"
+                | "proposal_observation_publication_missing"
+        ) {
+            legion_storage::ProposalObservationRetryErrorKind::Permanent
+        } else {
+            legion_storage::ProposalObservationRetryErrorKind::Transient
+        }
     }
 
     /// Run one delegated task synchronously for headless callers and tests.
@@ -34379,12 +35013,8 @@ mod tests {
             .pending_proposal_observation_batches()
             .expect("pending batch");
         assert_eq!(pending.len(), 1);
-        assert!(
-            pending[0]
-                .batch
-                .batch_id
-                .starts_with("delegated-created-v2-1-2-2-")
-        );
+        assert!(pending[0].batch.batch_id.starts_with("dpr3-"));
+        assert_eq!(pending[0].batch.batch_id.len(), "dpr3-".len() + 64);
         assert_eq!(pending[0].batch.event_metadata.len(), 2);
         assert_eq!(pending[0].batch.proposal_audits.len(), 2);
         assert_eq!(
@@ -34428,12 +35058,39 @@ mod tests {
             ));
         }
 
-        fail_second.store(false, Ordering::SeqCst);
+        let still_pending = app
+            .retry_pending_proposal_observations()
+            .expect("failed retry report");
+        assert_eq!(still_pending.delivered_count, 0);
+        assert_eq!(still_pending.pending_count, 1);
+        assert_eq!(still_pending.attempts.len(), 1);
         assert_eq!(
-            app.retry_pending_proposal_observations()
-                .expect("retry pending proposal observations"),
-            1
+            still_pending.attempts[0].delivery_state,
+            legion_storage::ProposalObservationDeliveryState::Pending
         );
+        assert_eq!(
+            still_pending.attempts[0].error_code.as_deref(),
+            Some("test_sink_validation_failed")
+        );
+        assert_eq!(
+            still_pending.attempts[0].error_kind,
+            Some(legion_storage::ProposalObservationRetryErrorKind::Transient)
+        );
+        assert_eq!(recorder.events().expect("event snapshot").len(), 0);
+
+        fail_second.store(false, Ordering::SeqCst);
+        let delivered = app
+            .retry_pending_proposal_observations()
+            .expect("retry pending proposal observations");
+        assert_eq!(delivered.delivered_count, 1);
+        assert_eq!(delivered.pending_count, 0);
+        assert_eq!(delivered.attempts.len(), 1);
+        assert_eq!(
+            delivered.attempts[0].delivery_state,
+            legion_storage::ProposalObservationDeliveryState::Delivered
+        );
+        assert!(delivered.attempts[0].error_code.is_none());
+        assert!(delivered.attempts[0].error_kind.is_none());
         assert_eq!(recorder.events().expect("event snapshot").len(), 2);
         assert!(
             app.storage
@@ -34442,16 +35099,444 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 3);
 
-        assert_eq!(
-            app.retry_pending_proposal_observations()
-                .expect("idempotent empty retry"),
-            0
-        );
+        let empty = app
+            .retry_pending_proposal_observations()
+            .expect("idempotent empty retry");
+        assert_eq!(empty.delivered_count, 0);
+        assert_eq!(empty.pending_count, 0);
+        assert!(empty.attempts.is_empty());
         assert_eq!(recorder.events().expect("event snapshot").len(), 2);
         assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_registration_key_canonicalizes_hash_map_insertion_order() {
+        let mut first = delegated_output_from(save_proposal(ProposalId(100)), "canonical");
+        let mut first_env = HashMap::new();
+        first_env.insert("B_KEY".to_string(), "two".to_string());
+        first_env.insert("A_KEY".to_string(), "one".to_string());
+        first.payload =
+            ProposalPayload::TerminalCommand(legion_protocol::TerminalCommandProposal {
+                session_id: None,
+                command: "cargo test".to_string(),
+                cwd: Some(CanonicalPath("C:/repo".to_string())),
+                env: first_env,
+            });
+
+        let mut second = first.clone();
+        let mut second_env = HashMap::new();
+        second_env.insert("A_KEY".to_string(), "one".to_string());
+        second_env.insert("B_KEY".to_string(), "two".to_string());
+        if let ProposalPayload::TerminalCommand(command) = &mut second.payload {
+            command.env = second_env;
+        } else {
+            panic!("test payload must remain a terminal command");
+        }
+
+        assert_eq!(
+            AppComposition::delegated_registration_keys(&[first]).expect("first canonical key"),
+            AppComposition::delegated_registration_keys(&[second]).expect("second canonical key")
+        );
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn durable_proposal_observation_rejects_near_terminal_identity_floors() {
+        let app_sink = legion_observability::InMemoryEventSink::new();
+        let mut app = AppComposition::with_event_sink(SharedEventSink::new(app_sink));
+        let proposal_id = ProposalId(MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR);
+        let proposal = save_proposal(proposal_id);
+        let causality_id = CausalityId(uuid::Uuid::now_v7());
+        let transition = ProposalLifecycleTransition {
+            proposal_id,
+            lifecycle_state: ProposalLifecycleState::Created,
+            timestamp: TimestampMillis(1),
+            principal: proposal.principal.clone(),
+            capability: proposal.capability.clone(),
+            correlation_id: proposal.correlation_id,
+            causality_id,
+            diagnostics: Vec::new(),
+        };
+        let event = proposal_created_event(
+            &proposal,
+            &transition,
+            EventSequence(MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR),
+        )
+        .expect("near-limit event remains structurally valid");
+        let batch = ProposalObservationBatch {
+            batch_id: "near-terminal-floor".to_string(),
+            event_metadata: vec![event_metadata_record(&event)],
+            proposal_audits: vec![
+                proposal_audit_record(&proposal, &transition).expect("near-limit audit"),
+            ],
+            events: vec![event],
+            schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
+        };
+        app.storage
+            .store_proposal_observation_batch(batch)
+            .expect("store near-limit untrusted durable record");
+
+        let error = app
+            .reserve_durable_proposal_observation_identities()
+            .expect_err("near-terminal durable floors must fail closed");
+        assert_eq!(error.code, "proposal_observation_identity_exhausted");
+        assert_eq!(app.proposal_coordinator.next_proposal_id.get(), 0);
+        assert_eq!(app.proposal_coordinator.next_event_sequence.get(), 0);
+    }
+
+    #[test]
+    fn proposal_persistence_late_enable_rejects_live_identity_overlap() {
+        let workspace_root = unique_temp_dir("proposal-persistence-late-enable");
+        let mut app = AppComposition::new();
+        let live = save_proposal(ProposalId(1));
+        register_created(&app.proposal_coordinator, &live);
+
+        let error = app
+            .enable_proposal_audit_persistence(&workspace_root)
+            .expect_err("persistence enable after live proposals must fail closed");
+        assert!(matches!(
+            error,
+            AppCompositionError::Protocol(ProtocolError { code, .. })
+                if code == "proposal_observation_publication_conflict"
+        ));
+        assert!(
+            !workspace_root.join(".legion").exists(),
+            "rejected late enable must not bind or create the durability root"
+        );
+
+        fs::remove_dir_all(&workspace_root).expect("remove late-enable test workspace");
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn proposal_observation_retry_skips_orphan_without_blocking_published_batch() {
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let fail_second = Arc::new(AtomicBool::new(true));
+        let sink = FailSecondAtomicBatchSink {
+            recorder: recorder.clone(),
+            fail_second: Arc::clone(&fail_second),
+            legacy_emit_calls: Arc::new(AtomicUsize::new(0)),
+            batch_emit_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut app = AppComposition::with_event_sink(SharedEventSink::new(sink));
+        let published = app
+            .register_delegated_task_proposals(vec![
+                delegated_output_from(save_proposal(ProposalId(100)), "published-first"),
+                delegated_output_from(save_proposal(ProposalId(101)), "published-second"),
+            ])
+            .expect("published batch remains Pending after sink failure");
+        let first_published = app
+            .proposal_coordinator
+            .proposal(published[0].proposal_id)
+            .expect("published proposal");
+        assert!(matches!(
+            app.proposal_coordinator
+                .handle(ProposalRequest::Validate(first_published)),
+            Ok(ProposalResponse::Validated(_))
+        ));
+
+        let orphan_proposal = save_proposal(ProposalId(900));
+        let orphan_transition = ProposalLifecycleTransition {
+            proposal_id: orphan_proposal.proposal_id,
+            lifecycle_state: ProposalLifecycleState::Created,
+            timestamp: TimestampMillis(900),
+            principal: orphan_proposal.principal.clone(),
+            capability: orphan_proposal.capability.clone(),
+            correlation_id: orphan_proposal.correlation_id,
+            causality_id: CausalityId(uuid::Uuid::now_v7()),
+            diagnostics: Vec::new(),
+        };
+        let orphan_event =
+            proposal_created_event(&orphan_proposal, &orphan_transition, EventSequence(900))
+                .expect("orphan event");
+        app.storage
+            .store_proposal_observation_batch(ProposalObservationBatch {
+                batch_id: "aaa-orphan".to_string(),
+                event_metadata: vec![event_metadata_record(&orphan_event)],
+                proposal_audits: vec![
+                    proposal_audit_record(&orphan_proposal, &orphan_transition)
+                        .expect("orphan audit"),
+                ],
+                events: vec![orphan_event],
+                schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
+            })
+            .expect("store unassociated orphan");
+
+        fail_second.store(false, Ordering::SeqCst);
+        let report = app
+            .retry_pending_proposal_observations()
+            .expect("retry all pending without head-of-line blocking");
+        assert_eq!(report.attempts.len(), 2);
+        assert_eq!(report.delivered_count, 1);
+        assert_eq!(report.pending_count, 1);
+        assert_eq!(report.attempts[0].batch_id, "aaa-orphan");
+        assert_eq!(
+            report.attempts[0].error_code.as_deref(),
+            Some("proposal_observation_publication_missing")
+        );
+        assert_eq!(
+            report.attempts[0].error_kind,
+            Some(legion_storage::ProposalObservationRetryErrorKind::Permanent)
+        );
+        assert_eq!(
+            report.attempts[1].delivery_state,
+            legion_storage::ProposalObservationDeliveryState::Delivered
+        );
+        assert_eq!(recorder.events().expect("published events").len(), 2);
+        let remaining = app
+            .storage
+            .pending_proposal_observation_batches()
+            .expect("remaining orphan");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].batch.batch_id, "aaa-orphan");
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_replay_rejects_durable_lifecycle_advanced_beyond_created() {
+        let workspace_root = unique_temp_dir("delegated-observation-advanced");
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let outputs = vec![delegated_output_from(
+            save_proposal(ProposalId(100)),
+            "advanced",
+        )];
+        {
+            let mut interrupted =
+                AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
+            interrupted
+                .enable_proposal_audit_persistence(&workspace_root)
+                .expect("enable durable proposal observations");
+            interrupted.interrupt_after_proposal_observation_store = true;
+            interrupted
+                .register_delegated_task_proposals(outputs.clone())
+                .expect_err("inject post-commit interruption");
+            let pending = interrupted
+                .storage
+                .pending_proposal_observation_batches()
+                .expect("pending record");
+            let mut advanced = pending[0].batch.proposal_audits[0].clone();
+            advanced.lifecycle_state = ProposalLifecycleState::Applied;
+            advanced.timestamp = TimestampMillis(advanced.timestamp.0.saturating_add(1));
+            interrupted
+                .storage
+                .handle(StorageRepositoryRequest::SaveProposalAuditRecord(advanced))
+                .expect("persist advanced lifecycle audit");
+        }
+
+        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
+        recovered
+            .enable_proposal_audit_persistence(&workspace_root)
+            .expect("reopen advanced durable state");
+        let error = recovered
+            .register_delegated_task_proposals(outputs)
+            .expect_err("advanced durable lifecycle must not regress to Created");
+        assert!(matches!(
+            error,
+            AppCompositionError::Protocol(ProtocolError { code, .. })
+                if code == "proposal_observation_replay_lifecycle_advanced"
+        ));
+        assert_eq!(
+            recovered.delegate_workflow.runtime_activation,
+            DelegatedTaskRuntimeActivationState::Failed
+        );
+        assert!(
+            recovered
+                .proposal_coordinator
+                .proposal_ledger_projection(TimestampMillis(99))
+                .rows
+                .is_empty()
+        );
+        assert!(
+            recorder
+                .events()
+                .expect("no regressed Created event")
+                .is_empty()
+        );
+        assert_eq!(
+            recovered
+                .storage
+                .pending_proposal_observation_batches()
+                .expect("advanced record stays pending")
+                .len(),
+            1
+        );
+
+        fs::remove_dir_all(&workspace_root).expect("remove advanced replay workspace");
+    }
+
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_proposal_replays_exact_durable_registration_after_interruption() {
+        let workspace_root = unique_temp_dir("delegated-observation-replay");
+        let recorder = legion_observability::InMemoryEventSink::new();
+        let outputs = vec![
+            delegated_output_from(save_proposal(ProposalId(100)), "first"),
+            delegated_output_from(save_proposal(ProposalId(101)), "second"),
+        ];
+
+        let durable_batch = {
+            let mut interrupted =
+                AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
+            interrupted
+                .enable_proposal_audit_persistence(&workspace_root)
+                .expect("enable durable proposal observations");
+            interrupted.interrupt_after_proposal_observation_store = true;
+            let error = interrupted
+                .register_delegated_task_proposals(outputs.clone())
+                .expect_err("inject post-commit interruption");
+            assert!(matches!(
+                error,
+                AppCompositionError::Protocol(ProtocolError { code, .. })
+                    if code == "proposal_observation_post_commit_interrupted"
+            ));
+            assert_eq!(
+                interrupted.delegate_workflow.runtime_activation,
+                DelegatedTaskRuntimeActivationState::Failed
+            );
+            assert!(
+                interrupted
+                    .proposal_coordinator
+                    .proposal_ledger_projection(TimestampMillis(99))
+                    .rows
+                    .is_empty()
+            );
+            let orphan = interrupted
+                .retry_pending_proposal_observations()
+                .expect("report unpublished durable batch");
+            assert_eq!(orphan.delivered_count, 0);
+            assert_eq!(orphan.pending_count, 1);
+            assert_eq!(
+                orphan.attempts[0].error_code.as_deref(),
+                Some("proposal_observation_publication_missing")
+            );
+            assert!(recorder.events().expect("no orphan events").is_empty());
+            interrupted
+                .storage
+                .pending_proposal_observation_batches()
+                .expect("durable pending batch")
+                .into_iter()
+                .next()
+                .expect("one pending batch")
+                .batch
+        };
+
+        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
+        recovered
+            .enable_proposal_audit_persistence(&workspace_root)
+            .expect("reopen durable proposal observations");
+        let orphan = recovered
+            .retry_pending_proposal_observations()
+            .expect("restart must still refuse orphan delivery");
+        assert_eq!(orphan.pending_count, 1);
+        assert_eq!(
+            orphan.attempts[0].error_code.as_deref(),
+            Some("proposal_observation_publication_missing")
+        );
+        assert!(
+            recorder
+                .events()
+                .expect("no restart orphan events")
+                .is_empty()
+        );
+
+        let mut divergent = outputs.clone();
+        let ProposalPayload::SaveFile(save) = &mut divergent[0].payload else {
+            panic!("test payload must remain a save proposal");
+        };
+        save.file.canonical_path.0 = "C:/repo/file.txu".to_string();
+        let error = recovered
+            .register_delegated_task_proposals(divergent)
+            .expect_err("same logical identities with changed payload must fail closed");
+        assert!(matches!(
+            error,
+            AppCompositionError::Protocol(ProtocolError { code, .. })
+                if code == "proposal_observation_replay_mismatch"
+        ));
+        assert!(
+            recovered
+                .proposal_coordinator
+                .proposal_ledger_projection(TimestampMillis(99))
+                .rows
+                .is_empty()
+        );
+
+        let replayed = recovered
+            .register_delegated_task_proposals(outputs.clone())
+            .expect("exact caller-assisted replay");
+        assert_eq!(
+            replayed
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect::<Vec<_>>(),
+            vec![ProposalId(1), ProposalId(2)]
+        );
+        assert_eq!(
+            recovered
+                .proposal_coordinator
+                .proposal_ledger_projection(TimestampMillis(99))
+                .rows
+                .len(),
+            2
+        );
+        let restored = recovered
+            .storage
+            .proposal_observation_batches()
+            .expect("restored outbox record");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].delivery_state,
+            legion_storage::ProposalObservationDeliveryState::Delivered
+        );
+        assert_eq!(restored[0].batch.batch_id, durable_batch.batch_id);
+        assert_eq!(
+            restored[0]
+                .batch
+                .events
+                .iter()
+                .map(|event| (event.event_id, event.occurred_at, event.sequence))
+                .collect::<Vec<_>>(),
+            durable_batch
+                .events
+                .iter()
+                .map(|event| (event.event_id, event.occurred_at, event.sequence))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            serde_json::to_value(&restored[0].batch.proposal_audits)
+                .expect("serialize restored audits"),
+            serde_json::to_value(&durable_batch.proposal_audits)
+                .expect("serialize original audits")
+        );
+        assert_eq!(
+            recorder.events().expect("one atomic replay delivery").len(),
+            2
+        );
+
+        let next = recovered
+            .register_delegated_task_proposals(vec![delegated_output_from(
+                save_proposal(ProposalId(200)),
+                "after-restart",
+            )])
+            .expect("new registration allocates above durable floors");
+        assert_eq!(next[0].proposal_id, ProposalId(3));
+        let records = recovered
+            .storage
+            .proposal_observation_batches()
+            .expect("all observation records");
+        assert_eq!(records.len(), 2);
+        let newest_sequence = records
+            .iter()
+            .flat_map(|record| &record.batch.events)
+            .map(|event| event.sequence.0)
+            .max()
+            .expect("event sequence");
+        assert!(newest_sequence > durable_batch.events[1].sequence.0);
+
+        fs::remove_dir_all(&workspace_root).expect("remove replay test workspace");
     }
 
     #[test]
