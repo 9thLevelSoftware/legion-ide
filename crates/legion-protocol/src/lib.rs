@@ -23778,6 +23778,20 @@ pub trait CapabilityBrokerPort {
 pub trait EventSinkPort {
     /// Emit event.
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()>;
+
+    /// Atomically emit a batch of events.
+    ///
+    /// Implementations that do not provide an atomic batch boundary fail
+    /// before emitting any item. Callers must not emulate this with repeated
+    /// [`Self::emit`] calls because a later failure would expose a partial batch.
+    /// Implementations must make identical retries idempotent by event id and
+    /// reject a reused event id whose content differs from the accepted event.
+    fn emit_batch(&self, _requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        Err(ProtocolError {
+            code: "event_batch_unsupported".to_string(),
+            message: "event sink does not support atomic batch emission".to_string(),
+        })
+    }
 }
 
 /// Service-port for storage repos.

@@ -20,16 +20,18 @@ pub use secrets::{
 /// Durable checkpoint store for workspace-level file-mutation rollback.
 pub mod checkpoint;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use legion_observability::{SharedEventSink, event_metadata_record};
+use legion_observability::{
+    EventSinkConfig, SharedEventSink, event_metadata_record, prepare_event_batch, validate_envelope,
+};
 use legion_protocol::{
     AgentReplayManifest, AgentRunId, AssistedAiAuditRecord, CanonicalPath, CausalityId,
     CollaborationAuditRecord, CollaborationSessionId, CorrelationId, DebugAdapterAuditRecord,
@@ -37,8 +39,8 @@ use legion_protocol::{
     EditablePlanRevisionArtifact, EventEnvelope, EventId, EventMetadataRecord, EventSequence,
     EventSinkPort, EventSinkRequest, FileId, FileMetadata, HostedTelemetrySpoolRecord,
     Phase4RuntimeAuditRecord, PluginDenialReason, PluginStorageOperation, PluginStorageRecord,
-    PrincipalId, ProposalAuditRecord, ProposalId, ProtocolError, ProtocolResult,
-    RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
+    PrincipalId, ProposalAuditRecord, ProposalId, ProposalLifecycleState, ProtocolError,
+    ProtocolResult, RawSourceRetentionAccessAudit, RemoteAuditRecord, RemoteTransportAuditSummary,
     RemoteWorkspaceSessionId, SemanticMetadataBatch, SemanticMetadataFreshnessKey,
     SemanticMetadataQuery, SemanticMetadataReadResult, SemanticMetadataRecord,
     SemanticMetadataTombstone, SemanticMetadataTombstoneReason, SnapshotId, StorageBackupMarker,
@@ -527,6 +529,39 @@ pub trait PlanRevisionRepository {
     fn latest_plan_revision(&self, plan_artifact_id: &str) -> Option<EditablePlanRevisionArtifact>;
 }
 
+/// Atomic proposal-created observation payload stored in the transactional outbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalObservationBatch {
+    /// Stable idempotency key for this batch.
+    pub batch_id: String,
+    /// Proposal-created events delivered atomically to the event sink.
+    pub events: Vec<EventEnvelope>,
+    /// Durable metadata corresponding one-to-one with `events`.
+    pub event_metadata: Vec<EventMetadataRecord>,
+    /// Proposal lifecycle audit records committed with the event metadata.
+    pub proposal_audits: Vec<ProposalAuditRecord>,
+    /// Batch schema version.
+    pub schema_version: u16,
+}
+
+/// Delivery state for a proposal observation outbox record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalObservationDeliveryState {
+    /// Storage committed, but the atomic sink batch is not acknowledged yet.
+    Pending,
+    /// The atomic sink batch completed and delivery was durably acknowledged.
+    Delivered,
+}
+
+/// Durable transactional-outbox record for one proposal observation batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalObservationOutboxRecord {
+    /// Validated observation batch.
+    pub batch: ProposalObservationBatch,
+    /// Current sink-delivery state.
+    pub delivery_state: ProposalObservationDeliveryState,
+}
+
 #[derive(Debug, Default)]
 /// Test-oriented, in-memory storage implementation.
 pub struct InMemoryStorage {
@@ -553,6 +588,7 @@ pub struct InMemoryStorage {
     protocol_hosted_telemetry_spool: HashMap<String, HostedTelemetrySpoolRecord>,
     protocol_raw_source_retention_access_audit: HashMap<String, RawSourceRetentionAccessAudit>,
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
+    protocol_proposal_observation_outbox: HashMap<String, ProposalObservationOutboxRecord>,
     protocol_semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     protocol_semantic_tombstones: Vec<SemanticMetadataTombstone>,
     protocol_plugin_storage: HashMap<String, PluginStorageRecord>,
@@ -947,6 +983,8 @@ struct PersistedState {
     #[serde(default)]
     protocol_event_metadata: HashMap<EventId, EventMetadataRecord>,
     #[serde(default)]
+    protocol_proposal_observation_outbox: HashMap<String, ProposalObservationOutboxRecord>,
+    #[serde(default)]
     protocol_plan_revisions: Vec<EditablePlanRevisionArtifact>,
     semantic_metadata: HashMap<String, SemanticMetadataRecord>,
     semantic_tombstones: Vec<SemanticMetadataTombstone>,
@@ -985,6 +1023,9 @@ impl From<&InMemoryStorage> for PersistedState {
                 .protocol_raw_source_retention_access_audit
                 .clone(),
             protocol_event_metadata: value.protocol_event_metadata.clone(),
+            protocol_proposal_observation_outbox: value
+                .protocol_proposal_observation_outbox
+                .clone(),
             protocol_plan_revisions: value.protocol_plan_revision_ledger.all_revisions(),
             semantic_metadata: value.protocol_semantic_metadata.clone(),
             semantic_tombstones: value.protocol_semantic_tombstones.clone(),
@@ -1023,6 +1064,7 @@ impl Clone for InMemoryStorage {
                 .protocol_raw_source_retention_access_audit
                 .clone(),
             protocol_event_metadata: self.protocol_event_metadata.clone(),
+            protocol_proposal_observation_outbox: self.protocol_proposal_observation_outbox.clone(),
             protocol_semantic_metadata: self.protocol_semantic_metadata.clone(),
             protocol_semantic_tombstones: self.protocol_semantic_tombstones.clone(),
             protocol_plugin_storage: self.protocol_plugin_storage.clone(),
@@ -1046,6 +1088,8 @@ pub struct InMemoryStorageRepositoryPort {
     fail_next_proposal_audit_write: AtomicBool,
     fail_next_event_metadata_write: AtomicBool,
     fail_next_plan_revision_write: AtomicBool,
+    fail_proposal_observation_batch_at_item: AtomicUsize,
+    proposal_observation_delivery: Mutex<()>,
 }
 
 impl InMemoryStorageRepositoryPort {
@@ -1063,6 +1107,8 @@ impl InMemoryStorageRepositoryPort {
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
+            fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            proposal_observation_delivery: Mutex::new(()),
         }
     }
 
@@ -1075,6 +1121,8 @@ impl InMemoryStorageRepositoryPort {
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
+            fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            proposal_observation_delivery: Mutex::new(()),
         }
     }
 
@@ -1090,6 +1138,8 @@ impl InMemoryStorageRepositoryPort {
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
+            fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            proposal_observation_delivery: Mutex::new(()),
         }
     }
 
@@ -1114,7 +1164,10 @@ impl InMemoryStorageRepositoryPort {
             fail_next_proposal_audit_write: AtomicBool::new(false),
             fail_next_event_metadata_write: AtomicBool::new(false),
             fail_next_plan_revision_write: AtomicBool::new(false),
+            fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
+            proposal_observation_delivery: Mutex::new(()),
         };
+        port.load_proposal_observation_outbox_from_disk();
         port.load_proposal_audit_from_disk();
         port
     }
@@ -1122,6 +1175,7 @@ impl InMemoryStorageRepositoryPort {
     /// Enable durability under `base_dir` on an existing port (loads existing blobs).
     pub fn enable_base_dir(&mut self, base_dir: impl AsRef<Path>) {
         self.base_dir = Some(base_dir.as_ref().to_path_buf());
+        self.load_proposal_observation_outbox_from_disk();
         self.load_proposal_audit_from_disk();
     }
 
@@ -1129,6 +1183,12 @@ impl InMemoryStorageRepositoryPort {
         self.base_dir
             .as_ref()
             .map(|base| base.join("proposal-audit"))
+    }
+
+    fn proposal_observation_outbox_dir(&self) -> Option<PathBuf> {
+        self.base_dir
+            .as_ref()
+            .map(|base| base.join("proposal-observation-outbox"))
     }
 
     fn load_proposal_audit_from_disk(&mut self) {
@@ -1175,6 +1235,69 @@ impl InMemoryStorageRepositoryPort {
         })
     }
 
+    fn persist_proposal_observation_outbox(
+        &self,
+        record: &ProposalObservationOutboxRecord,
+    ) -> Result<(), ProtocolError> {
+        let Some(dir) = self.proposal_observation_outbox_dir() else {
+            return Ok(());
+        };
+        fs::create_dir_all(&dir).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("create proposal observation outbox failed: {error}"),
+        })?;
+        let path = dir.join(format!("{}.json", record.batch.batch_id));
+        let body = serde_json::to_vec_pretty(record).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize proposal observation outbox failed: {error}"),
+        })?;
+        write_file_atomically(&path, &body).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("write proposal observation outbox failed: {error}"),
+        })
+    }
+
+    fn load_proposal_observation_outbox_from_disk(&mut self) {
+        let Some(dir) = self.proposal_observation_outbox_dir() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let mut records = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(&path)
+                && let Ok(record) =
+                    serde_json::from_slice::<ProposalObservationOutboxRecord>(&bytes)
+                && Self::validate_proposal_observation_batch(&record.batch).is_ok()
+            {
+                records.push(record);
+            }
+        }
+        let Ok(mut storage) = self.storage.lock() else {
+            return;
+        };
+        for record in records {
+            for metadata in &record.batch.event_metadata {
+                storage
+                    .protocol_event_metadata
+                    .insert(metadata.event_id, metadata.clone());
+            }
+            for audit in &record.batch.proposal_audits {
+                storage
+                    .protocol_proposal_audit
+                    .insert(audit.proposal_id, audit.clone());
+            }
+            storage
+                .protocol_proposal_observation_outbox
+                .insert(record.batch.batch_id.clone(), record);
+        }
+    }
+
     /// Cause the next proposal-audit write to fail for fail-closed integration tests.
     pub fn fail_next_proposal_audit_write(&self) {
         self.fail_next_proposal_audit_write
@@ -1191,6 +1314,355 @@ impl InMemoryStorageRepositoryPort {
     pub fn fail_next_plan_revision_write(&self) {
         self.fail_next_plan_revision_write
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Inject a deterministic zero-based item failure for the next proposal
+    /// observation batch. Validation still runs, but no storage state mutates.
+    pub fn fail_proposal_observation_batch_at_item_for_test(&self, item_index: usize) {
+        self.fail_proposal_observation_batch_at_item
+            .store(item_index.saturating_add(1), Ordering::SeqCst);
+    }
+
+    /// Validate and atomically commit a proposal-created observation as Pending.
+    ///
+    /// Event metadata, proposal audits, and the outbox record are inserted under
+    /// one storage lock. With `base_dir` enabled, the complete record is first
+    /// persisted as one atomically-renamed JSON document.
+    pub fn store_proposal_observation_batch(
+        &self,
+        mut batch: ProposalObservationBatch,
+    ) -> ProtocolResult<ProposalObservationOutboxRecord> {
+        batch.events = prepare_event_batch(
+            batch
+                .events
+                .into_iter()
+                .map(|envelope| EventSinkRequest { envelope })
+                .collect(),
+            EventSinkConfig::default(),
+        )
+        .map_err(|error| ProtocolError {
+            code: "proposal_observation_batch_invalid".to_string(),
+            message: format!("proposal observation event preparation failed: {error}"),
+        })?;
+        Self::validate_proposal_observation_batch(&batch)?;
+        let item_count = batch
+            .events
+            .len()
+            .saturating_add(batch.event_metadata.len())
+            .saturating_add(batch.proposal_audits.len());
+        let fail_item = self
+            .fail_proposal_observation_batch_at_item
+            .swap(0, Ordering::SeqCst);
+        if fail_item != 0 && fail_item <= item_count {
+            return Err(ProtocolError {
+                code: "storage_failed".to_string(),
+                message: format!(
+                    "injected proposal observation batch failure at item {}",
+                    fail_item - 1
+                ),
+            });
+        }
+
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        if let Some(existing) = storage
+            .protocol_proposal_observation_outbox
+            .get(&batch.batch_id)
+        {
+            if Self::proposal_observation_batches_equal(&existing.batch, &batch)? {
+                return Ok(existing.clone());
+            }
+            return Err(ProtocolError {
+                code: "proposal_observation_batch_conflict".to_string(),
+                message: format!(
+                    "proposal observation batch {} was retried with different content",
+                    batch.batch_id
+                ),
+            });
+        }
+        for metadata in &batch.event_metadata {
+            if let Some(existing) = storage.protocol_event_metadata.get(&metadata.event_id)
+                && !Self::serialized_records_equal(existing, metadata)?
+            {
+                return Err(ProtocolError {
+                    code: "proposal_observation_record_conflict".to_string(),
+                    message: format!(
+                        "event metadata {:?} already exists with different content",
+                        metadata.event_id
+                    ),
+                });
+            }
+        }
+        for audit in &batch.proposal_audits {
+            if let Some(existing) = storage.protocol_proposal_audit.get(&audit.proposal_id)
+                && !Self::serialized_records_equal(existing, audit)?
+            {
+                return Err(ProtocolError {
+                    code: "proposal_observation_record_conflict".to_string(),
+                    message: format!(
+                        "proposal audit {:?} already exists with different content",
+                        audit.proposal_id
+                    ),
+                });
+            }
+        }
+
+        let record = ProposalObservationOutboxRecord {
+            batch,
+            delivery_state: ProposalObservationDeliveryState::Pending,
+        };
+        self.persist_proposal_observation_outbox(&record)?;
+        for metadata in &record.batch.event_metadata {
+            storage
+                .protocol_event_metadata
+                .insert(metadata.event_id, metadata.clone());
+        }
+        for audit in &record.batch.proposal_audits {
+            storage
+                .protocol_proposal_audit
+                .insert(audit.proposal_id, audit.clone());
+        }
+        storage
+            .protocol_proposal_observation_outbox
+            .insert(record.batch.batch_id.clone(), record.clone());
+        Ok(record)
+    }
+
+    /// Return all proposal observation batches still awaiting sink delivery.
+    pub fn pending_proposal_observation_batches(
+        &self,
+    ) -> ProtocolResult<Vec<ProposalObservationOutboxRecord>> {
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let mut records = storage
+            .protocol_proposal_observation_outbox
+            .values()
+            .filter(|record| record.delivery_state == ProposalObservationDeliveryState::Pending)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.batch.batch_id.cmp(&right.batch.batch_id));
+        Ok(records)
+    }
+
+    /// Mark a previously committed proposal observation batch as delivered.
+    pub fn mark_proposal_observation_batch_delivered(
+        &self,
+        batch_id: &str,
+    ) -> ProtocolResult<ProposalObservationOutboxRecord> {
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let existing = storage
+            .protocol_proposal_observation_outbox
+            .get(batch_id)
+            .cloned()
+            .ok_or_else(|| ProtocolError {
+                code: "proposal_observation_batch_missing".to_string(),
+                message: format!("proposal observation batch {batch_id} is not stored"),
+            })?;
+        if existing.delivery_state == ProposalObservationDeliveryState::Delivered {
+            return Ok(existing);
+        }
+        let delivered = ProposalObservationOutboxRecord {
+            delivery_state: ProposalObservationDeliveryState::Delivered,
+            ..existing
+        };
+        self.persist_proposal_observation_outbox(&delivered)?;
+        storage
+            .protocol_proposal_observation_outbox
+            .insert(batch_id.to_string(), delivered.clone());
+        Ok(delivered)
+    }
+
+    /// Deliver one Pending outbox batch through the sink's atomic batch API.
+    pub fn deliver_proposal_observation_batch(
+        &self,
+        batch_id: &str,
+    ) -> ProtocolResult<ProposalObservationOutboxRecord> {
+        let _delivery = self
+            .proposal_observation_delivery
+            .lock()
+            .map_err(|_| ProtocolError {
+                code: "storage_lock_poisoned".to_string(),
+                message: "proposal observation delivery lock poisoned".to_string(),
+            })?;
+        let record = {
+            let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+            storage
+                .protocol_proposal_observation_outbox
+                .get(batch_id)
+                .cloned()
+                .ok_or_else(|| ProtocolError {
+                    code: "proposal_observation_batch_missing".to_string(),
+                    message: format!("proposal observation batch {batch_id} is not stored"),
+                })?
+        };
+        if record.delivery_state == ProposalObservationDeliveryState::Delivered {
+            return Ok(record);
+        }
+        self.event_sink
+            .emit_batch(
+                record
+                    .batch
+                    .events
+                    .iter()
+                    .cloned()
+                    .map(|envelope| EventSinkRequest { envelope })
+                    .collect(),
+            )
+            .map_err(|error| ProtocolError {
+                code: "proposal_observation_delivery_pending".to_string(),
+                message: format!(
+                    "proposal observation batch {batch_id} remains pending: {}",
+                    error.message
+                ),
+            })?;
+        self.mark_proposal_observation_batch_delivered(batch_id)
+    }
+
+    /// Atomically store, deliver, and acknowledge one proposal observation batch.
+    pub fn record_proposal_observation_batch(
+        &self,
+        batch: ProposalObservationBatch,
+    ) -> ProtocolResult<ProposalObservationOutboxRecord> {
+        let batch_id = batch.batch_id.clone();
+        let stored = self.store_proposal_observation_batch(batch)?;
+        if stored.delivery_state == ProposalObservationDeliveryState::Delivered {
+            return Ok(stored);
+        }
+        self.deliver_proposal_observation_batch(&batch_id)
+    }
+
+    /// Retry every Pending proposal observation batch in stable batch-id order.
+    ///
+    /// Each record remains Pending unless its complete event batch is accepted
+    /// by the sink and the Delivered marker is durably persisted.
+    pub fn retry_pending_proposal_observations(
+        &self,
+    ) -> ProtocolResult<Vec<ProposalObservationOutboxRecord>> {
+        let batch_ids = self
+            .pending_proposal_observation_batches()?
+            .into_iter()
+            .map(|record| record.batch.batch_id)
+            .collect::<Vec<_>>();
+        batch_ids
+            .iter()
+            .map(|batch_id| self.deliver_proposal_observation_batch(batch_id))
+            .collect()
+    }
+
+    fn proposal_observation_batches_equal(
+        left: &ProposalObservationBatch,
+        right: &ProposalObservationBatch,
+    ) -> ProtocolResult<bool> {
+        let left = serde_json::to_vec(left).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize stored proposal observation batch failed: {error}"),
+        })?;
+        let right = serde_json::to_vec(right).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize retried proposal observation batch failed: {error}"),
+        })?;
+        Ok(left == right)
+    }
+
+    fn serialized_records_equal<T: Serialize>(left: &T, right: &T) -> ProtocolResult<bool> {
+        let left = serde_json::to_vec(left).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize stored proposal observation record failed: {error}"),
+        })?;
+        let right = serde_json::to_vec(right).map_err(|error| ProtocolError {
+            code: "storage_failed".to_string(),
+            message: format!("serialize retried proposal observation record failed: {error}"),
+        })?;
+        Ok(left == right)
+    }
+
+    fn validate_proposal_observation_batch(batch: &ProposalObservationBatch) -> ProtocolResult<()> {
+        let safe_batch_id = !batch.batch_id.is_empty()
+            && batch.batch_id != "."
+            && batch.batch_id != ".."
+            && batch.batch_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            });
+        if !safe_batch_id || batch.schema_version == 0 {
+            return Err(ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message: "proposal observation batch requires a safe id and non-zero schema"
+                    .to_string(),
+            });
+        }
+        let item_count = batch.events.len();
+        if item_count == 0
+            || batch.event_metadata.len() != item_count
+            || batch.proposal_audits.len() != item_count
+        {
+            return Err(ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message: "proposal observation batch requires equal non-empty event, metadata, and audit lists"
+                    .to_string(),
+            });
+        }
+
+        let mut event_ids = HashSet::new();
+        let mut proposal_ids = HashSet::new();
+        for ((event, metadata), audit) in batch
+            .events
+            .iter()
+            .zip(&batch.event_metadata)
+            .zip(&batch.proposal_audits)
+        {
+            validate_envelope(event, EventSinkConfig::default()).map_err(|error| {
+                ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message: format!("proposal observation event is invalid: {error}"),
+                }
+            })?;
+            let prepared = prepare_event_batch(
+                vec![EventSinkRequest {
+                    envelope: event.clone(),
+                }],
+                EventSinkConfig::default(),
+            )
+            .map_err(|error| ProtocolError {
+                code: "proposal_observation_batch_invalid".to_string(),
+                message: format!("proposal observation event preparation failed: {error}"),
+            })?;
+            if !Self::serialized_records_equal(event, &prepared[0])?
+                || event.event_id.0.is_nil()
+                || event.event != "proposal.created"
+                || event.redaction == legion_protocol::RedactionHint::None
+                || audit.proposal_id.0 == 0
+                || audit.lifecycle_state != ProposalLifecycleState::Created
+                || audit.principal.0.trim().is_empty()
+                || audit.capability.0.trim().is_empty()
+                || event.payload["proposal_id"].as_u64() != Some(audit.proposal_id.0)
+                || event.payload["lifecycle_state"].as_str() != Some("Created")
+                || event.payload["capability"].as_str() != Some(audit.capability.0.as_str())
+                || event.principal_id.as_ref() != Some(&audit.principal)
+                || !event_ids.insert(event.event_id)
+                || !proposal_ids.insert(audit.proposal_id)
+            {
+                return Err(ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message: "proposal observation batch requires unique metadata-only Created events and audits"
+                        .to_string(),
+                });
+            }
+            InMemoryStorage::validate_event_metadata(metadata)
+                .map_err(InMemoryStorage::protocol_error)?;
+            InMemoryStorage::validate_audit_record(audit)
+                .map_err(InMemoryStorage::protocol_error)?;
+            let derived = event_metadata_record(event);
+            if !Self::serialized_records_equal(&derived, metadata)?
+                || event.correlation_id != audit.correlation_id
+                || event.causality_id != audit.causality_id
+            {
+                return Err(ProtocolError {
+                    code: "proposal_observation_batch_invalid".to_string(),
+                    message:
+                        "proposal observation event, metadata, and audit identities do not match"
+                            .to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Persist redacted event metadata and emit through the injected sink.
@@ -1424,6 +1896,7 @@ impl TryFrom<PersistedState> for InMemoryStorage {
             protocol_raw_source_retention_access_audit: value
                 .protocol_raw_source_retention_access_audit,
             protocol_event_metadata: value.protocol_event_metadata,
+            protocol_proposal_observation_outbox: value.protocol_proposal_observation_outbox,
             protocol_plan_revision_ledger,
             protocol_semantic_metadata: value.semantic_metadata,
             protocol_semantic_tombstones: value.semantic_tombstones,
@@ -2988,6 +3461,9 @@ pub fn protocol_trust_to_security(state: WorkspaceTrustState) -> TrustState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use legion_observability::{EventEnvelopeBuilder, InMemoryEventSink};
     use legion_protocol::{
         AgentReplayManifest, AgentRunId, AgentStateTransitionRecord,
         AssistedAiAuditOutcomeCategory, AssistedAiAuditPrivacyDisposition,
@@ -3269,6 +3745,270 @@ mod tests {
             occurred_at: legion_protocol::TimestampMillis(1),
             schema_version: 1,
         }
+    }
+
+    fn proposal_observation_batch(batch_id: &str, item_count: usize) -> ProposalObservationBatch {
+        let mut events = Vec::with_capacity(item_count);
+        let mut event_metadata = Vec::with_capacity(item_count);
+        let mut proposal_audits = Vec::with_capacity(item_count);
+        for index in 0..item_count {
+            let proposal_id = ProposalId(100 + index as u64);
+            let correlation_id = CorrelationId(700 + index as u64);
+            let causality_id = non_nil_causality_id();
+            let principal = PrincipalId(format!("proposal-author-{index}"));
+            let capability = CapabilityId("workspace.edit".to_string());
+            let event = EventEnvelopeBuilder::new("proposal.created", causality_id)
+                .correlation_id(correlation_id)
+                .sequence(EventSequence(index as u64 + 1))
+                .principal_id(principal.clone())
+                .retention(RetentionLabel::Audit)
+                .metadata("proposal_id", proposal_id.0)
+                .metadata("lifecycle_state", "Created")
+                .metadata("capability", capability.0.clone())
+                .metadata("source_text", "do not persist this source")
+                .build();
+            event_metadata.push(legion_observability::event_metadata_record(&event));
+            proposal_audits.push(ProposalAuditRecord {
+                proposal_id,
+                lifecycle_state: ProposalLifecycleState::Created,
+                timestamp: event.occurred_at,
+                principal,
+                capability,
+                correlation_id,
+                causality_id,
+                payload_summary: ProposalPayloadSummary {
+                    kind: ProposalPayloadKind::TextEdit,
+                    affected_files: vec![FileId(3 + index as u128)],
+                    title: Some(format!("proposal-{index}")),
+                    byte_count: Some(4),
+                },
+                checkpoint_rollback_projection: None,
+                risk_rule_ids: Vec::new(),
+                diagnostics: Vec::new(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+            events.push(event);
+        }
+        ProposalObservationBatch {
+            batch_id: batch_id.to_string(),
+            events,
+            event_metadata,
+            proposal_audits,
+            schema_version: 1,
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailBatchAtItemSink {
+        inner: InMemoryEventSink,
+        fail_at_item: Arc<AtomicUsize>,
+    }
+
+    impl EventSinkPort for FailBatchAtItemSink {
+        fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
+            self.inner.emit(request)
+        }
+
+        fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+            let fail_at_item = self.fail_at_item.load(Ordering::SeqCst);
+            for (index, request) in requests.iter().enumerate() {
+                validate_envelope(&request.envelope, EventSinkConfig::default()).map_err(
+                    |error| ProtocolError {
+                        code: "test_sink_invalid".to_string(),
+                        message: error.to_string(),
+                    },
+                )?;
+                if fail_at_item == index.saturating_add(1) {
+                    return Err(ProtocolError {
+                        code: "test_sink_failure".to_string(),
+                        message: format!("injected sink failure at item {index}"),
+                    });
+                }
+            }
+            self.inner.emit_batch(requests)
+        }
+    }
+
+    #[test]
+    fn proposal_observation_invalid_second_item_leaves_zero_storage_mutation() {
+        let port = InMemoryStorageRepositoryPort::new();
+        let mut batch = proposal_observation_batch("invalid-second", 2);
+        batch.proposal_audits[1].correlation_id = CorrelationId(999);
+
+        port.store_proposal_observation_batch(batch)
+            .expect_err("invalid second item must reject the complete batch");
+
+        let counts = port
+            .with_storage(|storage| {
+                (
+                    storage.protocol_event_metadata.len(),
+                    storage.protocol_proposal_audit.len(),
+                    storage.protocol_proposal_observation_outbox.len(),
+                )
+            })
+            .expect("inspect storage");
+        assert_eq!(counts, (0, 0, 0));
+    }
+
+    #[test]
+    fn proposal_observation_injected_second_item_failure_leaves_zero_disk_or_memory() {
+        let base_dir =
+            temp_storage_path("proposal-observation-fail-second").with_extension("outbox-dir");
+        let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        port.fail_proposal_observation_batch_at_item_for_test(1);
+
+        port.store_proposal_observation_batch(proposal_observation_batch("fail-second", 2))
+            .expect_err("injected second item failure");
+
+        let counts = port
+            .with_storage(|storage| {
+                (
+                    storage.protocol_event_metadata.len(),
+                    storage.protocol_proposal_audit.len(),
+                    storage.protocol_proposal_observation_outbox.len(),
+                )
+            })
+            .expect("inspect storage");
+        assert_eq!(counts, (0, 0, 0));
+        assert!(!base_dir.join("proposal-observation-outbox").exists());
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_observation_sink_second_item_failure_stays_pending_and_retries_once() {
+        let recorder = InMemoryEventSink::new();
+        let fail_at_item = Arc::new(AtomicUsize::new(2));
+        let sink = FailBatchAtItemSink {
+            inner: recorder.clone(),
+            fail_at_item: Arc::clone(&fail_at_item),
+        };
+        let port = InMemoryStorageRepositoryPort::with_event_sink(SharedEventSink::new(sink));
+        let batch = proposal_observation_batch("retry-batch", 2);
+
+        let error = port
+            .record_proposal_observation_batch(batch.clone())
+            .expect_err("sink failure must keep durable work pending");
+        assert_eq!(error.code, "proposal_observation_delivery_pending");
+        assert!(recorder.events().expect("event snapshot").is_empty());
+        assert_eq!(
+            port.pending_proposal_observation_batches()
+                .expect("pending records")
+                .len(),
+            1
+        );
+
+        fail_at_item.store(0, Ordering::SeqCst);
+        let retried = port
+            .retry_pending_proposal_observations()
+            .expect("retry pending batch");
+        assert_eq!(retried.len(), 1);
+        assert_eq!(
+            retried[0].delivery_state,
+            ProposalObservationDeliveryState::Delivered
+        );
+        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
+
+        port.record_proposal_observation_batch(batch.clone())
+            .expect("identical retry is idempotent");
+        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
+
+        let mut divergent = batch;
+        divergent.proposal_audits[0].payload_summary.title = Some("different".to_string());
+        let error = port
+            .store_proposal_observation_batch(divergent)
+            .expect_err("same batch id with different content must conflict");
+        assert_eq!(error.code, "proposal_observation_batch_conflict");
+    }
+
+    #[test]
+    fn proposal_observation_pending_and_delivered_states_survive_restart() {
+        let base_dir =
+            temp_storage_path("proposal-observation-restart").with_extension("outbox-dir");
+        let first_recorder = InMemoryEventSink::new();
+        let fail_at_item = Arc::new(AtomicUsize::new(2));
+        let batch = proposal_observation_batch("restart-batch", 2);
+        {
+            let sink = FailBatchAtItemSink {
+                inner: first_recorder.clone(),
+                fail_at_item: Arc::clone(&fail_at_item),
+            };
+            let port = InMemoryStorageRepositoryPort::with_event_sink_and_base_dir(
+                SharedEventSink::new(sink),
+                &base_dir,
+            );
+            port.record_proposal_observation_batch(batch)
+                .expect_err("initial delivery fails");
+        }
+
+        let outbox_path = base_dir
+            .join("proposal-observation-outbox")
+            .join("restart-batch.json");
+        let persisted = fs::read_to_string(&outbox_path).expect("read pending outbox");
+        assert!(!persisted.contains("do not persist this source"));
+        assert!(persisted.contains("<redacted>"));
+
+        fail_at_item.store(0, Ordering::SeqCst);
+        let second_recorder = InMemoryEventSink::new();
+        {
+            let sink = FailBatchAtItemSink {
+                inner: second_recorder.clone(),
+                fail_at_item,
+            };
+            let port = InMemoryStorageRepositoryPort::with_event_sink_and_base_dir(
+                SharedEventSink::new(sink),
+                &base_dir,
+            );
+            assert_eq!(
+                port.pending_proposal_observation_batches()
+                    .expect("restored pending records")
+                    .len(),
+                1
+            );
+            port.retry_pending_proposal_observations()
+                .expect("deliver restored pending record");
+            assert_eq!(second_recorder.events().expect("event snapshot").len(), 2);
+        }
+
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        assert!(
+            reopened
+                .pending_proposal_observation_batches()
+                .expect("reloaded delivered records")
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_observation_restart_preserves_later_audit_lifecycle_state() {
+        let base_dir =
+            temp_storage_path("proposal-observation-audit-order").with_extension("outbox-dir");
+        let batch = proposal_observation_batch("audit-order", 1);
+        let proposal_id = batch.proposal_audits[0].proposal_id;
+        {
+            let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+            port.record_proposal_observation_batch(batch.clone())
+                .expect("store created observation");
+            let mut applied = batch.proposal_audits[0].clone();
+            applied.lifecycle_state = ProposalLifecycleState::Applied;
+            port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(applied))
+                .expect("persist later applied audit");
+        }
+
+        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        let response = reopened
+            .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
+                proposal_id,
+            ))
+            .expect("read reloaded audit");
+        match response {
+            StorageRepositoryResponse::ProposalAuditRecord(Some(record)) => {
+                assert_eq!(record.lifecycle_state, ProposalLifecycleState::Applied);
+            }
+            other => panic!("unexpected proposal audit response: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(base_dir);
     }
 
     fn dock_layout_record(

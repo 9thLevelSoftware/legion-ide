@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 use std::{
+    collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
 };
@@ -66,6 +67,9 @@ pub enum ObservabilityError {
     /// Event sink storage lock was poisoned.
     #[error("event sink storage lock poisoned")]
     StorageUnavailable,
+    /// An event id was retried with different content.
+    #[error("event id was reused with different content")]
+    EventIdConflict,
 }
 
 /// Build a metadata-only plugin audit event envelope.
@@ -255,6 +259,26 @@ impl Default for EventSinkConfig {
     }
 }
 
+/// Validate and redact a complete event batch without emitting it.
+///
+/// This is the shared preparation boundary for atomic sinks and durable
+/// transactional outboxes; an invalid item returns before any caller mutates.
+pub fn prepare_event_batch(
+    requests: Vec<EventSinkRequest>,
+    config: EventSinkConfig,
+) -> Result<Vec<EventEnvelope>, ObservabilityError> {
+    let mut prepared = Vec::with_capacity(requests.len());
+    for request in requests {
+        let mut envelope = request.envelope;
+        validate_envelope(&envelope, config)?;
+        if config.metadata_only_by_default || envelope.redaction != RedactionHint::None {
+            envelope.payload = redact_payload(&envelope.payload, envelope.redaction);
+        }
+        prepared.push(envelope);
+    }
+    Ok(prepared)
+}
+
 /// In-memory event sink for tests and local replay drills.
 #[derive(Debug, Clone)]
 pub struct InMemoryEventSink {
@@ -292,6 +316,41 @@ impl InMemoryEventSink {
         Ok(())
     }
 
+    /// Validate and redact every request, then append the batch under one lock.
+    /// Identical retries are ignored; an event-id content conflict rejects all.
+    pub fn try_emit_batch(
+        &self,
+        requests: Vec<EventSinkRequest>,
+    ) -> Result<(), ObservabilityError> {
+        let prepared = prepare_event_batch(requests, self.config)?;
+
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| ObservabilityError::StorageUnavailable)?;
+        let mut known = HashMap::with_capacity(events.len().saturating_add(prepared.len()));
+        for event in events.iter() {
+            let serialized =
+                serde_json::to_vec(event).map_err(|_| ObservabilityError::InvalidPayload)?;
+            known.insert(event.event_id, serialized);
+        }
+        let mut additions = Vec::new();
+        for envelope in prepared {
+            let serialized =
+                serde_json::to_vec(&envelope).map_err(|_| ObservabilityError::InvalidPayload)?;
+            if let Some(existing) = known.get(&envelope.event_id) {
+                if existing != &serialized {
+                    return Err(ObservabilityError::EventIdConflict);
+                }
+            } else {
+                known.insert(envelope.event_id, serialized);
+                additions.push(envelope);
+            }
+        }
+        events.extend(additions);
+        Ok(())
+    }
+
     /// Return a cloned snapshot of stored envelopes.
     pub fn events(&self) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         Ok(self
@@ -311,6 +370,10 @@ impl Default for InMemoryEventSink {
 impl EventSinkPort for InMemoryEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.try_emit(request).map_err(protocol_error)
+    }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.try_emit_batch(requests).map_err(protocol_error)
     }
 }
 
@@ -336,6 +399,19 @@ impl RedactingEventSink {
         self.inner.try_emit(request)
     }
 
+    /// Redact every request and atomically emit the complete batch.
+    pub fn try_emit_batch(
+        &self,
+        mut requests: Vec<EventSinkRequest>,
+    ) -> Result<(), ObservabilityError> {
+        for request in &mut requests {
+            if request.envelope.redaction == RedactionHint::None {
+                request.envelope.redaction = RedactionHint::MetadataOnly;
+            }
+        }
+        self.inner.try_emit_batch(requests)
+    }
+
     /// Return a cloned snapshot of redacted envelopes.
     pub fn events(&self) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         self.inner.events()
@@ -352,6 +428,10 @@ impl EventSinkPort for RedactingEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.try_emit(request).map_err(protocol_error)
     }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.try_emit_batch(requests).map_err(protocol_error)
+    }
 }
 
 /// No-op event sink used when runtime observability wiring is intentionally deferred.
@@ -360,6 +440,10 @@ pub struct NoopEventSink;
 
 impl EventSinkPort for NoopEventSink {
     fn emit(&self, _request: EventSinkRequest) -> ProtocolResult<()> {
+        Ok(())
+    }
+
+    fn emit_batch(&self, _requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
         Ok(())
     }
 }
@@ -399,6 +483,10 @@ impl fmt::Debug for SharedEventSink {
 impl EventSinkPort for SharedEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.inner.emit(request)
+    }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.inner.emit_batch(requests)
     }
 }
 
@@ -1856,7 +1944,8 @@ fn validate_core_ids(
     Ok(())
 }
 
-fn validate_envelope(
+/// Validate one event envelope against sink configuration without emitting it.
+pub fn validate_envelope(
     envelope: &EventEnvelope,
     config: EventSinkConfig,
 ) -> Result<(), ObservabilityError> {
@@ -1944,8 +2033,9 @@ fn redact_metadata_value(key: &str, value: &Value) -> Value {
 /// fields). Anything not matched here is treated as untrusted free-form text.
 fn is_safe_metadata_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    const SAFE_KEYS: [&str; 17] = [
+    const SAFE_KEYS: [&str; 18] = [
         "metadata_only",
+        "capability",
         "payload_class",
         "payload_kind",
         "lifecycle_state",
@@ -1994,11 +2084,39 @@ fn protocol_error(error: ObservabilityError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SingleEventOnlySink {
+        emitted: AtomicUsize,
+    }
+
+    impl EventSinkPort for SingleEventOnlySink {
+        fn emit(&self, _request: EventSinkRequest) -> ProtocolResult<()> {
+            self.emitted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn event_with_payload(payload: Value) -> EventEnvelope {
         EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
             .metadata("payload", payload)
             .build()
+    }
+
+    #[test]
+    fn default_batch_api_fails_before_single_event_emit() {
+        let sink = SingleEventOnlySink {
+            emitted: AtomicUsize::new(0),
+        };
+
+        let error = sink
+            .emit_batch(vec![EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            }])
+            .expect_err("single-event-only sink must reject atomic batches");
+
+        assert_eq!(error.code, "event_batch_unsupported");
+        assert_eq!(sink.emitted.load(Ordering::SeqCst), 0);
     }
 
     fn save_proposal() -> WorkspaceProposal {
@@ -2173,6 +2291,98 @@ mod tests {
                 .expect_err("zero sequence should be rejected"),
             ObservabilityError::InvalidSequence
         );
+    }
+
+    #[test]
+    fn in_memory_batch_rejects_invalid_second_event_without_emitting_first() {
+        let sink = InMemoryEventSink::new();
+        let first = event_with_payload(json!({"item": 1}));
+        let mut second = event_with_payload(json!({"item": 2}));
+        second.sequence = EventSequence(0);
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest { envelope: first },
+                EventSinkRequest { envelope: second },
+            ])
+            .expect_err("invalid second item must reject the whole batch");
+
+        assert_eq!(error.code, "observability_error");
+        assert!(sink.events().expect("event snapshot").is_empty());
+    }
+
+    #[test]
+    fn in_memory_batch_retry_is_idempotent_by_event_id() {
+        let sink = InMemoryEventSink::new();
+        let requests = vec![
+            EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            },
+            EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 2})),
+            },
+        ];
+
+        sink.emit_batch(requests.clone()).expect("first delivery");
+        sink.emit_batch(requests).expect("idempotent retry");
+
+        assert_eq!(sink.events().expect("event snapshot").len(), 2);
+    }
+
+    #[test]
+    fn in_memory_batch_rejects_event_id_content_conflict_without_partial_append() {
+        let sink = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("item", 1)
+            .build();
+        sink.emit_batch(vec![EventSinkRequest {
+            envelope: original.clone(),
+        }])
+        .expect("initial delivery");
+        let mut conflicting = original;
+        conflicting.payload["item"] = json!(99);
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest {
+                    envelope: event_with_payload(json!({"item": 2})),
+                },
+                EventSinkRequest {
+                    envelope: conflicting,
+                },
+            ])
+            .expect_err("conflicting retry must reject the whole batch");
+
+        assert_eq!(error.code, "observability_error");
+        let events = sink.events().expect("event snapshot");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["item"], 1);
+    }
+
+    #[test]
+    fn redacting_batch_validates_all_before_atomic_redacted_delivery() {
+        let sink = RedactingEventSink::new();
+        let mut first = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret one")
+            .build();
+        first.redaction = RedactionHint::None;
+        let mut second = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret two")
+            .build();
+        second.redaction = RedactionHint::None;
+
+        sink.emit_batch(vec![
+            EventSinkRequest { envelope: first },
+            EventSinkRequest { envelope: second },
+        ])
+        .expect("atomic redacted batch");
+
+        let events = sink.events().expect("event snapshot");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.redaction == RedactionHint::MetadataOnly
+                && event.payload["source_text"] == "<redacted>"
+        }));
     }
 
     #[test]
