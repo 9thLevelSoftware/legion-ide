@@ -2223,7 +2223,7 @@ fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
     ]);
 
     let started = Instant::now();
-    app.execute_legion_workflow_with_providers(&session_id, &resolver)
+    let outcome = app.execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect("execute cancelled workflow");
     let finished = Instant::now();
 
