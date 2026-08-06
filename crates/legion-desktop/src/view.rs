@@ -1267,7 +1267,7 @@ fn render_product_mode_switch(
 ) {
     let tokens = theme::tokens();
     let compact_visuals = density == TopBarDensity::Compact && ui.available_width() < 440.0;
-    let button_width = if compact_visuals { 48.0 } else { 116.0 };
+    let button_width = if compact_visuals { 24.0 } else { 116.0 };
     let switch_width = button_width * 4.0 + ui.spacing().item_spacing.x * 3.0 + 8.0;
     let leading_space = ((ui.available_width() - switch_width) * 0.5).max(0.0);
     ui.horizontal(|ui| {
