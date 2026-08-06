@@ -986,19 +986,191 @@ struct PreparedLegionWorkflowWorkerRun {
 }
 
 #[cfg(feature = "ai")]
+type LegionWorkflowWorkerJoinHandle =
+    std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>;
+
+#[cfg(feature = "ai")]
+struct SupervisedLegionWorkflowWorkerRun {
+    completion_id: uuid::Uuid,
+    join_handle: LegionWorkflowWorkerJoinHandle,
+}
+
+#[cfg(feature = "ai")]
+struct LegionWorkflowWorkerHandleSupervisor {
+    sender: std::sync::mpsc::Sender<SupervisedLegionWorkflowWorkerRun>,
+    _thread_handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "ai")]
+static LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR: OnceLock<LegionWorkflowWorkerHandleSupervisor> =
+    OnceLock::new();
+
+#[cfg(feature = "ai")]
+static LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR_INIT: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "ai")]
+static LEGION_WORKFLOW_WORKER_HANDLE_FALLBACK: OnceLock<
+    Mutex<Vec<SupervisedLegionWorkflowWorkerRun>>,
+> = OnceLock::new();
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+#[derive(Default)]
+struct LegionWorkflowWorkerSupervisorTestObservations {
+    handed_off: HashSet<uuid::Uuid>,
+    reaped: HashSet<uuid::Uuid>,
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+static LEGION_WORKFLOW_WORKER_SUPERVISOR_TEST_OBSERVATIONS: OnceLock<
+    Mutex<LegionWorkflowWorkerSupervisorTestObservations>,
+> = OnceLock::new();
+
+#[cfg(feature = "ai")]
+fn retain_legion_workflow_worker_handle(run: SupervisedLegionWorkflowWorkerRun) {
+    LEGION_WORKFLOW_WORKER_HANDLE_FALLBACK
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(run);
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+fn record_legion_workflow_worker_handoff(completion_id: uuid::Uuid) {
+    LEGION_WORKFLOW_WORKER_SUPERVISOR_TEST_OBSERVATIONS
+        .get_or_init(|| Mutex::new(LegionWorkflowWorkerSupervisorTestObservations::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .handed_off
+        .insert(completion_id);
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+fn record_legion_workflow_worker_reaped(completion_id: uuid::Uuid) {
+    LEGION_WORKFLOW_WORKER_SUPERVISOR_TEST_OBSERVATIONS
+        .get_or_init(|| Mutex::new(LegionWorkflowWorkerSupervisorTestObservations::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reaped
+        .insert(completion_id);
+}
+
+#[cfg(feature = "ai")]
+fn run_legion_workflow_worker_handle_supervisor(
+    receiver: std::sync::mpsc::Receiver<SupervisedLegionWorkflowWorkerRun>,
+) {
+    let mut pending = Vec::new();
+    loop {
+        if pending.is_empty() {
+            match receiver.recv() {
+                Ok(run) => pending.push(run),
+                Err(_) => return,
+            }
+        } else {
+            match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(run) => pending.push(run),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    for run in pending.drain(..) {
+                        retain_legion_workflow_worker_handle(run);
+                    }
+                    return;
+                }
+            }
+        }
+        while let Ok(run) = receiver.try_recv() {
+            pending.push(run);
+        }
+
+        let mut index = 0;
+        while index < pending.len() {
+            if pending[index].join_handle.is_finished() {
+                let run = pending.swap_remove(index);
+                let completion_id = run.completion_id;
+                let _ = run.join_handle.join();
+                #[cfg(any(test, feature = "test-helpers"))]
+                record_legion_workflow_worker_reaped(completion_id);
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ai")]
+fn legion_workflow_worker_supervisor_sender()
+-> Result<std::sync::mpsc::Sender<SupervisedLegionWorkflowWorkerRun>, AppCompositionError> {
+    if let Some(supervisor) = LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR.get() {
+        return Ok(supervisor.sender.clone());
+    }
+    let _init_guard = LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR_INIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(supervisor) = LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR.get() {
+        return Ok(supervisor.sender.clone());
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread_handle = std::thread::Builder::new()
+        .name("legion-workflow-handle-supervisor".to_string())
+        .spawn(move || run_legion_workflow_worker_handle_supervisor(receiver))
+        .map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "failed to initialize Legion workflow worker handle supervisor: {error}"
+            ))
+        })?;
+    let supervisor = LegionWorkflowWorkerHandleSupervisor {
+        sender: sender.clone(),
+        _thread_handle: thread_handle,
+    };
+    if LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR
+        .set(supervisor)
+        .is_err()
+    {
+        return LEGION_WORKFLOW_WORKER_HANDLE_SUPERVISOR
+            .get()
+            .map(|supervisor| supervisor.sender.clone())
+            .ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "Legion workflow worker handle supervisor initialization raced without an owner"
+                        .to_string(),
+                )
+            });
+    }
+    Ok(sender)
+}
+
+#[cfg(feature = "ai")]
 struct InFlightLegionWorkflowWorkerRun {
     completion_id: uuid::Uuid,
     cancellation_flag: SharedCancellationFlag,
-    join_handle: Option<
-        std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
-    >,
+    join_handle: Option<LegionWorkflowWorkerJoinHandle>,
+    supervisor_sender: std::sync::mpsc::Sender<SupervisedLegionWorkflowWorkerRun>,
 }
 
 #[cfg(feature = "ai")]
 impl Drop for InFlightLegionWorkflowWorkerRun {
     fn drop(&mut self) {
-        if self.join_handle.is_some() {
+        if let Some(join_handle) = self.join_handle.take() {
+            // App shutdown must stay nonblocking without detaching worker cleanup. Transfer
+            // every unfinished handle to the preinitialized process-lifetime supervisor.
             self.cancellation_flag.cancel();
+            let completion_id = self.completion_id;
+            let supervised_run = SupervisedLegionWorkflowWorkerRun {
+                completion_id,
+                join_handle,
+            };
+            match self.supervisor_sender.send(supervised_run) {
+                Ok(()) => {
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    record_legion_workflow_worker_handoff(completion_id);
+                }
+                Err(std::sync::mpsc::SendError(supervised_run)) => {
+                    // The process-lifetime sender keeps the receiver connected. Retain the
+                    // handle statically if that invariant is ever violated so Drop never
+                    // detaches a live workflow worker.
+                    retain_legion_workflow_worker_handle(supervised_run);
+                }
+            }
         }
     }
 }
@@ -17964,6 +18136,36 @@ impl AppComposition {
         self.injected_workflow_spawn_failure_after = Some(successful_spawns);
     }
 
+    /// Test-only: return completion ids still retained by app-owned workflow draining state.
+    #[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+    pub fn draining_workflow_completion_ids_for_test(&self) -> Vec<uuid::Uuid> {
+        self.draining_workflow_worker
+            .as_ref()
+            .map(|registration| {
+                registration
+                    .unfinished_runs
+                    .iter()
+                    .map(|run| run.completion_id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Test-only: report whether the process-lifetime supervisor received and reaped a worker.
+    #[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+    pub fn workflow_worker_supervisor_state_for_test(completion_id: uuid::Uuid) -> (bool, bool) {
+        let Some(observations) = LEGION_WORKFLOW_WORKER_SUPERVISOR_TEST_OBSERVATIONS.get() else {
+            return (false, false);
+        };
+        let observations = observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            observations.handed_off.contains(&completion_id),
+            observations.reaped.contains(&completion_id),
+        )
+    }
+
     /// Test-only: project a live workflow owner with an explicit cancellation flag.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_active_workflow_for_test(
@@ -22465,6 +22667,7 @@ impl AppComposition {
         prepared: PreparedLegionWorkflowWorkerRun,
         cancellation_flag: SharedCancellationFlag,
         completion_sender: std::sync::mpsc::Sender<uuid::Uuid>,
+        supervisor_sender: std::sync::mpsc::Sender<SupervisedLegionWorkflowWorkerRun>,
     ) -> Result<InFlightLegionWorkflowWorkerRun, AppCompositionError> {
         #[cfg(any(test, feature = "test-helpers"))]
         if let Some(successful_spawns_remaining) =
@@ -22532,6 +22735,7 @@ impl AppComposition {
             completion_id,
             cancellation_flag,
             join_handle: Some(join_handle),
+            supervisor_sender,
         })
     }
 
@@ -23008,13 +23212,15 @@ impl AppComposition {
             )));
         }
 
+        #[cfg(feature = "ai")]
+        let workflow_worker_supervisor_sender = legion_workflow_worker_supervisor_sender()?;
         let (owner_id, cancellation_flag) =
             self.begin_active_worker(ActiveWorkerIdentity::LegionWorkflow {
                 session_id: session.session_id.clone(),
             })?;
         #[cfg(feature = "ai")]
         let mut unfinished_workflow_runs = Vec::new();
-        let mut execution_result = (|| {
+        let execute_workflow = || {
             #[cfg(feature = "ai")]
             let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
                 .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
@@ -23298,6 +23504,7 @@ impl AppComposition {
                                         prepared,
                                         cancellation_flag.clone(),
                                         completion_sender.clone(),
+                                        workflow_worker_supervisor_sender.clone(),
                                     )?,
                                 );
                                 continue;
@@ -23322,6 +23529,7 @@ impl AppComposition {
                                         prepared,
                                         cancellation_flag.clone(),
                                         completion_sender.clone(),
+                                        workflow_worker_supervisor_sender.clone(),
                                     )?,
                                 );
                                 continue;
@@ -23467,7 +23675,28 @@ impl AppComposition {
                 tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
                 memory_candidate_proposed,
             })
-        })();
+        };
+        #[cfg(feature = "ai")]
+        let mut execution_result =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute_workflow)) {
+                Ok(result) => result,
+                Err(payload) => {
+                    self.delegate_workflow
+                        .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                    let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
+                        *message
+                    } else if let Some(message) = payload.downcast_ref::<String>() {
+                        message.as_str()
+                    } else {
+                        "non-string panic payload"
+                    };
+                    Err(AppCompositionError::AiRuntime(format!(
+                        "workflow execution panicked: {panic_message}"
+                    )))
+                }
+            };
+        #[cfg(not(feature = "ai"))]
+        let mut execution_result = execute_workflow();
         #[cfg(feature = "ai")]
         if !unfinished_workflow_runs.is_empty() {
             self.draining_workflow_worker = Some(DrainingWorkflowWorkerRegistration::new(

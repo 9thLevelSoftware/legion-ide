@@ -481,6 +481,39 @@ impl LegionWorkerProviderResolver for SecondWorkerWaitResolver {
     }
 }
 
+struct PanicOnSecondWorkerResolver {
+    first_worker_id: String,
+    first_provider: Mutex<Option<Box<dyn ToolCallingProvider + Send>>>,
+    second_worker_id: String,
+    first_worker_entered: Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+impl LegionWorkerProviderResolver for PanicOnSecondWorkerResolver {
+    fn resolve_worker_provider(
+        &self,
+        assignment: &LegionWorkflowWorkerAssignment,
+    ) -> Option<Box<dyn ToolCallingProvider + Send>> {
+        if assignment.worker_id.0 == self.first_worker_id {
+            return self
+                .first_provider
+                .lock()
+                .expect("first-provider lock")
+                .take();
+        }
+        if assignment.worker_id.0 == self.second_worker_id {
+            self.first_worker_entered
+                .lock()
+                .expect("first-worker receiver lock")
+                .take()
+                .expect("second worker resolves once")
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first workflow worker must enter before resolver panic");
+            panic!("intentional second-worker resolver panic");
+        }
+        None
+    }
+}
+
 #[derive(Default)]
 struct EmptyWorkerProviderResolver;
 
@@ -2643,7 +2676,10 @@ fn workflow_worker_panic_cancels_and_reaps_blocked_lane_sibling_before_owner_cle
     }
 }
 
-fn assert_uninterruptible_lane_drains_without_releasing_owner(stuck_worker_first: bool) {
+fn assert_uninterruptible_lane_drains_without_releasing_owner(
+    stuck_worker_first: bool,
+    drop_app_while_draining: bool,
+) {
     let mut app = automate_app();
     let order_label = if stuck_worker_first {
         "stuck-first"
@@ -2754,6 +2790,57 @@ fn assert_uninterruptible_lane_drains_without_releasing_owner(stuck_worker_first
             .contains("already running")
     );
 
+    if drop_app_while_draining {
+        let completion_ids = app.draining_workflow_completion_ids_for_test();
+        assert_eq!(
+            completion_ids.len(),
+            1,
+            "only the release-gated worker should remain in app-owned draining state"
+        );
+        let completion_id = completion_ids[0];
+        drop(app);
+
+        let handoff_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (handed_off, reaped) =
+                AppComposition::workflow_worker_supervisor_state_for_test(completion_id);
+            if handed_off {
+                assert!(
+                    !reaped,
+                    "release-gated worker cannot be reaped before explicit release"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < handoff_deadline,
+                "app drop did not hand the workflow handle to the global supervisor"
+            );
+            std::thread::yield_now();
+        }
+
+        let (release, wake) = &*released;
+        *release.lock().expect("release lock") = true;
+        wake.notify_all();
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("release-gated worker must finish after app drop");
+
+        let reap_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let (_, reaped) =
+                AppComposition::workflow_worker_supervisor_state_for_test(completion_id);
+            if reaped {
+                break;
+            }
+            assert!(
+                Instant::now() < reap_deadline,
+                "global supervisor did not join the released workflow worker"
+            );
+            std::thread::yield_now();
+        }
+        return;
+    }
+
     let (release, wake) = &*released;
     *release.lock().expect("release lock") = true;
     wake.notify_all();
@@ -2777,12 +2864,17 @@ fn assert_uninterruptible_lane_drains_without_releasing_owner(stuck_worker_first
 
 #[test]
 fn workflow_worker_error_drains_uninterruptible_sibling_when_failure_is_assigned_first() {
-    assert_uninterruptible_lane_drains_without_releasing_owner(false);
+    assert_uninterruptible_lane_drains_without_releasing_owner(false, false);
 }
 
 #[test]
 fn workflow_worker_error_drains_uninterruptible_sibling_when_failure_completes_second() {
-    assert_uninterruptible_lane_drains_without_releasing_owner(true);
+    assert_uninterruptible_lane_drains_without_releasing_owner(true, false);
+}
+
+#[test]
+fn app_drop_hands_draining_workflow_to_global_supervisor_until_reaped() {
+    assert_uninterruptible_lane_drains_without_releasing_owner(true, true);
 }
 
 #[test]
@@ -2904,6 +2996,117 @@ fn workflow_spawn_failure_transfers_launched_worker_into_draining_ownership() {
         assert!(
             Instant::now() < deadline,
             "spawn-failure draining ownership did not reconcile"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn workflow_resolver_panic_transfers_launched_worker_into_draining_ownership() {
+    let mut app = automate_app();
+    let root = temp_workspace("resolver-panic-drains-launched-worker");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:resolver-panic-drain".to_string()),
+    )
+    .expect("open workspace");
+    let first_plan = DelegatedTaskPlanId("plan:resolver-panic-first".to_string());
+    let second_plan = DelegatedTaskPlanId("plan:resolver-panic-second".to_string());
+    let session = workflow_session(
+        "resolver-panic-drains-launched-worker",
+        vec![
+            worker(
+                "worker:a-release-gated",
+                LegionWorkflowModelBackend::Local,
+                Some(first_plan.clone()),
+                "target:first",
+                331,
+            ),
+            worker(
+                "worker:b-resolver-panics",
+                LegionWorkflowModelBackend::Local,
+                Some(second_plan.clone()),
+                "target:second",
+                332,
+            ),
+        ],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![
+        delegated_contract(first_plan),
+        delegated_contract(second_plan),
+    ]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let cancellation = SharedCancellationFlag::new();
+    app.inject_cancellation_flag_for_test(cancellation.clone());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let released = Arc::new((Mutex::new(false), Condvar::new()));
+    let resolver = PanicOnSecondWorkerResolver {
+        first_worker_id: "worker:a-release-gated".to_string(),
+        first_provider: Mutex::new(Some(Box::new(ReleaseGatedWorkflowProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            released: released.clone(),
+            finished: Mutex::new(Some(finished_tx)),
+        }))),
+        second_worker_id: "worker:b-resolver-panics".to_string(),
+        first_worker_entered: Mutex::new(Some(entered_rx)),
+    };
+
+    let started = Instant::now();
+    let error = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect_err("resolver panic must fail without losing the first worker handle");
+    assert!(
+        error
+            .to_string()
+            .contains("intentional second-worker resolver panic")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "resolver panic waited for the already-launched worker: {:?}",
+        started.elapsed()
+    );
+    assert!(cancellation.is_cancelled());
+
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Automate,
+        "resolver-panic drain must retain workflow authority"
+    );
+    assert!(
+        app.execute_legion_workflow_with_providers(&session_id, &resolver)
+            .expect_err("new workflow must remain blocked while first worker drains")
+            .to_string()
+            .contains("already running")
+    );
+
+    let (release, wake) = &*released;
+    *release.lock().expect("release lock") = true;
+    wake.notify_all();
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("launched worker must finish after explicit release");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        app.set_product_mode(AppProductMode::Manual);
+        if app.product_mode() == AppProductMode::Manual {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "resolver-panic draining ownership did not reconcile"
         );
         std::thread::yield_now();
     }
