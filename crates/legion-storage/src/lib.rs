@@ -2055,8 +2055,12 @@ impl InMemoryStorageRepositoryPort {
             })
     }
 
-    /// Return all proposal observation batches still awaiting sink delivery.
-    pub fn pending_proposal_observation_batches(
+    /// Return every proposal observation outbox record in stable batch-id order.
+    ///
+    /// This read-only view includes both Pending and Delivered records so an
+    /// application can reserve durable identities and reconcile its live
+    /// proposal ledger after a restart without re-persisting proposal content.
+    pub fn proposal_observation_batches(
         &self,
     ) -> ProtocolResult<Vec<ProposalObservationOutboxRecord>> {
         self.ensure_proposal_observation_outbox_healthy()?;
@@ -2064,11 +2068,62 @@ impl InMemoryStorageRepositoryPort {
         let mut records = storage
             .protocol_proposal_observation_outbox
             .values()
-            .filter(|record| record.delivery_state == ProposalObservationDeliveryState::Pending)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by(|left, right| left.batch.batch_id.cmp(&right.batch.batch_id));
         Ok(records)
+    }
+
+    /// Compare a replay candidate with its stored outbox record after applying
+    /// the same event preparation and audit sanitization as the write path.
+    ///
+    /// This never mutates storage or delivers events. It lets an application
+    /// prove that trusted replay inputs reproduce the exact durable
+    /// EventIds, timestamps, metadata, and redacted audits before publishing
+    /// recovered live proposal state.
+    pub fn proposal_observation_batch_matches_stored(
+        &self,
+        mut candidate: ProposalObservationBatch,
+    ) -> ProtocolResult<bool> {
+        self.ensure_proposal_observation_outbox_healthy()?;
+        candidate.events = prepare_event_batch(
+            candidate
+                .events
+                .into_iter()
+                .map(|envelope| EventSinkRequest { envelope })
+                .collect(),
+            EventSinkConfig::default(),
+        )
+        .map_err(|error| ProtocolError {
+            code: "proposal_observation_batch_invalid".to_string(),
+            message: format!("proposal observation replay event preparation failed: {error}"),
+        })?;
+        candidate.proposal_audits = candidate
+            .proposal_audits
+            .into_iter()
+            .map(Self::sanitize_proposal_observation_audit)
+            .collect::<ProtocolResult<Vec<_>>>()?;
+        Self::validate_proposal_observation_batch(&candidate)?;
+
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let Some(stored) = storage
+            .protocol_proposal_observation_outbox
+            .get(&candidate.batch_id)
+        else {
+            return Ok(false);
+        };
+        Self::proposal_observation_batches_equal(&stored.batch, &candidate)
+    }
+
+    /// Return all proposal observation batches still awaiting sink delivery.
+    pub fn pending_proposal_observation_batches(
+        &self,
+    ) -> ProtocolResult<Vec<ProposalObservationOutboxRecord>> {
+        Ok(self
+            .proposal_observation_batches()?
+            .into_iter()
+            .filter(|record| record.delivery_state == ProposalObservationDeliveryState::Pending)
+            .collect())
     }
 
     /// Mark a previously committed proposal observation batch as delivered.
@@ -4892,7 +4947,7 @@ mod tests {
                 SharedEventSink::new(sink),
                 &base_dir,
             );
-            port.store_proposal_observation_batch(batch)
+            port.store_proposal_observation_batch(batch.clone())
                 .expect("store Pending batch");
             port.deliver_proposal_observation_batch("restart-batch")
                 .expect_err("initial delivery fails");
@@ -4935,6 +4990,27 @@ mod tests {
                 .pending_proposal_observation_batches()
                 .expect("reloaded delivered records")
                 .is_empty()
+        );
+        let all_records = reopened
+            .proposal_observation_batches()
+            .expect("read delivered outbox records");
+        assert_eq!(all_records.len(), 1);
+        assert_eq!(
+            all_records[0].delivery_state,
+            ProposalObservationDeliveryState::Delivered
+        );
+        assert!(
+            reopened
+                .proposal_observation_batch_matches_stored(batch.clone())
+                .expect("compare exact replay batch")
+        );
+        let mut divergent = batch;
+        divergent.events[0].payload["payload_byte_count"] = json!(999);
+        divergent.proposal_audits[0].payload_summary.byte_count = Some(999);
+        assert!(
+            !reopened
+                .proposal_observation_batch_matches_stored(divergent)
+                .expect("compare divergent replay batch")
         );
         let _ = fs::remove_dir_all(base_dir);
     }
