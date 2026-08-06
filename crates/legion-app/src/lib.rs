@@ -987,8 +987,8 @@ struct PreparedLegionWorkflowWorkerRun {
 
 #[cfg(feature = "ai")]
 struct InFlightLegionWorkflowWorkerRun {
+    completion_id: uuid::Uuid,
     cancellation_flag: SharedCancellationFlag,
-    drain_state: Arc<WorkflowWorkerDrainState>,
     join_handle: Option<
         std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
     >,
@@ -997,18 +997,9 @@ struct InFlightLegionWorkflowWorkerRun {
 #[cfg(feature = "ai")]
 impl Drop for InFlightLegionWorkflowWorkerRun {
     fn drop(&mut self) {
-        let Some(join_handle) = self.join_handle.take() else {
-            return;
-        };
-        self.cancellation_flag.cancel();
-        self.drain_state.begin_draining();
-        let drain_state = self.drain_state.clone();
-        let _ = std::thread::Builder::new()
-            .name("legion-workflow-drain-reaper".to_string())
-            .spawn(move || {
-                let _ = join_handle.join();
-                drain_state.worker_completed();
-            });
+        if self.join_handle.is_some() {
+            self.cancellation_flag.cancel();
+        }
     }
 }
 
@@ -1017,57 +1008,65 @@ impl InFlightLegionWorkflowWorkerRun {
     fn join(
         mut self,
     ) -> std::thread::Result<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>> {
-        let joined = self
-            .join_handle
+        self.join_handle
             .take()
             .expect("workflow worker owns its join handle")
-            .join();
-        self.drain_state.worker_completed();
-        joined
-    }
-}
-
-#[cfg(feature = "ai")]
-#[derive(Default)]
-struct WorkflowWorkerDrainState {
-    outstanding_workers: std::sync::atomic::AtomicUsize,
-    draining: std::sync::atomic::AtomicBool,
-}
-
-#[cfg(feature = "ai")]
-impl WorkflowWorkerDrainState {
-    fn worker_started(&self) {
-        self.outstanding_workers
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            .join()
     }
 
-    fn worker_completed(&self) {
-        let previous = self
-            .outstanding_workers
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        debug_assert!(previous > 0, "workflow drain worker count underflow");
-    }
-
-    fn begin_draining(&self) {
-        self.draining
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    fn is_draining(&self) -> bool {
-        self.draining.load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    fn is_complete(&self) -> bool {
-        self.outstanding_workers
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 0
+    fn is_finished(&self) -> bool {
+        self.join_handle
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
     }
 }
 
 #[cfg(feature = "ai")]
 struct DrainingWorkflowWorkerRegistration {
     owner_id: uuid::Uuid,
-    drain_state: Arc<WorkflowWorkerDrainState>,
+    unfinished_runs: Vec<InFlightLegionWorkflowWorkerRun>,
+}
+
+#[cfg(feature = "ai")]
+impl DrainingWorkflowWorkerRegistration {
+    fn new(owner_id: uuid::Uuid, unfinished_runs: Vec<InFlightLegionWorkflowWorkerRun>) -> Self {
+        for run in &unfinished_runs {
+            run.cancellation_flag.cancel();
+        }
+        Self {
+            owner_id,
+            unfinished_runs,
+        }
+    }
+
+    fn reconcile_finished(&mut self) {
+        let mut index = 0;
+        while index < self.unfinished_runs.len() {
+            if self.unfinished_runs[index].is_finished() {
+                let run = self.unfinished_runs.swap_remove(index);
+                let _ = run.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.unfinished_runs.is_empty()
+    }
+}
+
+#[cfg(feature = "ai")]
+struct WorkflowWorkerCompletionNotice {
+    completion_id: uuid::Uuid,
+    sender: std::sync::mpsc::Sender<uuid::Uuid>,
+}
+
+#[cfg(feature = "ai")]
+impl Drop for WorkflowWorkerCompletionNotice {
+    fn drop(&mut self) {
+        let _ = self.sender.send(self.completion_id);
+    }
 }
 
 #[cfg(feature = "ai")]
@@ -16152,13 +16151,15 @@ pub struct AppComposition {
     /// Sole app-owned worker registration. The owner id prevents one run from
     /// clearing another run's cancellation authority.
     active_worker: Option<ActiveWorkerRegistration>,
-    /// Workflow worker handles handed to asynchronous reapers after a lane
-    /// failure. The matching active owner remains authoritative until every
-    /// reaper has joined its worker and a public retry reconciles this state.
+    /// Workflow worker handles retained after a lane failure. Public retries
+    /// poll and join only already-finished handles; the matching active owner
+    /// remains authoritative until this set is empty.
     #[cfg(feature = "ai")]
     draining_workflow_worker: Option<DrainingWorkflowWorkerRegistration>,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_cancellation_flag: Option<SharedCancellationFlag>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_workflow_spawn_failure_after: Option<usize>,
     /// App-owned worker for a Desktop-started delegated loop. Completion is
     /// merged on the app thread so proposal registration never moves into the renderer.
     #[cfg(feature = "ai")]
@@ -16437,6 +16438,8 @@ impl AppComposition {
             draining_workflow_worker: None,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_cancellation_flag: None,
+            #[cfg(any(test, feature = "test-helpers"))]
+            injected_workflow_spawn_failure_after: None,
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
@@ -16890,9 +16893,11 @@ impl AppComposition {
         {
             let completed_owner = self
                 .draining_workflow_worker
-                .as_ref()
-                .filter(|registration| registration.drain_state.is_complete())
-                .map(|registration| registration.owner_id);
+                .as_mut()
+                .and_then(|registration| {
+                    registration.reconcile_finished();
+                    registration.is_complete().then_some(registration.owner_id)
+                });
             if let Some(owner_id) = completed_owner {
                 self.draining_workflow_worker = None;
                 self.clear_active_worker(owner_id);
@@ -17950,6 +17955,13 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_cancellation_flag_for_test(&mut self, flag: SharedCancellationFlag) {
         self.injected_cancellation_flag = Some(flag);
+    }
+
+    /// Test-only: reject a workflow worker spawn after this many successful
+    /// spawns, proving already-launched handles transfer into draining ownership.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_workflow_spawn_failure_after_for_test(&mut self, successful_spawns: usize) {
+        self.injected_workflow_spawn_failure_after = Some(successful_spawns);
     }
 
     /// Test-only: project a live workflow owner with an explicit cancellation flag.
@@ -22452,52 +22464,75 @@ impl AppComposition {
         &mut self,
         prepared: PreparedLegionWorkflowWorkerRun,
         cancellation_flag: SharedCancellationFlag,
-        drain_state: Arc<WorkflowWorkerDrainState>,
-    ) -> InFlightLegionWorkflowWorkerRun {
+        completion_sender: std::sync::mpsc::Sender<uuid::Uuid>,
+    ) -> Result<InFlightLegionWorkflowWorkerRun, AppCompositionError> {
+        #[cfg(any(test, feature = "test-helpers"))]
+        if let Some(successful_spawns_remaining) =
+            self.injected_workflow_spawn_failure_after.as_mut()
+        {
+            if *successful_spawns_remaining == 0 {
+                self.injected_workflow_spawn_failure_after = None;
+                return Err(AppCompositionError::AiRuntime(
+                    "injected Legion workflow worker spawn failure".to_string(),
+                ));
+            }
+            *successful_spawns_remaining -= 1;
+        }
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
+        let completion_id = uuid::Uuid::now_v7();
         let worker = prepared.worker.clone();
         let mut sandbox_guard = prepared.sandbox_guard;
         let config = prepared.config;
         let tool_host = prepared.tool_host;
         let provider = prepared.provider;
         let worker_cancellation = cancellation_flag.clone();
-        let join_handle = std::thread::spawn(move || {
-            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::run_prepared_legion_workflow_worker(
-                    worker,
-                    config,
-                    tool_host,
-                    provider,
-                    worker_cancellation,
-                )
-            }));
-            let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
+        let join_handle = std::thread::Builder::new()
+            .name(format!("legion-workflow-worker-{completion_id}"))
+            .spawn(move || {
+                let _completion_notice = WorkflowWorkerCompletionNotice {
+                    completion_id,
+                    sender: completion_sender,
+                };
+                let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::run_prepared_legion_workflow_worker(
+                        worker,
+                        config,
+                        tool_host,
+                        provider,
+                        worker_cancellation,
+                    )
+                }));
+                let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "workflow worker sandbox cleanup failed: {error}"
+                    ))
+                });
+                match (run_result, cleanup_result) {
+                    (Ok(Ok(completion)), Ok(())) => Ok(completion),
+                    (Ok(Err(error)), Ok(())) => Err(error),
+                    (Ok(Ok(_)), Err(cleanup_error)) => Err(cleanup_error),
+                    (Ok(Err(error)), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(
+                        format!("{error}; {cleanup_error}"),
+                    )),
+                    (Err(_), Ok(())) => Err(AppCompositionError::AiRuntime(
+                        "delegated loop worker thread panicked".to_string(),
+                    )),
+                    (Err(_), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
+                        "delegated loop worker thread panicked; {cleanup_error}"
+                    ))),
+                }
+            })
+            .map_err(|error| {
                 AppCompositionError::AiRuntime(format!(
-                    "workflow worker sandbox cleanup failed: {error}"
+                    "failed to spawn Legion workflow worker: {error}"
                 ))
-            });
-            match (run_result, cleanup_result) {
-                (Ok(Ok(completion)), Ok(())) => Ok(completion),
-                (Ok(Err(error)), Ok(())) => Err(error),
-                (Ok(Ok(_)), Err(cleanup_error)) => Err(cleanup_error),
-                (Ok(Err(error)), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(
-                    format!("{error}; {cleanup_error}"),
-                )),
-                (Err(_), Ok(())) => Err(AppCompositionError::AiRuntime(
-                    "delegated loop worker thread panicked".to_string(),
-                )),
-                (Err(_), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
-                    "delegated loop worker thread panicked; {cleanup_error}"
-                ))),
-            }
-        });
-        drain_state.worker_started();
-        InFlightLegionWorkflowWorkerRun {
+            })?;
+        Ok(InFlightLegionWorkflowWorkerRun {
+            completion_id,
             cancellation_flag,
-            drain_state,
             join_handle: Some(join_handle),
-        }
+        })
     }
 
     #[cfg(feature = "ai")]
@@ -22978,8 +23013,8 @@ impl AppComposition {
                 session_id: session.session_id.clone(),
             })?;
         #[cfg(feature = "ai")]
-        let workflow_drain_state = Arc::new(WorkflowWorkerDrainState::default());
-        let execution_result = (|| {
+        let mut unfinished_workflow_runs = Vec::new();
+        let mut execution_result = (|| {
             #[cfg(feature = "ai")]
             let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
                 .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
@@ -22988,7 +23023,7 @@ impl AppComposition {
 
             'lane_loop: for lane in lanes {
                 #[cfg(feature = "ai")]
-                let mut in_flight = Vec::new();
+                let (completion_sender, completion_receiver) = std::sync::mpsc::channel();
                 let mut lane_paused = false;
 
                 if let Some((worker, conflict_id)) = lane.iter().find_map(|worker| {
@@ -23258,11 +23293,13 @@ impl AppComposition {
                                 let prepared = self.prepare_legion_workflow_worker_run(
                                     &session, &worker, provider,
                                 )?;
-                                in_flight.push(self.spawn_legion_workflow_worker_run(
-                                    prepared,
-                                    cancellation_flag.clone(),
-                                    workflow_drain_state.clone(),
-                                ));
+                                unfinished_workflow_runs.push(
+                                    self.spawn_legion_workflow_worker_run(
+                                        prepared,
+                                        cancellation_flag.clone(),
+                                        completion_sender.clone(),
+                                    )?,
+                                );
                                 continue;
                             }
                             self.block_legion_workflow_worker_provider_unavailable(
@@ -23280,11 +23317,13 @@ impl AppComposition {
                                 let prepared = self.prepare_legion_workflow_worker_run(
                                     &session, &worker, provider,
                                 )?;
-                                in_flight.push(self.spawn_legion_workflow_worker_run(
-                                    prepared,
-                                    cancellation_flag.clone(),
-                                    workflow_drain_state.clone(),
-                                ));
+                                unfinished_workflow_runs.push(
+                                    self.spawn_legion_workflow_worker_run(
+                                        prepared,
+                                        cancellation_flag.clone(),
+                                        completion_sender.clone(),
+                                    )?,
+                                );
                                 continue;
                             }
                             self.block_legion_workflow_worker_provider_unavailable(
@@ -23314,7 +23353,24 @@ impl AppComposition {
                 }
 
                 #[cfg(feature = "ai")]
-                for worker_run in in_flight {
+                drop(completion_sender);
+                #[cfg(feature = "ai")]
+                while !unfinished_workflow_runs.is_empty() {
+                    let completion_id = completion_receiver.recv().map_err(|_| {
+                        AppCompositionError::AiRuntime(
+                            "workflow completion channel closed with unfinished workers"
+                                .to_string(),
+                        )
+                    })?;
+                    let completed_index = unfinished_workflow_runs
+                        .iter()
+                        .position(|run| run.completion_id == completion_id)
+                        .ok_or_else(|| {
+                            AppCompositionError::AiRuntime(format!(
+                                "workflow completion channel reported unknown worker {completion_id}"
+                            ))
+                        })?;
+                    let worker_run = unfinished_workflow_runs.swap_remove(completed_index);
                     let joined = worker_run.join();
                     let completion = match joined {
                         Ok(Ok(completion)) => completion,
@@ -23413,11 +23469,16 @@ impl AppComposition {
             })
         })();
         #[cfg(feature = "ai")]
-        if workflow_drain_state.is_draining() && !workflow_drain_state.is_complete() {
-            self.draining_workflow_worker = Some(DrainingWorkflowWorkerRegistration {
+        if !unfinished_workflow_runs.is_empty() {
+            self.draining_workflow_worker = Some(DrainingWorkflowWorkerRegistration::new(
                 owner_id,
-                drain_state: workflow_drain_state,
-            });
+                std::mem::take(&mut unfinished_workflow_runs),
+            ));
+            if execution_result.is_ok() {
+                execution_result = Err(AppCompositionError::AiRuntime(
+                    "workflow execution returned with unfinished worker ownership".to_string(),
+                ));
+            }
         } else {
             self.clear_active_worker(owner_id);
         }
