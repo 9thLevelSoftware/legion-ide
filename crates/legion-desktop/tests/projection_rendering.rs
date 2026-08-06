@@ -646,19 +646,19 @@ fn projection_rendering_populates_required_phase2_surfaces() {
         model
             .top_bar_rows
             .iter()
-            .any(|row| row.contains("command bar: Foundation Mode"))
+            .any(|row| row.contains("top bar identity: Legion workspace=Foundation Mode"))
     );
     assert!(
         model
             .top_bar_rows
             .iter()
-            .any(|row| row.contains("registry=1"))
+            .any(|row| row.contains("active=Delegate"))
     );
     assert!(
         model
             .left_sidebar_rows
             .iter()
-            .any(|row| row.contains("project sidebar"))
+            .any(|row| row.contains("explorer chrome"))
     );
     assert!(
         model
@@ -800,9 +800,8 @@ fn projection_rendering_surfaces_assist_inline_prediction_rows() {
     }));
     assert!(model.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Assist")
-            && row.contains("id=sugg")
-            && row.contains("label=AI Suggestions")
-            && row.contains("count=1")
+            && row.contains("id=agent-log")
+            && row.contains("label=AGENT LOG")
     }));
 }
 
@@ -874,11 +873,11 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     assert!(manual.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Manual")
             && row.contains("id=term")
-            && row.contains("label=Terminal")
+            && row.contains("label=TERMINAL")
             && row.contains("active=true")
     }));
     assert!(manual.bottom_tab_rows.iter().any(|row| {
-        row.contains("mode=Manual") && row.contains("id=test") && row.contains("label=Tests")
+        row.contains("mode=Manual") && row.contains("id=problems") && row.contains("label=PROBLEMS")
     }));
 
     let mut assisted = Shell::empty("Assist").projection_snapshot();
@@ -890,9 +889,8 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     }));
     assert!(assisted_model.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Assist")
-            && row.contains("id=sugg")
-            && row.contains("label=AI Suggestions")
-            && row.contains("count=1")
+            && row.contains("id=agent-log")
+            && row.contains("label=AGENT LOG")
     }));
 
     let delegated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
@@ -904,10 +902,108 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     assert!(!delegated.command_palette_overlay.open);
     assert!(delegated.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Delegate")
-            && row.contains("id=test")
-            && row.contains("label=Test Runner")
+            && row.contains("id=term")
+            && row.contains("label=TERMINAL")
             && row.contains("active=true")
     }));
+}
+
+#[test]
+fn projection_rendering_models_prototype_workbench_composition() {
+    let mut snapshot = populated_snapshot();
+    snapshot
+        .context_manifest_projection
+        .manifest
+        .workspace_trust_state = Some(legion_protocol::WorkspaceTrustState::Trusted);
+    snapshot.language_tooling_projection.status = legion_protocol::LanguageToolingStatusKind::Ready;
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert_eq!(
+        model.top_bar_rows,
+        vec![
+            "top bar identity: Legion workspace=Foundation Mode".to_string(),
+            "top bar modes: Manual | Assist | Delegate | Legion Workflows active=Delegate"
+                .to_string(),
+            "top bar command: label=Command presence=1".to_string(),
+        ],
+        "the first-screen header should expose only identity, mode, and command/presence regions"
+    );
+    assert_eq!(
+        model.left_sidebar_rows,
+        vec![
+            "explorer chrome: title=EXPLORER · Foundation Mode nodes=2 selected_file=2".to_string()
+        ],
+        "the first-screen sidebar should be the projected explorer, without fleet or context-pack summaries"
+    );
+    assert_eq!(model.center_surface, "editor");
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=term") && row.contains("label=TERMINAL") && row.contains("active=true")
+    }));
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=problems") && row.contains("label=PROBLEMS") && row.contains("count=0")
+    }));
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=agent-log") && row.contains("label=AGENT LOG") })
+    );
+    assert_eq!(model.status_bar.trust.as_deref(), Some("Trusted"));
+    assert_eq!(
+        model.status_bar.lsp, None,
+        "general language readiness must not be relabeled as live LSP state"
+    );
+
+    snapshot.language_tooling_projection.lsp_session_status =
+        Some(legion_protocol::LspSessionStatusProjection {
+            lifecycle: legion_protocol::LspSessionLifecycleKind::Live,
+            restart_count: 0,
+            max_auto_restarts: 3,
+            backoff_remaining_ms: None,
+            failure_reason: None,
+            schema_version: 1,
+        });
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert_eq!(model.status_bar.lsp.as_deref(), Some("Live"));
+}
+
+#[test]
+fn projection_rendering_never_projects_live_agent_log_in_manual() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=term") && row.contains("label=TERMINAL") && row.contains("active=true")
+    }));
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .any(|row| row.contains("id=problems") && row.contains("label=PROBLEMS"))
+    );
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .all(|row| !row.contains("AGENT LOG")),
+        "Manual must not expose a live-agent console surface"
+    );
+}
+
+#[test]
+fn projection_rendering_suppresses_projected_presence_from_manual_chrome() {
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        model
+            .top_bar_rows
+            .iter()
+            .any(|row| row == "top bar command: label=Command presence=0"),
+        "Manual chrome must not expose collaboration-presence claims"
+    );
 }
 
 #[test]

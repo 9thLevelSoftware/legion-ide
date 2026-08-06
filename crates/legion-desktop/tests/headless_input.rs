@@ -24,6 +24,7 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
+    view::command_palette_control_action,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
 use legion_ui::{DockMode, PaletteMode, SearchScopeProjection, SearchStatusKindProjection};
@@ -236,6 +237,26 @@ fn headless_input_cmd_f_runs_search_through_real_egui_context() {
         2,
         "the active-file search should return both matching rows"
     );
+}
+
+#[test]
+fn headless_input_command_control_opens_the_command_region_palette_contract() {
+    let _guard = headless_input_test_guard();
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    app.handle_action(command_palette_control_action())
+        .expect("the rendered Command control action should dispatch");
+
+    let palette = &app.runtime_snapshot().palette_projection;
+    assert!(
+        palette.open,
+        "the Command control shortcut should open the palette"
+    );
+    assert_eq!(palette.mode, PaletteMode::Command);
+    assert_eq!(palette.query, ">");
+    assert_eq!(palette.scope, SearchScopeProjection::Workspace);
 }
 
 #[test]

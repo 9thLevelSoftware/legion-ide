@@ -12,9 +12,10 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
+    view::DesktopProjectionViewModel,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_ui::DockMode;
+use legion_ui::{DockMode, Shell};
 
 /// Build a five-target batch proposal suitable for seeding proposal_reviews in
 /// the desktop runtime's delegated-task projection.
@@ -194,6 +195,25 @@ fn product_mode_switch_accepts_keyboard_activation() {
         DockMode::Manual,
         "keyboard activation should select the Manual product mode"
     );
+}
+
+#[test]
+fn product_mode_navigation_keeps_the_real_editor_as_the_center_surface() {
+    let mut snapshot = Shell::empty("Stable editor").projection_snapshot();
+
+    for mode in [
+        DockMode::Manual,
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+    ] {
+        snapshot.product_mode = mode;
+        let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+        assert_eq!(
+            model.center_surface, "editor",
+            "mode {mode:?} must preserve the projected editor surface and its stable egui ids"
+        );
+    }
 }
 
 // ─── T4: Problems panel keyboard navigation ───────────────────────────────────
