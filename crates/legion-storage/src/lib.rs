@@ -1240,15 +1240,33 @@ impl InMemoryStorageRepositoryPort {
     }
 
     /// Enable durability under `base_dir` on an existing port (loads existing blobs).
-    pub fn enable_base_dir(&mut self, base_dir: impl AsRef<Path>) {
-        self.base_dir = Some(base_dir.as_ref().to_path_buf());
+    ///
+    /// A live port is bound to at most one durability root. Switching roots
+    /// would merge independently-owned proposal identities in the in-memory
+    /// maps, so it is rejected fail-closed.
+    pub fn enable_base_dir(&mut self, base_dir: impl AsRef<Path>) -> ProtocolResult<()> {
+        let base_dir = base_dir.as_ref().to_path_buf();
+        if self
+            .base_dir
+            .as_ref()
+            .is_some_and(|existing| existing != &base_dir)
+        {
+            return Err(ProtocolError {
+                code: "proposal_observation_workspace_switch_unsupported".to_string(),
+                message: "proposal observation storage is already bound to another workspace root"
+                    .to_string(),
+            });
+        }
+        self.base_dir = Some(base_dir);
         self.proposal_observation_startup_error = None;
         if let Err(error) = self
             .load_proposal_observation_outbox_from_disk()
             .and_then(|()| self.load_proposal_audit_from_disk())
         {
-            self.proposal_observation_startup_error = Some(error);
+            self.proposal_observation_startup_error = Some(error.clone());
+            return Err(error);
         }
+        Ok(())
     }
 
     fn proposal_audit_dir(&self) -> Option<PathBuf> {
@@ -4984,7 +5002,7 @@ mod tests {
             assert_eq!(second_recorder.events().expect("event snapshot").len(), 2);
         }
 
-        let reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        let mut reopened = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
         assert!(
             reopened
                 .pending_proposal_observation_batches()
@@ -5011,6 +5029,13 @@ mod tests {
             !reopened
                 .proposal_observation_batch_matches_stored(divergent)
                 .expect("compare divergent replay batch")
+        );
+        let switch_error = reopened
+            .enable_base_dir(base_dir.with_extension("different-root"))
+            .expect_err("a live storage port must not mix workspace roots");
+        assert_eq!(
+            switch_error.code,
+            "proposal_observation_workspace_switch_unsupported"
         );
         let _ = fs::remove_dir_all(base_dir);
     }
