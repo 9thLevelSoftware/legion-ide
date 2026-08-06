@@ -1825,6 +1825,29 @@ fn accesskit_button_bounds_in_x_range(
         .unwrap_or_else(|| panic!("central accessible control `{label}` should be allocated"))
 }
 
+fn accesskit_button_bounds_in_y_range(
+    output: &egui::FullOutput,
+    label: &str,
+    y_range: std::ops::RangeInclusive<f32>,
+) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            let bounds = node.bounds()?;
+            let center_y = ((bounds.y0 + bounds.y1) * 0.5) as f32;
+            (node.label() == Some(label)
+                && node.supports_action(egui::accesskit::Action::Click)
+                && y_range.contains(&center_y))
+            .then_some(bounds)
+        })
+        .unwrap_or_else(|| panic!("top-bar control `{label}` should be allocated"))
+}
+
 fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
     output
         .platform_output
@@ -1856,6 +1879,26 @@ fn accesskit_has_role(output: &egui::FullOutput, role: egui::accesskit::Role) ->
         .accesskit_update
         .as_ref()
         .is_some_and(|update| update.nodes.iter().any(|(_id, node)| node.role() == role))
+}
+
+fn accesskit_has_role_in_x_range(
+    output: &egui::FullOutput,
+    role: egui::accesskit::Role,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+                node.role() == role && x_range.contains(&center_x)
+            })
+        })
 }
 
 fn accesskit_label_is_disabled(output: &egui::FullOutput, label: &str) -> bool {
@@ -1969,6 +2012,34 @@ fn click_projection_at(
         projection_output.expect("clicked projection frame should render"),
         full_output,
     )
+}
+
+fn scroll_right_rail_to_bottom(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    let pointer = egui::pos2(size.x - 24.0, size.y * 0.5);
+    let mut full = None;
+    for _ in 0..4 {
+        let input = desktop_raw_input_at(
+            size,
+            vec![
+                egui::Event::PointerMoved(pointer),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -600.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        full = Some(ctx.run_ui(input, |ui| {
+            let _ = view.render(ui, snapshot);
+        }));
+    }
+    full.expect("right rail should render while scrolling")
 }
 
 fn seed_delegate_task_draft(ctx: &egui::Context, draft: &str) {
@@ -2319,6 +2390,9 @@ fn projection_rendering_assist_idle_and_in_flight_controls_route_existing_action
         .assist_inline_prediction_projection
         .request_in_flight = true;
     let (_next, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Cancel"));
+    assert!(!accesskit_has_label(&full, "Predict"));
+    assert!(!accesskit_has_clickable_label(&full, "Predict"));
     let (cancelled, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Cancel");
     assert_eq!(
         cancelled.actions,
@@ -2445,7 +2519,7 @@ fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
     assert!(accesskit_has_label(&full, "Task description"));
     let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     let cta = accesskit_bounds(&full, "Delegate task", true);
-    assert!(cta.y1 - cta.y0 >= 18.0);
+    assert!(cta.y1 - cta.y0 >= 24.0);
     let delegated = desktop_delegated_task_action(&snapshot, " Fix the delegated task rail ")
         .expect("non-empty draft should create one delegated task action");
     assert_eq!(
@@ -2460,6 +2534,168 @@ fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
         "Delegate CTA mapping must never use the proposal-only action"
     );
     assert_eq!(desktop_delegated_task_action(&snapshot, "   "), None);
+}
+
+#[test]
+fn projection_rendering_visible_actions_meet_minimum_target_height() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Action targets").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    let predict = accesskit_bounds(&full, "Predict", true);
+    assert!(predict.y1 - predict.y0 >= 24.0);
+
+    snapshot.product_mode = DockMode::Manual;
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    let full = scroll_right_rail_to_bottom(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    for label in ["Defaults", "Light", "All statuses"] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.y1 - bounds.y0 >= 24.0,
+            "{label} must retain a >=24px target in the compact viewport; bounds={bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_settings_selectors_emit_real_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Settings actions").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (theme, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Light");
+    assert_eq!(
+        theme.actions,
+        vec![DesktopAction::SetThemePreference {
+            preference: ThemePreferenceProjection::Light,
+        }]
+    );
+
+    let (_next, _full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let full = scroll_right_rail_to_bottom(&ctx, &mut view, &snapshot, egui::vec2(1_440.0, 900.0));
+    let (toasts, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "All statuses");
+    assert_eq!(
+        toasts.actions,
+        vec![DesktopAction::SetToastVerbosity {
+            verbosity: ToastVerbosityProjection::All,
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Advanced rail surfaces");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Human Feedback"));
+    assert!(!accesskit_has_clickable_label(&full, "Send"));
+}
+
+#[test]
+fn projection_rendering_shell_panels_preserve_physical_prototype_edges() {
+    let assert_edge = |label: &str, actual: f32, expected: f32| {
+        assert!(
+            (actual - expected).abs() <= 2.0,
+            "{label}: panel edge {actual} must align with {expected} within the 2px separator stroke"
+        );
+    };
+    for size in [egui::vec2(960.0, 720.0), egui::vec2(1_440.0, 900.0)] {
+        let ctx = egui::Context::default();
+        let mut view = ProjectionView::new();
+        let snapshot = Shell::empty("Panel geometry").projection_snapshot();
+
+        let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        let rects = view
+            .last_shell_panel_rects()
+            .expect("the composed shell must record panel rectangles");
+
+        assert_edge("top left", rects.top.left(), 0.0);
+        assert_edge("top right", rects.top.right(), size.x);
+        assert_edge("status left", rects.status.left(), 0.0);
+        assert_edge("status right", rects.status.right(), size.x);
+        assert_edge("left top", rects.left.top(), rects.top.bottom());
+        assert_edge("left bottom", rects.left.bottom(), rects.status.top());
+        assert_edge("right top", rects.right.top(), rects.top.bottom());
+        assert_edge("right bottom", rects.right.bottom(), rects.status.top());
+        assert_edge("bottom left", rects.bottom.left(), rects.left.right());
+        assert_edge("bottom right", rects.bottom.right(), rects.right.left());
+        assert_edge("bottom bottom", rects.bottom.bottom(), rects.status.top());
+        assert_edge("center left", rects.center.left(), rects.left.right());
+        assert_edge("center right", rects.center.right(), rects.right.left());
+        assert_edge("center bottom", rects.center.bottom(), rects.bottom.top());
+        assert_edge(
+            "console height",
+            rects.bottom.height(),
+            ShellGeometry::for_available_size(size.x, size.y).bottom_height,
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_desktop_top_bar_uses_three_non_overlapping_regions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Legion IDE").projection_snapshot();
+
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let manual = accesskit_button_bounds_in_y_range(&full, "Manual", 0.0..=44.0);
+    let workflows = accesskit_button_bounds_in_y_range(&full, "Legion Workflows", 0.0..=44.0);
+    let command = accesskit_button_bounds_in_y_range(&full, "Command", 0.0..=44.0);
+    let workspace = accesskit_bounds(&full, "Legion IDE", false);
+    let switch_center = ((manual.x0 + workflows.x1) * 0.5) as f32;
+
+    assert!(
+        (switch_center - 720.0).abs() <= 24.0,
+        "desktop mode switch must be centered around x=720; actual center={switch_center}, manual={manual:?}, workflows={workflows:?}, command={command:?}, workspace={workspace:?}"
+    );
+    assert!(
+        command.x0 >= 1_160.0,
+        "Command must be right-aligned within the 280px edge region; bounds={command:?}"
+    );
+    assert!(workspace.x1 <= manual.x0);
+    assert!(workflows.x1 <= command.x0);
+    assert!(accesskit_has_label(&full, "·"));
+}
+
+#[test]
+fn projection_rendering_compact_right_rail_exposes_vertical_scroll_reachability() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let mut projection_output = None;
+    let full = ctx.run_ui(
+        desktop_raw_input_at(egui::vec2(960.0, 720.0), Vec::new()),
+        |ui| {
+            projection_output = Some(view.render_with_state(ui, &snapshot, &state));
+        },
+    );
+    assert!(projection_output.is_some());
+    assert!(
+        accesskit_has_role_in_x_range(&full, egui::accesskit::Role::ScrollBar, 680.0..=960.0,),
+        "overflowing compact right-rail content must expose a vertical scrollbar"
+    );
 }
 
 #[test]
@@ -2590,6 +2826,10 @@ fn projection_rendering_expanded_workbenches_leave_a_usable_visible_editor() {
             assert!(
                 visible_editor.height() >= 180.0,
                 "{mode:?} at {size:?} must leave at least 180px of the editor visible; actual editor={editor_rect:?}, visible={visible_editor:?}"
+            );
+            assert!(
+                visible_editor.width() >= 360.0,
+                "{mode:?} at {size:?} must leave at least 360px of the editor visible; actual editor={editor_rect:?}, visible={visible_editor:?}"
             );
 
             let action_bounds = accesskit_button_bounds_in_x_range(

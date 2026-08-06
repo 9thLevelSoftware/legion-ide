@@ -905,6 +905,23 @@ impl DesktopProjectionViewModel {
     }
 }
 
+/// Physical panel allocations from the most recent composed shell frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShellPanelRects {
+    /// Full-width top command bar.
+    pub top: egui::Rect,
+    /// Full-width bottom status bar.
+    pub status: egui::Rect,
+    /// Full-height explorer/activity rail between top and status.
+    pub left: egui::Rect,
+    /// Full-height mode rail between top and status.
+    pub right: egui::Rect,
+    /// Center-column console above the status bar.
+    pub bottom: egui::Rect,
+    /// Remaining center editor region above the console.
+    pub center: egui::Rect,
+}
+
 /// Renderer-owned projection view state.
 #[derive(Debug)]
 pub struct ProjectionView {
@@ -912,6 +929,7 @@ pub struct ProjectionView {
     theme_preference: theme::ThemePreference,
     selected_bottom_panel: BottomPanelTab,
     last_editor_rect: Option<egui::Rect>,
+    last_shell_panel_rects: Option<ShellPanelRects>,
     /// Renderer-only presentation state. This is not product-mode authority.
     pending_mode_confirmation: Option<DockMode>,
     pending_mode_confirmation_source: Option<DockMode>,
@@ -946,6 +964,7 @@ impl ProjectionView {
             theme_preference: theme::ThemePreference::all()[0],
             selected_bottom_panel: BottomPanelTab::Terminal,
             last_editor_rect: None,
+            last_shell_panel_rects: None,
             pending_mode_confirmation: None,
             pending_mode_confirmation_source: None,
             pending_mode_confirmation_origin: None,
@@ -963,6 +982,12 @@ impl ProjectionView {
     #[doc(hidden)]
     pub fn last_editor_rect(&self) -> Option<egui::Rect> {
         self.last_editor_rect
+    }
+
+    /// Returns the physical panel allocations recorded during the last render.
+    #[doc(hidden)]
+    pub fn last_shell_panel_rects(&self) -> Option<ShellPanelRects> {
+        self.last_shell_panel_rects
     }
 
     fn request_product_mode(
@@ -1041,12 +1066,23 @@ impl ProjectionView {
         let geometry =
             ShellGeometry::for_available_size(ui.available_width(), ui.available_height());
 
-        egui::Panel::top("legion_desktop_top")
+        let top = egui::Panel::top("legion_desktop_top")
             .exact_size(geometry.top_bar_height)
             .frame(theme::toolbar_frame())
             .show_inside(ui, |ui| {
                 render_top_command_bar(ui, snapshot, &model, geometry, self, &mut actions);
-            });
+            })
+            .response
+            .rect;
+
+        let status = egui::Panel::bottom("legion_desktop_status")
+            .exact_size(geometry.status_bar_height)
+            .frame(theme::status_frame(theme::tokens().bg.code))
+            .show_inside(ui, |ui| {
+                render_status_bar(ui, &model, geometry);
+            })
+            .response
+            .rect;
 
         let left_panel = egui::Panel::left("legion_desktop_explorer")
             .frame(theme::pane_frame(theme::tokens().bg.panel))
@@ -1058,37 +1094,12 @@ impl ProjectionView {
                 .default_size(geometry.left_width)
                 .min_size(geometry.left_min_width)
         };
-        left_panel.show_inside(ui, |ui| {
-            render_left_sidebar(ui, snapshot, state, &model, geometry, &mut actions);
-        });
-
-        egui::Panel::bottom("legion_desktop_status")
-            .exact_size(geometry.status_bar_height)
-            .frame(theme::status_frame(theme::tokens().bg.code))
+        let left = left_panel
             .show_inside(ui, |ui| {
-                render_status_bar(ui, &model, geometry);
-            });
-
-        let bottom_panel = egui::Panel::bottom("legion_desktop_bottom_console")
-            .frame(theme::pane_frame(theme::tokens().bg.code))
-            .resizable(!geometry.compact);
-        let bottom_panel = if geometry.compact {
-            bottom_panel.exact_size(geometry.bottom_height)
-        } else {
-            bottom_panel
-                .default_size(geometry.bottom_height)
-                .min_size(geometry.bottom_min_height)
-        };
-        bottom_panel.show_inside(ui, |ui| {
-            render_bottom_console(
-                ui,
-                snapshot,
-                &model,
-                state.problems_selected_index,
-                &mut self.selected_bottom_panel,
-                &mut actions,
-            );
-        });
+                render_left_sidebar(ui, snapshot, state, &model, geometry, &mut actions);
+            })
+            .response
+            .rect;
 
         let right_panel = egui::Panel::right("legion_desktop_trust")
             .frame(theme::pane_frame(theme::tokens().bg.panel))
@@ -1100,9 +1111,40 @@ impl ProjectionView {
                 .default_size(geometry.right_width)
                 .min_size(geometry.right_min_width)
         };
-        right_panel.show_inside(ui, |ui| {
-            render_right_dock(ui, snapshot, state, &model, self, &mut actions);
-        });
+        let right = right_panel
+            .show_inside(ui, |ui| {
+                render_right_dock(ui, snapshot, state, &model, self, &mut actions);
+            })
+            .response
+            .rect;
+
+        let bottom_panel = egui::Panel::bottom("legion_desktop_bottom_console")
+            .frame(theme::pane_frame(theme::tokens().bg.code))
+            .resizable(!geometry.compact);
+        let bottom_panel = if geometry.compact {
+            bottom_panel.exact_size(geometry.bottom_height)
+        } else {
+            bottom_panel
+                .default_size(geometry.bottom_height)
+                .min_size(geometry.bottom_min_height)
+        };
+        let bottom_content = bottom_panel
+            .show_inside(ui, |ui| {
+                render_bottom_console(
+                    ui,
+                    snapshot,
+                    &model,
+                    state.problems_selected_index,
+                    &mut self.selected_bottom_panel,
+                    &mut actions,
+                );
+            })
+            .response
+            .rect;
+        let bottom = egui::Rect::from_min_max(
+            bottom_content.min,
+            egui::pos2(bottom_content.right(), status.top()),
+        );
 
         egui::CentralPanel::default()
             .frame(theme::pane_frame(theme::tokens().bg.code))
@@ -1110,6 +1152,18 @@ impl ProjectionView {
                 self.last_editor_rect =
                     Some(render_code_canvas(ui, snapshot, &model, &mut actions));
             });
+        let center = egui::Rect::from_min_max(
+            egui::pos2(left.right(), top.bottom()),
+            egui::pos2(right.left(), bottom.top()),
+        );
+        self.last_shell_panel_rects = Some(ShellPanelRects {
+            top,
+            status,
+            left,
+            right,
+            bottom,
+            center,
+        });
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
@@ -1147,42 +1201,60 @@ fn render_top_command_bar(
         (available_width * 0.22).clamp(180.0, 280.0)
     };
     let center_width = (available_width - edge_width * 2.0).max(0.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.allocate_ui_with_layout(
-            egui::vec2(edge_width, geometry.top_bar_content_height()),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(theme::accent("◆", theme::tokens().accent.amber));
-                ui.label(theme::title(LEGION_WORDMARK));
-                if composition.shows_workspace_context {
-                    ui.label(theme::code_muted(trim_middle(&model.layout_title, 24)));
-                }
-            },
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(center_width, geometry.top_bar_content_height()),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                if composition.shows_mode_switch {
-                    render_product_mode_switch(ui, level, composition.density, view, actions);
-                }
-            },
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(edge_width, geometry.top_bar_content_height()),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                if composition.shows_command_palette && top_bar_command_button(ui).clicked() {
-                    actions.push(command_palette_control_action());
-                }
-                let presence_count = projected_presence_count_for_chrome(snapshot);
-                if presence_count > 0 {
-                    ui.label(theme::code_muted(format!("{presence_count} present")));
-                }
-            },
-        );
-    });
+    let bar_rect = egui::Rect::from_min_size(
+        ui.available_rect_before_wrap().min,
+        egui::vec2(available_width, geometry.top_bar_content_height()),
+    );
+    ui.allocate_rect(bar_rect, egui::Sense::hover());
+    let left_rect = egui::Rect::from_min_size(
+        bar_rect.min,
+        egui::vec2(edge_width, geometry.top_bar_content_height()),
+    );
+    let center_rect = egui::Rect::from_min_size(
+        egui::pos2(left_rect.right(), bar_rect.top()),
+        egui::vec2(center_width, geometry.top_bar_content_height()),
+    );
+    let right_rect = egui::Rect::from_min_max(
+        egui::pos2(center_rect.right(), bar_rect.top()),
+        bar_rect.max,
+    );
+
+    let mut left_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("legion_desktop_top_left")
+            .max_rect(left_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    left_ui.label(theme::accent("◆", theme::tokens().accent.amber));
+    left_ui.label(theme::title(LEGION_WORDMARK));
+    if composition.shows_workspace_context {
+        left_ui.label(theme::muted("·"));
+        left_ui.label(theme::code_muted(trim_middle(&model.layout_title, 24)));
+    }
+
+    let mut center_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("legion_desktop_top_center")
+            .max_rect(center_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    if composition.shows_mode_switch {
+        render_product_mode_switch(&mut center_ui, level, composition.density, view, actions);
+    }
+
+    let mut right_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("legion_desktop_top_right")
+            .max_rect(right_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    if composition.shows_command_palette && top_bar_command_button(&mut right_ui).clicked() {
+        actions.push(command_palette_control_action());
+    }
+    let presence_count = projected_presence_count_for_chrome(snapshot);
+    if presence_count > 0 {
+        right_ui.label(theme::code_muted(format!("{presence_count} present")));
+    }
 }
 
 fn render_product_mode_switch(
@@ -1194,57 +1266,62 @@ fn render_product_mode_switch(
 ) {
     let tokens = theme::tokens();
     let compact_visuals = density == TopBarDensity::Compact && ui.available_width() < 440.0;
-    egui::Frame::NONE
-        .fill(tokens.bg.input)
-        .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
-        .corner_radius(egui::CornerRadius::same(tokens.radius.md))
-        .inner_margin(egui::Margin::symmetric(4, 1))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for spec in product_mode_switch_specs() {
-                    let canonical = canonical_mode_entry(spec.mode);
-                    let active = spec.mode == active_level;
-                    let color = level_color(spec.mode);
-                    let visual_label = if compact_visuals {
-                        spec.compact_label
-                    } else {
-                        canonical.label
-                    };
-                    let button_width = if compact_visuals { 48.0 } else { 116.0 };
-                    let response = ui
-                        .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
-                            ui.add_sized(
-                                [button_width, 24.0],
-                                egui::Button::new(theme::accent(visual_label, color))
-                                    .selected(active)
-                                    .fill(if active {
-                                        theme::dim(color, 28)
-                                    } else {
-                                        theme::tokens().bg.input
-                                    }),
-                            )
-                        })
-                        .inner;
-                    ui.ctx().accesskit_node_builder(response.id, |node| {
-                        node.set_label(canonical.label);
-                        node.set_selected(active);
-                        if active {
-                            node.set_aria_current(egui::accesskit::AriaCurrent::True);
+    let button_width = if compact_visuals { 48.0 } else { 116.0 };
+    let switch_width = button_width * 4.0 + ui.spacing().item_spacing.x * 3.0 + 8.0;
+    let leading_space = ((ui.available_width() - switch_width) * 0.5).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(leading_space);
+        egui::Frame::NONE
+            .fill(tokens.bg.input)
+            .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+            .corner_radius(egui::CornerRadius::same(tokens.radius.md))
+            .inner_margin(egui::Margin::symmetric(4, 1))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for spec in product_mode_switch_specs() {
+                        let canonical = canonical_mode_entry(spec.mode);
+                        let active = spec.mode == active_level;
+                        let color = level_color(spec.mode);
+                        let visual_label = if compact_visuals {
+                            spec.compact_label
                         } else {
-                            node.clear_aria_current();
+                            canonical.label
+                        };
+                        let response = ui
+                            .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
+                                ui.add_sized(
+                                    [button_width, 24.0],
+                                    egui::Button::new(theme::accent(visual_label, color))
+                                        .selected(active)
+                                        .fill(if active {
+                                            theme::dim(color, 28)
+                                        } else {
+                                            theme::tokens().bg.input
+                                        }),
+                                )
+                            })
+                            .inner;
+                        ui.ctx().accesskit_node_builder(response.id, |node| {
+                            node.set_label(canonical.label);
+                            node.set_selected(active);
+                            if active {
+                                node.set_aria_current(egui::accesskit::AriaCurrent::True);
+                            } else {
+                                node.clear_aria_current();
+                            }
+                        });
+                        if response.clicked() {
+                            view.request_product_mode(
+                                active_level.to_dock_mode(),
+                                spec.mode.to_dock_mode(),
+                                response.id,
+                                actions,
+                            );
                         }
-                    });
-                    if response.clicked() {
-                        view.request_product_mode(
-                            active_level.to_dock_mode(),
-                            spec.mode.to_dock_mode(),
-                            response.id,
-                            actions,
-                        );
                     }
-                }
+                });
             });
-        });
+    });
 }
 
 const MODE_CONFIRMATION_BODY: &str = "Execution remains proposal-mediated and limited to bounded permissions. This presentation confirmation grants no permissions; operation-level app gates remain authoritative.";
@@ -1522,39 +1599,54 @@ fn render_right_dock(
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
-    match projected_product_mode(snapshot) {
-        DesktopProductMode::Manual => render_manual_context_inspector(ui, snapshot, view, actions),
-        DesktopProductMode::Assist => render_assist_rail(ui, snapshot, model, actions),
-        DesktopProductMode::Delegate => {
-            if delegated_activity_projected(snapshot) {
-                render_delegation_console(ui, snapshot, model, &mut view.show_trust, actions)
-            } else {
-                render_delegate_draft_rail(ui, snapshot, model, actions)
-            }
-        }
-        DesktopProductMode::LegionWorkflows => render_fleet_console(ui, snapshot, model, actions),
-    }
-    if projected_product_mode(snapshot) != DesktopProductMode::Manual {
-        egui::CollapsingHeader::new(theme::label("Advanced rail surfaces"))
-            .id_salt("legion_desktop_advanced_right_rail")
-            .default_open(false)
-            .show(ui, |ui| {
-                render_dock_side_summary(ui, DockSide::Right, model);
-                match projected_product_mode(snapshot) {
-                    DesktopProductMode::Assist => {
-                        render_assisted_inspector(ui, snapshot, model, actions)
-                    }
-                    DesktopProductMode::Delegate => {
-                        render_pair_session_panel(ui, snapshot, model, actions)
-                    }
-                    DesktopProductMode::LegionWorkflows | DesktopProductMode::Manual => {}
+    egui::ScrollArea::vertical()
+        .id_salt("legion_desktop_right_rail_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            match projected_product_mode(snapshot) {
+                DesktopProductMode::Manual => {
+                    render_manual_context_inspector(ui, snapshot, view, actions)
                 }
-            });
-    }
-    if projected_product_mode(snapshot) != DesktopProductMode::Manual {
-        render_onboarding_panel(ui, snapshot, state, model, view, actions);
-    }
-    render_settings_panel(ui, model, actions);
+                DesktopProductMode::Assist => render_assist_rail(ui, snapshot, model, actions),
+                DesktopProductMode::Delegate => {
+                    if delegated_activity_projected(snapshot) {
+                        render_delegation_console(
+                            ui,
+                            snapshot,
+                            model,
+                            &mut view.show_trust,
+                            actions,
+                        )
+                    } else {
+                        render_delegate_draft_rail(ui, snapshot, model, actions)
+                    }
+                }
+                DesktopProductMode::LegionWorkflows => {
+                    render_fleet_console(ui, snapshot, model, actions)
+                }
+            }
+            if projected_product_mode(snapshot) != DesktopProductMode::Manual {
+                egui::CollapsingHeader::new(theme::label("Advanced rail surfaces"))
+                    .id_salt("legion_desktop_advanced_right_rail")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        render_dock_side_summary(ui, DockSide::Right, model);
+                        match projected_product_mode(snapshot) {
+                            DesktopProductMode::Assist => {
+                                render_assisted_inspector(ui, snapshot, model, actions)
+                            }
+                            DesktopProductMode::Delegate => {
+                                render_pair_session_panel(ui, snapshot, model, actions)
+                            }
+                            DesktopProductMode::LegionWorkflows | DesktopProductMode::Manual => {}
+                        }
+                    });
+            }
+            if projected_product_mode(snapshot) != DesktopProductMode::Manual {
+                render_onboarding_panel(ui, snapshot, state, model, view, actions);
+            }
+            render_settings_panel(ui, model, actions);
+        });
 }
 
 fn render_bottom_console(
@@ -2446,6 +2538,47 @@ struct CodeLineGalleyCacheKey {
     width_bucket: u32,
 }
 
+#[derive(Clone)]
+struct RenderPassCache<K, V> {
+    pass_nr: Option<u64>,
+    entries: HashMap<K, V>,
+}
+
+impl<K, V> Default for RenderPassCache<K, V> {
+    fn default() -> Self {
+        Self {
+            pass_nr: None,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> RenderPassCache<K, V> {
+    fn prepare_for_pass(&mut self, pass_nr: u64) {
+        if self.pass_nr != Some(pass_nr) {
+            self.pass_nr = Some(pass_nr);
+            self.entries.clear();
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.entries.get(key)
+    }
+
+    fn insert_bounded(&mut self, key: K, value: V, limit: usize) {
+        if limit == 0 {
+            self.entries.clear();
+            return;
+        }
+        if !self.entries.contains_key(&key) && self.entries.len() >= limit {
+            self.entries.clear();
+        }
+        self.entries.insert(key, value);
+    }
+}
+
+type CodeLineGalleyCache = RenderPassCache<CodeLineGalleyCacheKey, Arc<egui::Galley>>;
+
 fn cached_code_line_galley(
     ui: &egui::Ui,
     buffer_id: Option<legion_protocol::BufferId>,
@@ -2458,10 +2591,16 @@ fn cached_code_line_galley(
     };
     let cache_id = code_line_galley_cache_id(buffer_id);
     let key = code_line_galley_cache_key(Some(buffer_id), snapshot_id, line, wrap_width);
+    let pass_nr = ui.ctx().cumulative_pass_nr();
 
     if let Some(cached_galley) = ui.ctx().data_mut(|data| {
-        data.get_temp::<HashMap<CodeLineGalleyCacheKey, Arc<egui::Galley>>>(cache_id)
-            .and_then(|cache| cache.get(&key).cloned())
+        let mut cache = data
+            .get_temp::<CodeLineGalleyCache>(cache_id)
+            .unwrap_or_default();
+        cache.prepare_for_pass(pass_nr);
+        let cached_galley = cache.get(&key).cloned();
+        data.insert_temp(cache_id, cache);
+        cached_galley
     }) {
         return cached_galley;
     }
@@ -2469,12 +2608,10 @@ fn cached_code_line_galley(
     let galley = shape_code_line_galley(ui, line, wrap_width);
     ui.ctx().data_mut(|data| {
         let mut cache = data
-            .get_temp::<HashMap<CodeLineGalleyCacheKey, Arc<egui::Galley>>>(cache_id)
+            .get_temp::<CodeLineGalleyCache>(cache_id)
             .unwrap_or_default();
-        if cache.len() >= CODE_LINE_GALLEY_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(key, Arc::clone(&galley));
+        cache.prepare_for_pass(pass_nr);
+        cache.insert_bounded(key, Arc::clone(&galley), CODE_LINE_GALLEY_CACHE_LIMIT);
         data.insert_temp(cache_id, cache);
     });
     galley
@@ -2765,9 +2902,10 @@ fn render_assisted_suggestion_panel(
                 if snapshot
                     .assist_inline_prediction_projection
                     .request_in_flight
-                    && soft_button(ui, "Cancel").clicked()
                 {
-                    actions.push(DesktopAction::CancelAssistInlinePrediction);
+                    if soft_button(ui, "Cancel").clicked() {
+                        actions.push(DesktopAction::CancelAssistInlinePrediction);
+                    }
                 } else if snapshot
                     .assist_inline_prediction_projection
                     .active_prediction
@@ -3498,7 +3636,7 @@ fn render_settings_panel(
                 ThemePreferenceProjection::System,
             ] {
                 let selected = model.settings.theme_preference == preference;
-                let response = pill(
+                let response = selectable_pill_button(
                     ui,
                     preference.label(),
                     if selected {
@@ -3555,7 +3693,7 @@ fn render_settings_panel(
                 ToastVerbosityProjection::All,
             ] {
                 let selected = model.settings.toast_verbosity == verbosity;
-                let response = pill(
+                let response = selectable_pill_button(
                     ui,
                     verbosity.label(),
                     if selected {
@@ -3732,7 +3870,7 @@ fn render_pair_session_panel(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
-    actions: &mut Vec<DesktopAction>,
+    _actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegate Session", DesktopProductMode::Delegate);
     section_label(ui, "Current Objective", Some(theme::tokens().accent.blue));
@@ -3745,13 +3883,8 @@ fn render_pair_session_panel(
     section_label(ui, "Human Feedback", None);
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::muted(
-            "Guide the delegate, revise the plan, or ask for alternatives...",
+            "Feedback entry is unavailable until a user-editable draft can be projected truthfully.",
         ));
-        if primary_button(ui, "Send", theme::tokens().accent.blue).clicked() {
-            actions.push(DesktopAction::SendDelegateChat {
-                prompt_label: "desktop pair feedback".to_string(),
-            });
-        }
     });
 }
 
@@ -4813,6 +4946,33 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
         .response
 }
 
+fn selectable_pill_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: egui::Color32,
+    selected: bool,
+) -> egui::Response {
+    ui.add(
+        egui::Button::new(theme::accent(label, color))
+            .selected(selected)
+            .min_size(egui::vec2(24.0, 24.0))
+            .fill(if selected {
+                theme::dim(color, 28)
+            } else {
+                theme::tokens().bg.card
+            })
+            .stroke(egui::Stroke::new(
+                1.0_f32,
+                if selected {
+                    theme::dim(color, 90)
+                } else {
+                    theme::tokens().border.default
+                },
+            ))
+            .corner_radius(egui::CornerRadius::same(6)),
+    )
+}
+
 fn avatar(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::NONE
         .fill(theme::dim(color, 30))
@@ -4827,6 +4987,7 @@ fn avatar(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 fn soft_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(theme::label(label))
+            .min_size(egui::vec2(24.0, 24.0))
             .fill(theme::tokens().bg.card)
             .stroke(egui::Stroke::new(1.0_f32, theme::tokens().border.default))
             .corner_radius(egui::CornerRadius::same(6)),
@@ -4854,6 +5015,7 @@ fn primary_button_enabled(
     enabled: bool,
 ) -> egui::Response {
     let button = egui::Button::new(theme::inverse(label))
+        .min_size(egui::vec2(24.0, 24.0))
         .fill(color)
         .stroke(egui::Stroke::new(1.0_f32, theme::dim(color, 180)))
         .corner_radius(egui::CornerRadius::same(6));
@@ -8654,6 +8816,30 @@ mod tests {
         assert_eq!(code_line_width_bucket(103.9), 25);
         assert_eq!(code_line_width_bucket(104.0), 26);
         assert_eq!(code_line_width_bucket(-1.0), 0);
+    }
+
+    #[test]
+    fn code_line_galley_cache_discards_entries_from_prior_render_pass() {
+        let mut cache = RenderPassCache::<u8, u8>::default();
+        cache.prepare_for_pass(41);
+        cache.insert_bounded(1, 7, CODE_LINE_GALLEY_CACHE_LIMIT);
+        assert_eq!(cache.get(&1), Some(&7));
+
+        cache.prepare_for_pass(42);
+
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.entries.len(), 0);
+    }
+
+    #[test]
+    fn code_line_galley_cache_never_exceeds_its_entry_limit() {
+        let mut cache = RenderPassCache::<usize, usize>::default();
+        cache.prepare_for_pass(1);
+        for key in 0..=CODE_LINE_GALLEY_CACHE_LIMIT {
+            cache.insert_bounded(key, key, CODE_LINE_GALLEY_CACHE_LIMIT);
+        }
+
+        assert!(cache.entries.len() <= CODE_LINE_GALLEY_CACHE_LIMIT);
     }
 
     #[test]
