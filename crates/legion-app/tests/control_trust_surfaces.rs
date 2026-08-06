@@ -951,6 +951,46 @@ fn assisted_ai_propose_is_proposal_only() {
 }
 
 #[test]
+fn assisted_ai_spawn_failure_releases_pending_job_and_stream_lane() {
+    let root = create_root();
+    let target = root.join("assist-spawn-failure.rs");
+    std::fs::write(&target, "fn main() {}\n").expect("seed file");
+
+    let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+    let _ = opened_text_file(&mut app, &root, "assist-spawn-failure.rs");
+    app.inject_assist_spawn_failure_for_test();
+
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "exercise spawn rollback".to_string(),
+            selection: None,
+        })
+        .expect_err("injected Assist worker spawn must fail");
+    assert!(error.to_string().contains("spawn failure"));
+    assert!(
+        !app.has_pending_assist_proposal_for_test(),
+        "failed spawn must not retain a pending Assist proposal"
+    );
+    assert!(
+        !app.product_ai_stream_in_flight(),
+        "failed spawn must release the shared product-AI lane"
+    );
+
+    let retry = ai_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "retry after spawn rollback".to_string(),
+            selection: None,
+        })
+        .expect("the released lane must accept the next Assist proposal"),
+    );
+    assert!(retry.proposal_id.is_some());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn assisted_ai_refusals_visible_for_untrusted_workspace() {
     let root = create_root();
     let target = root.join("refusal.rs");

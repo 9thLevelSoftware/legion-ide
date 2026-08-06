@@ -2310,11 +2310,160 @@ pub enum AppDelegatedTaskOutcome {
 }
 
 #[cfg(feature = "ai")]
+type DelegatedTaskJoinHandle =
+    std::thread::JoinHandle<Result<DelegatedTaskRunCompletion, AppCompositionError>>;
+
+#[cfg(feature = "ai")]
+struct SupervisedDelegatedTaskRun {
+    owner_id: uuid::Uuid,
+    join_handle: DelegatedTaskJoinHandle,
+}
+
+#[cfg(feature = "ai")]
+struct DelegatedTaskHandleSupervisor {
+    sender: std::sync::mpsc::Sender<SupervisedDelegatedTaskRun>,
+    _thread_handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "ai")]
+static DELEGATED_TASK_HANDLE_SUPERVISOR: OnceLock<DelegatedTaskHandleSupervisor> = OnceLock::new();
+
+#[cfg(feature = "ai")]
+static DELEGATED_TASK_HANDLE_SUPERVISOR_INIT: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "ai")]
+static DELEGATED_TASK_HANDLE_FALLBACK: OnceLock<Mutex<Vec<SupervisedDelegatedTaskRun>>> =
+    OnceLock::new();
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+#[derive(Default)]
+struct DelegatedTaskSupervisorTestObservations {
+    handed_off: HashSet<uuid::Uuid>,
+    reaped: HashSet<uuid::Uuid>,
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+static DELEGATED_TASK_SUPERVISOR_TEST_OBSERVATIONS: OnceLock<
+    Mutex<DelegatedTaskSupervisorTestObservations>,
+> = OnceLock::new();
+
+#[cfg(feature = "ai")]
+fn retain_delegated_task_handle(run: SupervisedDelegatedTaskRun) {
+    DELEGATED_TASK_HANDLE_FALLBACK
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(run);
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+fn record_delegated_task_handoff(owner_id: uuid::Uuid) {
+    DELEGATED_TASK_SUPERVISOR_TEST_OBSERVATIONS
+        .get_or_init(|| Mutex::new(DelegatedTaskSupervisorTestObservations::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .handed_off
+        .insert(owner_id);
+}
+
+#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+fn record_delegated_task_reaped(owner_id: uuid::Uuid) {
+    DELEGATED_TASK_SUPERVISOR_TEST_OBSERVATIONS
+        .get_or_init(|| Mutex::new(DelegatedTaskSupervisorTestObservations::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reaped
+        .insert(owner_id);
+}
+
+#[cfg(feature = "ai")]
+fn run_delegated_task_handle_supervisor(
+    receiver: std::sync::mpsc::Receiver<SupervisedDelegatedTaskRun>,
+) {
+    let mut pending = Vec::new();
+    loop {
+        if pending.is_empty() {
+            match receiver.recv() {
+                Ok(run) => pending.push(run),
+                Err(_) => return,
+            }
+        } else {
+            match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(run) => pending.push(run),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    for run in pending.drain(..) {
+                        retain_delegated_task_handle(run);
+                    }
+                    return;
+                }
+            }
+        }
+        while let Ok(run) = receiver.try_recv() {
+            pending.push(run);
+        }
+
+        let mut index = 0;
+        while index < pending.len() {
+            if pending[index].join_handle.is_finished() {
+                let run = pending.swap_remove(index);
+                let _owner_id = run.owner_id;
+                let _ = run.join_handle.join();
+                #[cfg(any(test, feature = "test-helpers"))]
+                record_delegated_task_reaped(_owner_id);
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ai")]
+fn delegated_task_supervisor_sender()
+-> Result<std::sync::mpsc::Sender<SupervisedDelegatedTaskRun>, AppCompositionError> {
+    if let Some(supervisor) = DELEGATED_TASK_HANDLE_SUPERVISOR.get() {
+        return Ok(supervisor.sender.clone());
+    }
+    let _init_guard = DELEGATED_TASK_HANDLE_SUPERVISOR_INIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(supervisor) = DELEGATED_TASK_HANDLE_SUPERVISOR.get() {
+        return Ok(supervisor.sender.clone());
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread_handle = std::thread::Builder::new()
+        .name("legion-delegated-handle-supervisor".to_string())
+        .spawn(move || run_delegated_task_handle_supervisor(receiver))
+        .map_err(|error| {
+            AppCompositionError::AiRuntime(format!(
+                "failed to initialize delegated task handle supervisor: {error}"
+            ))
+        })?;
+    let supervisor = DelegatedTaskHandleSupervisor {
+        sender: sender.clone(),
+        _thread_handle: thread_handle,
+    };
+    if DELEGATED_TASK_HANDLE_SUPERVISOR.set(supervisor).is_err() {
+        return DELEGATED_TASK_HANDLE_SUPERVISOR
+            .get()
+            .map(|supervisor| supervisor.sender.clone())
+            .ok_or_else(|| {
+                AppCompositionError::AiRuntime(
+                    "delegated task handle supervisor initialization raced without an owner"
+                        .to_string(),
+                )
+            });
+    }
+    Ok(sender)
+}
+
+#[cfg(feature = "ai")]
 struct InFlightDelegatedTaskRun {
     owner_id: uuid::Uuid,
     cancellation_flag: SharedCancellationFlag,
-    join_handle:
-        Option<std::thread::JoinHandle<Result<DelegatedTaskRunCompletion, AppCompositionError>>>,
+    join_handle: Option<DelegatedTaskJoinHandle>,
+    supervisor_sender: std::sync::mpsc::Sender<SupervisedDelegatedTaskRun>,
 }
 
 #[cfg(feature = "ai")]
@@ -2328,11 +2477,22 @@ impl Drop for InFlightDelegatedTaskRun {
             let _ = join_handle.join();
             return;
         }
-        let _ = std::thread::Builder::new()
-            .name("legion-delegate-drop-reaper".to_string())
-            .spawn(move || {
-                let _ = join_handle.join();
-            });
+        let owner_id = self.owner_id;
+        let supervised_run = SupervisedDelegatedTaskRun {
+            owner_id,
+            join_handle,
+        };
+        match self.supervisor_sender.send(supervised_run) {
+            Ok(()) => {
+                #[cfg(any(test, feature = "test-helpers"))]
+                record_delegated_task_handoff(owner_id);
+            }
+            Err(std::sync::mpsc::SendError(supervised_run)) => {
+                // Retain ownership for process lifetime if the preinitialized
+                // supervisor ever disconnects; never detach a live worker.
+                retain_delegated_task_handle(supervised_run);
+            }
+        }
     }
 }
 
@@ -16345,6 +16505,8 @@ pub struct AppComposition {
     injected_workflow_spawn_failure_after: Option<usize>,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_delegated_spawn_failure: bool,
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_assist_spawn_failure: bool,
     /// Test-only interruption seam after a Pending proposal observation is
     /// durable but before its proposals are published to the live ledger.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -16673,6 +16835,8 @@ impl AppComposition {
             injected_workflow_spawn_failure_after: None,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_delegated_spawn_failure: false,
+            #[cfg(any(test, feature = "test-helpers"))]
+            injected_assist_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
@@ -18319,6 +18483,41 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_delegated_spawn_failure_for_test(&mut self) {
         self.injected_delegated_spawn_failure = true;
+    }
+
+    /// Test-only: force the next live Assist background worker spawn to fail.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_assist_spawn_failure_for_test(&mut self) {
+        self.injected_assist_spawn_failure = true;
+    }
+
+    /// Test-only: report whether an Assist proposal job remains app-owned.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn has_pending_assist_proposal_for_test(&self) -> bool {
+        self.pending_assist_proposal.is_some()
+    }
+
+    /// Test-only: return the owner id of the active background delegated task.
+    #[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+    pub fn in_flight_delegated_owner_id_for_test(&self) -> Option<uuid::Uuid> {
+        self.in_flight_delegated_task
+            .as_ref()
+            .map(|run| run.owner_id)
+    }
+
+    /// Test-only: report process-lifetime handoff and reap observations.
+    #[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+    pub fn delegated_worker_supervisor_state_for_test(owner_id: uuid::Uuid) -> (bool, bool) {
+        let Some(observations) = DELEGATED_TASK_SUPERVISOR_TEST_OBSERVATIONS.get() else {
+            return (false, false);
+        };
+        let observations = observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            observations.handed_off.contains(&owner_id),
+            observations.reaped.contains(&owner_id),
+        )
     }
 
     /// Test-only: return completion ids still retained by app-owned workflow draining state.
@@ -21211,6 +21410,10 @@ impl AppComposition {
                 .map(|path| path.0.clone())
                 .collect(),
         };
+        // Initialize the process-lifetime owner before launching the worker.
+        // If the supervisor thread cannot be created, no delegated worker is
+        // started and app-owned lifecycle state remains untouched.
+        let supervisor_sender = delegated_task_supervisor_sender()?;
         let (owner_id, cancellation_flag) =
             self.begin_active_worker(ActiveWorkerIdentity::DelegatedTask {
                 run_id: run_identity,
@@ -21344,6 +21547,7 @@ impl AppComposition {
             owner_id,
             cancellation_flag,
             join_handle: Some(join_handle),
+            supervisor_sender,
         });
         Ok(())
     }
@@ -23519,17 +23723,19 @@ impl AppComposition {
         supervisor_sender: std::sync::mpsc::Sender<SupervisedLegionWorkflowWorkerRun>,
     ) -> Result<InFlightLegionWorkflowWorkerRun, AppCompositionError> {
         #[cfg(any(test, feature = "test-helpers"))]
-        if let Some(successful_spawns_remaining) =
+        let inject_spawn_failure = if let Some(successful_spawns_remaining) =
             self.injected_workflow_spawn_failure_after.as_mut()
         {
             if *successful_spawns_remaining == 0 {
                 self.injected_workflow_spawn_failure_after = None;
-                return Err(AppCompositionError::AiRuntime(
-                    "injected Legion workflow worker spawn failure".to_string(),
-                ));
+                true
+            } else {
+                *successful_spawns_remaining -= 1;
+                false
             }
-            *successful_spawns_remaining -= 1;
-        }
+        } else {
+            false
+        };
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
         let completion_id = uuid::Uuid::now_v7();
@@ -23539,47 +23745,64 @@ impl AppComposition {
         let tool_host = prepared.tool_host;
         let provider = prepared.provider;
         let worker_cancellation = cancellation_flag.clone();
-        let join_handle = std::thread::Builder::new()
-            .name(format!("legion-workflow-worker-{completion_id}"))
-            .spawn(move || {
-                let _completion_notice = WorkflowWorkerCompletionNotice {
-                    completion_id,
-                    sender: completion_sender,
-                };
-                let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Self::run_prepared_legion_workflow_worker(
-                        worker,
-                        config,
-                        tool_host,
-                        provider,
-                        worker_cancellation,
-                    )
-                }));
-                let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "workflow worker sandbox cleanup failed: {error}"
-                    ))
-                });
-                match (run_result, cleanup_result) {
-                    (Ok(Ok(completion)), Ok(())) => Ok(completion),
-                    (Ok(Err(error)), Ok(())) => Err(error),
-                    (Ok(Ok(_)), Err(cleanup_error)) => Err(cleanup_error),
-                    (Ok(Err(error)), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(
-                        format!("{error}; {cleanup_error}"),
-                    )),
-                    (Err(_), Ok(())) => Err(AppCompositionError::AiRuntime(
-                        "delegated loop worker thread panicked".to_string(),
-                    )),
-                    (Err(_), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
-                        "delegated loop worker thread panicked; {cleanup_error}"
-                    ))),
-                }
-            })
-            .map_err(|error| {
+        let worker_run = move || {
+            let _completion_notice = WorkflowWorkerCompletionNotice {
+                completion_id,
+                sender: completion_sender,
+            };
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::run_prepared_legion_workflow_worker(
+                    worker,
+                    config,
+                    tool_host,
+                    provider,
+                    worker_cancellation,
+                )
+            }));
+            let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
                 AppCompositionError::AiRuntime(format!(
-                    "failed to spawn Legion workflow worker: {error}"
+                    "workflow worker sandbox cleanup failed: {error}"
                 ))
-            })?;
+            });
+            match (run_result, cleanup_result) {
+                (Ok(Ok(completion)), Ok(())) => Ok(completion),
+                (Ok(Err(error)), Ok(())) => Err(error),
+                (Ok(Ok(_)), Err(cleanup_error)) => Err(cleanup_error),
+                (Ok(Err(error)), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(
+                    format!("{error}; {cleanup_error}"),
+                )),
+                (Err(_), Ok(())) => Err(AppCompositionError::AiRuntime(
+                    "delegated loop worker thread panicked".to_string(),
+                )),
+                (Err(_), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
+                    "delegated loop worker thread panicked; {cleanup_error}"
+                ))),
+            }
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        let spawn_result = if inject_spawn_failure {
+            Err(std::io::Error::other(
+                "injected Legion workflow worker spawn failure",
+            ))
+        } else {
+            std::thread::Builder::new()
+                .name(format!("legion-workflow-worker-{completion_id}"))
+                .spawn(worker_run)
+        };
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("legion-workflow-worker-{completion_id}"))
+            .spawn(worker_run);
+        let join_handle = match spawn_result {
+            Ok(join_handle) => join_handle,
+            Err(error) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "failed to spawn Legion workflow worker: {error}"
+                )));
+            }
+        };
         Ok(InFlightLegionWorkflowWorkerRun {
             completion_id,
             cancellation_flag,
@@ -25680,17 +25903,25 @@ impl AppComposition {
         // deltas; proposal registration runs on poll_product_ai_stream when the
         // worker finishes (Delegate-chat parity). Offline/fixture stays sync so
         // tests keep receiving proposal_id in the same call.
+        #[cfg(any(test, feature = "test-helpers"))]
+        let inject_assist_spawn_failure = std::mem::take(&mut self.injected_assist_spawn_failure);
         #[cfg(feature = "ai")]
-        let use_background_live = product_ai_will_attempt_live(self.preferred_ai_provider);
+        let use_background_live =
+            product_ai_will_attempt_live(self.preferred_ai_provider) || inject_assist_spawn_failure;
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
-        let sink = self.live_product_ai_stream.clone();
-        if !sink.try_begin("assist.proposal", "pending", "") {
-            return Err(AppCompositionError::AiRuntime(
+        let lane_reservation = ProductAiLaneReservation::try_acquire(
+            self.live_product_ai_stream.clone(),
+            "assist.proposal",
+            "pending",
+            "",
+        )
+        .ok_or_else(|| {
+            AppCompositionError::AiRuntime(
                 "product AI provider lane is busy; poll the active result before dispatching another request"
                     .to_string(),
-            ));
-        }
+            )
+        })?;
 
         #[cfg(feature = "ai")]
         if use_background_live {
@@ -25713,16 +25944,8 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             };
-            self.pending_assist_proposal = Some(pending_job);
-            // Partial phase-4 projections so rails show the in-flight run.
-            self.phase4_projection_state.context_manifest_projection =
-                Some(context_manifest_projection.clone());
-            self.phase4_projection_state.privacy_inspector_projection =
-                Some(privacy_inspector_projection.clone());
-            self.phase4_projection_state.permission_budget_projection =
-                Some(permission_budget_projection.clone());
-            std::thread::spawn(move || {
-                let sink_delta = sink.clone();
+            let sink_delta = lane_reservation.sink();
+            let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
                     preference,
@@ -25738,7 +25961,7 @@ impl AppComposition {
                     stream_chunks: stream.chunks.clone(),
                     streamed: stream.streamed,
                 });
-                sink.finish_background(
+                lane_reservation.finish_background(
                     ProductAiBackgroundResult {
                         assistant_message_id: String::new(),
                         content_label: String::new(),
@@ -25746,9 +25969,36 @@ impl AppComposition {
                         assist_proposal: Some(proposal_source),
                     },
                     completion.as_ref(),
-                    "assist.proposal",
                 );
-            });
+            };
+            #[cfg(any(test, feature = "test-helpers"))]
+            let spawn_result = if inject_assist_spawn_failure {
+                Err(std::io::Error::other(
+                    "injected Assist background worker spawn failure",
+                ))
+            } else {
+                std::thread::Builder::new()
+                    .name("legion-assist-proposal".to_string())
+                    .spawn(worker)
+            };
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            let spawn_result = std::thread::Builder::new()
+                .name("legion-assist-proposal".to_string())
+                .spawn(worker);
+            spawn_result.map_err(|error| {
+                AppCompositionError::AiRuntime(format!(
+                    "failed to spawn Assist background worker: {error}"
+                ))
+            })?;
+            self.pending_assist_proposal = Some(pending_job);
+            // Partial phase-4 projections are published only after the worker
+            // exists, so a failed spawn cannot leave a phantom in-flight run.
+            self.phase4_projection_state.context_manifest_projection =
+                Some(context_manifest_projection.clone());
+            self.phase4_projection_state.privacy_inspector_projection =
+                Some(privacy_inspector_projection.clone());
+            self.phase4_projection_state.permission_budget_projection =
+                Some(permission_budget_projection.clone());
             // Streaming outcome: proposal_id arrives on the next poll cycle(s).
             return Ok(AppAiRunOutcome {
                 run_id,
@@ -25766,7 +26016,7 @@ impl AppComposition {
         #[cfg(not(feature = "ai"))]
         let _ = use_background_live;
 
-        let sink_delta = sink.clone();
+        let sink_delta = lane_reservation.sink();
         let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
         let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
             self.preferred_ai_provider,
@@ -25775,20 +26025,16 @@ impl AppComposition {
             &context.metadata.identity.canonical_path.0,
             Some(&mut on_delta),
         );
+        let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+            provider_id: stream.provider_id.clone(),
+            model: stream.model.clone(),
+            text: stream.text_preview.clone(),
+            stream_chunks: stream.chunks.clone(),
+            streamed: stream.streamed,
+        });
+        lane_reservation.finish(completion.as_ref());
         if let Some(stream) = stream {
-            sink.finish(
-                Some(&ProductChatCompletion {
-                    provider_id: stream.provider_id.clone(),
-                    model: stream.model.clone(),
-                    text: stream.text_preview.clone(),
-                    stream_chunks: stream.chunks.clone(),
-                    streamed: stream.streamed,
-                }),
-                "assist.proposal",
-            );
             self.last_product_ai_stream = Some(stream);
-        } else {
-            sink.finish(None, "assist.proposal");
         }
 
         self.finish_assisted_edit_proposal_registration(pending_job, proposal_source)

@@ -543,6 +543,9 @@ fn dropping_app_cancels_worker_without_blocking_and_reaper_joins_cleanup() {
     entered_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("worker must enter provider call");
+    let owner_id = app
+        .in_flight_delegated_owner_id_for_test()
+        .expect("background worker owner id");
 
     let dropped_at = Instant::now();
     drop(app);
@@ -550,6 +553,20 @@ fn dropping_app_cancels_worker_without_blocking_and_reaper_joins_cleanup() {
         dropped_at.elapsed() < Duration::from_secs(1),
         "Drop must hand joining to the reaper rather than block on provider transport"
     );
+    let handoff_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (handed_off, reaped) =
+            AppComposition::delegated_worker_supervisor_state_for_test(owner_id);
+        if handed_off {
+            assert!(!reaped, "blocked worker cannot be reaped before release");
+            break;
+        }
+        assert!(
+            Instant::now() < handoff_deadline,
+            "app drop did not transfer the delegated handle to the global supervisor"
+        );
+        std::thread::yield_now();
+    }
 
     let (released, wake) = &*release;
     *released.lock().expect("release lock") = true;
@@ -569,6 +586,18 @@ fn dropping_app_cancels_worker_without_blocking_and_reaper_joins_cleanup() {
         assert!(
             Instant::now() < deadline,
             "drop reaper did not join worker cleanup"
+        );
+        std::thread::yield_now();
+    }
+    let reap_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (_, reaped) = AppComposition::delegated_worker_supervisor_state_for_test(owner_id);
+        if reaped {
+            break;
+        }
+        assert!(
+            Instant::now() < reap_deadline,
+            "global supervisor did not join the delegated worker"
         );
         std::thread::yield_now();
     }

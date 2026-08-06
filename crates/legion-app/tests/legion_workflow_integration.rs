@@ -26,18 +26,19 @@ use legion_protocol::{
     CancellationTokenId, CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId,
     CausalityId, CommandRiskLabel, CorrelationId, DelegatedTaskAffectedTargetSummary,
     DelegatedTaskOperationClass, DelegatedTaskPlanId, DelegatedTaskPlanningBoundaryInput,
-    DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile, FileFingerprint,
-    LegionCloudLaneBudget, LegionCloudLaneSecretScanStatus, LegionCloudLaneTaskId,
-    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneUploadManifest,
-    LegionEvidenceKind, LegionProviderLocalityPreference, LegionProviderPrivacyPolicy,
-    LegionTaskContextRef, LegionTaskContextRefKind, LegionTaskFileScope, LegionTaskOutputContract,
-    LegionTaskPacket, LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan,
-    LegionWorkerResultKind, LegionWorkflowConflict, LegionWorkflowConflictId,
-    LegionWorkflowConflictKind, LegionWorkflowConflictState, LegionWorkflowDecisionKind,
-    LegionWorkflowDependency, LegionWorkflowDependencyId, LegionWorkflowDependencyState,
-    LegionWorkflowMergeApproval, LegionWorkflowMergeReadinessBlocker,
-    LegionWorkflowMergeReadinessState, LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState,
-    LegionWorkflowSession, LegionWorkflowSessionId, LegionWorkflowSignOff, LegionWorkflowSignOffId,
+    DelegatedTaskRuntimeActivationState, DelegatedTaskToolPermissionDecision,
+    DelegatedTaskToolPermissionProfile, FileFingerprint, LegionCloudLaneBudget,
+    LegionCloudLaneSecretScanStatus, LegionCloudLaneTaskId, LegionCloudLaneTaskRequest,
+    LegionCloudLaneTaskState, LegionCloudLaneUploadManifest, LegionEvidenceKind,
+    LegionProviderLocalityPreference, LegionProviderPrivacyPolicy, LegionTaskContextRef,
+    LegionTaskContextRefKind, LegionTaskFileScope, LegionTaskOutputContract, LegionTaskPacket,
+    LegionTaskPacketId, LegionTaskPolicy, LegionTaskValidationPlan, LegionWorkerResultKind,
+    LegionWorkflowConflict, LegionWorkflowConflictId, LegionWorkflowConflictKind,
+    LegionWorkflowConflictState, LegionWorkflowDecisionKind, LegionWorkflowDependency,
+    LegionWorkflowDependencyId, LegionWorkflowDependencyState, LegionWorkflowMergeApproval,
+    LegionWorkflowMergeReadinessBlocker, LegionWorkflowMergeReadinessState,
+    LegionWorkflowModelBackend, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
+    LegionWorkflowSessionId, LegionWorkflowSignOff, LegionWorkflowSignOffId,
     LegionWorkflowSignOffState, LegionWorkflowState, LegionWorkflowVerificationGate,
     LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerRole,
@@ -2966,6 +2967,14 @@ fn workflow_spawn_failure_transfers_launched_worker_into_draining_ownership() {
         started.elapsed()
     );
     assert!(cancellation.is_cancelled());
+    assert_eq!(
+        app.shell_projection_snapshot("workflow spawn failure")
+            .expect("workflow spawn-failure projection")
+            .delegated_task_projection
+            .runtime_activation,
+        DelegatedTaskRuntimeActivationState::Failed,
+        "spawn failure must not leave the workflow projected as executing"
+    );
 
     app.set_product_mode(AppProductMode::Manual);
     assert_eq!(
