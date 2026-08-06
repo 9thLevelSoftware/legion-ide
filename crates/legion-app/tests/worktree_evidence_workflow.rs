@@ -208,12 +208,19 @@ fn export_worktree_evidence_written_to_legion_evidence_dir() {
     };
 
     // Evidence must be under <workspace>/.legion/evidence/
-    let evidence_path = std::path::Path::new(&evidence_path_str);
-    let evidence_dir = repo.path().join(".legion").join("evidence");
+    let evidence_path = std::path::Path::new(&evidence_path_str)
+        .canonicalize()
+        .expect("exported evidence path should canonicalize");
+    let evidence_dir = repo
+        .path()
+        .join(".legion")
+        .join("evidence")
+        .canonicalize()
+        .expect("evidence directory should canonicalize");
     assert!(
         evidence_path.starts_with(&evidence_dir),
         "evidence file should be under .legion/evidence/; got: {}",
-        evidence_path_str
+        evidence_path.display()
     );
 }
 
