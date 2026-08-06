@@ -416,3 +416,31 @@ fn docs_hygiene_exempts_evidence_records_that_name_an_adr_number() {
     run_docs_hygiene(&repo.root, &DocsHygieneConfig::default())
         .expect("an evidence ratification record should not count as a second ADR");
 }
+
+#[test]
+fn docs_hygiene_indexes_allowlisted_canonical_adr_numbers() {
+    let repo = TempRepo::new("allowlisted-canonical-adr-number");
+    repo.write("plans/adrs/ADR-0015-streaming.md", "# Existing ADR\n");
+    repo.write("plans/adrs/ADR-0015-duplicate.md", "# Duplicate ADR\n");
+    let config = DocsHygieneConfig {
+        allowlisted_paths: vec!["plans/adrs/ADR-0015-streaming.md".to_string()],
+    };
+
+    let violations = run_docs_hygiene(&repo.root, &config)
+        .expect_err("allowlisting content checks must not hide duplicate ADR numbers");
+    assert!(violations.iter().any(|violation| {
+        violation.kind == DocsHygieneViolationKind::DuplicateAdrNumber
+    }));
+}
+
+#[test]
+fn docs_hygiene_allows_legacy_adr_in_allowlisted_archive() {
+    let repo = TempRepo::new("allowlisted-archived-adr");
+    repo.write("plans/archive/ADR-0001-legacy.md", "# Legacy ADR\n");
+    let config = DocsHygieneConfig {
+        allowlisted_paths: vec!["plans/archive/".to_string()],
+    };
+
+    run_docs_hygiene(&repo.root, &config)
+        .expect("allowlisted archived ADR should be excluded from ADR validation");
+}

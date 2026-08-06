@@ -41,7 +41,7 @@ After, all explicit:
 | Epic | done | in-progress | todo | blocked |
 | --- | --- | --- | --- | --- |
 | P0 | 11 | 0 | 0 | 0 |
-| P1 | 14 | 2 | 1 | 0 |
+| P1 | 11 | 2 | 4 | 0 |
 | P2 | 14 | 6 | 3 | 0 |
 | P3 | 16 | 0 | 0 | 0 |
 | P4 | 15 | 0 | 0 | 0 |
@@ -50,10 +50,10 @@ After, all explicit:
 | P7 | 1 | 3 | 4 | 0 |
 | P8 | 12 | 2 | 1 | 1 |
 | P9 | 3 | 5 | 6 | 0 |
-| **Total** | **110** | **18** | **17** | **1** |
+| **Total** | **107** | **18** | **20** | **1** |
 
-Thirty-five cards that the gate reported as outstanding were already delivered.
-Seventeen are genuinely not started. One is blocked on an external gate
+Thirty-two cards that the gate reported as outstanding were already delivered.
+Twenty are genuinely not started. One is blocked on an external gate
 (`P8.F1.T3`, `EXT-VM` — fresh-VM Gatekeeper/SmartScreen evidence).
 
 ## The P3.F1.T2 contradiction, resolved by test
@@ -79,14 +79,18 @@ remaining promotion blocker is 3-OS CI smoke.
   projection exists in `legion-protocol` or `legion-desktop`. Demoted to `todo`.
 - The PR-LANG-001 evidence cell's apply-activation blocker claim was stale.
   Corrected, with the test output that disproves it.
+- `P1.F4.T2`, `P1.F4.T3`, and the directly dependent UI task `P1.F4.T4` were initially reconciled as done, but their
+  acceptance criteria require the still-missing 100MB streaming path and an
+  explicit streaming projection state. All three remain `todo` until those product
+  behaviors and their non-ignored verification exist.
 
 ## Verification
 
 ```
 cargo test -p xtask --lib kanban_backlog          # 8 passed
-cargo test -p xtask --lib readiness_consistency   # 8 passed
+cargo test -p xtask --lib readiness_consistency   # 11 passed
 cargo test -p xtask --test kanban_backlog         # 19 passed
-cargo test -p xtask --test docs_hygiene           # 19 passed
+cargo test -p xtask --test docs_hygiene           # 20 passed
 cargo run -p xtask -- verify-kanban-backlog       # ok: 10 epics, 38 features, 146 tasks
 cargo run -p xtask -- verify-readiness-consistency # ok: 146 tasks cross-checked
 cargo run -p xtask -- docs-hygiene                # passed
@@ -98,7 +102,8 @@ Negative coverage — each new rule ships with a test proving it goes red:
 omitted status, `in-progress` without evidence, `blocked` without an
 `external_unblock`, an unknown `external_unblock`, a duplicate ADR number, a
 misplaced ADR, a ledger calling a done task a blocker, and a ledger calling a
-todo task delivered.
+todo task delivered. Review follow-up adds coverage for an allowlisted archived
+ADR, an unknown ledger task id, and predicates shared by coordinated task ids.
 
 ## Readiness ledger impact
 
@@ -109,8 +114,8 @@ existing statuses earned rather than better. The standing-gate count rises from
 ## Known limits
 
 `verify-readiness-consistency` splits on clause separators (`. `, `; `, `|`) and
-clamps at neighbouring task ids; it does not parse sentences and does not
-understand negation. A sentence *reporting* that a past claim was wrong reads as
-making that claim — corrections must put the task id in the resolved clause.
-This limit was hit while writing the PR-LANG-001 correction above and is
-recorded in the module docs.
+clamps at neighbouring task ids except coordinated lists that share a predicate;
+it does not parse sentences and does not understand negation. A sentence
+*reporting* that a past claim was wrong reads as making that claim — corrections
+must put the task id in the resolved clause. This limit was hit while writing
+the PR-LANG-001 correction above and is recorded in the module docs.

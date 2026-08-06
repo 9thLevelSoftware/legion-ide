@@ -1724,12 +1724,8 @@ fn run_rust_analyzer_smoke_command() -> i32 {
 }
 
 fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
-    let workspace_root = match env::current_dir() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("kanban backlog verify failed: unable to resolve current directory: {err}");
-            return 1;
-        }
+    let Some(workspace_root) = resolve_workspace_root("kanban backlog") else {
+        return 1;
     };
     let path = workspace_root.join(backlog_path);
     match xtask::kanban_backlog::run_verify_kanban_backlog(&path) {
@@ -1751,14 +1747,8 @@ fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
 }
 
 fn run_verify_readiness_consistency_command(ledger_path: &str, backlog_path: &str) -> i32 {
-    let workspace_root = match env::current_dir() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!(
-                "readiness consistency verify failed: unable to resolve current directory: {err}"
-            );
-            return 1;
-        }
+    let Some(workspace_root) = resolve_workspace_root("readiness consistency") else {
+        return 1;
     };
     let ledger = workspace_root.join(ledger_path);
     let backlog = workspace_root.join(backlog_path);
@@ -1774,6 +1764,16 @@ fn run_verify_readiness_consistency_command(ledger_path: &str, backlog_path: &st
         Err(err) => {
             eprintln!("readiness consistency verify failed: {err}");
             1
+        }
+    }
+}
+
+fn resolve_workspace_root(gate_name: &str) -> Option<std::path::PathBuf> {
+    match env::current_dir() {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!("{gate_name} verify failed: unable to resolve current directory: {err}");
+            None
         }
     }
 }
