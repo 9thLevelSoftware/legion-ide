@@ -620,6 +620,52 @@ fn delegated_background_submit_rejects_scope_from_another_workspace() {
     );
 }
 
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_spawn_failure_rolls_back_worker_and_activation() {
+    let workspace_root = temp_workspace("spawn-failure-rollback");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-spawn-failure-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.inject_delegated_spawn_failure_for_test();
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("spawn-failure");
+
+    let error = app
+        .start_delegated_task_background(
+            "must fail before worker execution".to_string(),
+            test_scope(&workspace_root),
+            Box::new(provider),
+        )
+        .expect_err("injected worker spawn must be reported as an error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to spawn delegated task worker")
+    );
+    assert!(
+        app.cancel_delegated_task()
+            .expect_err("spawn failure must clear worker ownership")
+            .to_string()
+            .contains("no delegated task running")
+    );
+    assert_eq!(
+        app.shell_projection_snapshot("Legion")
+            .expect("projection")
+            .delegated_task_projection
+            .runtime_activation,
+        DelegatedTaskRuntimeActivationState::NotEncoded,
+    );
+}
+
 #[test]
 fn execute_delegated_task_reports_missing_plan_without_error() {
     let mut app = AppComposition::new();

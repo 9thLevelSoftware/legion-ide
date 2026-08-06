@@ -961,7 +961,7 @@ impl LegionWorkflowEvidenceBundle {
 /// is an honest unavailable-provider outcome; workflow execution will block the
 /// worker instead of falling back to a mock output.
 #[cfg(feature = "ai")]
-pub trait LegionWorkerProviderResolver {
+pub trait LegionWorkerProviderResolver: std::panic::RefUnwindSafe {
     /// Resolve a provider for the given workflow worker assignment.
     fn resolve_worker_provider(
         &self,
@@ -6006,13 +6006,10 @@ impl AppProposalCoordinator {
             .borrow()
             .get(&command.proposal_id)
             .copied();
-        let correlation_id = (command.correlation_id.0 != 0)
-            .then_some(command.correlation_id)
-            .or_else(|| {
-                context
-                    .map(|context| context.correlation_id)
-                    .filter(|correlation_id| correlation_id.0 != 0)
-            })
+        let correlation_id = context
+            .map(|context| context.correlation_id)
+            .filter(|correlation_id| correlation_id.0 != 0)
+            .or_else(|| (command.correlation_id.0 != 0).then_some(command.correlation_id))
             .unwrap_or(CorrelationId(1));
         let causality_id = (!command.causality_id.0.is_nil())
             .then_some(command.causality_id)
@@ -16321,6 +16318,7 @@ pub struct AppComposition {
     event_sink: SharedEventSink,
     published_proposal_observation_batches:
         HashMap<String, PublishedProposalObservationAssociation>,
+    proposal_observation_retry_schedule: Option<ProposalObservationRetrySchedule>,
     ai_registry: ProviderRegistry,
     tracker_ledger: TrackerLedger,
     legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger,
@@ -16345,6 +16343,8 @@ pub struct AppComposition {
     injected_cancellation_flag: Option<SharedCancellationFlag>,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_workflow_spawn_failure_after: Option<usize>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_delegated_spawn_failure: bool,
     /// Test-only interruption seam after a Pending proposal observation is
     /// durable but before its proposals are published to the live ledger.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -16439,6 +16439,31 @@ struct AppDocumentResolver {
 struct PublishedProposalObservationAssociation {
     proposal_ids: Vec<ProposalId>,
     proposal_commitments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProposalObservationRetrySchedule {
+    next_attempt_at: Instant,
+    failed_attempts: u8,
+}
+
+impl ProposalObservationRetrySchedule {
+    fn ready_after_initial_failure() -> Self {
+        Self {
+            next_attempt_at: Instant::now(),
+            failed_attempts: 1,
+        }
+    }
+
+    fn after_retry_failure(failed_attempts: u8) -> Self {
+        let failed_attempts = failed_attempts.saturating_add(1);
+        let exponent = u32::from(failed_attempts.min(6));
+        let delay_ms = 50_u64.saturating_mul(1_u64 << exponent);
+        Self {
+            next_attempt_at: Instant::now() + std::time::Duration::from_millis(delay_ms),
+            failed_attempts,
+        }
+    }
 }
 
 // Durable workspace state is untrusted input. Refuse implausibly high floors
@@ -16626,6 +16651,7 @@ impl AppComposition {
             storage: InMemoryStorageRepositoryPort::with_event_sink(event_sink.clone()),
             event_sink,
             published_proposal_observation_batches: HashMap::new(),
+            proposal_observation_retry_schedule: None,
             ai_registry: default_ai_registry(),
             tracker_ledger: TrackerLedger::new(),
             legion_workflow_tracker_ledger: LegionWorkflowTrackerLedger::new(),
@@ -16645,6 +16671,8 @@ impl AppComposition {
             injected_cancellation_flag: None,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_workflow_spawn_failure_after: None,
+            #[cfg(any(test, feature = "test-helpers"))]
+            injected_delegated_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
@@ -17274,7 +17302,7 @@ impl AppComposition {
     /// Returns `true` when the retained stream, chat projection, or Assist proposal
     /// ledger changed (desktop should repaint).
     pub fn poll_product_ai_stream(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.poll_scheduled_proposal_observation_retries();
         let snap = self.live_product_ai_stream.snapshot();
         if (!snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty())
             && self.last_product_ai_stream.as_ref() != Some(&snap)
@@ -17312,6 +17340,47 @@ impl AppComposition {
             }
         }
         changed
+    }
+
+    /// Time until the next app-owned proposal observation delivery retry.
+    ///
+    /// Desktop adapters can use this to request a repaint without busy-polling.
+    pub fn proposal_observation_retry_delay(&self) -> Option<std::time::Duration> {
+        self.proposal_observation_retry_schedule.map(|schedule| {
+            schedule
+                .next_attempt_at
+                .saturating_duration_since(Instant::now())
+        })
+    }
+
+    fn poll_scheduled_proposal_observation_retries(&mut self) -> bool {
+        let Some(schedule) = self.proposal_observation_retry_schedule else {
+            return false;
+        };
+        if Instant::now() < schedule.next_attempt_at {
+            return false;
+        }
+
+        match self.retry_pending_proposal_observations() {
+            Ok(report) => {
+                let has_transient_pending = report.attempts.iter().any(|attempt| {
+                    attempt.delivery_state
+                        == legion_storage::ProposalObservationDeliveryState::Pending
+                        && attempt.error_kind
+                            == Some(legion_storage::ProposalObservationRetryErrorKind::Transient)
+                });
+                self.proposal_observation_retry_schedule = has_transient_pending.then(|| {
+                    ProposalObservationRetrySchedule::after_retry_failure(schedule.failed_attempts)
+                });
+                report.delivered_count > 0
+            }
+            Err(_) => {
+                self.proposal_observation_retry_schedule = Some(
+                    ProposalObservationRetrySchedule::after_retry_failure(schedule.failed_attempts),
+                );
+                false
+            }
+        }
     }
 
     /// Clear the retained product AI stream (e.g. when leaving Assist/Delegate).
@@ -18244,6 +18313,12 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_workflow_spawn_failure_after_for_test(&mut self, successful_spawns: usize) {
         self.injected_workflow_spawn_failure_after = Some(successful_spawns);
+    }
+
+    /// Test-only: make the next background delegated worker spawn fail.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_delegated_spawn_failure_for_test(&mut self) {
+        self.injected_delegated_spawn_failure = true;
     }
 
     /// Test-only: return completion ids still retained by app-owned workflow draining state.
@@ -21109,7 +21184,7 @@ impl AppComposition {
                 profile: DelegatedTaskToolPermissionProfile::Write,
                 action_class: PermissionBudgetActionClass::AccessWorkspaceFiles,
                 capability: Some(CapabilityId("delegated.runtime.allocate".to_string())),
-                target_id: Some(task_id),
+                target_id: Some(task_id.clone()),
                 decision: DelegatedTaskToolPermissionDecision::Allow,
                 labels: vec![],
                 schema_version: 1,
@@ -21140,12 +21215,15 @@ impl AppComposition {
             self.begin_active_worker(ActiveWorkerIdentity::DelegatedTask {
                 run_id: run_identity,
             })?;
+        let previous_activation = self.delegate_workflow.runtime_activation;
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
+        #[cfg(any(test, feature = "test-helpers"))]
+        let inject_spawn_failure = std::mem::take(&mut self.injected_delegated_spawn_failure);
         let worker_cancellation = cancellation_flag.clone();
         let mut sandbox_guard =
             DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
-        let join_handle = std::thread::spawn(move || {
+        let worker = move || {
             struct VecAuditSink {
                 steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
             }
@@ -21236,7 +21314,32 @@ impl AppComposition {
                     "{error}; {cleanup_error}"
                 ))),
             }
-        });
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        let spawn_result = if inject_spawn_failure {
+            Err(std::io::Error::other(
+                "injected delegated task worker spawn failure",
+            ))
+        } else {
+            std::thread::Builder::new()
+                .name(format!("legion-delegated-task-{task_id}"))
+                .spawn(worker)
+        };
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("legion-delegated-task-{task_id}"))
+            .spawn(worker);
+        let join_handle = match spawn_result {
+            Ok(join_handle) => join_handle,
+            Err(error) => {
+                self.clear_active_worker(owner_id);
+                self.delegate_workflow
+                    .set_runtime_activation(previous_activation);
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "failed to spawn delegated task worker: {error}"
+                )));
+            }
+        };
         self.in_flight_delegated_task = Some(InFlightDelegatedTaskRun {
             owner_id,
             cancellation_flag,
@@ -21932,7 +22035,14 @@ impl AppComposition {
                 proposal_commitments,
             },
         );
-        let _ = self.storage.deliver_proposal_observation_batch(&batch_id);
+        if self
+            .storage
+            .deliver_proposal_observation_batch(&batch_id)
+            .is_err()
+        {
+            self.proposal_observation_retry_schedule =
+                Some(ProposalObservationRetrySchedule::ready_after_initial_failure());
+        }
 
         Ok(proposal_outputs)
     }
@@ -23376,6 +23486,31 @@ impl AppComposition {
     }
 
     #[cfg(feature = "ai")]
+    fn resolve_legion_workflow_worker_provider(
+        resolver: &dyn LegionWorkerProviderResolver,
+        worker: &LegionWorkflowWorkerAssignment,
+    ) -> Result<
+        Option<Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>>,
+        AppCompositionError,
+    > {
+        // The resolver is external code and does not receive app-owned mutable
+        // state. Contain only that call so unwinding never crosses a partially
+        // mutated `AppComposition`.
+        std::panic::catch_unwind(|| resolver.resolve_worker_provider(worker)).map_err(|payload| {
+            let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
+                *message
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.as_str()
+            } else {
+                "non-string panic payload"
+            };
+            AppCompositionError::AiRuntime(format!(
+                "workflow provider resolver panicked: {panic_message}"
+            ))
+        })
+    }
+
+    #[cfg(feature = "ai")]
     fn spawn_legion_workflow_worker_run(
         &mut self,
         prepared: PreparedLegionWorkflowWorkerRun,
@@ -24208,7 +24343,10 @@ impl AppComposition {
                             outputs.push(metadata_output);
                             #[cfg(feature = "ai")]
                             if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                                && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                                && let Some(provider) =
+                                    Self::resolve_legion_workflow_worker_provider(
+                                        resolver, &worker,
+                                    )?
                             {
                                 let prepared = self.prepare_legion_workflow_worker_run(
                                     &session, &worker, provider,
@@ -24233,7 +24371,10 @@ impl AppComposition {
                         legion_protocol::LegionWorkflowModelBackend::Local => {
                             #[cfg(feature = "ai")]
                             if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                                && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                                && let Some(provider) =
+                                    Self::resolve_legion_workflow_worker_provider(
+                                        resolver, &worker,
+                                    )?
                             {
                                 let prepared = self.prepare_legion_workflow_worker_run(
                                     &session, &worker, provider,
@@ -24390,26 +24531,6 @@ impl AppComposition {
                 memory_candidate_proposed,
             })
         };
-        #[cfg(feature = "ai")]
-        let mut execution_result =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute_workflow)) {
-                Ok(result) => result,
-                Err(payload) => {
-                    self.delegate_workflow
-                        .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                    let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
-                        *message
-                    } else if let Some(message) = payload.downcast_ref::<String>() {
-                        message.as_str()
-                    } else {
-                        "non-string panic payload"
-                    };
-                    Err(AppCompositionError::AiRuntime(format!(
-                        "workflow execution panicked: {panic_message}"
-                    )))
-                }
-            };
-        #[cfg(not(feature = "ai"))]
         let mut execution_result = execute_workflow();
         #[cfg(feature = "ai")]
         if !unfinished_workflow_runs.is_empty() {
@@ -34979,7 +35100,7 @@ mod tests {
 
     #[cfg(feature = "ai")]
     #[test]
-    fn delegated_proposal_sink_failure_registers_pending_batch_then_retries_atomically() {
+    fn delegated_proposal_sink_failure_schedules_production_retry() {
         let recorder = legion_observability::InMemoryEventSink::new();
         let fail_second = Arc::new(AtomicBool::new(true));
         let legacy_emit_calls = Arc::new(AtomicUsize::new(0));
@@ -34997,7 +35118,7 @@ mod tests {
                 delegated_output_from(save_proposal(ProposalId(100)), "first"),
                 delegated_output_from(save_proposal(ProposalId(101)), "second"),
             ])
-            .expect("sink delivery failure must not undo durable registration");
+            .expect("sink failure must retain registration and schedule delivery retry");
 
         assert_eq!(
             registered
@@ -35010,6 +35131,14 @@ mod tests {
             .proposal_coordinator
             .proposal_ledger_projection(TimestampMillis(99));
         assert_eq!(ledger.rows.len(), 2);
+        assert_eq!(
+            ledger
+                .rows
+                .iter()
+                .map(|row| row.proposal_id)
+                .collect::<Vec<_>>(),
+            vec![ProposalId(1), ProposalId(2)]
+        );
         assert!(recorder.events().expect("event snapshot").is_empty());
         assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
         assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 1);
@@ -35085,18 +35214,10 @@ mod tests {
         assert_eq!(recorder.events().expect("event snapshot").len(), 0);
 
         fail_second.store(false, Ordering::SeqCst);
-        let delivered = app
-            .retry_pending_proposal_observations()
-            .expect("retry pending proposal observations");
-        assert_eq!(delivered.delivered_count, 1);
-        assert_eq!(delivered.pending_count, 0);
-        assert_eq!(delivered.attempts.len(), 1);
-        assert_eq!(
-            delivered.attempts[0].delivery_state,
-            legion_storage::ProposalObservationDeliveryState::Delivered
+        assert!(
+            app.poll_product_ai_stream(),
+            "production polling must service the scheduled observation retry"
         );
-        assert!(delivered.attempts[0].error_code.is_none());
-        assert!(delivered.attempts[0].error_kind.is_none());
         assert_eq!(recorder.events().expect("event snapshot").len(), 2);
         assert!(
             app.storage
@@ -35234,7 +35355,7 @@ mod tests {
                 delegated_output_from(save_proposal(ProposalId(100)), "published-first"),
                 delegated_output_from(save_proposal(ProposalId(101)), "published-second"),
             ])
-            .expect("published batch remains Pending after sink failure");
+            .expect("published batch remains Pending with a scheduled retry");
         let first_published = app
             .proposal_coordinator
             .proposal(published[0].proposal_id)

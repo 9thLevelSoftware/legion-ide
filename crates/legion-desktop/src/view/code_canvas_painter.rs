@@ -27,45 +27,19 @@ pub trait CodeCanvasPainter {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EguiCodeCanvasPainter;
 
-/// Prototype-aligned editor paint roles derived from the active theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PrototypeCodeCanvasTokens {
-    pub(super) background: egui::Color32,
-    pub(super) current_line: egui::Color32,
-    pub(super) selection: egui::Color32,
-    pub(super) cursor: egui::Color32,
-    pub(super) line_number: egui::Color32,
-    pub(super) keyword: egui::Color32,
-    pub(super) comment: egui::Color32,
-}
-
-pub(super) fn prototype_code_canvas_tokens() -> PrototypeCodeCanvasTokens {
-    let tokens = theme::tokens();
-    PrototypeCodeCanvasTokens {
-        background: tokens.bg.code,
-        current_line: theme::dim(tokens.accent.amber, 28),
-        selection: theme::dim(tokens.accent.blue, 72),
-        cursor: tokens.accent.amber,
-        line_number: tokens.text.muted,
-        keyword: tokens.accent.amber,
-        comment: tokens.text.muted,
-    }
-}
-
 pub(super) fn semantic_token_color(kind: ViewportSemanticTokenKind) -> egui::Color32 {
-    let tokens = theme::tokens();
-    let canvas = prototype_code_canvas_tokens();
+    let canvas = theme::tokens().code_canvas;
     match kind {
-        ViewportSemanticTokenKind::Ident => tokens.text.secondary,
+        ViewportSemanticTokenKind::Ident => canvas.ident,
         ViewportSemanticTokenKind::Keyword => canvas.keyword,
-        ViewportSemanticTokenKind::Type => tokens.accent.cyan,
-        ViewportSemanticTokenKind::String => tokens.accent.green,
-        ViewportSemanticTokenKind::Number => tokens.accent.orange,
+        ViewportSemanticTokenKind::Type => canvas.type_name,
+        ViewportSemanticTokenKind::String => canvas.string,
+        ViewportSemanticTokenKind::Number => canvas.number,
         ViewportSemanticTokenKind::Comment => canvas.comment,
-        ViewportSemanticTokenKind::Punct => tokens.text.muted,
-        ViewportSemanticTokenKind::Function => tokens.accent.blue,
-        ViewportSemanticTokenKind::Attribute => tokens.accent.purple,
-        ViewportSemanticTokenKind::Error => tokens.accent.red,
+        ViewportSemanticTokenKind::Punct => canvas.punct,
+        ViewportSemanticTokenKind::Function => canvas.function,
+        ViewportSemanticTokenKind::Attribute => canvas.attribute,
+        ViewportSemanticTokenKind::Error => canvas.error,
     }
 }
 
@@ -94,8 +68,8 @@ mod tests {
     }
 
     #[test]
-    fn prototype_code_canvas_tokens_use_slate_amber_editor_roles() {
-        let tokens = prototype_code_canvas_tokens();
+    fn theme_code_canvas_tokens_use_slate_amber_editor_roles() {
+        let tokens = theme::Theme::dark().code_canvas;
 
         assert_eq!(tokens.background, egui::Color32::from_rgb(0x12, 0x1a, 0x23));
         assert_eq!(

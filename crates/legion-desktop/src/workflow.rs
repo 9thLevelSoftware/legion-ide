@@ -1164,6 +1164,11 @@ impl DesktopRuntime {
         self.app.poll_product_ai_stream()
     }
 
+    /// Return the delay until app-owned proposal observation delivery retries.
+    pub fn proposal_observation_retry_delay(&self) -> Option<std::time::Duration> {
+        self.app.proposal_observation_retry_delay()
+    }
+
     /// Poll an app-owned delegated worker and merge completion on the app thread.
     pub fn poll_delegated_task(&mut self) -> bool {
         #[cfg(feature = "ai")]
@@ -3501,6 +3506,9 @@ impl DesktopEframeApp {
             .persist_bottom_panel_selection(output.selected_bottom_panel);
         for action in output.actions {
             self.runtime.dispatch_ui_action(action);
+        }
+        if let Some(delay) = self.runtime.proposal_observation_retry_delay() {
+            ui.ctx().request_repaint_after(delay);
         }
         if output.needs_repaint {
             ui.ctx().request_repaint();

@@ -47,6 +47,7 @@ pub(crate) struct Theme {
     pub(crate) border: BorderTokens,
     pub(crate) text: TextTokens,
     pub(crate) accent: AccentTokens,
+    pub(crate) code_canvas: CodeCanvasTokens,
     pub(crate) spacing: SpacingScale,
     pub(crate) radius: RadiusScale,
     pub(crate) typography: TypographyScale,
@@ -93,6 +94,23 @@ impl Theme {
                 green: Color32::from_rgb(0x4f, 0xae, 0x6d),
                 red: Color32::from_rgb(0xd2, 0x3b, 0x2e),
             },
+            code_canvas: CodeCanvasTokens {
+                background: Color32::from_rgb(0x12, 0x1a, 0x23),
+                current_line: Color32::from_rgba_unmultiplied_const(0xcf, 0x81, 0x36, 28),
+                selection: Color32::from_rgba_unmultiplied_const(0x2e, 0x7f, 0xb8, 72),
+                cursor: Color32::from_rgb(0xcf, 0x81, 0x36),
+                line_number: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                ident: Color32::from_rgb(0xc4, 0xcc, 0xd6),
+                keyword: Color32::from_rgb(0xcf, 0x81, 0x36),
+                type_name: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                string: Color32::from_rgb(0x4f, 0xae, 0x6d),
+                number: Color32::from_rgb(0xdc, 0x9a, 0x50),
+                comment: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                punct: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                function: Color32::from_rgb(0x2e, 0x7f, 0xb8),
+                attribute: Color32::from_rgb(0xb2, 0x7d, 0xc4),
+                error: Color32::from_rgb(0xd2, 0x3b, 0x2e),
+            },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
             typography: TypographyScale::standard(),
@@ -138,6 +156,23 @@ impl Theme {
                 orange: Color32::from_rgb(180, 91, 18),
                 green: Color32::from_rgb(35, 125, 72),
                 red: Color32::from_rgb(190, 48, 38),
+            },
+            code_canvas: CodeCanvasTokens {
+                background: Color32::from_rgb(247, 247, 249),
+                current_line: Color32::from_rgba_unmultiplied_const(158, 88, 22, 28),
+                selection: Color32::from_rgba_unmultiplied_const(31, 105, 158, 72),
+                cursor: Color32::from_rgb(158, 88, 22),
+                line_number: Color32::from_rgb(113, 113, 130),
+                ident: Color32::from_rgb(74, 75, 88),
+                keyword: Color32::from_rgb(158, 88, 22),
+                type_name: Color32::from_rgb(22, 113, 158),
+                string: Color32::from_rgb(35, 125, 72),
+                number: Color32::from_rgb(180, 91, 18),
+                comment: Color32::from_rgb(113, 113, 130),
+                punct: Color32::from_rgb(113, 113, 130),
+                function: Color32::from_rgb(31, 105, 158),
+                attribute: Color32::from_rgb(145, 83, 220),
+                error: Color32::from_rgb(190, 48, 38),
             },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
@@ -189,6 +224,25 @@ pub(crate) struct AccentTokens {
     pub(crate) orange: Color32,
     pub(crate) green: Color32,
     pub(crate) red: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodeCanvasTokens {
+    pub(crate) background: Color32,
+    pub(crate) current_line: Color32,
+    pub(crate) selection: Color32,
+    pub(crate) cursor: Color32,
+    pub(crate) line_number: Color32,
+    pub(crate) ident: Color32,
+    pub(crate) keyword: Color32,
+    pub(crate) type_name: Color32,
+    pub(crate) string: Color32,
+    pub(crate) number: Color32,
+    pub(crate) comment: Color32,
+    pub(crate) punct: Color32,
+    pub(crate) function: Color32,
+    pub(crate) attribute: Color32,
+    pub(crate) error: Color32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,7 +460,7 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
     };
     visuals.panel_fill = theme.bg.surface;
     visuals.window_fill = theme.bg.overlay;
-    visuals.extreme_bg_color = theme.bg.code;
+    visuals.extreme_bg_color = theme.code_canvas.background;
     visuals.faint_bg_color = theme.bg.card;
     visuals.selection.bg_fill = theme.bg.active;
     visuals.selection.stroke = Stroke::new(1.0_f32, theme.accent.cyan);
@@ -474,7 +528,7 @@ pub(crate) fn small_card_frame() -> Frame {
 
 pub(crate) fn code_frame() -> Frame {
     Frame::NONE
-        .fill(tokens().bg.code)
+        .fill(tokens().code_canvas.background)
         .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::same(0))
 }

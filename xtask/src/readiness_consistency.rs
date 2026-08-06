@@ -158,7 +158,7 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
-        .filter(|other| coordinated.map_or(true, |(run_start, _)| other.start < run_start))
+        .filter(|other| coordinated.is_none_or(|(run_start, _)| other.start < run_start))
         .map(|other| other.end)
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
@@ -166,7 +166,7 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
-        .filter(|other| coordinated.map_or(true, |(_, run_end)| other.end > run_end))
+        .filter(|other| coordinated.is_none_or(|(_, run_end)| other.end > run_end))
         .map(|other| other.start)
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
@@ -213,8 +213,7 @@ fn coordinated_list_bounds(
 
 fn is_list_separator(between: &str) -> bool {
     let connector = between.trim();
-    connector.chars().all(|ch| ch == ',')
-        || is_explicit_coordinator(connector)
+    connector.chars().all(|ch| ch == ',') || is_explicit_coordinator(connector)
 }
 
 fn is_explicit_coordinator(between: &str) -> bool {

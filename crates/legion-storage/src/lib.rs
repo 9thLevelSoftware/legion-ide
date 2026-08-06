@@ -1143,7 +1143,12 @@ pub struct InMemoryStorageRepositoryPort {
     fail_next_plan_revision_write: AtomicBool,
     fail_proposal_observation_batch_at_item: AtomicUsize,
     fail_next_proposal_observation_delivery_persist: AtomicBool,
+    /// Serializes proposal identity checks with their durable commits without
+    /// blocking unrelated repository reads and writes during filesystem I/O.
+    proposal_persistence: Mutex<()>,
     proposal_observation_delivery: Mutex<()>,
+    #[cfg(test)]
+    reject_proposal_persistence_while_storage_locked: AtomicBool,
     proposal_observation_startup_error: Option<ProtocolError>,
 }
 
@@ -1164,7 +1169,10 @@ impl InMemoryStorageRepositoryPort {
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
             fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
+            proposal_persistence: Mutex::new(()),
             proposal_observation_delivery: Mutex::new(()),
+            #[cfg(test)]
+            reject_proposal_persistence_while_storage_locked: AtomicBool::new(false),
             proposal_observation_startup_error: None,
         }
     }
@@ -1180,7 +1188,10 @@ impl InMemoryStorageRepositoryPort {
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
             fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
+            proposal_persistence: Mutex::new(()),
             proposal_observation_delivery: Mutex::new(()),
+            #[cfg(test)]
+            reject_proposal_persistence_while_storage_locked: AtomicBool::new(false),
             proposal_observation_startup_error: None,
         }
     }
@@ -1199,7 +1210,10 @@ impl InMemoryStorageRepositoryPort {
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
             fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
+            proposal_persistence: Mutex::new(()),
             proposal_observation_delivery: Mutex::new(()),
+            #[cfg(test)]
+            reject_proposal_persistence_while_storage_locked: AtomicBool::new(false),
             proposal_observation_startup_error: None,
         }
     }
@@ -1227,7 +1241,10 @@ impl InMemoryStorageRepositoryPort {
             fail_next_plan_revision_write: AtomicBool::new(false),
             fail_proposal_observation_batch_at_item: AtomicUsize::new(0),
             fail_next_proposal_observation_delivery_persist: AtomicBool::new(false),
+            proposal_persistence: Mutex::new(()),
             proposal_observation_delivery: Mutex::new(()),
+            #[cfg(test)]
+            reject_proposal_persistence_while_storage_locked: AtomicBool::new(false),
             proposal_observation_startup_error: None,
         };
         if let Err(error) = port
@@ -1360,6 +1377,19 @@ impl InMemoryStorageRepositoryPort {
         let Some(dir) = self.proposal_audit_dir() else {
             return Ok(());
         };
+        #[cfg(test)]
+        if self
+            .reject_proposal_persistence_while_storage_locked
+            .load(Ordering::SeqCst)
+            && self.storage.try_lock().is_err()
+        {
+            return Err(ProtocolError {
+                code: "test_storage_lock_held_during_persistence".to_string(),
+                message:
+                    "proposal persistence attempted while the repository storage lock was held"
+                        .to_string(),
+            });
+        }
         fs::create_dir_all(&dir).map_err(|err| ProtocolError {
             code: "storage_failed".to_string(),
             message: format!("create proposal-audit directory failed: {err}"),
@@ -1382,6 +1412,19 @@ impl InMemoryStorageRepositoryPort {
         let Some(dir) = self.proposal_observation_outbox_dir() else {
             return Ok(());
         };
+        #[cfg(test)]
+        if self
+            .reject_proposal_persistence_while_storage_locked
+            .load(Ordering::SeqCst)
+            && self.storage.try_lock().is_err()
+        {
+            return Err(ProtocolError {
+                code: "test_storage_lock_held_during_persistence".to_string(),
+                message:
+                    "proposal persistence attempted while the repository storage lock was held"
+                        .to_string(),
+            });
+        }
         fs::create_dir_all(&dir).map_err(|error| ProtocolError {
             code: "storage_failed".to_string(),
             message: format!("create proposal observation outbox failed: {error}"),
@@ -1615,9 +1658,9 @@ impl InMemoryStorageRepositoryPort {
 
     /// Validate and atomically commit a proposal-created observation as Pending.
     ///
-    /// Event metadata, proposal audits, and the outbox record are inserted under
-    /// one storage lock. With `base_dir` enabled, the complete record is first
-    /// persisted as one atomically-renamed JSON document.
+    /// Event metadata, proposal audits, and the outbox record are committed as
+    /// one logical transaction. With `base_dir` enabled, the complete record is
+    /// first persisted as one atomically-renamed JSON document.
     pub fn store_proposal_observation_batch(
         &self,
         mut batch: ProposalObservationBatch,
@@ -1659,7 +1702,14 @@ impl InMemoryStorageRepositoryPort {
             });
         }
 
-        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let _persistence = self
+            .proposal_persistence
+            .lock()
+            .map_err(|_| ProtocolError {
+                code: "storage_lock_poisoned".to_string(),
+                message: "proposal persistence lock poisoned".to_string(),
+            })?;
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
         if let Some(existing) = storage
             .protocol_proposal_observation_outbox
             .get(&batch.batch_id)
@@ -1725,7 +1775,9 @@ impl InMemoryStorageRepositoryPort {
             batch,
             delivery_state: ProposalObservationDeliveryState::Pending,
         };
+        drop(storage);
         self.persist_proposal_observation_outbox(&record)?;
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
         for event in &record.batch.events {
             storage
                 .protocol_proposal_observation_events
@@ -2165,7 +2217,14 @@ impl InMemoryStorageRepositoryPort {
         batch_id: &str,
     ) -> ProtocolResult<ProposalObservationOutboxRecord> {
         self.ensure_proposal_observation_outbox_healthy()?;
-        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let _persistence = self
+            .proposal_persistence
+            .lock()
+            .map_err(|_| ProtocolError {
+                code: "storage_lock_poisoned".to_string(),
+                message: "proposal persistence lock poisoned".to_string(),
+            })?;
+        let storage = self.storage.lock().map_err(Self::poisoned_error)?;
         let existing = storage
             .protocol_proposal_observation_outbox
             .get(batch_id)
@@ -2190,7 +2249,9 @@ impl InMemoryStorageRepositoryPort {
                 message: "injected Delivered-marker persistence failure".to_string(),
             });
         }
+        drop(storage);
         self.persist_proposal_observation_outbox(&delivered)?;
+        let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
         storage
             .protocol_proposal_observation_outbox
             .insert(batch_id.to_string(), delivered.clone());
@@ -2690,7 +2751,14 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
             StorageRepositoryRequest::SaveProposalAuditRecord(record) => {
                 let record = Self::sanitize_proposal_audit(record)?;
                 Self::validate_persisted_proposal_audit(&record)?;
-                let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+                let _persistence = self
+                    .proposal_persistence
+                    .lock()
+                    .map_err(|_| ProtocolError {
+                        code: "storage_lock_poisoned".to_string(),
+                        message: "proposal persistence lock poisoned".to_string(),
+                    })?;
+                let storage = self.storage.lock().map_err(Self::poisoned_error)?;
                 if let Some(created) = storage
                     .protocol_proposal_observation_outbox
                     .values()
@@ -2706,9 +2774,11 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
                         ),
                     });
                 }
-                // Validate → durable write → memory while holding the repository
-                // lock, so concurrent lifecycle writes cannot race the identity check.
+                // The narrow proposal-persistence lock preserves identity ordering
+                // while the global repository lock is released for filesystem I/O.
+                drop(storage);
                 self.persist_proposal_audit(&record)?;
+                let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
                 storage
                     .handle_protocol_request(StorageRepositoryRequest::SaveProposalAuditRecord(
                         record,
@@ -2718,6 +2788,13 @@ impl StorageRepositoryPort for InMemoryStorageRepositoryPort {
             StorageRepositoryRequest::SaveEventMetadata(metadata) => {
                 InMemoryStorage::validate_event_metadata(&metadata)
                     .map_err(InMemoryStorage::protocol_error)?;
+                let _persistence = self
+                    .proposal_persistence
+                    .lock()
+                    .map_err(|_| ProtocolError {
+                        code: "storage_lock_poisoned".to_string(),
+                        message: "proposal persistence lock poisoned".to_string(),
+                    })?;
                 let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
                 if let Some(event) = storage
                     .protocol_proposal_observation_events
@@ -4871,6 +4948,58 @@ mod tests {
             .expect("inspect storage");
         assert_eq!(counts, (0, 0, 0, 0));
         assert!(!base_dir.join("proposal-observation-outbox").exists());
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_observation_pending_persistence_does_not_hold_repository_storage_lock() {
+        let base_dir =
+            temp_storage_path("proposal-observation-pending-unlocked").with_extension("outbox-dir");
+        let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        port.reject_proposal_persistence_while_storage_locked
+            .store(true, Ordering::SeqCst);
+
+        port.store_proposal_observation_batch(proposal_observation_batch("pending-unlocked", 1))
+            .expect("durable Pending persistence must not hold the repository storage lock");
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_observation_delivered_persistence_does_not_hold_repository_storage_lock() {
+        let base_dir = temp_storage_path("proposal-observation-delivered-unlocked")
+            .with_extension("outbox-dir");
+        let port = InMemoryStorageRepositoryPort::with_event_sink_and_base_dir(
+            SharedEventSink::new(InMemoryEventSink::new()),
+            &base_dir,
+        );
+        port.store_proposal_observation_batch(proposal_observation_batch("delivered-unlocked", 1))
+            .expect("store pending batch");
+        port.reject_proposal_persistence_while_storage_locked
+            .store(true, Ordering::SeqCst);
+
+        port.deliver_proposal_observation_batch("delivered-unlocked")
+            .expect("durable Delivered persistence must not hold the repository storage lock");
+
+        let _ = fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn proposal_audit_persistence_does_not_hold_repository_storage_lock() {
+        let base_dir =
+            temp_storage_path("proposal-audit-unlocked").with_extension("proposal-audit-dir");
+        let port = InMemoryStorageRepositoryPort::with_base_dir(&base_dir);
+        let audit = proposal_observation_batch("audit-unlocked", 1)
+            .proposal_audits
+            .into_iter()
+            .next()
+            .expect("proposal audit fixture");
+        port.reject_proposal_persistence_while_storage_locked
+            .store(true, Ordering::SeqCst);
+
+        port.handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
+            .expect("proposal audit persistence must not hold the repository storage lock");
+
         let _ = fs::remove_dir_all(base_dir);
     }
 

@@ -63,9 +63,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
-use code_canvas_painter::{
-    CodeCanvasPainter, EguiCodeCanvasPainter, prototype_code_canvas_tokens, semantic_token_color,
-};
+use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter, semantic_token_color};
 
 use legion_protocol::{
     BufferId, CANONICAL_PRODUCT_MODES, CanonicalPath, CanonicalProductMode,
@@ -2582,9 +2580,9 @@ fn render_code_lines(
                     ui.add_sized(
                         [42.0, 18.0],
                         egui::Label::new(if line.number == current_line_number {
-                            theme::accent(line_number, theme::tokens().accent.amber)
+                            theme::accent(line_number, theme::tokens().code_canvas.cursor)
                         } else {
-                            theme::code_muted(line_number)
+                            theme::accent(line_number, theme::tokens().code_canvas.line_number)
                         }),
                     );
                 }
@@ -2889,7 +2887,7 @@ fn paint_current_line_highlight(
     ui.painter().rect_filled(
         response.rect.expand2(egui::vec2(3.0, 1.0)),
         0.0,
-        prototype_code_canvas_tokens().current_line,
+        theme::tokens().code_canvas.current_line,
     );
 }
 
@@ -2929,11 +2927,8 @@ fn paint_code_selections(
                 response.rect.bottom(),
             ),
         );
-        ui.painter().rect_filled(
-            selection_rect,
-            0.0,
-            prototype_code_canvas_tokens().selection,
-        );
+        ui.painter()
+            .rect_filled(selection_rect, 0.0, theme::tokens().code_canvas.selection);
     }
 }
 
@@ -2975,7 +2970,7 @@ fn paint_code_cursor(
             egui::pos2(x, response.rect.top()),
             egui::pos2(x, response.rect.bottom()),
         ],
-        egui::Stroke::new(1.0_f32, prototype_code_canvas_tokens().cursor),
+        egui::Stroke::new(1.0_f32, theme::tokens().code_canvas.cursor),
     );
 }
 
