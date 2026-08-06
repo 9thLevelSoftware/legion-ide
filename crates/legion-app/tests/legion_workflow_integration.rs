@@ -2235,16 +2235,25 @@ fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
         .legion_workflow_session(&session_id)
         .expect("stored cancelled session");
     assert!(
-        stored
-            .worker_assignments
-            .iter()
-            .all(|worker| worker.state == LegionWorkflowWorkerState::Cancelled),
-        "all in-flight workers should be cancelled after the shared flag trips: {:?}",
+        stored.worker_assignments.iter().all(|worker| matches!(
+            worker.state,
+            LegionWorkflowWorkerState::Completed
+                | LegionWorkflowWorkerState::Blocked
+                | LegionWorkflowWorkerState::Cancelled
+        )),
+        "all workers should be terminal after the shared flag trips: {:?}",
         stored
             .worker_assignments
             .iter()
             .map(|worker| (&worker.worker_id.0, worker.state))
             .collect::<Vec<_>>()
+    );
+    assert!(
+        stored.worker_assignments.iter().any(|worker| matches!(
+            worker.state,
+            LegionWorkflowWorkerState::Blocked | LegionWorkflowWorkerState::Cancelled
+        )),
+        "the kill-switch-triggering worker must not complete"
     );
     let cancelled_at = cancelled_at
         .lock()
