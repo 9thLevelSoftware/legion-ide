@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use legion_agent::LegionWorkflowCoordinatorOutput;
@@ -654,6 +654,12 @@ struct WaitForWorkflowCancellationProvider {
     acknowledged: Mutex<Option<mpsc::Sender<Instant>>>,
 }
 
+struct ReleaseGatedWorkflowProvider {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+    finished: Mutex<Option<mpsc::Sender<()>>>,
+}
+
 impl ModelProvider for WaitForWorkflowCancellationProvider {
     fn provider_id(&self) -> ProviderId {
         "provider:wait-for-workflow-cancellation".to_string()
@@ -704,6 +710,60 @@ impl ToolCallingProvider for WaitForWorkflowCancellationProvider {
         Err(ProviderError::RequestFailed {
             provider: self.provider_id(),
             message: "workflow sibling cancelled".to_string(),
+        })
+    }
+}
+
+impl ModelProvider for ReleaseGatedWorkflowProvider {
+    fn provider_id(&self) -> ProviderId {
+        "provider:release-gated-workflow".to_string()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+impl ToolCallingProvider for ReleaseGatedWorkflowProvider {
+    fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+            let _ = entered.send(());
+        }
+        let (released, wake) = &*self.released;
+        let released = released.lock().expect("release lock");
+        let (released, _) = wake
+            .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+            .expect("release wait");
+        assert!(
+            *released,
+            "release-gated provider was never explicitly released"
+        );
+        if let Some(finished) = self.finished.lock().expect("finished lock").take() {
+            let _ = finished.send(());
+        }
+        Err(ProviderError::RequestFailed {
+            provider: self.provider_id(),
+            message: "release-gated workflow provider finished".to_string(),
         })
     }
 }
@@ -2548,6 +2608,120 @@ fn workflow_worker_panic_cancels_and_reaps_blocked_lane_sibling_before_owner_cle
         AppProductMode::Manual,
         "downgrade may complete only after the sibling cancellation acknowledgement"
     );
+}
+
+#[test]
+fn workflow_worker_error_reaps_uninterruptible_sibling_without_releasing_owner_early() {
+    let mut app = automate_app();
+    let root = temp_workspace("panic-drains-uninterruptible-lane");
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal:panic-drains-uninterruptible-lane".to_string()),
+    )
+    .expect("open workspace");
+    let panic_plan = DelegatedTaskPlanId("plan-panic-drains-lane".to_string());
+    let sibling_plan = DelegatedTaskPlanId("plan-uninterruptible-sibling".to_string());
+    let session = workflow_session(
+        "panic-drains-uninterruptible-lane",
+        vec![
+            worker(
+                "worker:a-panic",
+                LegionWorkflowModelBackend::Local,
+                Some(panic_plan.clone()),
+                "target:panic",
+                311,
+            ),
+            worker(
+                "worker:b-uninterruptible-sibling",
+                LegionWorkflowModelBackend::Local,
+                Some(sibling_plan.clone()),
+                "target:uninterruptible-sibling",
+                312,
+            ),
+        ],
+        vec![verification_gate(
+            LegionWorkflowVerificationGateState::Passed,
+        )],
+        vec![signoff(LegionWorkflowSignOffState::SignedOff)],
+        Vec::new(),
+        Some(approval(true)),
+    );
+    let session_id = session.session_id.clone();
+    app.seed_delegated_task_plan_contracts(vec![
+        delegated_contract(panic_plan),
+        delegated_contract(sibling_plan),
+    ]);
+    app.seed_legion_workflow_sessions(vec![session])
+        .expect("seed workflow");
+
+    let cancellation = SharedCancellationFlag::new();
+    app.inject_cancellation_flag_for_test(cancellation.clone());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let released = Arc::new((Mutex::new(false), Condvar::new()));
+    let resolver = NamedWorkerProviderResolver::new([
+        (
+            "worker:a-panic".to_string(),
+            Box::new(PanicAfterSiblingStartsProvider {
+                sibling_entered: Mutex::new(Some(entered_rx)),
+            }) as Box<dyn ToolCallingProvider + Send>,
+        ),
+        (
+            "worker:b-uninterruptible-sibling".to_string(),
+            Box::new(ReleaseGatedWorkflowProvider {
+                entered: Mutex::new(Some(entered_tx)),
+                released: released.clone(),
+                finished: Mutex::new(Some(finished_tx)),
+            }) as Box<dyn ToolCallingProvider + Send>,
+        ),
+    ]);
+
+    let started = Instant::now();
+    let error = app
+        .execute_legion_workflow_with_providers(&session_id, &resolver)
+        .expect_err("first worker panic must fail the lane promptly");
+    assert!(error.to_string().contains("panicked"));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "workflow error waited for an uninterruptible sibling: {:?}",
+        started.elapsed()
+    );
+    assert!(cancellation.is_cancelled());
+
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Automate,
+        "Manual must remain refused while the workflow owner is draining"
+    );
+    let overlap = app.execute_legion_workflow_with_providers(&session_id, &resolver);
+    assert!(
+        overlap
+            .expect_err("a new worker must be refused while the prior owner drains")
+            .to_string()
+            .contains("already running")
+    );
+
+    let (release, wake) = &*released;
+    *release.lock().expect("release lock") = true;
+    wake.notify_all();
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("release-gated sibling must finish");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        app.set_product_mode(AppProductMode::Manual);
+        if app.product_mode() == AppProductMode::Manual {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workflow drain reaper did not reconcile after sibling release"
+        );
+        std::thread::yield_now();
+    }
 }
 
 #[test]

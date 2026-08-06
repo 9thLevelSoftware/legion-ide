@@ -988,6 +988,7 @@ struct PreparedLegionWorkflowWorkerRun {
 #[cfg(feature = "ai")]
 struct InFlightLegionWorkflowWorkerRun {
     cancellation_flag: SharedCancellationFlag,
+    drain_state: Arc<WorkflowWorkerDrainState>,
     join_handle: Option<
         std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
     >,
@@ -1000,8 +1001,73 @@ impl Drop for InFlightLegionWorkflowWorkerRun {
             return;
         };
         self.cancellation_flag.cancel();
-        let _ = join_handle.join();
+        self.drain_state.begin_draining();
+        let drain_state = self.drain_state.clone();
+        let _ = std::thread::Builder::new()
+            .name("legion-workflow-drain-reaper".to_string())
+            .spawn(move || {
+                let _ = join_handle.join();
+                drain_state.worker_completed();
+            });
     }
+}
+
+#[cfg(feature = "ai")]
+impl InFlightLegionWorkflowWorkerRun {
+    fn join(
+        mut self,
+    ) -> std::thread::Result<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>> {
+        let joined = self
+            .join_handle
+            .take()
+            .expect("workflow worker owns its join handle")
+            .join();
+        self.drain_state.worker_completed();
+        joined
+    }
+}
+
+#[cfg(feature = "ai")]
+#[derive(Default)]
+struct WorkflowWorkerDrainState {
+    outstanding_workers: std::sync::atomic::AtomicUsize,
+    draining: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "ai")]
+impl WorkflowWorkerDrainState {
+    fn worker_started(&self) {
+        self.outstanding_workers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn worker_completed(&self) {
+        let previous = self
+            .outstanding_workers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0, "workflow drain worker count underflow");
+    }
+
+    fn begin_draining(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.outstanding_workers
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+    }
+}
+
+#[cfg(feature = "ai")]
+struct DrainingWorkflowWorkerRegistration {
+    owner_id: uuid::Uuid,
+    drain_state: Arc<WorkflowWorkerDrainState>,
 }
 
 #[cfg(feature = "ai")]
@@ -16086,6 +16152,11 @@ pub struct AppComposition {
     /// Sole app-owned worker registration. The owner id prevents one run from
     /// clearing another run's cancellation authority.
     active_worker: Option<ActiveWorkerRegistration>,
+    /// Workflow worker handles handed to asynchronous reapers after a lane
+    /// failure. The matching active owner remains authoritative until every
+    /// reaper has joined its worker and a public retry reconciles this state.
+    #[cfg(feature = "ai")]
+    draining_workflow_worker: Option<DrainingWorkflowWorkerRegistration>,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_cancellation_flag: Option<SharedCancellationFlag>,
     /// App-owned worker for a Desktop-started delegated loop. Completion is
@@ -16362,6 +16433,8 @@ impl AppComposition {
             legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
             active_worker: None,
+            #[cfg(feature = "ai")]
+            draining_workflow_worker: None,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_cancellation_flag: None,
             #[cfg(feature = "ai")]
@@ -16772,6 +16845,7 @@ impl AppComposition {
         &mut self,
         identity: ActiveWorkerIdentity,
     ) -> Result<(uuid::Uuid, SharedCancellationFlag), AppCompositionError> {
+        self.reconcile_completed_workflow_drain();
         if self.active_worker.is_some() {
             return Err(AppCompositionError::AiRuntime(
                 "an AI/workflow worker is already running".to_string(),
@@ -16790,7 +16864,8 @@ impl AppComposition {
         Ok((owner_id, cancellation_flag))
     }
 
-    fn ensure_no_active_worker(&self) -> Result<(), AppCompositionError> {
+    fn ensure_no_active_worker(&mut self) -> Result<(), AppCompositionError> {
+        self.reconcile_completed_workflow_drain();
         if self.active_worker.is_some() {
             Err(AppCompositionError::AiRuntime(
                 "an AI/workflow worker is already running".to_string(),
@@ -16810,6 +16885,21 @@ impl AppComposition {
         }
     }
 
+    fn reconcile_completed_workflow_drain(&mut self) {
+        #[cfg(feature = "ai")]
+        {
+            let completed_owner = self
+                .draining_workflow_worker
+                .as_ref()
+                .filter(|registration| registration.drain_state.is_complete())
+                .map(|registration| registration.owner_id);
+            if let Some(owner_id) = completed_owner {
+                self.draining_workflow_worker = None;
+                self.clear_active_worker(owner_id);
+            }
+        }
+    }
+
     fn mode_allows_active_worker(mode: AppProductMode, identity: &ActiveWorkerIdentity) -> bool {
         match identity {
             ActiveWorkerIdentity::DelegatedTask { .. } => mode.allows_delegate(),
@@ -16819,6 +16909,7 @@ impl AppComposition {
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        self.reconcile_completed_workflow_drain();
         if let Some(worker) = &self.active_worker
             && !Self::mode_allows_active_worker(mode, &worker.identity)
         {
@@ -21994,6 +22085,7 @@ impl AppComposition {
         principal_id: PrincipalId,
         reason_label: String,
     ) -> Result<LegionWorkflowProjection, AppCompositionError> {
+        self.reconcile_completed_workflow_drain();
         self.require_automate_mode()?;
         let workflow_cancellation = match &self.active_worker {
             Some(ActiveWorkerRegistration {
@@ -22360,6 +22452,7 @@ impl AppComposition {
         &mut self,
         prepared: PreparedLegionWorkflowWorkerRun,
         cancellation_flag: SharedCancellationFlag,
+        drain_state: Arc<WorkflowWorkerDrainState>,
     ) -> InFlightLegionWorkflowWorkerRun {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
@@ -22399,8 +22492,10 @@ impl AppComposition {
                 ))),
             }
         });
+        drain_state.worker_started();
         InFlightLegionWorkflowWorkerRun {
             cancellation_flag,
+            drain_state,
             join_handle: Some(join_handle),
         }
     }
@@ -22882,6 +22977,8 @@ impl AppComposition {
             self.begin_active_worker(ActiveWorkerIdentity::LegionWorkflow {
                 session_id: session.session_id.clone(),
             })?;
+        #[cfg(feature = "ai")]
+        let workflow_drain_state = Arc::new(WorkflowWorkerDrainState::default());
         let execution_result = (|| {
             #[cfg(feature = "ai")]
             let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
@@ -23164,6 +23261,7 @@ impl AppComposition {
                                 in_flight.push(self.spawn_legion_workflow_worker_run(
                                     prepared,
                                     cancellation_flag.clone(),
+                                    workflow_drain_state.clone(),
                                 ));
                                 continue;
                             }
@@ -23185,6 +23283,7 @@ impl AppComposition {
                                 in_flight.push(self.spawn_legion_workflow_worker_run(
                                     prepared,
                                     cancellation_flag.clone(),
+                                    workflow_drain_state.clone(),
                                 ));
                                 continue;
                             }
@@ -23215,12 +23314,8 @@ impl AppComposition {
                 }
 
                 #[cfg(feature = "ai")]
-                for mut worker_run in in_flight {
-                    let joined = worker_run
-                        .join_handle
-                        .take()
-                        .expect("workflow worker owns its join handle")
-                        .join();
+                for worker_run in in_flight {
+                    let joined = worker_run.join();
                     let completion = match joined {
                         Ok(Ok(completion)) => completion,
                         Ok(Err(error)) => {
@@ -23317,6 +23412,16 @@ impl AppComposition {
                 memory_candidate_proposed,
             })
         })();
+        #[cfg(feature = "ai")]
+        if workflow_drain_state.is_draining() && !workflow_drain_state.is_complete() {
+            self.draining_workflow_worker = Some(DrainingWorkflowWorkerRegistration {
+                owner_id,
+                drain_state: workflow_drain_state,
+            });
+        } else {
+            self.clear_active_worker(owner_id);
+        }
+        #[cfg(not(feature = "ai"))]
         self.clear_active_worker(owner_id);
         execution_result
     }
