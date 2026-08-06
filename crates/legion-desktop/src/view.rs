@@ -4935,7 +4935,7 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
     } else {
         theme::dim(theme::tokens().text.primary, 10)
     };
-    ui.add(
+    let response = ui.add(
         egui::Button::new(theme::accent(label, color))
             .wrap_mode(egui::TextWrapMode::Extend)
             .sense(egui::Sense::hover())
@@ -4950,7 +4950,12 @@ fn pill(ui: &mut egui::Ui, label: &str, color: egui::Color32, active: bool) -> e
             ))
             .corner_radius(egui::CornerRadius::same(6))
             .min_size(egui::vec2(0.0, 20.0)),
-    )
+    );
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Label);
+        node.clear_actions();
+    });
+    response
 }
 
 fn selectable_pill_button(

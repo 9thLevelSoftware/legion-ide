@@ -48,6 +48,7 @@ public static class NativeCapture {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
@@ -62,7 +63,10 @@ public static class NativeCapture {
       GetWindowThreadProcessId(hwnd, out uint owner);
       var text = new StringBuilder(256);
       GetWindowText(hwnd, text, text.Capacity);
-      if (owner == processId && text.ToString() == title) { result = hwnd; return false; }
+      if (owner == processId && IsWindowVisible(hwnd) && text.ToString() == title) {
+        result = hwnd;
+        return false;
+      }
       return true;
     }, IntPtr.Zero);
     return result;

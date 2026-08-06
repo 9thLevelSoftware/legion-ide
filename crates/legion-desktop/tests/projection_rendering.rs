@@ -2763,6 +2763,18 @@ fn projection_rendering_context_pills_wrap_as_atomic_readable_items() {
         manifest.x1 - manifest.x0 >= 80.0 && manifest.y1 - manifest.y0 <= 30.0,
         "the manifest context pill must remain a horizontal atomic item; bounds={manifest:?}"
     );
+    let manifest_node = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| (node.label() == Some("manifest: 1 items")).then_some(node))
+        .expect("the manifest context pill should expose one semantic node");
+    assert_eq!(manifest_node.role(), egui::accesskit::Role::Label);
+    assert!(!manifest_node.supports_action(egui::accesskit::Action::Click));
+    assert!(!manifest_node.supports_action(egui::accesskit::Action::Focus));
 }
 
 #[test]
