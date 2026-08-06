@@ -3324,6 +3324,30 @@ impl DesktopEframeApp {
         })
     }
 
+    /// Return the persistent egui context used by the headless full-frame seam.
+    #[doc(hidden)]
+    pub fn headless_egui_context(&self) -> egui::Context {
+        self.ctx.clone()
+    }
+
+    /// Return the real editor allocation recorded by the last full frame.
+    #[doc(hidden)]
+    pub fn last_editor_rect_for_test(&self) -> Option<egui::Rect> {
+        self.runtime.view.last_editor_rect()
+    }
+
+    /// Return adapter-local persisted panel state without granting mutation authority.
+    #[doc(hidden)]
+    pub fn panel_state_for_test(&self) -> &SessionPanelState {
+        self.runtime.panel_state()
+    }
+
+    /// Return adapter-local mode-scoped dock layouts without granting mutation authority.
+    #[doc(hidden)]
+    pub fn dock_layouts_for_test(&self) -> &[DockLayout] {
+        self.runtime.dock_layouts()
+    }
+
     /// Return the zero-based index of the currently selected problem row.
     ///
     /// Test-only delegate that forwards to the runtime so tests that wrap a

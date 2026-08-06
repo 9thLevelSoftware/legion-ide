@@ -92,6 +92,12 @@ use crate::{
 
 const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
 const LEGION_WORDMARK: &str = "Legion";
+/// Minimum actual editor allocation retained below an expanded center workbench.
+const MIN_USABLE_EDITOR_HEIGHT: f32 = 180.0;
+/// Space retained for tabs, breadcrumbs, and editor-frame margins above the code canvas.
+const EDITOR_CHROME_HEIGHT_RESERVE: f32 = 74.0;
+/// Maximum viewport height for expanded center-workbench content.
+const MAX_ADVANCED_WORKBENCH_HEIGHT: f32 = 220.0;
 
 /// Action emitted by the top-bar `Command` control.
 pub fn command_palette_control_action() -> DesktopAction {
@@ -857,7 +863,7 @@ impl DesktopProjectionViewModel {
             directive_panel_rows: directive_panel_rows(snapshot),
             onboarding_rows,
             bottom_console_rows: bottom_console_rows(snapshot),
-            bottom_tab_rows: bottom_tab_rows(snapshot),
+            bottom_tab_rows: bottom_tab_rows(snapshot, BottomPanelTab::Terminal),
             dock_rows,
             dock_panel_rows,
             status_bar: DesktopStatusBarViewModel::from_snapshot(snapshot, &flags),
@@ -905,6 +911,7 @@ pub struct ProjectionView {
     show_auxiliary: bool,
     theme_preference: theme::ThemePreference,
     selected_bottom_panel: BottomPanelTab,
+    last_editor_rect: Option<egui::Rect>,
 }
 
 /// Renderer-owned selection for the operational bottom panel.
@@ -933,12 +940,19 @@ impl ProjectionView {
             show_auxiliary: true,
             theme_preference: theme::ThemePreference::all()[0],
             selected_bottom_panel: BottomPanelTab::Terminal,
+            last_editor_rect: None,
         }
     }
 
     /// Returns the renderer-local bottom-panel selection.
     pub fn selected_bottom_panel(&self) -> BottomPanelTab {
         self.selected_bottom_panel
+    }
+
+    /// Returns the actual editor allocation recorded during the last render.
+    #[doc(hidden)]
+    pub fn last_editor_rect(&self) -> Option<egui::Rect> {
+        self.last_editor_rect
     }
 
     /// Renders the current projection snapshot into egui panels.
@@ -972,7 +986,8 @@ impl ProjectionView {
         ui.ctx()
             .set_zoom_factor(settings.zoom_percent as f32 / 100.0);
         theme::install(ui.ctx(), &active_theme);
-        let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
+        let mut model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
+        model.bottom_tab_rows = bottom_tab_rows(snapshot, self.selected_bottom_panel);
         let mut actions = Vec::new();
         let geometry =
             ShellGeometry::for_available_size(ui.available_width(), ui.available_height());
@@ -1051,7 +1066,8 @@ impl ProjectionView {
         egui::CentralPanel::default()
             .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
-                render_code_canvas(ui, snapshot, &model, &mut actions);
+                self.last_editor_rect =
+                    Some(render_code_canvas(ui, snapshot, &model, &mut actions));
             });
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
@@ -1061,6 +1077,7 @@ impl ProjectionView {
         ProjectionViewOutput {
             needs_repaint: false,
             displayed_title: model.layout_title,
+            bottom_tab_rows: model.bottom_tab_rows,
             actions,
         }
     }
@@ -1137,12 +1154,22 @@ fn render_product_mode_switch(
             ui.horizontal(|ui| {
                 for spec in product_mode_switch_specs() {
                     let canonical = canonical_mode_entry(spec.mode);
-                    let response = pill(
-                        ui,
-                        canonical.label,
-                        level_color(spec.mode),
-                        spec.mode == active_level,
-                    );
+                    let active = spec.mode == active_level;
+                    let color = level_color(spec.mode);
+                    let response = ui
+                        .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
+                            ui.add_sized(
+                                [116.0, 24.0],
+                                egui::Button::new(theme::accent(canonical.label, color))
+                                    .selected(active)
+                                    .fill(if active {
+                                        theme::dim(color, 28)
+                                    } else {
+                                        theme::tokens().bg.input
+                                    }),
+                            )
+                        })
+                        .inner;
                     if response.clicked() && spec.mode != active_level {
                         actions.push(DesktopAction::SetProductMode {
                             mode: spec.mode.to_dock_mode(),
@@ -1213,9 +1240,9 @@ fn render_code_canvas(
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
-) {
+) -> egui::Rect {
     render_advanced_center_surface(ui, snapshot, model, actions);
-    render_editor_canvas(ui, snapshot, model, actions);
+    render_editor_canvas(ui, snapshot, model, actions)
 }
 
 fn render_workbench_toolbox(
@@ -1252,27 +1279,39 @@ fn render_advanced_center_surface(
     if !has_surface {
         return;
     }
+    let header_height = ui.spacing().interact_size.y;
+    let body_height = (ui.available_height()
+        - MIN_USABLE_EDITOR_HEIGHT
+        - EDITOR_CHROME_HEIGHT_RESERVE
+        - header_height)
+        .clamp(96.0, MAX_ADVANCED_WORKBENCH_HEIGHT);
     egui::CollapsingHeader::new(theme::label(label))
         .id_salt("legion_desktop_advanced_center_surface")
         .default_open(false)
-        .show(ui, |ui| match projected_product_mode(snapshot) {
-            DesktopProductMode::Manual => {}
-            DesktopProductMode::Assist => {
-                render_assisted_suggestion_panel(ui, snapshot, model, actions);
-                if snapshot.assisted_ai_projection.preview_ready_count > 0 {
-                    render_copilot_canvas(ui, snapshot, model, actions);
-                }
-            }
-            DesktopProductMode::Delegate => {
-                if delegated_activity_projected(snapshot) {
-                    render_delegated_canvas(ui, snapshot, model, actions);
-                } else {
-                    render_assisted_suggestion_panel(ui, snapshot, model, actions);
-                }
-            }
-            DesktopProductMode::LegionWorkflows => {
-                render_fleet_canvas(ui, snapshot, model, actions);
-            }
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("legion_desktop_advanced_center_scroll")
+                .max_height(body_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| match projected_product_mode(snapshot) {
+                    DesktopProductMode::Manual => {}
+                    DesktopProductMode::Assist => {
+                        render_assisted_suggestion_panel(ui, snapshot, model, actions);
+                        if snapshot.assisted_ai_projection.preview_ready_count > 0 {
+                            render_copilot_canvas(ui, snapshot, model, actions);
+                        }
+                    }
+                    DesktopProductMode::Delegate => {
+                        if delegated_activity_projected(snapshot) {
+                            render_delegated_canvas(ui, snapshot, model, actions);
+                        } else {
+                            render_assisted_suggestion_panel(ui, snapshot, model, actions);
+                        }
+                    }
+                    DesktopProductMode::LegionWorkflows => {
+                        render_fleet_canvas(ui, snapshot, model, actions);
+                    }
+                });
         });
 }
 
@@ -1779,7 +1818,7 @@ fn render_editor_canvas(
     snapshot: &ShellProjectionSnapshot,
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
-) {
+) -> egui::Rect {
     render_tab_strip(ui, snapshot, actions);
     render_breadcrumb_bar(ui, snapshot);
     if !model.large_file_banner_rows.is_empty() {
@@ -1793,18 +1832,22 @@ fn render_editor_canvas(
         );
         ui.add_space(6.0);
     }
-    theme::code_frame().show(ui, |ui| {
-        egui::ScrollArea::both()
-            .id_salt("legion_desktop_code_canvas_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut painter = EguiCodeCanvasPainter;
-                painter.paint_lines(ui, snapshot, model, actions);
-            });
-    });
+    let editor_rect = theme::code_frame()
+        .show(ui, |ui| {
+            egui::ScrollArea::both()
+                .id_salt("legion_desktop_code_canvas_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut painter = EguiCodeCanvasPainter;
+                    painter.paint_lines(ui, snapshot, model, actions);
+                });
+        })
+        .response
+        .rect;
     render_excerpt_surface(ui, snapshot, actions);
     render_search_projection(ui, snapshot);
     render_close_dirty_prompt_controls(ui, snapshot, actions);
+    editor_rect
 }
 
 fn render_tab_strip(
@@ -2914,10 +2957,14 @@ fn render_delegate_task_board(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let board_height = ui.available_height();
+    // This board is nested in the bounded advanced-workbench viewport. Keep
+    // its own non-shrinking horizontal scroll finite so it cannot claim the
+    // editor allocation below the outer vertical scroll region.
+    let board_height = 180.0_f32;
     egui::ScrollArea::horizontal()
         .id_salt("legion_desktop_task_board")
         .auto_shrink([false, false])
+        .max_height(board_height)
         .show(ui, |ui| {
             ui.set_min_height(board_height);
             ui.horizontal_top(|ui| {
@@ -4789,6 +4836,8 @@ pub struct ProjectionViewOutput {
     pub needs_repaint: bool,
     /// Title displayed during this render.
     pub displayed_title: String,
+    /// Bottom-tab model rows derived from the renderer's visible selection.
+    pub bottom_tab_rows: Vec<String>,
     /// Adapter actions requested by rendered controls.
     pub actions: Vec<DesktopAction>,
 }
@@ -5269,8 +5318,8 @@ fn command_palette_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     rows
 }
 
-fn bottom_tab_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
-    bottom_tab_specs(snapshot, BottomPanelTab::Terminal)
+fn bottom_tab_rows(snapshot: &ShellProjectionSnapshot, selected: BottomPanelTab) -> Vec<String> {
+    bottom_tab_specs(snapshot, selected)
         .into_iter()
         .map(|tab| {
             let count = tab

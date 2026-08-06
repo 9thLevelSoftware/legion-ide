@@ -1728,13 +1728,10 @@ fn projection_rendering_marks_expanded_and_collapsed_explorer_rows() {
     );
 }
 
-fn desktop_raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+fn desktop_raw_input_at(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
         focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
         events,
         ..egui::RawInput::default()
     }
@@ -1745,8 +1742,17 @@ fn render_projection_frame(
     view: &mut ProjectionView,
     snapshot: &legion_ui::ShellProjectionSnapshot,
 ) -> (ProjectionViewOutput, egui::FullOutput) {
+    render_projection_frame_at(ctx, view, snapshot, egui::vec2(1_440.0, 900.0))
+}
+
+fn render_projection_frame_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
     let mut projection_output = None;
-    let full_output = ctx.run_ui(desktop_raw_input(Vec::new()), |ui| {
+    let full_output = ctx.run_ui(desktop_raw_input_at(size, Vec::new()), |ui| {
         projection_output = Some(view.render(ui, snapshot));
     });
     (
@@ -1776,6 +1782,29 @@ fn accesskit_bounds(
         .unwrap_or_else(|| panic!("accessible control `{label}` should be allocated"))
 }
 
+fn accesskit_button_bounds_in_x_range(
+    output: &egui::FullOutput,
+    label: &str,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            let bounds = node.bounds()?;
+            let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+            (node.label() == Some(label)
+                && node.supports_action(egui::accesskit::Action::Click)
+                && x_range.contains(&center_x))
+            .then_some(bounds)
+        })
+        .unwrap_or_else(|| panic!("central accessible control `{label}` should be allocated"))
+}
+
 fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
     output
         .platform_output
@@ -1796,33 +1825,67 @@ fn click_accessible_control(
     primed: &egui::FullOutput,
     label: &str,
 ) -> (ProjectionViewOutput, egui::FullOutput) {
+    click_accessible_control_at(
+        ctx,
+        view,
+        snapshot,
+        primed,
+        label,
+        egui::vec2(1_440.0, 900.0),
+    )
+}
+
+fn click_accessible_control_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
     let bounds = accesskit_bounds(primed, label, true);
     let pos = egui::pos2(
         ((bounds.x0 + bounds.x1) * 0.5) as f32,
         ((bounds.y0 + bounds.y1) * 0.5) as f32,
     );
-    let press = desktop_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]);
+    click_projection_at(ctx, view, snapshot, pos, size)
+}
+
+fn click_projection_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    pos: egui::Pos2,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let press = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
     let _ = ctx.run_ui(press, |ui| {
         let _ = view.render(ui, snapshot);
     });
 
-    let release = desktop_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]);
+    let release = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
     let mut projection_output = None;
     let full_output = ctx.run_ui(release, |ui| {
         projection_output = Some(view.render(ui, snapshot));
@@ -1853,6 +1916,19 @@ fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_s
     assert_eq!(view.selected_bottom_panel(), BottomPanelTab::Problems);
     assert!(accesskit_has_label(&full, "Problems"));
     assert!(!accesskit_has_label(&full, "Terminal / Runtime"));
+    let (problems_frame, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(
+        problems_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=problems") && row.contains("active=true") })
+    );
+    assert!(
+        problems_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=false") })
+    );
 
     snapshot.product_mode = DockMode::Assist;
     let (_assist, next) = render_projection_frame(&ctx, &mut view, &snapshot);
@@ -1867,6 +1943,19 @@ fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_s
     full = next;
     assert_eq!(view.selected_bottom_panel(), BottomPanelTab::AgentLog);
     assert!(accesskit_has_label(&full, "Agent Comm Stream"));
+    let (agent_frame, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(
+        agent_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=agent-log") && row.contains("active=true") })
+    );
+    assert!(
+        agent_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=false") })
+    );
 
     snapshot.product_mode = DockMode::Manual;
     let (_manual, full) = render_projection_frame(&ctx, &mut view, &snapshot);
@@ -1874,6 +1963,61 @@ fn projection_rendering_bottom_tabs_are_real_controls_with_persistent_renderer_s
     assert!(!accesskit_has_label(&full, "AGENT LOG"));
     assert!(!accesskit_has_label(&full, "Agent Comm Stream"));
     assert!(accesskit_has_label(&full, "Terminal / Runtime"));
+}
+
+#[test]
+fn projection_rendering_expanded_workbenches_leave_a_usable_visible_editor() {
+    for size in [egui::vec2(960.0, 720.0), egui::vec2(1_440.0, 900.0)] {
+        for (mode, disclosure, action) in [
+            (DockMode::Assist, "Assist workbench", "Predict"),
+            (DockMode::Delegate, "Delegate workbench", "Approve"),
+            (
+                DockMode::Automate,
+                "Legion Workflows workbench",
+                "Force Review",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut view = ProjectionView::new();
+            let mut snapshot = populated_snapshot();
+            snapshot.product_mode = mode;
+
+            let (_closed, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+            let (_opened, _) =
+                click_accessible_control_at(&ctx, &mut view, &snapshot, &full, disclosure, size);
+            let mut full = render_projection_frame_at(&ctx, &mut view, &snapshot, size).1;
+            for _ in 0..8 {
+                full = render_projection_frame_at(&ctx, &mut view, &snapshot, size).1;
+            }
+            let editor_rect = view
+                .last_editor_rect()
+                .expect("the real editor surface should record its allocation");
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let visible_editor = editor_rect.intersect(screen);
+            assert!(
+                visible_editor.height() >= 180.0,
+                "{mode:?} at {size:?} must leave at least 180px of the editor visible; actual editor={editor_rect:?}, visible={visible_editor:?}"
+            );
+
+            let action_bounds = accesskit_button_bounds_in_x_range(
+                &full,
+                action,
+                editor_rect.left()..=editor_rect.right(),
+            );
+            let action_pos = egui::pos2(
+                ((action_bounds.x0 + action_bounds.x1) * 0.5) as f32,
+                ((action_bounds.y0 + action_bounds.y1) * 0.5) as f32,
+            );
+            let (action_output, _) =
+                click_projection_at(&ctx, &mut view, &snapshot, action_pos, size);
+            assert_eq!(
+                action_output.actions.len(),
+                1,
+                "{mode:?} action should remain clickable inside the bounded workbench"
+            );
+        }
+    }
 }
 
 #[test]
