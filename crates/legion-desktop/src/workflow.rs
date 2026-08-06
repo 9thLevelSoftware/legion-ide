@@ -3273,7 +3273,7 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
     // `DesktopRuntime::open` itself, since that constructor is also used by
     // the headless test harness and unit tests, which may run concurrently
     // against the same relative `target/delegated-tasks` path.
-    reap_orphaned_delegated_task_sandboxes_at_startup();
+    reap_orphaned_delegated_task_sandboxes_at_startup(&config.workspace_root);
 
     let native_options = desktop_native_options(WINDOW_TITLE);
     eframe::run_native(
@@ -3292,8 +3292,9 @@ fn run_native(config: DesktopLaunchConfig) -> Result<()> {
 /// prior process, using the default `target/delegated-tasks` root. Failures
 /// are logged and otherwise ignored — a reap failure must never block desktop
 /// startup.
-fn reap_orphaned_delegated_task_sandboxes_at_startup() {
-    match AppComposition::reap_orphaned_delegated_task_sandboxes() {
+fn reap_orphaned_delegated_task_sandboxes_at_startup(workspace_root: &Path) {
+    let delegated_tasks_root = workspace_root.join("target").join("delegated-tasks");
+    match AppComposition::reap_orphaned_delegated_task_sandboxes_at(&delegated_tasks_root) {
         Ok(removed) if !removed.is_empty() => {
             eprintln!(
                 "Reaped {} orphaned delegated-task sandbox(es):",
@@ -4720,6 +4721,22 @@ mod tests {
     use super::*;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn startup_reaper_targets_the_selected_workspace_sandbox_root() {
+        let workspace = TempWorkspace::new();
+        let orphan = workspace
+            .path()
+            .join("target")
+            .join("delegated-tasks")
+            .join("task-orphan");
+        fs::create_dir_all(&orphan).expect("create orphan sandbox");
+        fs::write(orphan.join("marker.txt"), "orphan\n").expect("write orphan marker");
+
+        reap_orphaned_delegated_task_sandboxes_at_startup(workspace.path());
+
+        assert!(!orphan.exists(), "workspace-root orphan must be reaped");
+    }
 
     #[test]
     fn projection_view_state_uses_runtime_root_and_persisted_bottom_panel() {

@@ -281,7 +281,7 @@ fn manual_mode_refuses_active_workflow_and_signals_cancellation() {
     app.seed_legion_workflow_sessions(vec![session])
         .expect("seed executing workflow");
     let cancellation = SharedCancellationFlag::new();
-    app.inject_cancellation_flag_for_test(cancellation.clone());
+    app.inject_active_workflow_for_test(cancellation.clone());
 
     app.set_product_mode(AppProductMode::Manual);
 

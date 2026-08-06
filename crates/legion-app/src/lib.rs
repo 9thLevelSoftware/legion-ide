@@ -979,8 +979,7 @@ enum LegionWorkflowProviderMode<'a> {
 #[cfg(feature = "ai")]
 struct PreparedLegionWorkflowWorkerRun {
     worker: LegionWorkflowWorkerAssignment,
-    orchestrator: DelegatedTaskSandboxOrchestrator,
-    implicit_permission: DelegatedTaskToolPermissionRequest,
+    sandbox_guard: DelegatedSandboxCleanupGuard,
     config: legion_agent::agent_loop::DelegatedTaskLoopConfig,
     tool_host: AppDelegatedToolHost,
     provider: Box<dyn legion_ai::tool_calls::ToolCallingProvider + Send>,
@@ -988,8 +987,6 @@ struct PreparedLegionWorkflowWorkerRun {
 
 #[cfg(feature = "ai")]
 struct InFlightLegionWorkflowWorkerRun {
-    orchestrator: DelegatedTaskSandboxOrchestrator,
-    implicit_permission: DelegatedTaskToolPermissionRequest,
     join_handle:
         std::thread::JoinHandle<Result<LegionWorkflowWorkerRunCompletion, AppCompositionError>>,
 }
@@ -1751,20 +1748,38 @@ struct LiveProductAiStreamSink {
 }
 
 impl LiveProductAiStreamSink {
-    fn begin(&self, operation: &str, provider_hint: &str, model_hint: &str) {
-        self.in_flight
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut guard) = self.projection.lock() {
-            *guard = ProductAiStreamProjection {
-                provider_id: provider_hint.to_string(),
-                model: model_hint.to_string(),
-                operation: operation.to_string(),
-                chunks: Vec::new(),
-                streamed: false,
-                in_flight: true,
-                text_preview: String::new(),
-            };
+    fn try_begin(&self, operation: &str, provider_hint: &str, model_hint: &str) -> bool {
+        let Ok(pending) = self.pending_results.lock() else {
+            return false;
+        };
+        if !pending.is_empty()
+            || self
+                .in_flight
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+        {
+            return false;
         }
+        let Ok(mut guard) = self.projection.lock() else {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        };
+        *guard = ProductAiStreamProjection {
+            provider_id: provider_hint.to_string(),
+            model: model_hint.to_string(),
+            operation: operation.to_string(),
+            chunks: Vec::new(),
+            streamed: false,
+            in_flight: true,
+            text_preview: String::new(),
+        };
+        true
     }
 
     fn push_delta(&self, delta: &str) {
@@ -1810,6 +1825,20 @@ impl LiveProductAiStreamSink {
             .unwrap_or(true)
     }
 
+    fn mode_allows_active_operation(&self, mode: AppProductMode) -> bool {
+        if !self.is_in_flight() && !self.has_pending_results() {
+            return true;
+        }
+        let Ok(guard) = self.projection.lock() else {
+            return false;
+        };
+        match guard.operation.as_str() {
+            "delegate.chat" => mode.allows_delegate(),
+            "assist.proposal" => mode.allows_assist(),
+            _ => false,
+        }
+    }
+
     /// Publish the final stream projection and enqueue its app-thread result
     /// before making the operation observable as no longer in flight. This
     /// ordering closes the Manual-transition race between provider completion
@@ -1820,6 +1849,9 @@ impl LiveProductAiStreamSink {
         completion: Option<&ProductChatCompletion>,
         operation: &str,
     ) {
+        let Ok(mut queue) = self.pending_results.lock() else {
+            return;
+        };
         if let Ok(mut guard) = self.projection.lock() {
             if let Some(completion) = completion {
                 *guard = product_stream_from_completion(completion, operation);
@@ -1827,16 +1859,9 @@ impl LiveProductAiStreamSink {
                 guard.in_flight = false;
             }
         }
-        let queued = if let Ok(mut queue) = self.pending_results.lock() {
-            queue.push_back(result);
-            true
-        } else {
-            false
-        };
-        if queued {
-            self.in_flight
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        }
+        queue.push_back(result);
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
@@ -1983,8 +2008,29 @@ pub enum AppDelegatedTaskOutcome {
 
 #[cfg(feature = "ai")]
 struct InFlightDelegatedTaskRun {
+    owner_id: uuid::Uuid,
     cancellation_flag: SharedCancellationFlag,
-    join_handle: std::thread::JoinHandle<Result<DelegatedTaskRunCompletion, AppCompositionError>>,
+    join_handle:
+        Option<std::thread::JoinHandle<Result<DelegatedTaskRunCompletion, AppCompositionError>>>,
+}
+
+#[cfg(feature = "ai")]
+impl Drop for InFlightDelegatedTaskRun {
+    fn drop(&mut self) {
+        self.cancellation_flag.cancel();
+        let Some(join_handle) = self.join_handle.take() else {
+            return;
+        };
+        if join_handle.is_finished() {
+            let _ = join_handle.join();
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("legion-delegate-drop-reaper".to_string())
+            .spawn(move || {
+                let _ = join_handle.join();
+            });
+    }
 }
 
 #[cfg(feature = "ai")]
@@ -1995,6 +2041,50 @@ struct DelegatedTaskRunCompletion {
     sandbox_enforcement_label: Option<String>,
 }
 
+#[cfg(feature = "ai")]
+struct DelegatedSandboxCleanupGuard {
+    orchestrator: DelegatedTaskSandboxOrchestrator,
+    permission: DelegatedTaskToolPermissionRequest,
+    cleanup_complete: bool,
+}
+
+#[cfg(feature = "ai")]
+impl DelegatedSandboxCleanupGuard {
+    fn new(
+        orchestrator: DelegatedTaskSandboxOrchestrator,
+        permission: DelegatedTaskToolPermissionRequest,
+    ) -> Self {
+        Self {
+            orchestrator,
+            permission,
+            cleanup_complete: false,
+        }
+    }
+
+    fn initialize(&mut self) -> Result<(), std::io::Error> {
+        self.orchestrator.initialize(&self.permission)
+    }
+
+    fn cleanup(&mut self) -> Result<(), std::io::Error> {
+        match self.orchestrator.cleanup(&self.permission) {
+            Ok(()) => {
+                self.cleanup_complete = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(feature = "ai")]
+impl Drop for DelegatedSandboxCleanupGuard {
+    fn drop(&mut self) {
+        if !self.cleanup_complete {
+            let _ = self.orchestrator.cleanup(&self.permission);
+        }
+    }
+}
+
 /// Thread-safe cancellation flag shared between the UI kill switch and the delegated task loop.
 ///
 /// The UI thread calls [`SharedCancellationFlag::cancel`] and the delegated task loop polls
@@ -2002,6 +2092,19 @@ struct DelegatedTaskRunCompletion {
 #[derive(Clone)]
 pub struct SharedCancellationFlag {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveWorkerKind {
+    DelegatedTask,
+    LegionWorkflow,
+}
+
+#[derive(Clone)]
+struct ActiveWorkerRegistration {
+    owner_id: uuid::Uuid,
+    kind: ActiveWorkerKind,
+    cancellation_flag: SharedCancellationFlag,
 }
 
 impl SharedCancellationFlag {
@@ -15907,11 +16010,11 @@ pub struct AppComposition {
     remote: RemoteComposition,
     legion_cloud_lane: LegionCloudLaneComposition,
     delegate_workflow: DelegateWorkflowState,
-    /// Shared cancellation flag for the currently running delegated task loop, if any.
-    /// Set to `Some` when `start_delegated_task` begins execution; cleared to `None` when the
-    /// loop returns. The UI kill switch calls `cancel_delegated_task` which sets the flag to
-    /// signal the loop to stop before its next model turn or tool execution.
-    active_cancellation_flag: Option<SharedCancellationFlag>,
+    /// Sole app-owned worker registration. The owner id prevents one run from
+    /// clearing another run's cancellation authority.
+    active_worker: Option<ActiveWorkerRegistration>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_cancellation_flag: Option<SharedCancellationFlag>,
     /// App-owned worker for a Desktop-started delegated loop. Completion is
     /// merged on the app thread so proposal registration never moves into the renderer.
     #[cfg(feature = "ai")]
@@ -16185,7 +16288,9 @@ impl AppComposition {
             remote: RemoteComposition::default(),
             legion_cloud_lane: LegionCloudLaneComposition::default(),
             delegate_workflow: DelegateWorkflowState::default(),
-            active_cancellation_flag: None,
+            active_worker: None,
+            #[cfg(any(test, feature = "test-helpers"))]
+            injected_cancellation_flag: None,
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
@@ -16590,18 +16695,82 @@ impl AppComposition {
         }
     }
 
+    fn begin_active_worker(
+        &mut self,
+        kind: ActiveWorkerKind,
+    ) -> Result<(uuid::Uuid, SharedCancellationFlag), AppCompositionError> {
+        if self.active_worker.is_some() {
+            return Err(AppCompositionError::AiRuntime(
+                "an AI/workflow worker is already running".to_string(),
+            ));
+        }
+        #[cfg(any(test, feature = "test-helpers"))]
+        let cancellation_flag = self.injected_cancellation_flag.take().unwrap_or_default();
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        let cancellation_flag = SharedCancellationFlag::default();
+        let owner_id = uuid::Uuid::now_v7();
+        self.active_worker = Some(ActiveWorkerRegistration {
+            owner_id,
+            kind,
+            cancellation_flag: cancellation_flag.clone(),
+        });
+        Ok((owner_id, cancellation_flag))
+    }
+
+    fn ensure_no_active_worker(&self) -> Result<(), AppCompositionError> {
+        if self.active_worker.is_some() {
+            Err(AppCompositionError::AiRuntime(
+                "an AI/workflow worker is already running".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn clear_active_worker(&mut self, owner_id: uuid::Uuid) {
+        if self
+            .active_worker
+            .as_ref()
+            .is_some_and(|registration| registration.owner_id == owner_id)
+        {
+            self.active_worker = None;
+        }
+    }
+
+    fn mode_allows_active_worker(mode: AppProductMode, kind: ActiveWorkerKind) -> bool {
+        match kind {
+            ActiveWorkerKind::DelegatedTask => mode.allows_delegate(),
+            ActiveWorkerKind::LegionWorkflow => mode.allows_automate(),
+        }
+    }
+
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
-        if mode == AppProductMode::Manual && self.product_mode != AppProductMode::Manual {
-            if let Some(flag) = &self.active_cancellation_flag {
-                flag.cancel();
-                // Stay in the current authority mode until the app thread has
-                // observed and merged the cancellation acknowledgement.
-                return;
-            }
-            // Persisted/projected workflow activity without a live worker can
-            // be acknowledged synchronously. A real worker always owns the
-            // cancellation flag handled above.
+        if let Some(worker) = &self.active_worker
+            && !Self::mode_allows_active_worker(mode, worker.kind)
+        {
+            worker.cancellation_flag.cancel();
+            // Keep the current authority projection, and therefore its visible
+            // cancel control, until the owning worker result is merged.
+            return;
+        }
+        if self.product_mode == mode {
+            return;
+        }
+        if !self
+            .live_product_ai_stream
+            .mode_allows_active_operation(mode)
+        {
+            // Product provider calls do not yet expose a transport-level
+            // cancellation handle. Refuse the downgrade rather than claim a
+            // zero-egress mode while the request or result handoff is live.
+            return;
+        }
+        // Persisted/projected workflow activity without a live worker can be
+        // acknowledged synchronously, but only after every live lane above has
+        // accepted the target mode. This avoids partial cancellation on a
+        // downgrade that is ultimately deferred.
+        if !mode.allows_automate() {
             for session in &mut self.legion_workflow_sessions {
                 if matches!(
                     session.lifecycle_state,
@@ -16611,14 +16780,6 @@ impl AppComposition {
                 ) {
                     session.lifecycle_state = LegionWorkflowState::Cancelled;
                 }
-            }
-            if self.live_product_ai_stream.is_in_flight()
-                || self.live_product_ai_stream.has_pending_results()
-            {
-                // Product provider calls do not yet expose a transport-level
-                // cancellation handle. Refuse the downgrade rather than claim
-                // Manual's zero-egress boundary while the request continues.
-                return;
             }
         }
         self.product_mode = mode;
@@ -16784,8 +16945,8 @@ impl AppComposition {
     /// already projected a lower product mode. Returns an error if no delegated
     /// task or workflow worker is currently running.
     pub fn cancel_delegated_task(&self) -> Result<(), AppCompositionError> {
-        if let Some(flag) = &self.active_cancellation_flag {
-            flag.cancel();
+        if let Some(worker) = &self.active_worker {
+            worker.cancellation_flag.cancel();
             Ok(())
         } else {
             Err(AppCompositionError::AiRuntime(
@@ -16806,10 +16967,10 @@ impl AppComposition {
     }
 
     #[cfg(feature = "ai")]
-    fn validate_delegated_task_scope_root(
+    fn normalize_delegated_task_scope(
         &self,
-        scope: &legion_protocol::DelegatedTaskScope,
-    ) -> Result<(), AppCompositionError> {
+        mut scope: legion_protocol::DelegatedTaskScope,
+    ) -> Result<legion_protocol::DelegatedTaskScope, AppCompositionError> {
         let active_root = std::fs::canonicalize(self.workspace_root_path()).map_err(|error| {
             AppCompositionError::AiRuntime(format!(
                 "active workspace root could not be canonicalized: {error}"
@@ -16825,6 +16986,23 @@ impl AppComposition {
                 "delegated scope workspace root does not match the active workspace".to_string(),
             ));
         }
+        scope.workspace_root = CanonicalPath(active_root.to_string_lossy().into_owned());
+
+        let normalize_path = |path: &CanonicalPath,
+                              label: &str|
+         -> Result<std::path::PathBuf, AppCompositionError> {
+            let path = std::path::Path::new(&path.0);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                active_root.join(path)
+            };
+            resolve_existing_prefix(&path).ok_or_else(|| {
+                AppCompositionError::AiRuntime(format!(
+                    "delegated scope {label} contains an unresolvable path alias"
+                ))
+            })
+        };
 
         match (scope.target_kind, scope.target_path.as_ref()) {
             (legion_protocol::DelegatedTaskScopeTargetKind::Repo, None) => {}
@@ -16833,28 +17011,22 @@ impl AppComposition {
                 | legion_protocol::DelegatedTaskScopeTargetKind::Module,
                 Some(target),
             ) => {
-                let target = std::fs::canonicalize(&target.0).map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "delegated scope target could not be canonicalized: {error}"
-                    ))
-                })?;
+                let target = normalize_path(target, "target")?;
                 if !target.starts_with(&active_root) {
                     return Err(AppCompositionError::AiRuntime(
                         "delegated scope target is outside the active workspace".to_string(),
                     ));
                 }
+                scope.target_path = Some(CanonicalPath(target.to_string_lossy().into_owned()));
             }
             (legion_protocol::DelegatedTaskScopeTargetKind::Repo, Some(target)) => {
-                let target = std::fs::canonicalize(&target.0).map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "delegated scope target could not be canonicalized: {error}"
-                    ))
-                })?;
+                let target = normalize_path(target, "target")?;
                 if !target.starts_with(&active_root) {
                     return Err(AppCompositionError::AiRuntime(
                         "delegated scope target is outside the active workspace".to_string(),
                     ));
                 }
+                scope.target_path = Some(CanonicalPath(target.to_string_lossy().into_owned()));
             }
             (_, None) => {
                 return Err(AppCompositionError::AiRuntime(
@@ -16862,7 +17034,15 @@ impl AppComposition {
                 ));
             }
         }
-        Ok(())
+        scope.forbidden_paths = scope
+            .forbidden_paths
+            .iter()
+            .map(|path| {
+                normalize_path(path, "forbidden path")
+                    .map(|path| CanonicalPath(path.to_string_lossy().into_owned()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(scope)
     }
 
     fn require_automate_mode(&self) -> Result<(), AppCompositionError> {
@@ -17569,7 +17749,17 @@ impl AppComposition {
     /// PKT-WORKER D3.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_cancellation_flag_for_test(&mut self, flag: SharedCancellationFlag) {
-        self.active_cancellation_flag = Some(flag);
+        self.injected_cancellation_flag = Some(flag);
+    }
+
+    /// Test-only: project a live workflow owner with an explicit cancellation flag.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_active_workflow_for_test(&mut self, flag: SharedCancellationFlag) {
+        self.active_worker = Some(ActiveWorkerRegistration {
+            owner_id: uuid::Uuid::now_v7(),
+            kind: ActiveWorkerKind::LegionWorkflow,
+            cancellation_flag: flag,
+        });
     }
 
     /// Test-only: returns `true` if the LSP session handle is in the `Idle`
@@ -20331,7 +20521,8 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
-        self.validate_delegated_task_scope_root(&scope)?;
+        let scope = self.normalize_delegated_task_scope(scope)?;
+        self.ensure_no_active_worker()?;
         if self.in_flight_delegated_task.is_some() {
             return Err(AppCompositionError::AiRuntime(
                 "a delegated task is already running".to_string(),
@@ -20342,7 +20533,7 @@ impl AppComposition {
         let correlation_id = event_context.correlation_id;
         let causality_id = event_context.causality_id;
         let event_sequence = self.event_sequence_generator.next();
-        let workspace_root = self.workspace_root_path();
+        let workspace_root = std::path::PathBuf::from(&scope.workspace_root.0);
         let task_id = uuid::Uuid::new_v4().to_string();
         let run_id = legion_protocol::AgentRunId(format!("run-{task_id}"));
         let mut agent_runtime = AgentRuntime::new(run_id);
@@ -20365,7 +20556,7 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        let mut orchestrator =
+        let orchestrator =
             DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &task_id);
         let implicit_permission =
             delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
@@ -20400,11 +20591,13 @@ impl AppComposition {
                 .map(|path| path.0.clone())
                 .collect(),
         };
-        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
-        self.active_cancellation_flag = Some(cancellation_flag.clone());
+        let (owner_id, cancellation_flag) =
+            self.begin_active_worker(ActiveWorkerKind::DelegatedTask)?;
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
         let worker_cancellation = cancellation_flag.clone();
+        let mut sandbox_guard =
+            DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
         let join_handle = std::thread::spawn(move || {
             struct VecAuditSink {
                 steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
@@ -20430,50 +20623,77 @@ impl AppComposition {
                 }
             }
 
-            if worker_cancellation.is_cancelled() {
-                return Ok(DelegatedTaskRunCompletion {
-                    audit_steps: Vec::new(),
-                    loop_result: Some(legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled),
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if worker_cancellation.is_cancelled() {
+                    return Ok(DelegatedTaskRunCompletion {
+                        audit_steps: Vec::new(),
+                        loop_result: Some(
+                            legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled,
+                        ),
+                        sandbox_allocation_failure: None,
+                        sandbox_enforcement_label: None,
+                    });
+                }
+                if let Err(error) = sandbox_guard.initialize() {
+                    return Ok(DelegatedTaskRunCompletion {
+                        audit_steps: Vec::new(),
+                        loop_result: None,
+                        sandbox_allocation_failure: Some(error.to_string()),
+                        sandbox_enforcement_label: None,
+                    });
+                }
+                let tool_host = AppDelegatedToolHost::new(
+                    config.worktree_root.clone(),
+                    std::collections::BTreeSet::new(),
+                );
+                let mut audit_sink = VecAuditSink { steps: Vec::new() };
+                let loop_result = run_delegated_task_loop(
+                    &config,
+                    provider.as_ref(),
+                    &tool_host,
+                    &mut audit_sink,
+                    &worker_cancellation,
+                    &AllowAllCapabilityBroker,
+                )
+                .map_err(|error| {
+                    AppCompositionError::AiRuntime(format!("delegated loop error: {error}"))
+                })?;
+                Ok(DelegatedTaskRunCompletion {
+                    audit_steps: audit_sink.steps,
+                    loop_result: Some(loop_result),
                     sandbox_allocation_failure: None,
-                    sandbox_enforcement_label: None,
-                });
-            }
-            if let Err(error) = orchestrator.initialize(&implicit_permission) {
-                return Ok(DelegatedTaskRunCompletion {
-                    audit_steps: Vec::new(),
-                    loop_result: None,
-                    sandbox_allocation_failure: Some(error.to_string()),
-                    sandbox_enforcement_label: None,
-                });
-            }
-            let tool_host = AppDelegatedToolHost::new(
-                config.worktree_root.clone(),
-                std::collections::BTreeSet::new(),
-            );
-            let mut audit_sink = VecAuditSink { steps: Vec::new() };
-            let loop_result = run_delegated_task_loop(
-                &config,
-                provider.as_ref(),
-                &tool_host,
-                &mut audit_sink,
-                &worker_cancellation,
-                &AllowAllCapabilityBroker,
-            )
-            .map_err(|error| {
-                AppCompositionError::AiRuntime(format!("delegated loop error: {error}"))
+                    sandbox_enforcement_label: tool_host.last_enforcement_summary(),
+                })
+            }));
+            let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
+                AppCompositionError::AiRuntime(format!("sandbox cleanup failed: {error}"))
             });
-            let sandbox_enforcement_label = tool_host.last_enforcement_summary();
-            if let Err(_cleanup_error) = orchestrator.cleanup(&implicit_permission) {}
-            Ok(DelegatedTaskRunCompletion {
-                audit_steps: audit_sink.steps,
-                loop_result: Some(loop_result?),
-                sandbox_allocation_failure: None,
-                sandbox_enforcement_label,
-            })
+            let run_result = match run_result {
+                Ok(result) => result,
+                Err(payload) => {
+                    let reason = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown panic");
+                    Err(AppCompositionError::AiRuntime(format!(
+                        "delegated loop worker thread panicked: {reason}"
+                    )))
+                }
+            };
+            match (run_result, cleanup_result) {
+                (Ok(completion), Ok(())) => Ok(completion),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+                (Err(error), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
+                    "{error}; {cleanup_error}"
+                ))),
+            }
         });
         self.in_flight_delegated_task = Some(InFlightDelegatedTaskRun {
+            owner_id,
             cancellation_flag,
-            join_handle,
+            join_handle: Some(join_handle),
         });
         Ok(())
     }
@@ -20487,15 +20707,23 @@ impl AppComposition {
         let Some(run) = self.in_flight_delegated_task.as_ref() else {
             return Ok(None);
         };
-        if !run.join_handle.is_finished() {
+        if !run
+            .join_handle
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
             return Ok(None);
         }
-        let run = self
+        let mut run = self
             .in_flight_delegated_task
             .take()
             .expect("checked in-flight delegated task");
-        let joined = run.join_handle.join();
-        self.active_cancellation_flag = None;
+        let joined = run
+            .join_handle
+            .take()
+            .expect("in-flight delegated task owns join handle")
+            .join();
+        self.clear_active_worker(run.owner_id);
         let completion = match joined {
             Ok(Ok(completion)) => completion,
             Ok(Err(error)) => {
@@ -20520,15 +20748,11 @@ impl AppComposition {
                 reason,
             }));
         }
-        let loop_result = if run.cancellation_flag.is_cancelled() {
-            legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled
-        } else {
-            completion.loop_result.ok_or_else(|| {
-                AppCompositionError::AiRuntime(
-                    "delegated worker finished without a loop outcome".to_string(),
-                )
-            })?
-        };
+        let loop_result = completion.loop_result.ok_or_else(|| {
+            AppCompositionError::AiRuntime(
+                "delegated worker finished without a loop outcome".to_string(),
+            )
+        })?;
         Ok(Some(self.finish_background_delegated_task(
             loop_result,
             completion.audit_steps,
@@ -20543,12 +20767,10 @@ impl AppComposition {
     ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
         use legion_agent::agent_loop::DelegatedTaskLoopResult;
         match &loop_result {
-            DelegatedTaskLoopResult::Completed { .. } => self
-                .delegate_workflow
-                .set_runtime_activation(DelegatedTaskRuntimeActivationState::WaitingForApproval),
             DelegatedTaskLoopResult::Cancelled => self
                 .delegate_workflow
                 .set_runtime_activation(DelegatedTaskRuntimeActivationState::Cancelled),
+            DelegatedTaskLoopResult::Completed { .. } => {}
             _ => self
                 .delegate_workflow
                 .set_runtime_activation(DelegatedTaskRuntimeActivationState::Blocked),
@@ -20559,28 +20781,10 @@ impl AppComposition {
                 final_message,
                 proposals,
             } => {
-                let mut registered = Vec::new();
-                for mut proposal_output in proposals {
-                    let proposal_id = self.proposal_coordinator.next_id();
-                    proposal_output.proposal_id = proposal_id;
-                    let proposal = WorkspaceProposal {
-                        proposal_id,
-                        principal: proposal_output.principal.clone(),
-                        capability: proposal_output.capability.clone(),
-                        correlation_id: proposal_output.correlation_id,
-                        payload: proposal_output.payload.clone(),
-                        preconditions: proposal_output.preconditions.clone(),
-                        preview: proposal_output.preview.clone(),
-                        expires_at: proposal_output.expires_at,
-                        created_at: proposal_output.created_at,
-                    };
-                    if matches!(
-                        self.register_proposal_lifecycle(&proposal)?,
-                        ProposalResponse::Created(_)
-                    ) {
-                        registered.push(proposal_output);
-                    }
-                }
+                let registered = self.register_delegated_task_proposals(proposals)?;
+                self.delegate_workflow.set_runtime_activation(
+                    DelegatedTaskRuntimeActivationState::WaitingForApproval,
+                );
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
                     proposals: registered,
@@ -20607,6 +20811,54 @@ impl AppComposition {
         })
     }
 
+    #[cfg(feature = "ai")]
+    fn register_delegated_task_proposals(
+        &mut self,
+        proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
+    ) -> Result<Vec<legion_protocol::AssistedAiEditProposalOutput>, AppCompositionError> {
+        let snapshot = self
+            .proposal_coordinator
+            .proposal_lifecycle_recovery_snapshot();
+        let registration = (|| {
+            let mut registered = Vec::with_capacity(proposals.len());
+            for mut proposal_output in proposals {
+                let proposal_id = self.proposal_coordinator.next_id();
+                proposal_output.proposal_id = proposal_id;
+                let proposal = WorkspaceProposal {
+                    proposal_id,
+                    principal: proposal_output.principal.clone(),
+                    capability: proposal_output.capability.clone(),
+                    correlation_id: proposal_output.correlation_id,
+                    payload: proposal_output.payload.clone(),
+                    preconditions: proposal_output.preconditions.clone(),
+                    preview: proposal_output.preview.clone(),
+                    expires_at: proposal_output.expires_at,
+                    created_at: proposal_output.created_at,
+                };
+                match self.register_proposal_lifecycle(&proposal)? {
+                    ProposalResponse::Created(_) => registered.push(proposal_output),
+                    response => {
+                        return Err(AppCompositionError::AiRuntime(format!(
+                            "delegated proposal registration was rejected: {response:?}"
+                        )));
+                    }
+                }
+            }
+            Ok(registered)
+        })();
+
+        match registration {
+            Ok(registered) => Ok(registered),
+            Err(error) => {
+                self.proposal_coordinator
+                    .recover_lifecycle_from_snapshot(snapshot);
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                Err(error)
+            }
+        }
+    }
+
     /// Run one delegated task synchronously for headless callers and tests.
     /// Desktop actions use [`Self::start_delegated_task_background`] instead.
     #[cfg(feature = "ai")]
@@ -20623,14 +20875,15 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
-        self.validate_delegated_task_scope_root(&scope)?;
+        let scope = self.normalize_delegated_task_scope(scope)?;
+        self.ensure_no_active_worker()?;
 
         let event_context = self.next_event_context();
         let correlation_id = event_context.correlation_id;
         let causality_id = event_context.causality_id;
         let event_sequence = self.event_sequence_generator.next();
 
-        let workspace_root = self.workspace_root_path();
+        let workspace_root = std::path::PathBuf::from(&scope.workspace_root.0);
 
         // Allocate the sandbox worktree for this task run.
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -20660,7 +20913,7 @@ impl AppComposition {
         // registration hook (PKT-AGENT-REG) is tracked for a future packet.
         drop(agent_runtime);
 
-        let mut orchestrator =
+        let orchestrator =
             DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &task_id);
 
         // The permission for the production dispatch is an implicit Allow
@@ -20677,12 +20930,14 @@ impl AppComposition {
                 schema_version: 1,
             });
 
-        orchestrator.initialize(&implicit_permission).map_err(|e| {
+        let mut sandbox_guard =
+            DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission.clone());
+        sandbox_guard.initialize().map_err(|e| {
             AppCompositionError::AiRuntime(format!("sandbox allocation failed: {e}"))
         })?;
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
-        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+        let sandbox_path = sandbox_guard.orchestrator.sandbox_path().to_path_buf();
 
         // Build the tool host backed by `spawn_sandboxed`.
         let tool_host =
@@ -20701,8 +20956,8 @@ impl AppComposition {
 
         // Cancellation probe — reuse a pre-injected flag (e.g., from tests) or create a fresh one.
         // The UI kill switch calls `cancel_delegated_task` which sets the Arc<AtomicBool>.
-        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
-        self.active_cancellation_flag = Some(cancellation_flag.clone());
+        let (owner_id, cancellation_flag) =
+            self.begin_active_worker(ActiveWorkerKind::DelegatedTask)?;
 
         // Capability broker — scope enforcement is the primary gate inside
         // the loop; the loop's scope validator and containment checks enforce
@@ -20748,37 +21003,58 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
 
-        let loop_result = match run_delegated_task_loop(
-            &config,
-            provider,
-            &tool_host,
-            &mut audit_sink,
-            &cancellation_flag,
-            &allow_all_broker,
-        ) {
-            Ok(result) => {
-                // Clear the flag on the success path.
-                self.active_cancellation_flag = None;
-                if let Some(summary) = tool_host.last_enforcement_summary() {
-                    self.delegate_workflow.last_sandbox_enforcement_label = Some(summary);
-                }
-                result
-            }
-            Err(e) => {
-                // On error: clear the flag, mark the activation as Failed, run cleanup,
-                // then propagate the error.  Without this the activation stays stuck at
-                // Executing for the rest of the session.
-                self.active_cancellation_flag = None;
-                if let Some(summary) = tool_host.last_enforcement_summary() {
-                    self.delegate_workflow.last_sandbox_enforcement_label = Some(summary);
-                }
+        let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_delegated_task_loop(
+                &config,
+                provider,
+                &tool_host,
+                &mut audit_sink,
+                &cancellation_flag,
+                &allow_all_broker,
+            )
+        }));
+        self.clear_active_worker(owner_id);
+        if let Some(summary) = tool_host.last_enforcement_summary() {
+            self.delegate_workflow.last_sandbox_enforcement_label = Some(summary);
+        }
+        let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
+            AppCompositionError::AiRuntime(format!("sandbox cleanup failed: {error}"))
+        });
+        let loop_result = match (run_result, cleanup_result) {
+            (Ok(Ok(result)), Ok(())) => result,
+            (Ok(Ok(_)), Err(cleanup_error)) => {
                 self.delegate_workflow
                     .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {
-                    // Cleanup failure is non-fatal — orphan reaping handles stale sandboxes.
-                }
+                return Err(cleanup_error);
+            }
+            (Ok(Err(error)), Ok(())) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
                 return Err(AppCompositionError::AiRuntime(format!(
-                    "delegated loop error: {e}"
+                    "delegated loop error: {error}"
+                )));
+            }
+            (Ok(Err(error)), Err(cleanup_error)) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "delegated loop error: {error}; {cleanup_error}"
+                )));
+            }
+            (Err(payload), cleanup_result) => {
+                self.delegate_workflow
+                    .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                let reason = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic");
+                let cleanup_suffix = cleanup_result
+                    .err()
+                    .map(|error| format!("; {error}"))
+                    .unwrap_or_default();
+                return Err(AppCompositionError::AiRuntime(format!(
+                    "delegated loop panicked: {reason}{cleanup_suffix}"
                 )));
             }
         };
@@ -20800,12 +21076,6 @@ impl AppComposition {
             }
         }
 
-        // Best-effort cleanup; failure is non-fatal and does not override the loop outcome.
-        if let Err(_cleanup_err) = orchestrator.cleanup(&implicit_permission) {
-            // Cleanup failure is non-fatal — the sandbox directory may persist on disk.
-            // Lease-based orphan reaping (reap_orphaned_sandboxes) handles stale sandboxes.
-        }
-
         let audit_steps = audit_sink.steps;
 
         Ok(match loop_result {
@@ -20813,42 +21083,7 @@ impl AppComposition {
                 final_message,
                 proposals: loop_proposals,
             } => {
-                // Assign real ProposalIds and register each proposal for human review.
-                // The loop stamps ProposalId(0) as a placeholder; we replace it here.
-                let mut registered = Vec::new();
-                for mut proposal_output in loop_proposals {
-                    let real_id = self.proposal_coordinator.next_id();
-                    proposal_output.proposal_id = real_id;
-                    // Build WorkspaceProposal directly: agent-loop preconditions carry only
-                    // file-level guards (no buffer/snapshot versioning), so we bypass
-                    // to_workspace_proposal() which requires the full core-precondition set.
-                    let workspace_proposal = WorkspaceProposal {
-                        proposal_id: real_id,
-                        principal: proposal_output.principal.clone(),
-                        capability: proposal_output.capability.clone(),
-                        correlation_id: proposal_output.correlation_id,
-                        payload: proposal_output.payload.clone(),
-                        preconditions: proposal_output.preconditions.clone(),
-                        preview: proposal_output.preview.clone(),
-                        expires_at: proposal_output.expires_at,
-                        created_at: proposal_output.created_at,
-                    };
-                    // Propagate registration errors and verify the Created variant; skip
-                    // proposals for which registration fails or returns an unexpected
-                    // response so callers do not see phantom proposals that would fail
-                    // with "proposal not found" when review_delegate_proposal_hunk
-                    // looks them up in the ledger.
-                    match self.register_proposal_lifecycle(&workspace_proposal)? {
-                        ProposalResponse::Created(_) => {
-                            registered.push(proposal_output);
-                        }
-                        _unexpected => {
-                            // Registration did not return Created — the proposal was not
-                            // entered into the ledger. Exclude it so callers never attempt
-                            // to review a phantom proposal.
-                        }
-                    }
-                }
+                let registered = self.register_delegated_task_proposals(loop_proposals)?;
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
                     proposals: registered,
@@ -21592,8 +21827,8 @@ impl AppComposition {
             let session = self.legion_workflow_session_mut(session_id)?;
             session.lifecycle_state = LegionWorkflowState::Cancelled;
         }
-        if let Some(flag) = &self.active_cancellation_flag {
-            flag.cancel();
+        if let Some(worker) = &self.active_worker {
+            worker.cancellation_flag.cancel();
         }
         let event_context = self.next_event_context();
         self.automate_workflow.trigger_kill_switch(
@@ -21866,7 +22101,7 @@ impl AppComposition {
             safe_path_component(&worker.worker_id.0, "worker")
         );
         let workspace_root = self.workspace_root_path();
-        let mut orchestrator =
+        let orchestrator =
             DelegatedTaskSandboxOrchestrator::with_workspace_root(&workspace_root, &task_id);
         let implicit_permission =
             delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
@@ -21883,14 +22118,14 @@ impl AppComposition {
                 schema_version: 1,
             });
 
-        orchestrator
-            .initialize(&implicit_permission)
-            .map_err(|error| {
-                AppCompositionError::AiRuntime(format!("sandbox allocation failed: {error}"))
-            })?;
+        let mut sandbox_guard =
+            DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
+        sandbox_guard.initialize().map_err(|error| {
+            AppCompositionError::AiRuntime(format!("sandbox allocation failed: {error}"))
+        })?;
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
-        let sandbox_path = orchestrator.sandbox_path().to_path_buf();
+        let sandbox_path = sandbox_guard.orchestrator.sandbox_path().to_path_buf();
         let tool_host =
             AppDelegatedToolHost::new(sandbox_path.clone(), std::collections::BTreeSet::new());
 
@@ -21915,8 +22150,7 @@ impl AppComposition {
 
         Ok(PreparedLegionWorkflowWorkerRun {
             worker: worker.clone(),
-            orchestrator,
-            implicit_permission,
+            sandbox_guard,
             config,
             tool_host,
             provider,
@@ -21932,25 +22166,41 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::Executing);
         let worker = prepared.worker.clone();
-        let orchestrator = prepared.orchestrator;
-        let implicit_permission = prepared.implicit_permission;
+        let mut sandbox_guard = prepared.sandbox_guard;
         let config = prepared.config;
         let tool_host = prepared.tool_host;
         let provider = prepared.provider;
         let join_handle = std::thread::spawn(move || {
-            Self::run_prepared_legion_workflow_worker(
-                worker,
-                config,
-                tool_host,
-                provider,
-                cancellation_flag,
-            )
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::run_prepared_legion_workflow_worker(
+                    worker,
+                    config,
+                    tool_host,
+                    provider,
+                    cancellation_flag,
+                )
+            }));
+            let cleanup_result = sandbox_guard.cleanup().map_err(|error| {
+                AppCompositionError::AiRuntime(format!(
+                    "workflow worker sandbox cleanup failed: {error}"
+                ))
+            });
+            match (run_result, cleanup_result) {
+                (Ok(Ok(completion)), Ok(())) => Ok(completion),
+                (Ok(Err(error)), Ok(())) => Err(error),
+                (Ok(Ok(_)), Err(cleanup_error)) => Err(cleanup_error),
+                (Ok(Err(error)), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(
+                    format!("{error}; {cleanup_error}"),
+                )),
+                (Err(_), Ok(())) => Err(AppCompositionError::AiRuntime(
+                    "delegated loop worker thread panicked".to_string(),
+                )),
+                (Err(_), Err(cleanup_error)) => Err(AppCompositionError::AiRuntime(format!(
+                    "delegated loop worker thread panicked; {cleanup_error}"
+                ))),
+            }
         });
-        InFlightLegionWorkflowWorkerRun {
-            orchestrator,
-            implicit_permission,
-            join_handle,
-        }
+        InFlightLegionWorkflowWorkerRun { join_handle }
     }
 
     #[cfg(feature = "ai")]
@@ -22356,6 +22606,7 @@ impl AppComposition {
     ) -> Result<AppLegionWorkflowExecution, AppCompositionError> {
         let _ = &provider_mode;
         self.require_automate_mode()?;
+        self.ensure_no_active_worker()?;
         let session_index = self
             .legion_workflow_sessions
             .iter()
@@ -22425,60 +22676,34 @@ impl AppComposition {
             )));
         }
 
-        let cancellation_flag = self.active_cancellation_flag.clone().unwrap_or_default();
-        self.active_cancellation_flag = Some(cancellation_flag.clone());
-        #[cfg(feature = "ai")]
-        let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
-            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-        #[cfg(not(feature = "ai"))]
-        let lanes = vec![coordinator.next_ready_workers()];
-
-        'lane_loop: for lane in lanes {
+        let (owner_id, cancellation_flag) =
+            self.begin_active_worker(ActiveWorkerKind::LegionWorkflow)?;
+        let execution_result = (|| {
             #[cfg(feature = "ai")]
-            let mut in_flight = Vec::new();
-            let mut lane_paused = false;
+            let lanes = legion_agent::scheduler::parallel_worker_lanes(&session)
+                .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+            #[cfg(not(feature = "ai"))]
+            let lanes = vec![coordinator.next_ready_workers()];
 
-            if let Some((worker, conflict_id)) = lane.iter().find_map(|worker| {
-                let current_state =
-                    Self::current_legion_workflow_worker_state(&session, &worker.worker_id)?;
-                if !Self::legion_workflow_worker_can_dispatch(current_state)
-                    || !Self::legion_workflow_dependencies_satisfied(&session, &worker.worker_id)
-                {
-                    return None;
-                }
-                Self::unresolved_conflict_for_legion_workflow_worker(&session, worker)
-                    .map(|conflict_id| (worker.clone(), conflict_id))
-            }) {
-                self.pause_legion_workflow_worker_for_conflict(
-                    &mut session,
-                    &mut coordinator,
-                    &worker,
-                    &conflict_id,
-                    &mut outputs,
-                )?;
-                break 'lane_loop;
-            }
+            'lane_loop: for lane in lanes {
+                #[cfg(feature = "ai")]
+                let mut in_flight = Vec::new();
+                let mut lane_paused = false;
 
-            for worker in lane {
-                let Some(current_state) =
-                    Self::current_legion_workflow_worker_state(&session, &worker.worker_id)
-                else {
-                    continue;
-                };
-                if !Self::legion_workflow_worker_can_dispatch(current_state) {
-                    continue;
-                }
-                if !Self::legion_workflow_dependencies_satisfied(&session, &worker.worker_id) {
-                    self.set_legion_workflow_worker_state(
-                        &mut session,
-                        &worker.worker_id,
-                        LegionWorkflowWorkerState::WaitingForDependency,
-                    );
-                    continue;
-                }
-                if let Some(conflict_id) =
-                    Self::unresolved_conflict_for_legion_workflow_worker(&session, &worker)
-                {
+                if let Some((worker, conflict_id)) = lane.iter().find_map(|worker| {
+                    let current_state =
+                        Self::current_legion_workflow_worker_state(&session, &worker.worker_id)?;
+                    if !Self::legion_workflow_worker_can_dispatch(current_state)
+                        || !Self::legion_workflow_dependencies_satisfied(
+                            &session,
+                            &worker.worker_id,
+                        )
+                    {
+                        return None;
+                    }
+                    Self::unresolved_conflict_for_legion_workflow_worker(&session, worker)
+                        .map(|conflict_id| (worker.clone(), conflict_id))
+                }) {
                     self.pause_legion_workflow_worker_for_conflict(
                         &mut session,
                         &mut coordinator,
@@ -22486,64 +22711,96 @@ impl AppComposition {
                         &conflict_id,
                         &mut outputs,
                     )?;
-                    lane_paused = true;
-                    break;
+                    break 'lane_loop;
                 }
-                if cancellation_flag.is_cancelled() {
-                    let output = coordinator
-                        .mark_worker_blocked(
+
+                for worker in lane {
+                    let Some(current_state) =
+                        Self::current_legion_workflow_worker_state(&session, &worker.worker_id)
+                    else {
+                        continue;
+                    };
+                    if !Self::legion_workflow_worker_can_dispatch(current_state) {
+                        continue;
+                    }
+                    if !Self::legion_workflow_dependencies_satisfied(&session, &worker.worker_id) {
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
                             &worker.worker_id,
-                            vec!["legion_workflow.worker_cancelled".to_string()],
-                        )
-                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-                    self.set_legion_workflow_worker_state(
-                        &mut session,
-                        &worker.worker_id,
-                        LegionWorkflowWorkerState::Cancelled,
-                    );
-                    outputs.push(output);
-                    continue;
-                }
-
-                self.automate_workflow
-                    .record_decision(AutomateDecisionInput {
-                        session_id: session.session_id.clone(),
-                        worker_id: Some(worker.worker_id.clone()),
-                        kind: LegionWorkflowDecisionKind::WorkerScheduled,
-                        summary_label: format!(
-                            "Legion workflow worker scheduled: {}",
-                            worker.worker_id.0
-                        ),
-                        risk_label: if worker.risk_labels.iter().any(|risk| {
-                            matches!(
-                                risk,
-                                CommandRiskLabel::Privileged | CommandRiskLabel::Destructive
+                            LegionWorkflowWorkerState::WaitingForDependency,
+                        );
+                        continue;
+                    }
+                    if let Some(conflict_id) =
+                        Self::unresolved_conflict_for_legion_workflow_worker(&session, &worker)
+                    {
+                        self.pause_legion_workflow_worker_for_conflict(
+                            &mut session,
+                            &mut coordinator,
+                            &worker,
+                            &conflict_id,
+                            &mut outputs,
+                        )?;
+                        lane_paused = true;
+                        break;
+                    }
+                    if cancellation_flag.is_cancelled() {
+                        let output = coordinator
+                            .mark_worker_blocked(
+                                &worker.worker_id,
+                                vec!["legion_workflow.worker_cancelled".to_string()],
                             )
-                        }) {
-                            ProposalRiskLabel::High
-                        } else {
-                            ProposalRiskLabel::Medium
-                        },
-                        mcp_server_id: None,
-                        mcp_primitive_kind: None,
-                        tool_permission_request_id: None,
-                        event_context,
-                        event_sequence: self.event_sequence_generator.next(),
-                    })?;
-                self.record_legion_workflow_comm_row(
-                    "PLAN",
-                    format!("worker:{}", worker.worker_id.0),
-                    "Scheduled for workflow execution",
-                );
+                            .map_err(|error| {
+                                AppCompositionError::LegionWorkflow(error.to_string())
+                            })?;
+                        self.set_legion_workflow_worker_state(
+                            &mut session,
+                            &worker.worker_id,
+                            LegionWorkflowWorkerState::Cancelled,
+                        );
+                        outputs.push(output);
+                        continue;
+                    }
 
-                if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
-                    match self.prepare_legion_workflow_mcp_tool_call(
-                        &session.session_id,
-                        &server_id,
-                        &tool_name,
-                    )? {
-                        AppAutomateToolCallOutcome::WaitingForToolPermission { request } => {
-                            let output = coordinator
+                    self.automate_workflow
+                        .record_decision(AutomateDecisionInput {
+                            session_id: session.session_id.clone(),
+                            worker_id: Some(worker.worker_id.clone()),
+                            kind: LegionWorkflowDecisionKind::WorkerScheduled,
+                            summary_label: format!(
+                                "Legion workflow worker scheduled: {}",
+                                worker.worker_id.0
+                            ),
+                            risk_label: if worker.risk_labels.iter().any(|risk| {
+                                matches!(
+                                    risk,
+                                    CommandRiskLabel::Privileged | CommandRiskLabel::Destructive
+                                )
+                            }) {
+                                ProposalRiskLabel::High
+                            } else {
+                                ProposalRiskLabel::Medium
+                            },
+                            mcp_server_id: None,
+                            mcp_primitive_kind: None,
+                            tool_permission_request_id: None,
+                            event_context,
+                            event_sequence: self.event_sequence_generator.next(),
+                        })?;
+                    self.record_legion_workflow_comm_row(
+                        "PLAN",
+                        format!("worker:{}", worker.worker_id.0),
+                        "Scheduled for workflow execution",
+                    );
+
+                    if let Some((server_id, tool_name)) = legion_workflow_worker_mcp_tool(&worker) {
+                        match self.prepare_legion_workflow_mcp_tool_call(
+                            &session.session_id,
+                            &server_id,
+                            &tool_name,
+                        )? {
+                            AppAutomateToolCallOutcome::WaitingForToolPermission { request } => {
+                                let output = coordinator
                                 .mark_worker_blocked(
                                     &worker.worker_id,
                                     vec![format!(
@@ -22554,101 +22811,105 @@ impl AppComposition {
                                 .map_err(|error| {
                                     AppCompositionError::LegionWorkflow(error.to_string())
                                 })?;
-                            self.set_legion_workflow_worker_state(
-                                &mut session,
-                                &worker.worker_id,
-                                LegionWorkflowWorkerState::ProviderRouteRequired,
-                            );
-                            outputs.push(output);
-                            continue;
-                        }
-                        AppAutomateToolCallOutcome::Denied { request } => {
-                            let output = coordinator
-                                .mark_worker_blocked(
+                                self.set_legion_workflow_worker_state(
+                                    &mut session,
                                     &worker.worker_id,
-                                    vec![format!(
-                                        "legion_workflow.mcp_worker_tool_permission_denied:{}",
-                                        request.request_id
-                                    )],
-                                )
-                                .map_err(|error| {
-                                    AppCompositionError::LegionWorkflow(error.to_string())
-                                })?;
-                            self.set_legion_workflow_worker_state(
-                                &mut session,
-                                &worker.worker_id,
-                                LegionWorkflowWorkerState::Blocked,
-                            );
-                            outputs.push(output);
-                            continue;
-                        }
-                        AppAutomateToolCallOutcome::Halted { monitor } => {
-                            let output = coordinator
-                                .mark_worker_blocked(
+                                    LegionWorkflowWorkerState::ProviderRouteRequired,
+                                );
+                                outputs.push(output);
+                                continue;
+                            }
+                            AppAutomateToolCallOutcome::Denied { request } => {
+                                let output = coordinator
+                                    .mark_worker_blocked(
+                                        &worker.worker_id,
+                                        vec![format!(
+                                            "legion_workflow.mcp_worker_tool_permission_denied:{}",
+                                            request.request_id
+                                        )],
+                                    )
+                                    .map_err(|error| {
+                                        AppCompositionError::LegionWorkflow(error.to_string())
+                                    })?;
+                                self.set_legion_workflow_worker_state(
+                                    &mut session,
                                     &worker.worker_id,
-                                    vec![format!(
-                                        "legion_workflow.mcp_worker_halted:{:?}",
-                                        monitor.halt_reason
-                                    )],
-                                )
-                                .map_err(|error| {
-                                    AppCompositionError::LegionWorkflow(error.to_string())
-                                })?;
-                            self.set_legion_workflow_worker_state(
-                                &mut session,
-                                &worker.worker_id,
-                                LegionWorkflowWorkerState::Blocked,
-                            );
-                            outputs.push(output);
-                            continue;
-                        }
-                        AppAutomateToolCallOutcome::Ready { request, .. } => {
-                            match self.invoke_legion_workflow_mcp_tool(
-                                &session.session_id,
-                                &worker.worker_id,
-                                &server_id,
-                                &tool_name,
-                                &request,
-                            ) {
-                                Ok(_receipt) => {
-                                    coordinator
-                                        .mark_worker_completed(&worker.worker_id)
-                                        .map_err(|error| {
-                                            AppCompositionError::LegionWorkflow(error.to_string())
-                                        })?;
-                                    self.set_legion_workflow_worker_state(
-                                        &mut session,
+                                    LegionWorkflowWorkerState::Blocked,
+                                );
+                                outputs.push(output);
+                                continue;
+                            }
+                            AppAutomateToolCallOutcome::Halted { monitor } => {
+                                let output = coordinator
+                                    .mark_worker_blocked(
                                         &worker.worker_id,
-                                        LegionWorkflowWorkerState::Completed,
-                                    );
-                                    self.satisfy_legion_workflow_dependencies(
-                                        &mut session,
-                                        &worker.worker_id,
-                                    );
-                                    continue;
-                                }
-                                Err(error) => {
-                                    let reason = error.to_string();
-                                    let event_context = self.next_event_context();
-                                    self.automate_workflow.record_decision(
-                                        AutomateDecisionInput {
-                                            session_id: session.session_id.clone(),
-                                            worker_id: Some(worker.worker_id.clone()),
-                                            kind: LegionWorkflowDecisionKind::ToolCallFailed,
-                                            summary_label: format!(
-                                                "MCP tool call failed: {reason}"
-                                            ),
-                                            risk_label: ProposalRiskLabel::High,
-                                            mcp_server_id: Some(server_id.clone()),
-                                            mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
-                                            tool_permission_request_id: Some(
-                                                request.request_id.clone(),
-                                            ),
-                                            event_context,
-                                            event_sequence: self.event_sequence_generator.next(),
-                                        },
-                                    )?;
-                                    let output = coordinator
+                                        vec![format!(
+                                            "legion_workflow.mcp_worker_halted:{:?}",
+                                            monitor.halt_reason
+                                        )],
+                                    )
+                                    .map_err(|error| {
+                                        AppCompositionError::LegionWorkflow(error.to_string())
+                                    })?;
+                                self.set_legion_workflow_worker_state(
+                                    &mut session,
+                                    &worker.worker_id,
+                                    LegionWorkflowWorkerState::Blocked,
+                                );
+                                outputs.push(output);
+                                continue;
+                            }
+                            AppAutomateToolCallOutcome::Ready { request, .. } => {
+                                match self.invoke_legion_workflow_mcp_tool(
+                                    &session.session_id,
+                                    &worker.worker_id,
+                                    &server_id,
+                                    &tool_name,
+                                    &request,
+                                ) {
+                                    Ok(_receipt) => {
+                                        coordinator
+                                            .mark_worker_completed(&worker.worker_id)
+                                            .map_err(|error| {
+                                                AppCompositionError::LegionWorkflow(
+                                                    error.to_string(),
+                                                )
+                                            })?;
+                                        self.set_legion_workflow_worker_state(
+                                            &mut session,
+                                            &worker.worker_id,
+                                            LegionWorkflowWorkerState::Completed,
+                                        );
+                                        self.satisfy_legion_workflow_dependencies(
+                                            &mut session,
+                                            &worker.worker_id,
+                                        );
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let reason = error.to_string();
+                                        let event_context = self.next_event_context();
+                                        self.automate_workflow.record_decision(
+                                            AutomateDecisionInput {
+                                                session_id: session.session_id.clone(),
+                                                worker_id: Some(worker.worker_id.clone()),
+                                                kind: LegionWorkflowDecisionKind::ToolCallFailed,
+                                                summary_label: format!(
+                                                    "MCP tool call failed: {reason}"
+                                                ),
+                                                risk_label: ProposalRiskLabel::High,
+                                                mcp_server_id: Some(server_id.clone()),
+                                                mcp_primitive_kind: Some(McpPrimitiveKind::Tool),
+                                                tool_permission_request_id: Some(
+                                                    request.request_id.clone(),
+                                                ),
+                                                event_context,
+                                                event_sequence: self
+                                                    .event_sequence_generator
+                                                    .next(),
+                                            },
+                                        )?;
+                                        let output = coordinator
                                         .mark_worker_blocked(
                                             &worker.worker_id,
                                             vec![format!(
@@ -22658,193 +22919,198 @@ impl AppComposition {
                                         .map_err(|error| {
                                             AppCompositionError::LegionWorkflow(error.to_string())
                                         })?;
-                                    self.set_legion_workflow_worker_state(
-                                        &mut session,
-                                        &worker.worker_id,
-                                        LegionWorkflowWorkerState::Blocked,
-                                    );
-                                    outputs.push(output);
-                                    continue;
+                                        self.set_legion_workflow_worker_state(
+                                            &mut session,
+                                            &worker.worker_id,
+                                            LegionWorkflowWorkerState::Blocked,
+                                        );
+                                        outputs.push(output);
+                                        continue;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                let task_packet_output = coordinator
-                    .task_packet_for_worker(&worker.worker_id)
-                    .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
-                outputs.push(task_packet_output);
-                match worker.model_backend {
-                    legion_protocol::LegionWorkflowModelBackend::ProviderBacked => {
-                        let output = coordinator
-                            .provider_route_for_worker(&worker.worker_id)
-                            .map_err(|error| {
+                    let task_packet_output = coordinator
+                        .task_packet_for_worker(&worker.worker_id)
+                        .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
+                    outputs.push(task_packet_output);
+                    match worker.model_backend {
+                        legion_protocol::LegionWorkflowModelBackend::ProviderBacked => {
+                            let output = coordinator
+                                .provider_route_for_worker(&worker.worker_id)
+                                .map_err(|error| {
                                 AppCompositionError::LegionWorkflow(error.to_string())
                             })?;
-                        let metadata_output = coordinator
-                            .provider_route_metadata_for_worker(&worker.worker_id)
-                            .map_err(|error| {
-                                AppCompositionError::LegionWorkflow(error.to_string())
-                            })?;
-                        outputs.push(output);
-                        outputs.push(metadata_output);
-                        #[cfg(feature = "ai")]
-                        if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                            && let Some(provider) = resolver.resolve_worker_provider(&worker)
-                        {
-                            let prepared = self
-                                .prepare_legion_workflow_worker_run(&session, &worker, provider)?;
-                            in_flight.push(self.spawn_legion_workflow_worker_run(
-                                prepared,
-                                cancellation_flag.clone(),
-                            ));
-                            continue;
-                        }
-                        self.block_legion_workflow_worker_provider_unavailable(
-                            &mut session,
-                            &mut coordinator,
-                            &worker.worker_id,
-                            &mut outputs,
-                        )?;
-                    }
-                    legion_protocol::LegionWorkflowModelBackend::Local => {
-                        #[cfg(feature = "ai")]
-                        if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
-                            && let Some(provider) = resolver.resolve_worker_provider(&worker)
-                        {
-                            let prepared = self
-                                .prepare_legion_workflow_worker_run(&session, &worker, provider)?;
-                            in_flight.push(self.spawn_legion_workflow_worker_run(
-                                prepared,
-                                cancellation_flag.clone(),
-                            ));
-                            continue;
-                        }
-                        self.block_legion_workflow_worker_provider_unavailable(
-                            &mut session,
-                            &mut coordinator,
-                            &worker.worker_id,
-                            &mut outputs,
-                        )?;
-                    }
-                    legion_protocol::LegionWorkflowModelBackend::Unavailable => {
-                        let output = coordinator
-                            .mark_worker_blocked(
+                            let metadata_output = coordinator
+                                .provider_route_metadata_for_worker(&worker.worker_id)
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            outputs.push(output);
+                            outputs.push(metadata_output);
+                            #[cfg(feature = "ai")]
+                            if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
+                                && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                            {
+                                let prepared = self.prepare_legion_workflow_worker_run(
+                                    &session, &worker, provider,
+                                )?;
+                                in_flight.push(self.spawn_legion_workflow_worker_run(
+                                    prepared,
+                                    cancellation_flag.clone(),
+                                ));
+                                continue;
+                            }
+                            self.block_legion_workflow_worker_provider_unavailable(
+                                &mut session,
+                                &mut coordinator,
                                 &worker.worker_id,
-                                vec!["legion_workflow.worker_backend_unavailable".to_string()],
-                            )
-                            .map_err(|error| {
-                                AppCompositionError::LegionWorkflow(error.to_string())
-                            })?;
-                        self.set_legion_workflow_worker_state(
-                            &mut session,
-                            &worker.worker_id,
-                            LegionWorkflowWorkerState::Blocked,
-                        );
-                        outputs.push(output);
+                                &mut outputs,
+                            )?;
+                        }
+                        legion_protocol::LegionWorkflowModelBackend::Local => {
+                            #[cfg(feature = "ai")]
+                            if let LegionWorkflowProviderMode::Resolver(resolver) = provider_mode
+                                && let Some(provider) = resolver.resolve_worker_provider(&worker)
+                            {
+                                let prepared = self.prepare_legion_workflow_worker_run(
+                                    &session, &worker, provider,
+                                )?;
+                                in_flight.push(self.spawn_legion_workflow_worker_run(
+                                    prepared,
+                                    cancellation_flag.clone(),
+                                ));
+                                continue;
+                            }
+                            self.block_legion_workflow_worker_provider_unavailable(
+                                &mut session,
+                                &mut coordinator,
+                                &worker.worker_id,
+                                &mut outputs,
+                            )?;
+                        }
+                        legion_protocol::LegionWorkflowModelBackend::Unavailable => {
+                            let output = coordinator
+                                .mark_worker_blocked(
+                                    &worker.worker_id,
+                                    vec!["legion_workflow.worker_backend_unavailable".to_string()],
+                                )
+                                .map_err(|error| {
+                                    AppCompositionError::LegionWorkflow(error.to_string())
+                                })?;
+                            self.set_legion_workflow_worker_state(
+                                &mut session,
+                                &worker.worker_id,
+                                LegionWorkflowWorkerState::Blocked,
+                            );
+                            outputs.push(output);
+                        }
                     }
                 }
-            }
 
-            #[cfg(feature = "ai")]
-            for mut worker_run in in_flight {
-                let joined = worker_run.join_handle.join();
-                if let Err(_cleanup_err) = worker_run
-                    .orchestrator
-                    .cleanup(&worker_run.implicit_permission)
-                {}
-                let completion = match joined {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        self.active_cancellation_flag = None;
-                        self.delegate_workflow
-                            .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
-                        return Err(AppCompositionError::AiRuntime(
-                            "delegated loop worker thread panicked".to_string(),
-                        ));
-                    }
-                };
-                let loop_result = if cancellation_flag.is_cancelled() {
-                    legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled
+                #[cfg(feature = "ai")]
+                for worker_run in in_flight {
+                    let joined = worker_run.join_handle.join();
+                    let completion = match joined {
+                        Ok(Ok(completion)) => completion,
+                        Ok(Err(error)) => {
+                            self.delegate_workflow.set_runtime_activation(
+                                DelegatedTaskRuntimeActivationState::Failed,
+                            );
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            self.delegate_workflow.set_runtime_activation(
+                                DelegatedTaskRuntimeActivationState::Failed,
+                            );
+                            return Err(AppCompositionError::AiRuntime(
+                                "workflow worker thread panicked outside its cleanup boundary"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    self.finish_legion_workflow_worker_run(
+                        &mut session,
+                        &mut coordinator,
+                        &completion.worker,
+                        completion.audit_steps,
+                        completion.loop_result,
+                        &mut outputs,
+                    )?;
+                }
+
+                if lane_paused
+                    || session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
+                    || cancellation_flag.is_cancelled()
+                {
+                    break;
+                }
+            }
+            self.apply_legion_workflow_dirty_workspace_gate(&mut session);
+            let merge_readiness =
+                legion_protocol::evaluate_legion_workflow_merge_readiness(&session);
+            session.lifecycle_state =
+                if session.lifecycle_state == LegionWorkflowState::WaitingOnHuman {
+                    LegionWorkflowState::WaitingOnHuman
+                } else if session
+                    .worker_assignments
+                    .iter()
+                    .any(|worker| worker.state == LegionWorkflowWorkerState::Cancelled)
+                {
+                    LegionWorkflowState::Cancelled
                 } else {
-                    completion.loop_result
+                    match merge_readiness.state {
+                        LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
+                        LegionWorkflowMergeReadinessState::WaitingForApproval => {
+                            LegionWorkflowState::WaitingForApproval
+                        }
+                        LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
+                    }
                 };
-                self.finish_legion_workflow_worker_run(
-                    &mut session,
-                    &mut coordinator,
-                    &completion.worker,
-                    completion.audit_steps,
-                    loop_result,
-                    &mut outputs,
-                )?;
-            }
-
-            if lane_paused
-                || session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
-                || cancellation_flag.is_cancelled()
-            {
-                break;
-            }
-        }
-        self.active_cancellation_flag = None;
-
-        self.apply_legion_workflow_dirty_workspace_gate(&mut session);
-        let merge_readiness = legion_protocol::evaluate_legion_workflow_merge_readiness(&session);
-        session.lifecycle_state = if session.lifecycle_state == LegionWorkflowState::WaitingOnHuman
-        {
-            LegionWorkflowState::WaitingOnHuman
-        } else if session
-            .worker_assignments
-            .iter()
-            .any(|worker| worker.state == LegionWorkflowWorkerState::Cancelled)
-        {
-            LegionWorkflowState::Cancelled
-        } else {
-            match merge_readiness.state {
-                LegionWorkflowMergeReadinessState::Ready => LegionWorkflowState::Completed,
-                LegionWorkflowMergeReadinessState::WaitingForApproval => {
-                    LegionWorkflowState::WaitingForApproval
-                }
-                LegionWorkflowMergeReadinessState::Blocked => LegionWorkflowState::Blocked,
-            }
-        };
-        self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
-        let memory_candidate_proposed = self
-            .propose_legion_workflow_memory_candidate(&session, MemoryConsentState::NotGranted)?;
-        self.automate_workflow
-            .record_decision(AutomateDecisionInput {
+            self.append_legion_workflow_tracker_record(&session, &merge_readiness, event_context)?;
+            let memory_candidate_proposed = self.propose_legion_workflow_memory_candidate(
+                &session,
+                MemoryConsentState::NotGranted,
+            )?;
+            self.automate_workflow
+                .record_decision(AutomateDecisionInput {
+                    session_id: session.session_id.clone(),
+                    worker_id: None,
+                    kind: LegionWorkflowDecisionKind::MergeReadinessEvaluated,
+                    summary_label: format!(
+                        "Legion workflow merge readiness evaluated: {:?}",
+                        merge_readiness.state
+                    ),
+                    risk_label: if merge_readiness.state == LegionWorkflowMergeReadinessState::Ready
+                    {
+                        ProposalRiskLabel::Medium
+                    } else {
+                        ProposalRiskLabel::High
+                    },
+                    mcp_server_id: None,
+                    mcp_primitive_kind: None,
+                    tool_permission_request_id: None,
+                    event_context,
+                    event_sequence: self.event_sequence_generator.next(),
+                })?;
+            self.legion_workflow_sessions[session_index] = session.clone();
+            outputs.push(LegionWorkflowCoordinatorOutput::MergeReadiness(
+                merge_readiness.clone(),
+            ));
+            self.persist_legion_workflow_output_artifacts(&session.session_id, &outputs);
+            Ok(AppLegionWorkflowExecution {
                 session_id: session.session_id.clone(),
-                worker_id: None,
-                kind: LegionWorkflowDecisionKind::MergeReadinessEvaluated,
-                summary_label: format!(
-                    "Legion workflow merge readiness evaluated: {:?}",
-                    merge_readiness.state
-                ),
-                risk_label: if merge_readiness.state == LegionWorkflowMergeReadinessState::Ready {
-                    ProposalRiskLabel::Medium
-                } else {
-                    ProposalRiskLabel::High
-                },
-                mcp_server_id: None,
-                mcp_primitive_kind: None,
-                tool_permission_request_id: None,
-                event_context,
-                event_sequence: self.event_sequence_generator.next(),
-            })?;
-        self.legion_workflow_sessions[session_index] = session.clone();
-        outputs.push(LegionWorkflowCoordinatorOutput::MergeReadiness(
-            merge_readiness.clone(),
-        ));
-        self.persist_legion_workflow_output_artifacts(&session.session_id, &outputs);
-        Ok(AppLegionWorkflowExecution {
-            session_id: session.session_id.clone(),
-            outputs,
-            merge_readiness,
-            projection: self.legion_workflow_projection(TimestampMillis::now()),
-            tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
-            memory_candidate_proposed,
-        })
+                outputs,
+                merge_readiness,
+                projection: self.legion_workflow_projection(TimestampMillis::now()),
+                tracker_record_count: self.legion_workflow_tracker_ledger.records().len(),
+                memory_candidate_proposed,
+            })
+        })();
+        self.clear_active_worker(owner_id);
+        execution_result
     }
 
     /// Records app-owned verification evidence metadata for a Legion workflow gate.
@@ -23977,15 +24243,19 @@ impl AppComposition {
         // worker finishes (Delegate-chat parity). Offline/fixture stays sync so
         // tests keep receiving proposal_id in the same call.
         #[cfg(feature = "ai")]
-        let use_background_live = product_ai_will_attempt_live(self.preferred_ai_provider)
-            && !self.live_product_ai_stream.is_in_flight();
+        let use_background_live = product_ai_will_attempt_live(self.preferred_ai_provider);
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
+        let sink = self.live_product_ai_stream.clone();
+        if !sink.try_begin("assist.proposal", "pending", "") {
+            return Err(AppCompositionError::AiRuntime(
+                "product AI provider lane is busy; poll the active result before dispatching another request"
+                    .to_string(),
+            ));
+        }
 
         #[cfg(feature = "ai")]
         if use_background_live {
-            let sink = self.live_product_ai_stream.clone();
-            sink.begin("assist.proposal", "pending", "");
             let preference = self.preferred_ai_provider;
             let file_path = context.metadata.identity.canonical_path.0.clone();
             let instruction_for_worker = instruction_label.clone();
@@ -24058,8 +24328,6 @@ impl AppComposition {
         #[cfg(not(feature = "ai"))]
         let _ = use_background_live;
 
-        let sink = self.live_product_ai_stream.clone();
-        sink.begin("assist.proposal", "pending", "");
         let sink_delta = sink.clone();
         let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
         let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
@@ -26463,11 +26731,17 @@ impl AppComposition {
         let route_completed = provider_route_response.invocation_state
             == AssistedAiProviderInvocationState::Completed;
         #[cfg(feature = "ai")]
-        let use_background_live = route_completed
-            && product_ai_will_attempt_live(self.preferred_ai_provider)
-            && !self.live_product_ai_stream.is_in_flight();
+        let use_background_live =
+            route_completed && product_ai_will_attempt_live(self.preferred_ai_provider);
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
+        let sink = self.live_product_ai_stream.clone();
+        if route_completed && !sink.try_begin("delegate.chat", "pending", "") {
+            return Err(AppCompositionError::AiRuntime(
+                "product AI provider lane is busy; poll the active result before dispatching another request"
+                    .to_string(),
+            ));
+        }
 
         let user_message_id = self
             .delegate_workflow
@@ -26507,8 +26781,6 @@ impl AppComposition {
         } else if use_background_live {
             // Non-blocking path: stream on a worker thread; poll_product_ai_stream
             // finalizes the assistant message when generation completes.
-            let sink = self.live_product_ai_stream.clone();
-            sink.begin("delegate.chat", "pending", "");
             let preference = self.preferred_ai_provider;
             let file_path = input.metadata.identity.canonical_path.0.clone();
             let route_id = provider_route_response.route_id.clone();
@@ -26550,8 +26822,6 @@ impl AppComposition {
             });
             "Streaming response…".to_string()
         } else {
-            let sink = self.live_product_ai_stream.clone();
-            sink.begin("delegate.chat", "pending", "");
             let sink_delta = sink.clone();
             let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
             let (label, stream) = resolve_delegate_chat_reply(
@@ -29048,13 +29318,15 @@ impl AppComposition {
             EventContext::new(proposal.correlation_id),
         );
         let response = self.proposal_coordinator.created_response(proposal);
-        let _ = SaveWorkflowService::observe_proposal_response(
+        if let Err(failure) = SaveWorkflowService::observe_proposal_response(
             &mut self.proposal_coordinator,
             &self.storage,
             proposal,
             &response,
             None,
-        );
+        ) {
+            return Ok(failure);
+        }
         Ok(response)
     }
 
@@ -33189,6 +33461,77 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ai")]
+    #[test]
+    fn delegated_proposal_batch_rolls_back_when_any_registration_is_rejected() {
+        fn output_from(
+            proposal: WorkspaceProposal,
+            suffix: &str,
+        ) -> legion_protocol::AssistedAiEditProposalOutput {
+            legion_protocol::AssistedAiEditProposalOutput {
+                output_id: format!("delegated-output-{suffix}"),
+                request_id: format!("delegated-request-{suffix}"),
+                provider_id: "provider:test".to_string(),
+                proposal_id: ProposalId(0),
+                principal: proposal.principal,
+                capability: proposal.capability,
+                correlation_id: proposal.correlation_id,
+                causality_id: CausalityId(uuid::Uuid::now_v7()),
+                payload: proposal.payload,
+                preconditions: proposal.preconditions,
+                preview: proposal.preview,
+                expires_at: proposal.expires_at,
+                created_at: proposal.created_at,
+                context_manifest: trust_reference(
+                    "delegated-context-test",
+                    legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+                ),
+                approval_checklist: trust_reference(
+                    "delegated-approval-test",
+                    legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+                ),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }
+        }
+
+        let mut app = AppComposition::new();
+        let existing = save_proposal(ProposalId(2));
+        assert!(matches!(
+            app.register_proposal_lifecycle(&existing),
+            Ok(ProposalResponse::Created(_))
+        ));
+
+        let mut rejected = output_from(save_proposal(ProposalId(101)), "second");
+        rejected.correlation_id = CorrelationId(0);
+        let error = app
+            .register_delegated_task_proposals(vec![
+                output_from(save_proposal(ProposalId(100)), "first"),
+                rejected,
+            ])
+            .expect_err("the invalid second proposal must reject the full batch");
+
+        assert!(error.to_string().contains("registration was rejected"));
+        assert_eq!(
+            app.delegate_workflow.runtime_activation,
+            DelegatedTaskRuntimeActivationState::Failed
+        );
+        let ledger = app
+            .proposal_coordinator
+            .proposal_ledger_projection(TimestampMillis(99));
+        assert_eq!(ledger.rows.len(), 1);
+        assert_eq!(ledger.rows[0].proposal_id, existing.proposal_id);
+        assert_eq!(
+            app.proposal_coordinator
+                .proposal(existing.proposal_id)
+                .expect("pre-existing proposal must survive rollback")
+                .preview
+                .summary,
+            existing.preview.summary
+        );
+        assert!(app.proposal_coordinator.proposal(ProposalId(1)).is_none());
+    }
+
     #[test]
     fn proposal_coordinator_builds_metadata_only_ledger_projection() {
         let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
@@ -34109,8 +34452,11 @@ mod pkt_worker_tests {
     fn manual_mode_is_refused_while_product_provider_stream_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        app.live_product_ai_stream
-            .begin("assist.proposal", "provider:test", "model:test");
+        assert!(app.live_product_ai_stream.try_begin(
+            "assist.proposal",
+            "provider:test",
+            "model:test"
+        ));
 
         app.set_product_mode(AppProductMode::Manual);
 
@@ -34123,11 +34469,66 @@ mod pkt_worker_tests {
     }
 
     #[test]
+    fn product_ai_stream_lane_rejects_reentrant_and_pending_result_begin() {
+        let sink = LiveProductAiStreamSink::default();
+        assert!(sink.try_begin("assist.proposal", "provider:a", "model:a"));
+        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert_eq!(sink.snapshot().operation, "assist.proposal");
+
+        sink.finish_background(
+            ProductAiBackgroundResult {
+                assistant_message_id: String::new(),
+                content_label: "finished".to_string(),
+                stream: None,
+                assist_proposal: None,
+            },
+            None,
+            "assist.proposal",
+        );
+        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert_eq!(sink.take_background_results().len(), 1);
+        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+    }
+
+    #[test]
+    fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Delegate);
+        assert!(app.live_product_ai_stream.try_begin(
+            "delegate.chat",
+            "provider:test",
+            "model:test"
+        ));
+
+        app.set_product_mode(AppProductMode::Assist);
+        assert_eq!(app.product_mode(), AppProductMode::Delegate);
+
+        app.live_product_ai_stream.finish_background(
+            ProductAiBackgroundResult {
+                assistant_message_id: String::new(),
+                content_label: "finished".to_string(),
+                stream: None,
+                assist_proposal: None,
+            },
+            None,
+            "delegate.chat",
+        );
+        app.set_product_mode(AppProductMode::Assist);
+        assert_eq!(app.product_mode(), AppProductMode::Delegate);
+        let _ = app.poll_product_ai_stream();
+        app.set_product_mode(AppProductMode::Assist);
+        assert_eq!(app.product_mode(), AppProductMode::Assist);
+    }
+
+    #[test]
     fn manual_dispatch_does_not_report_mode_changed_while_provider_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        app.live_product_ai_stream
-            .begin("assist.proposal", "provider:test", "model:test");
+        assert!(app.live_product_ai_stream.try_begin(
+            "assist.proposal",
+            "provider:test",
+            "model:test"
+        ));
 
         let outcome = app.dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
             mode: DockMode::Manual,
@@ -34142,8 +34543,11 @@ mod pkt_worker_tests {
     fn manual_mode_waits_until_completed_provider_result_is_merged() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        app.live_product_ai_stream
-            .begin("delegate.chat", "provider:test", "model:test");
+        assert!(app.live_product_ai_stream.try_begin(
+            "delegate.chat",
+            "provider:test",
+            "model:test"
+        ));
         app.live_product_ai_stream.finish_background(
             ProductAiBackgroundResult {
                 assistant_message_id: String::new(),
@@ -34169,7 +34573,7 @@ mod pkt_worker_tests {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
         let flag = SharedCancellationFlag::new();
-        app.active_cancellation_flag = Some(flag.clone());
+        app.inject_active_workflow_for_test(flag.clone());
         // Simulate a stale downgraded projection: cancellation must remain a
         // safety action even though the authority mode is already Manual.
         app.product_mode = AppProductMode::Manual;
