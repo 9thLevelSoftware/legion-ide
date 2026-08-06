@@ -125,6 +125,14 @@ pub enum DockMode {
     Automate,
 }
 
+fn normalize_dock_mode_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && !matches!(*character, '_' | '-'))
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
 impl DockMode {
     /// Stable user-facing label.
     pub fn label(self) -> &'static str {
@@ -148,12 +156,12 @@ impl DockMode {
 
     /// Parse a stable user-facing or persisted mode label.
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "Manual" | "manual" => Some(Self::Manual),
-            "Assist" | "assist" => Some(Self::Assist),
-            "Delegate" | "Delegates" | "delegate" | "delegates" => Some(Self::Delegate),
-            "Automate" | "Autonomous" | "LegionWorkflows" | "Legion Workflows" | "automate"
-            | "autonomous" | "legion_workflows" => Some(Self::Automate),
+        match normalize_dock_mode_label(value).as_str() {
+            "manual" | "m" => Some(Self::Manual),
+            "assist" | "a" => Some(Self::Assist),
+            "delegate" | "delegates" | "d" => Some(Self::Delegate),
+            "automate" | "automation" | "autonomous" | "legion" | "legionworkflows"
+            | "workflow" | "workflows" | "w" => Some(Self::Automate),
             _ => None,
         }
     }
@@ -4362,9 +4370,7 @@ impl Shell {
                 );
             }
         }
-        println!(
-            "Commands: :mode manual|assist|delegate|automate | :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :tab | :assist-predict offset | :assist-dismiss | :assist-cancel | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :debug-configs | :debug-launch id | :debug-step over | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
-        );
+        println!("{}", terminal_command_help());
     }
 
     /// Parse a command and emit a typed dispatch intent without mutating editor or workspace state.
@@ -5393,13 +5399,12 @@ fn parse_debug_step_kind(input: &str) -> DebugStepKindProjection {
     }
 }
 
+fn terminal_command_help() -> &'static str {
+    "Commands: :mode Manual|Assist|Delegate|Legion Workflows | :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :tab | :assist-predict offset | :assist-dismiss | :assist-cancel | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :debug-configs | :debug-launch id | :debug-step over | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
+}
+
 fn parse_dock_mode(input: &str) -> DockMode {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "assist" | "a" => DockMode::Assist,
-        "delegate" | "delegates" | "d" => DockMode::Delegate,
-        "automate" | "automation" | "legion" | "workflow" | "workflows" | "w" => DockMode::Automate,
-        _ => DockMode::Manual,
-    }
+    DockMode::parse(input).unwrap_or(DockMode::Manual)
 }
 
 fn parse_delegate_hunk_disposition(input: &str) -> Option<DelegatedTaskProposalHunkDisposition> {
@@ -5848,6 +5853,58 @@ mod tests {
                 DockMode::parse(legacy_label),
                 Some(DockMode::Automate),
                 "legacy label {legacy_label} should retain the Automate compatibility binding"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_command_dispatches_canonical_legion_workflows_after_normalization() {
+        let mut shell = Shell::empty("mode command");
+
+        for command in [":mode Legion Workflows", "  :mode   LEGION   WORKFLOWS  "] {
+            assert_eq!(
+                shell.handle_command(command).expect("mode command parses"),
+                Some(CommandDispatchIntent::SetProductMode {
+                    mode: DockMode::Automate,
+                }),
+                "canonical command {command:?} must not fall back to Manual"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_command_dispatches_legacy_workflow_aliases_to_automate() {
+        let mut shell = Shell::empty("mode aliases");
+
+        for alias in [
+            "automate",
+            "automation",
+            "autonomous",
+            "LegionWorkflows",
+            "workflow",
+            "workflows",
+            "w",
+        ] {
+            let command = format!(":mode {alias}");
+            assert_eq!(
+                shell.handle_command(&command).expect("mode command parses"),
+                Some(CommandDispatchIntent::SetProductMode {
+                    mode: DockMode::Automate,
+                }),
+                "legacy alias {alias:?} must retain its Automate compatibility binding"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_command_help_uses_only_canonical_mode_labels() {
+        let help = terminal_command_help();
+
+        assert!(help.contains(":mode Manual|Assist|Delegate|Legion Workflows"));
+        for legacy_label in ["Automate", "Autonomous", "Delegates"] {
+            assert!(
+                !help.contains(legacy_label),
+                "help must not expose legacy mode label {legacy_label:?}"
             );
         }
     }
