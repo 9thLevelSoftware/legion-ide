@@ -97,8 +97,8 @@ $clientOrigin = [NativeCapture+POINT]::new()
 if ($client.Right -ne 1440 -or $client.Bottom -ne 900) { throw 'desktop client resize failed' }
 $physicalX = [math]::Floor($clientOrigin.X * $scale) # 280
 $physicalY = [math]::Floor($clientOrigin.Y * $scale) # 75
-$physicalWidth = [int]($client.Right * $scale) # 2160
-$physicalHeight = [int]($client.Bottom * $scale) # 1350
+$physicalWidth = [Convert]::ToInt32($client.Right * $scale) # 2160
+$physicalHeight = [Convert]::ToInt32($client.Bottom * $scale) # 1350
 $rawDesktop = "$captureDir\manual-final-2160x1350-raw.png"
 $desktopCapture = "$captureDir\manual-1440x900.png"
 ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
@@ -120,8 +120,8 @@ $clientOrigin = [NativeCapture+POINT]::new()
 if ($client.Right -ne 960 -or $client.Bottom -ne 720) { throw 'compact client resize failed' }
 $physicalX = [math]::Floor($clientOrigin.X * $scale)
 $physicalY = [math]::Floor($clientOrigin.Y * $scale)
-$physicalWidth = [int]($client.Right * $scale) # 1440
-$physicalHeight = [int]($client.Bottom * $scale) # 1080
+$physicalWidth = [Convert]::ToInt32($client.Right * $scale) # 1440
+$physicalHeight = [Convert]::ToInt32($client.Bottom * $scale) # 1080
 $rawCompact = "$captureDir\assist-final-1440x1080-raw.png"
 $compactCapture = "$captureDir\assist-960x720.png"
 ffmpeg -hide_banner -loglevel error -f gdigrab -draw_mouse 0 -framerate 30 `
