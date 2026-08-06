@@ -1,7 +1,7 @@
 # Four-mode prototype fidelity ledger
 
-Date: 2026-08-06  
-Native implementation: `legion-desktop`  
+Date: 2026-08-06
+Native implementation: `legion-desktop`
 Accepted concept source: the four local Design Compose HTML artifacts and their PNG captures
 
 ## Evidence and capture method

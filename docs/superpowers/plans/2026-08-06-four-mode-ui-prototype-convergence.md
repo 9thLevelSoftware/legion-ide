@@ -252,4 +252,3 @@ git status --short
 ```
 
 If package/full-suite timing prevents completion, report the exact command, elapsed limit, and last observed state; never convert a timeout into a passing claim.
-
