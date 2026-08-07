@@ -5,7 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use xtask::docs_hygiene::{DocsHygieneConfig, normalize_relative_target, run_docs_hygiene};
+use xtask::docs_hygiene::{
+    DocsHygieneConfig, DocsHygieneViolationKind, normalize_relative_target, run_docs_hygiene,
+};
 
 struct TempRepo {
     root: PathBuf,
@@ -428,9 +430,11 @@ fn docs_hygiene_indexes_allowlisted_canonical_adr_numbers() {
 
     let violations = run_docs_hygiene(&repo.root, &config)
         .expect_err("allowlisting content checks must not hide duplicate ADR numbers");
-    assert!(violations.iter().any(|violation| {
-        violation.kind == DocsHygieneViolationKind::DuplicateAdrNumber
-    }));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| { violation.kind == DocsHygieneViolationKind::DuplicateAdrNumber })
+    );
 }
 
 #[test]

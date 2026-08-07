@@ -9,6 +9,7 @@ use legion_desktop::{
     platform::{
         DesktopPlatformAdapterChecks, NativePlatformObservation, build_platform_smoke_snapshot,
     },
+    view::ProjectionView,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
 use legion_protocol::{
@@ -85,6 +86,90 @@ fn range(start: u64, end: u64) -> ProtocolTextRange {
 fn open_runtime(root: &Path) -> DesktopRuntime {
     DesktopRuntime::open(DesktopLaunchConfig::new(root.to_path_buf(), None))
         .expect("desktop runtime should open workspace")
+}
+
+fn desktop_raw_input(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
+fn render_projection(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    ctx.run_ui(desktop_raw_input(size, Vec::new()), |ui| {
+        let _ = view.render(ui, snapshot);
+    })
+}
+
+fn logical_viewport_for_physical_size(physical_size: egui::Vec2, zoom_percent: u16) -> egui::Vec2 {
+    physical_size / (f32::from(zoom_percent) / 100.0)
+}
+
+fn top_bar_painted_text(output: &egui::FullOutput) -> Vec<String> {
+    fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) if text.pos.y < 42.0 => {
+                texts.push(text.galley.job.text.clone());
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut texts);
+    }
+    texts
+}
+
+fn click_projection_control(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    let target = primed
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("projection should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("{label} should be a clickable accessible control"));
+    ctx.run_ui(
+        desktop_raw_input(
+            size,
+            vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Click,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: target,
+                    data: None,
+                },
+            )],
+        ),
+        |ui| {
+            let _ = view.render(ui, snapshot);
+        },
+    )
 }
 
 #[test]
@@ -259,6 +344,275 @@ fn focus_order_follows_the_projected_accessibility_node_sequence() {
         ["window", "explorer", "editor", "tabs", "status", "search"]
     );
     assert_eq!(smoke.accessibility_projection_node_count, 6);
+}
+
+#[test]
+fn rendered_mode_switch_and_confirmation_dialog_expose_accessible_semantics() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Accessible modes").projection_snapshot();
+    let size = egui::vec2(1_440.0, 900.0);
+
+    let full = render_projection(&ctx, &mut view, &snapshot, size);
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("mode switch should expose AccessKit");
+    for (label, selected) in [
+        ("Manual", true),
+        ("Assist", false),
+        ("Delegate", false),
+        ("Legion Workflows", false),
+    ] {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.bounds().is_some_and(|bounds| bounds.y1 <= 42.0))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("{label} should be a top-bar mode button"));
+        assert_eq!(
+            node.is_selected(),
+            Some(selected),
+            "wrong current state for {label}"
+        );
+        assert!(node.supports_action(egui::accesskit::Action::Click));
+        assert!(node.supports_action(egui::accesskit::Action::Focus));
+        let bounds = node.bounds().expect("mode button should have bounds");
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+    }
+
+    let _modal_full = click_projection_control(&ctx, &mut view, &snapshot, &full, "Delegate", size);
+    let modal_full = render_projection(&ctx, &mut view, &snapshot, size);
+    let modal_update = modal_full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("confirmation should expose AccessKit");
+    let (_dialog_id, dialog) = modal_update
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.role() == egui::accesskit::Role::Dialog).then_some((*id, node))
+        })
+        .expect("escalation should expose a real Dialog node");
+    assert_eq!(dialog.label(), Some("Confirm Delegate mode"));
+    assert!(dialog.is_modal());
+    let description = dialog
+        .description()
+        .expect("dialog should expose its explanatory body");
+    assert!(description.contains("proposal-mediated"));
+    assert!(description.contains("bounded permissions"));
+    let mut descendants = dialog.children().to_vec();
+    while let Some(descendant_id) = descendants.pop() {
+        let descendant = modal_update
+            .nodes
+            .iter()
+            .find_map(|(id, node)| (*id == descendant_id).then_some(node))
+            .unwrap_or_else(|| panic!("dialog descendant {descendant_id:?} should be projected"));
+        assert_ne!(
+            descendant.role(),
+            egui::accesskit::Role::CheckBox,
+            "presentation dialog must not expose permission-grant checkboxes"
+        );
+        descendants.extend(descendant.children().iter().copied());
+    }
+    for label in ["Confirm", "Cancel"] {
+        let action = modal_update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("dialog should expose {label}"));
+        let bounds = action.bounds().expect("dialog action should have bounds");
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(action.supports_action(egui::accesskit::Action::Click));
+        assert!(action.supports_action(egui::accesskit::Action::Focus));
+    }
+}
+
+#[test]
+fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Compact accessible modes").projection_snapshot();
+    snapshot.settings_projection.zoom_percent = 200;
+    let physical_size = egui::vec2(960.0, 720.0);
+    let logical_size = logical_viewport_for_physical_size(physical_size, 200);
+    assert_eq!(logical_size, egui::vec2(480.0, 360.0));
+
+    let _first = render_projection(&ctx, &mut view, &snapshot, physical_size);
+    let full = render_projection(&ctx, &mut view, &snapshot, physical_size);
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("compact mode switch should expose AccessKit");
+    let modes = [
+        ("Manual", true),
+        ("Assist", false),
+        ("Delegate", false),
+        ("Legion Workflows", false),
+    ]
+    .map(|(label, expected_selected)| {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.bounds().is_some_and(|bounds| bounds.y1 <= 42.0))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("compact switch must retain full name `{label}`"));
+        let bounds = node
+            .bounds()
+            .expect("compact mode button should have bounds");
+        (label, node, bounds, expected_selected)
+    });
+
+    for (label, node, bounds, expected_selected) in &modes {
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x0 >= 0.0 && bounds.x1 <= 480.0);
+        assert!(bounds.y0 >= 0.0 && bounds.y1 <= 42.0);
+        assert_eq!(
+            node.is_selected(),
+            Some(*expected_selected),
+            "wrong selected state for compact `{label}` mode"
+        );
+        assert_eq!(
+            node.aria_current(),
+            expected_selected.then_some(egui::accesskit::AriaCurrent::True),
+            "wrong current state for compact `{label}` mode"
+        );
+    }
+
+    for pair in modes.windows(2) {
+        let (left_label, _left_node, left_bounds, _left_selected) = pair[0];
+        let (right_label, _right_node, right_bounds, _right_selected) = pair[1];
+        assert!(
+            left_bounds.x0 < right_bounds.x0,
+            "compact canonical order must be left-to-right: `{left_label}` before `{right_label}`"
+        );
+        assert!(
+            left_bounds.x1 <= right_bounds.x0,
+            "compact accessible targets `{left_label}` and `{right_label}` must not overlap"
+        );
+    }
+
+    let command = update
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some("Command")
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click))
+            .then_some(node)
+        })
+        .expect("Command must remain reachable at physical 960x720 and 200% zoom");
+    let command_bounds = command.bounds().expect("Command should be allocated");
+    assert!(command_bounds.x0 >= 0.0 && command_bounds.x1 <= 480.0);
+    assert!(command_bounds.y0 >= 0.0 && command_bounds.y1 <= 42.0);
+    assert!(command_bounds.x1 - command_bounds.x0 >= 24.0);
+    assert!(command_bounds.y1 - command_bounds.y0 >= 24.0);
+
+    let painted = top_bar_painted_text(&full);
+    for label in ["Manual", "Assist", "Delegate", "Legion Workflows"] {
+        assert!(
+            painted.iter().any(|text| text == label),
+            "ultra-compact switch should paint full canonical label `{label}`; painted={painted:?}"
+        );
+    }
+
+    let editor = view
+        .last_editor_rect()
+        .expect("ultra-compact render should retain a real editor allocation")
+        .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, logical_size));
+    assert!(
+        editor.width() >= 360.0 && editor.height() >= 160.0,
+        "200% zoom must collapse secondary panes and preserve a usable editor; editor={editor:?}"
+    );
+
+    for label in ["Explorer drawer", "Mode rail drawer", "Bottom panel drawer"] {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("ultra-compact layout must expose `{label}`"));
+        let bounds = node.bounds().expect("drawer control should have bounds");
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+    }
+
+    let _opened = click_projection_control(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &full,
+        "Mode rail drawer",
+        physical_size,
+    );
+    let opened = render_projection(&ctx, &mut view, &snapshot, physical_size);
+    let opened_labels = opened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter_map(|(_id, node)| node.label().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        opened
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some("Enable Assist")
+                    && node.supports_action(egui::accesskit::Action::Click)
+            })),
+        "the compact mode-rail drawer must make its hidden mode action reachable; labels={opened_labels:?}"
+    );
+}
+
+#[test]
+fn physical_960_by_720_at_one_hundred_percent_keeps_full_visible_mode_labels() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Normal compact modes").projection_snapshot();
+    let logical_size = logical_viewport_for_physical_size(egui::vec2(960.0, 720.0), 100);
+
+    let _first = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let full = render_projection(&ctx, &mut view, &snapshot, logical_size);
+    let painted = top_bar_painted_text(&full);
+    for label in ["Manual", "Assist", "Delegate", "Legion Workflows"] {
+        assert!(
+            painted.iter().any(|text| text == label),
+            "normal compact switch should paint full label `{label}`; painted={painted:?}"
+        );
+    }
 }
 
 #[test]

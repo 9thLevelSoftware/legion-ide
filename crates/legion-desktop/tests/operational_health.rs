@@ -141,6 +141,6 @@ fn operational_health_empty_projection_uses_safe_default_labels() {
         health
             .unsupported_surfaces
             .iter()
-            .any(|surface| surface.contains("Autonomous apply: unsupported"))
+            .any(|surface| surface.contains("Legion Workflows apply: unsupported"))
     );
 }

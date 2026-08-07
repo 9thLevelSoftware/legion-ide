@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 use std::{
+    collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
 };
@@ -60,12 +61,15 @@ pub enum ObservabilityError {
     /// Event sequence is missing or zero.
     #[error("event envelope sequence must be non-zero")]
     InvalidSequence,
-    /// Proposal lifecycle transition referenced a different proposal than the audit subject.
-    #[error("proposal audit record requires transition.proposal_id == proposal.proposal_id")]
+    /// Proposal lifecycle transition identity did not match the audit subject.
+    #[error("proposal audit record requires transition identity == proposal identity")]
     MismatchedProposalTransition,
     /// Event sink storage lock was poisoned.
     #[error("event sink storage lock poisoned")]
     StorageUnavailable,
+    /// An event id was retried with different content.
+    #[error("event id was reused with different content")]
+    EventIdConflict,
 }
 
 /// Build a metadata-only plugin audit event envelope.
@@ -255,11 +259,37 @@ impl Default for EventSinkConfig {
     }
 }
 
+/// Validate and redact a complete event batch without emitting it.
+///
+/// This is the shared preparation boundary for atomic sinks and durable
+/// transactional outboxes; an invalid item returns before any caller mutates.
+pub fn prepare_event_batch(
+    requests: Vec<EventSinkRequest>,
+    config: EventSinkConfig,
+) -> Result<Vec<EventEnvelope>, ObservabilityError> {
+    let mut prepared = Vec::with_capacity(requests.len());
+    for request in requests {
+        let mut envelope = request.envelope;
+        validate_envelope(&envelope, config)?;
+        if config.metadata_only_by_default || envelope.redaction != RedactionHint::None {
+            envelope.payload = redact_payload(&envelope.payload, envelope.redaction);
+        }
+        prepared.push(envelope);
+    }
+    Ok(prepared)
+}
+
 /// In-memory event sink for tests and local replay drills.
 #[derive(Debug, Clone)]
 pub struct InMemoryEventSink {
     config: EventSinkConfig,
-    events: Arc<Mutex<Vec<EventEnvelope>>>,
+    state: Arc<Mutex<InMemoryEventSinkState>>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryEventSinkState {
+    events: Vec<EventEnvelope>,
+    raw_fingerprints: HashMap<EventId, String>,
 }
 
 impl InMemoryEventSink {
@@ -272,7 +302,7 @@ impl InMemoryEventSink {
     pub fn with_config(config: EventSinkConfig) -> Self {
         Self {
             config,
-            events: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(Mutex::new(InMemoryEventSinkState::default())),
         }
     }
 
@@ -280,24 +310,74 @@ impl InMemoryEventSink {
     pub fn try_emit(&self, request: EventSinkRequest) -> Result<(), ObservabilityError> {
         let mut envelope = request.envelope;
         validate_envelope(&envelope, self.config)?;
+        let raw_fingerprint = raw_event_fingerprint(&envelope)?;
 
         if self.config.metadata_only_by_default || envelope.redaction != RedactionHint::None {
             envelope.payload = redact_payload(&envelope.payload, envelope.redaction);
         }
 
-        self.events
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| ObservabilityError::StorageUnavailable)?
-            .push(envelope);
+            .map_err(|_| ObservabilityError::StorageUnavailable)?;
+        if let Some(existing) = state.raw_fingerprints.get(&envelope.event_id) {
+            return if existing == &raw_fingerprint {
+                Ok(())
+            } else {
+                Err(ObservabilityError::EventIdConflict)
+            };
+        }
+        state
+            .raw_fingerprints
+            .insert(envelope.event_id, raw_fingerprint);
+        state.events.push(envelope);
+        Ok(())
+    }
+
+    /// Validate and redact every request, then append the batch under one lock.
+    /// Identical retries are ignored; an event-id content conflict rejects all.
+    pub fn try_emit_batch(
+        &self,
+        requests: Vec<EventSinkRequest>,
+    ) -> Result<(), ObservabilityError> {
+        let raw_fingerprints = requests
+            .iter()
+            .map(|request| raw_event_fingerprint(&request.envelope))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prepared = prepare_event_batch(requests, self.config)?;
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ObservabilityError::StorageUnavailable)?;
+        let mut known = state.raw_fingerprints.clone();
+        let mut additions = Vec::new();
+        for (envelope, raw_fingerprint) in prepared.into_iter().zip(raw_fingerprints) {
+            if let Some(existing) = known.get(&envelope.event_id) {
+                if existing != &raw_fingerprint {
+                    return Err(ObservabilityError::EventIdConflict);
+                }
+            } else {
+                known.insert(envelope.event_id, raw_fingerprint.clone());
+                additions.push((envelope, raw_fingerprint));
+            }
+        }
+        for (envelope, raw_fingerprint) in additions {
+            state
+                .raw_fingerprints
+                .insert(envelope.event_id, raw_fingerprint);
+            state.events.push(envelope);
+        }
         Ok(())
     }
 
     /// Return a cloned snapshot of stored envelopes.
     pub fn events(&self) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         Ok(self
-            .events
+            .state
             .lock()
             .map_err(|_| ObservabilityError::StorageUnavailable)?
+            .events
             .clone())
     }
 }
@@ -311,6 +391,10 @@ impl Default for InMemoryEventSink {
 impl EventSinkPort for InMemoryEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.try_emit(request).map_err(protocol_error)
+    }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.try_emit_batch(requests).map_err(protocol_error)
     }
 }
 
@@ -336,6 +420,19 @@ impl RedactingEventSink {
         self.inner.try_emit(request)
     }
 
+    /// Redact every request and atomically emit the complete batch.
+    pub fn try_emit_batch(
+        &self,
+        mut requests: Vec<EventSinkRequest>,
+    ) -> Result<(), ObservabilityError> {
+        for request in &mut requests {
+            if request.envelope.redaction == RedactionHint::None {
+                request.envelope.redaction = RedactionHint::MetadataOnly;
+            }
+        }
+        self.inner.try_emit_batch(requests)
+    }
+
     /// Return a cloned snapshot of redacted envelopes.
     pub fn events(&self) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         self.inner.events()
@@ -351,6 +448,10 @@ impl Default for RedactingEventSink {
 impl EventSinkPort for RedactingEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.try_emit(request).map_err(protocol_error)
+    }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.try_emit_batch(requests).map_err(protocol_error)
     }
 }
 
@@ -400,6 +501,10 @@ impl EventSinkPort for SharedEventSink {
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
         self.inner.emit(request)
     }
+
+    fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        self.inner.emit_batch(requests)
+    }
 }
 
 /// Event metadata helper used by workspace write and editor transaction paths.
@@ -445,6 +550,7 @@ pub struct EventEnvelopeBuilder {
     correlation_id: CorrelationId,
     principal_id: Option<PrincipalId>,
     sequence: EventSequence,
+    occurred_at: Option<TimestampMillis>,
     payload: Map<String, Value>,
 }
 
@@ -467,6 +573,7 @@ impl EventEnvelopeBuilder {
             correlation_id: CorrelationId(1),
             principal_id: None,
             sequence: EventSequence(1),
+            occurred_at: None,
             payload,
         }
     }
@@ -534,6 +641,12 @@ impl EventEnvelopeBuilder {
         self
     }
 
+    /// Bind the envelope timestamp to the operation or transition it records.
+    pub fn occurred_at(mut self, occurred_at: TimestampMillis) -> Self {
+        self.occurred_at = Some(occurred_at);
+        self
+    }
+
     /// Add metadata payload key.
     pub fn metadata(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.payload.insert(key.into(), value.into());
@@ -555,7 +668,7 @@ impl EventEnvelopeBuilder {
             workspace_id: self.workspace_id,
             sequence: self.sequence,
             principal_id: self.principal_id,
-            occurred_at: TimestampMillis::now(),
+            occurred_at: self.occurred_at.unwrap_or_else(TimestampMillis::now),
             payload: Value::Object(self.payload),
         }
     }
@@ -584,12 +697,7 @@ pub fn proposal_audit_record(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
 ) -> Result<ProposalAuditRecord, ObservabilityError> {
-    // Fail closed on a mismatched proposal/transition pairing: emitting a record
-    // that stamps `proposal.proposal_id` onto a different proposal's lifecycle
-    // data would silently corrupt the audit trail.
-    if transition.proposal_id != proposal.proposal_id {
-        return Err(ObservabilityError::MismatchedProposalTransition);
-    }
+    validate_proposal_transition_identity(proposal, transition)?;
     Ok(ProposalAuditRecord {
         proposal_id: proposal.proposal_id,
         lifecycle_state: transition.lifecycle_state,
@@ -605,6 +713,23 @@ pub fn proposal_audit_record(
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     })
+}
+
+fn validate_proposal_transition_identity(
+    proposal: &WorkspaceProposal,
+    transition: &ProposalLifecycleTransition,
+) -> Result<(), ObservabilityError> {
+    // Fail closed before building either side of an observation pair. Otherwise
+    // an event and audit can each be internally valid while describing different
+    // principals, capabilities, correlations, or proposals.
+    if transition.proposal_id != proposal.proposal_id
+        || transition.principal != proposal.principal
+        || transition.capability != proposal.capability
+        || transition.correlation_id != proposal.correlation_id
+    {
+        return Err(ObservabilityError::MismatchedProposalTransition);
+    }
+    Ok(())
 }
 
 /// Build an envelope-ready metadata DTO proving that proposal audit storage completed.
@@ -1134,20 +1259,13 @@ pub fn watcher_recovery_event(
 /// Build a proposal-created lifecycle event.
 pub fn proposal_created_event(
     proposal: &WorkspaceProposal,
-    causality_id: CausalityId,
+    transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
 ) -> Result<EventEnvelope, ObservabilityError> {
-    proposal_lifecycle_event(
-        "proposal.created",
-        proposal,
-        ProposalLifecycleState::Created,
-        proposal.correlation_id,
-        causality_id,
-        sequence,
-        EventSeverity::Info,
-        None,
-        &[],
-    )
+    if transition.lifecycle_state != ProposalLifecycleState::Created {
+        return Err(ObservabilityError::MismatchedProposalTransition);
+    }
+    proposal_transition_event("proposal.created", proposal, transition, sequence, None)
 }
 
 /// Build a proposal-validated lifecycle event.
@@ -1456,6 +1574,7 @@ fn proposal_transition_event(
     sequence: EventSequence,
     reason: Option<String>,
 ) -> Result<EventEnvelope, ObservabilityError> {
+    validate_proposal_transition_identity(proposal, transition)?;
     let severity = match transition.lifecycle_state {
         ProposalLifecycleState::Failed => EventSeverity::Error,
         ProposalLifecycleState::Denied
@@ -1472,6 +1591,7 @@ fn proposal_transition_event(
         transition.correlation_id,
         transition.causality_id,
         sequence,
+        transition.timestamp,
         severity,
         reason.as_deref(),
         &transition.diagnostics,
@@ -1486,6 +1606,7 @@ fn proposal_lifecycle_event(
     correlation_id: CorrelationId,
     causality_id: CausalityId,
     sequence: EventSequence,
+    occurred_at: TimestampMillis,
     severity: EventSeverity,
     reason: Option<&str>,
     diagnostics: &[ProtocolDiagnostic],
@@ -1495,6 +1616,7 @@ fn proposal_lifecycle_event(
     let mut builder = EventEnvelopeBuilder::new(event, causality_id)
         .correlation_id(correlation_id)
         .sequence(sequence)
+        .occurred_at(occurred_at)
         .principal_id(proposal.principal.clone())
         .severity(severity)
         .retention(RetentionLabel::Audit)
@@ -1856,7 +1978,8 @@ fn validate_core_ids(
     Ok(())
 }
 
-fn validate_envelope(
+/// Validate one event envelope against sink configuration without emitting it.
+pub fn validate_envelope(
     envelope: &EventEnvelope,
     config: EventSinkConfig,
 ) -> Result<(), ObservabilityError> {
@@ -1908,6 +2031,15 @@ fn redact_payload(payload: &Value, hint: RedactionHint) -> Value {
 
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
+    // These are schema-level classifiers/counts, not proposal payload content.
+    // Keep the exception list exact so a similarly named free-form field still
+    // fails closed through the broad `payload` sensitivity check below.
+    if matches!(
+        lower.as_str(),
+        "payload_class" | "payload_kind" | "payload_byte_count"
+    ) {
+        return false;
+    }
     lower.contains("text")
         || lower.contains("source")
         || lower.contains("secret")
@@ -1929,7 +2061,9 @@ fn redact_metadata_value(key: &str, value: &Value) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
         Value::String(text) => {
-            if is_safe_metadata_key(key) && !contains_forbidden_assisted_ai_marker(text) {
+            if is_canonical_redaction_marker(text)
+                || (is_safe_metadata_key(key) && !contains_forbidden_assisted_ai_marker(text))
+            {
                 value.clone()
             } else {
                 Value::String(format!("hash={};len={}", metadata_hash(text), text.len()))
@@ -1939,13 +2073,32 @@ fn redact_metadata_value(key: &str, value: &Value) -> Value {
     }
 }
 
+fn is_canonical_redaction_marker(value: &str) -> bool {
+    if matches!(value, "<metadata-only>" | "<redacted>") {
+        return true;
+    }
+    let Some((digest, length)) = value
+        .strip_prefix("hash=")
+        .and_then(|value| value.split_once(";len="))
+    else {
+        return false;
+    };
+    digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && digest.bytes().all(|byte| !byte.is_ascii_uppercase())
+        && !length.is_empty()
+        && length.bytes().all(|byte| byte.is_ascii_digit())
+        && length.parse::<u64>().is_ok()
+}
+
 /// Allowlist of metadata keys whose string values are known-safe to retain
 /// verbatim (stable classifiers, enum labels, identifiers, and pre-hashed
 /// fields). Anything not matched here is treated as untrusted free-form text.
 fn is_safe_metadata_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    const SAFE_KEYS: [&str; 17] = [
+    const SAFE_KEYS: [&str; 18] = [
         "metadata_only",
+        "capability",
         "payload_class",
         "payload_kind",
         "lifecycle_state",
@@ -1985,20 +2138,76 @@ fn is_safe_metadata_key(key: &str) -> bool {
 }
 
 fn protocol_error(error: ObservabilityError) -> ProtocolError {
+    let code = match error {
+        ObservabilityError::EventIdConflict => "event_id_conflict",
+        ObservabilityError::StorageUnavailable => "event_sink_unavailable",
+        ObservabilityError::InvalidSchemaVersion
+        | ObservabilityError::MissingEventName
+        | ObservabilityError::InvalidPayload
+        | ObservabilityError::InvalidCausalityId
+        | ObservabilityError::InvalidCorrelationId
+        | ObservabilityError::InvalidSequence
+        | ObservabilityError::MismatchedProposalTransition => "event_batch_invalid",
+    };
     ProtocolError {
-        code: "observability_error".to_string(),
+        code: code.to_string(),
         message: error.to_string(),
     }
+}
+
+fn raw_event_fingerprint(envelope: &EventEnvelope) -> Result<String, ObservabilityError> {
+    let serialized =
+        serde_json::to_vec(envelope).map_err(|_| ObservabilityError::InvalidPayload)?;
+    Ok(sha256_hex(&serialized))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SingleEventOnlySink {
+        emitted: AtomicUsize,
+    }
+
+    impl EventSinkPort for SingleEventOnlySink {
+        fn emit(&self, _request: EventSinkRequest) -> ProtocolResult<()> {
+            self.emitted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn event_with_payload(payload: Value) -> EventEnvelope {
         EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
             .metadata("payload", payload)
             .build()
+    }
+
+    #[test]
+    fn default_batch_api_fails_before_single_event_emit() {
+        let sink = SingleEventOnlySink {
+            emitted: AtomicUsize::new(0),
+        };
+
+        let error = sink
+            .emit_batch(vec![EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            }])
+            .expect_err("single-event-only sink must reject atomic batches");
+
+        assert_eq!(error.code, "event_batch_unsupported");
+        assert_eq!(sink.emitted.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn noop_sink_does_not_acknowledge_atomic_batch_delivery() {
+        let error = NoopEventSink
+            .emit_batch(vec![EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            }])
+            .expect_err("no-op sink cannot prove atomic batch delivery");
+
+        assert_eq!(error.code, "event_batch_unsupported");
     }
 
     fn save_proposal() -> WorkspaceProposal {
@@ -2176,6 +2385,196 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_batch_rejects_invalid_second_event_without_emitting_first() {
+        let sink = InMemoryEventSink::new();
+        let first = event_with_payload(json!({"item": 1}));
+        let mut second = event_with_payload(json!({"item": 2}));
+        second.sequence = EventSequence(0);
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest { envelope: first },
+                EventSinkRequest { envelope: second },
+            ])
+            .expect_err("invalid second item must reject the whole batch");
+
+        assert_eq!(error.code, "event_batch_invalid");
+        assert!(sink.events().expect("event snapshot").is_empty());
+    }
+
+    #[test]
+    fn in_memory_batch_retry_is_idempotent_by_event_id() {
+        let sink = InMemoryEventSink::new();
+        let requests = vec![
+            EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 1})),
+            },
+            EventSinkRequest {
+                envelope: event_with_payload(json!({"item": 2})),
+            },
+        ];
+
+        sink.emit_batch(requests.clone()).expect("first delivery");
+        sink.emit_batch(requests).expect("idempotent retry");
+
+        assert_eq!(sink.events().expect("event snapshot").len(), 2);
+    }
+
+    #[test]
+    fn in_memory_batch_rejects_event_id_content_conflict_without_partial_append() {
+        let sink = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("item", 1)
+            .build();
+        sink.emit_batch(vec![EventSinkRequest {
+            envelope: original.clone(),
+        }])
+        .expect("initial delivery");
+        let mut conflicting = original;
+        conflicting.payload["item"] = json!(99);
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest {
+                    envelope: event_with_payload(json!({"item": 2})),
+                },
+                EventSinkRequest {
+                    envelope: conflicting,
+                },
+            ])
+            .expect_err("conflicting retry must reject the whole batch");
+
+        assert_eq!(error.code, "event_id_conflict");
+        let events = sink.events().expect("event snapshot");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["item"], 1);
+    }
+
+    #[test]
+    fn in_memory_sink_rejects_raw_secret_conflicts_across_single_and_batch_apis() {
+        let sink = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret alpha")
+            .build();
+        let mut conflicting = original.clone();
+        conflicting.payload["source_text"] = json!("secret beta");
+        sink.emit(EventSinkRequest {
+            envelope: original.clone(),
+        })
+        .expect("initial single emit");
+
+        let error = sink
+            .emit(EventSinkRequest {
+                envelope: conflicting.clone(),
+            })
+            .expect_err("different raw secret must conflict after identical redaction");
+        assert_eq!(error.code, "event_id_conflict");
+
+        let error = sink
+            .emit_batch(vec![
+                EventSinkRequest {
+                    envelope: event_with_payload(json!({"new": true})),
+                },
+                EventSinkRequest {
+                    envelope: conflicting,
+                },
+            ])
+            .expect_err("later raw conflict rejects the complete batch");
+        assert_eq!(error.code, "event_id_conflict");
+        assert_eq!(sink.events().expect("event snapshot").len(), 1);
+
+        sink.emit_batch(vec![EventSinkRequest {
+            envelope: original.clone(),
+        }])
+        .expect("exact single-to-batch retry is idempotent");
+        sink.emit(EventSinkRequest { envelope: original })
+            .expect("exact batch-to-single retry is idempotent");
+        assert_eq!(sink.events().expect("event snapshot").len(), 1);
+
+        let batch_first = InMemoryEventSink::new();
+        let original = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret gamma")
+            .build();
+        let mut conflicting = original.clone();
+        conflicting.payload["source_text"] = json!("secret delta");
+        batch_first
+            .emit_batch(vec![EventSinkRequest { envelope: original }])
+            .expect("initial batch emit");
+        assert_eq!(
+            batch_first
+                .emit(EventSinkRequest {
+                    envelope: conflicting,
+                })
+                .expect_err("batch-to-single raw conflict")
+                .code,
+            "event_id_conflict"
+        );
+        assert_eq!(batch_first.events().expect("event snapshot").len(), 1);
+    }
+
+    #[test]
+    fn metadata_redaction_is_idempotent_and_rejects_malformed_markers() {
+        let canonical_hash = format!("hash={};len=6", metadata_hash("secret"));
+        let malformed_hash = format!("hash={};len=6", metadata_hash("secret").to_uppercase());
+        let envelope = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("summary", "free-form secret")
+            .metadata("nested", json!({"raw": "value"}))
+            .metadata("redacted_marker", "<redacted>")
+            .metadata("metadata_marker", "<metadata-only>")
+            .metadata("hash_marker", canonical_hash.clone())
+            .metadata("malformed_marker", malformed_hash.clone())
+            .build();
+
+        let first = prepare_event_batch(
+            vec![EventSinkRequest { envelope }],
+            EventSinkConfig::default(),
+        )
+        .expect("first preparation");
+        let second = prepare_event_batch(
+            vec![EventSinkRequest {
+                envelope: first[0].clone(),
+            }],
+            EventSinkConfig::default(),
+        )
+        .expect("second preparation");
+
+        assert_eq!(
+            serde_json::to_vec(&first[0]).expect("serialize first"),
+            serde_json::to_vec(&second[0]).expect("serialize second")
+        );
+        assert_eq!(first[0].payload["redacted_marker"], "<redacted>");
+        assert_eq!(first[0].payload["metadata_marker"], "<metadata-only>");
+        assert_eq!(first[0].payload["hash_marker"], canonical_hash);
+        assert_ne!(first[0].payload["malformed_marker"], malformed_hash);
+    }
+
+    #[test]
+    fn redacting_batch_validates_all_before_atomic_redacted_delivery() {
+        let sink = RedactingEventSink::new();
+        let mut first = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret one")
+            .build();
+        first.redaction = RedactionHint::None;
+        let mut second = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
+            .metadata("source_text", "secret two")
+            .build();
+        second.redaction = RedactionHint::None;
+
+        sink.emit_batch(vec![
+            EventSinkRequest { envelope: first },
+            EventSinkRequest { envelope: second },
+        ])
+        .expect("atomic redacted batch");
+
+        let events = sink.events().expect("event snapshot");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.redaction == RedactionHint::MetadataOnly
+                && event.payload["source_text"] == "<redacted>"
+        }));
+    }
+
+    #[test]
     fn redacting_sink_removes_source_text_for_metadata_only_retention() {
         let sink = RedactingEventSink::new();
         let mut envelope = EventEnvelopeBuilder::new("test.event", CausalityId(Uuid::now_v7()))
@@ -2281,8 +2680,8 @@ mod tests {
     #[test]
     fn proposal_lifecycle_helpers_are_metadata_only_and_orderable() {
         let proposal = save_proposal();
-        let created_causality = CausalityId(Uuid::now_v7());
-        let created = proposal_created_event(&proposal, created_causality, EventSequence(1))
+        let created_transition = transition(ProposalLifecycleState::Created);
+        let created = proposal_created_event(&proposal, &created_transition, EventSequence(1))
             .expect("valid ids");
         let validated_transition = transition(ProposalLifecycleState::Validated);
         let validated =
@@ -2317,6 +2716,23 @@ mod tests {
             assert_eq!(event.redaction, RedactionHint::MetadataOnly);
             assert_ne!(event.payload.to_string(), "/secret/source.rs");
         }
+        assert_eq!(events[0].occurred_at, created_transition.timestamp);
+    }
+
+    #[test]
+    fn proposal_created_event_and_audit_share_the_exact_transition_timestamp() {
+        let proposal = save_proposal();
+        let mut created = transition(ProposalLifecycleState::Created);
+        created.timestamp = TimestampMillis(1_234_567_890);
+
+        let event =
+            proposal_created_event(&proposal, &created, EventSequence(1)).expect("created event");
+        let audit = proposal_audit_record(&proposal, &created).expect("created audit");
+
+        assert_eq!(event.occurred_at, created.timestamp);
+        assert_eq!(event.occurred_at, audit.timestamp);
+        assert_eq!(event.retention, RetentionLabel::Audit);
+        assert_eq!(event.severity, EventSeverity::Info);
     }
 
     #[test]
@@ -2771,6 +3187,8 @@ mod tests {
             .metadata("summary", "raw user prose that must not leak")
             .metadata("reason", "blocked because /secret/source.rs")
             .metadata("lifecycle_state", "Applied")
+            .metadata("payload_kind", "TextEdit")
+            .metadata("payload_byte_count", json!(128))
             .metadata("affected_file_count", json!(3))
             .build();
 
@@ -2790,6 +3208,8 @@ mod tests {
 
         // Allowlisted classifier keys and numeric metadata pass through verbatim.
         assert_eq!(payload["lifecycle_state"], "Applied");
+        assert_eq!(payload["payload_kind"], "TextEdit");
+        assert_eq!(payload["payload_byte_count"], 128);
         assert_eq!(payload["affected_file_count"], 3);
         assert_eq!(payload["metadata_only"], true);
     }
@@ -2840,6 +3260,33 @@ mod tests {
     }
 
     #[test]
+    fn proposal_created_producer_rejects_every_mismatched_transition_identity() {
+        for case in ["proposal", "principal", "capability", "correlation"] {
+            let proposal = save_proposal();
+            let mut created = transition(ProposalLifecycleState::Created);
+            match case {
+                "proposal" => created.proposal_id = legion_protocol::ProposalId(9999),
+                "principal" => created.principal = PrincipalId("different-principal".to_string()),
+                "capability" => {
+                    created.capability = CapabilityId("different.capability".to_string())
+                }
+                "correlation" => created.correlation_id = CorrelationId(9999),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                proposal_created_event(&proposal, &created, EventSequence(1)).unwrap_err(),
+                ObservabilityError::MismatchedProposalTransition,
+                "case={case}"
+            );
+            assert_eq!(
+                proposal_audit_record(&proposal, &created).unwrap_err(),
+                ObservabilityError::MismatchedProposalTransition,
+                "case={case}"
+            );
+        }
+    }
+
+    #[test]
     fn envelope_helpers_reject_invalid_ids_instead_of_panicking() {
         // Zero correlation id.
         assert_eq!(
@@ -2885,14 +3332,15 @@ mod tests {
 
         // Lifecycle helpers validate caller-supplied ids too.
         let proposal = save_proposal();
-        let transition = transition(ProposalLifecycleState::Applied);
+        let applied_transition = transition(ProposalLifecycleState::Applied);
+        let mut invalid_created = transition(ProposalLifecycleState::Created);
+        invalid_created.causality_id = CausalityId(Uuid::nil());
         assert_eq!(
-            proposal_created_event(&proposal, CausalityId(Uuid::nil()), EventSequence(1))
-                .unwrap_err(),
+            proposal_created_event(&proposal, &invalid_created, EventSequence(1)).unwrap_err(),
             ObservabilityError::InvalidCausalityId
         );
         assert_eq!(
-            proposal_applied_event(&proposal, &transition, EventSequence(0)).unwrap_err(),
+            proposal_applied_event(&proposal, &applied_transition, EventSequence(0)).unwrap_err(),
             ObservabilityError::InvalidSequence
         );
     }

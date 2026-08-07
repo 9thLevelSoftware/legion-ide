@@ -158,21 +158,38 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
-        .filter(|other| coordinated.map_or(true, |(run_start, _)| other.start < run_start))
-        .map(|other| other.end)
+        .filter(|other| coordinated.is_none_or(|(run_start, _)| other.start < run_start))
+        .map(|other| independent_claim_start(line, other.end, mention.start))
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
         .max(clause_start(line, mention.start));
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
-        .filter(|other| coordinated.map_or(true, |(_, run_end)| other.end > run_end))
-        .map(|other| other.start)
+        .filter(|other| coordinated.is_none_or(|(_, run_end)| other.end > run_end))
+        .map(|other| independent_claim_end(line, mention.end, other.start))
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
         .min(clause_end(line, mention.end));
 
     line[start..end].to_lowercase()
+}
+
+/// Clamp an independent claim after the last comma between adjacent task IDs.
+/// The text before that comma is the previous task's predicate, not context for
+/// the current task (for example, `T1 landed, T2 remains open`).
+fn independent_claim_start(line: &str, previous_end: usize, current_start: usize) -> usize {
+    line[previous_end..current_start]
+        .rfind(',')
+        .map_or(previous_end, |offset| previous_end + offset + 1)
+}
+
+/// Clamp an independent claim before the first comma between adjacent task IDs.
+/// Coordinated task lists bypass this boundary in [`context_around`].
+fn independent_claim_end(line: &str, current_end: usize, next_start: usize) -> usize {
+    line[current_end..next_start]
+        .find(',')
+        .map_or(next_start, |offset| current_end + offset)
 }
 
 /// Return the span of a coordinated task-id list containing `mention`.
@@ -213,8 +230,7 @@ fn coordinated_list_bounds(
 
 fn is_list_separator(between: &str) -> bool {
     let connector = between.trim();
-    connector.chars().all(|ch| ch == ',')
-        || is_explicit_coordinator(connector)
+    connector.chars().all(|ch| ch == ',') || is_explicit_coordinator(connector)
 }
 
 fn is_explicit_coordinator(between: &str) -> bool {
