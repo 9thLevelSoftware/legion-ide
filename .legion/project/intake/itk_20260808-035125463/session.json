@@ -1,0 +1,307 @@
+{
+  "schemaVersion": "0.3.0",
+  "createdAt": "2026-08-08T03:51:25.463Z",
+  "kind": "intake-session",
+  "id": "itk_20260808-035125463",
+  "projectId": "prj_legion-ide",
+  "graphVersion": "1.2.0",
+  "status": "finalized",
+  "explorationRef": {
+    "runId": "run_explore-2026-08-08t00-53-14-329z-legion-ide-production-completio",
+    "artifact": {
+      "path": ".legion/project/workflow/explore/2026-08-08t00-53-14-329z-legion-ide-production-completion/exploration.json",
+      "sha256": "sha256:2cc77f59bd403dd7ff029edfd6d8bf077af16d0bc465f6c3ebfe726a7a6b90c6"
+    }
+  },
+  "answers": [
+    {
+      "nodeId": "project-name",
+      "slot": "project.name",
+      "value": "Legion IDE",
+      "answeredAt": "2026-08-08T03:51:48.142Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "project-summary",
+      "slot": "project.summary",
+      "value": "A secure IDE built entirely in Rust which various levels of configurable automation, from entirely manual to fully automated workflows.",
+      "answeredAt": "2026-08-08T03:52:42.858Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "project-owner",
+      "slot": "project.owner",
+      "value": "Devil",
+      "answeredAt": "2026-08-08T03:52:58.223Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "problem-statement",
+      "slot": "problem.statement",
+      "value": "Nearly every semi-popular IDE on the market right now is a) a fork of VSCode and b) more AI than IDE.  This application looks to bridge the gap.",
+      "answeredAt": "2026-08-08T03:54:02.395Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "problem-users",
+      "slot": "problem.users",
+      "value": "Most seasoned software engineers",
+      "answeredAt": "2026-08-08T03:54:20.602Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "problem-success",
+      "slot": "problem.success",
+      "value": "The application functions flawlessly in full manual mode and successfully incorporates configurable levels of AI tools through its four levels of automation.",
+      "answeredAt": "2026-08-08T03:56:23.019Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-statement",
+      "slot": "requirements.1.statement",
+      "value": "The application must be able to facilitate the writing and refining of code in all languages/file formats.",
+      "answeredAt": "2026-08-08T03:58:16.407Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-priority",
+      "slot": "requirements.1.priority",
+      "value": "must",
+      "answeredAt": "2026-08-08T03:58:33.933Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-category",
+      "slot": "requirements.1.category",
+      "value": "behavior",
+      "answeredAt": "2026-08-08T03:58:52.185Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-statement",
+      "slot": "requirements.1.criteria.1.statement",
+      "value": "All file types related to coding can be created/edited.",
+      "answeredAt": "2026-08-08T04:01:05.930Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-proof",
+      "slot": "requirements.1.criteria.1.proof",
+      "value": "executable",
+      "answeredAt": "2026-08-08T04:01:20.333Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-detail",
+      "slot": "requirements.1.criteria.1.detail",
+      "value": "cargo test --workspace -F desktop -- file_type",
+      "answeredAt": "2026-08-08T04:13:26.121Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-surface-kind",
+      "slot": "requirements.1.criteria.1.surface.kind",
+      "value": "integration",
+      "answeredAt": "2026-08-08T04:13:52.007Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-surface-interface",
+      "slot": "requirements.1.criteria.1.surface.interface",
+      "value": "EditorBufferManager::open_file() -> ShellProjectionSnapshot",
+      "answeredAt": "2026-08-08T04:13:56.446Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-surface-rationale",
+      "slot": "requirements.1.criteria.1.surface.rationale",
+      "value": "A unit test on the buffer alone would miss projection boundary failures where file open succeeds but the GUI never receives the snapshot to render.",
+      "answeredAt": "2026-08-08T04:14:00.951Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-surface-pins",
+      "slot": "requirements.1.criteria.1.surface.pins",
+      "value": "crates/legion-editor/src/lib.rs, crates/legion-app/src/lib.rs, crates/legion-ui/src/lib.rs, crates/legion-desktop/tests/projection_rendering.rs",
+      "answeredAt": "2026-08-08T04:14:13.903Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-acceptance-paths",
+      "slot": "requirements.1.criteria.1.acceptance-paths",
+      "value": "crates/legion-desktop/tests/projection_rendering.rs, crates/legion-desktop/tests/headless_input.rs, crates/legion-desktop/tests/save_all_conflict.rs, crates/legion-app/src/bin/golden_path_1.rs",
+      "answeredAt": "2026-08-08T04:14:18.444Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-ac-1-more",
+      "slot": "requirements.1.criteria.1.more",
+      "value": false,
+      "answeredAt": "2026-08-08T04:14:27.643Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-1-more",
+      "slot": "requirements.1.more",
+      "value": true,
+      "answeredAt": "2026-08-08T04:14:35.881Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-statement",
+      "slot": "requirements.2.statement",
+      "value": "All automated and AI-assisted operations must be sandboxed behind trust boundaries and require explicit human approval before mutating the main workspace.",
+      "answeredAt": "2026-08-08T04:14:40.105Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-priority",
+      "slot": "requirements.2.priority",
+      "value": "must",
+      "answeredAt": "2026-08-08T04:14:43.205Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-category",
+      "slot": "requirements.2.category",
+      "value": "security",
+      "answeredAt": "2026-08-08T04:14:47.175Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-statement",
+      "slot": "requirements.2.criteria.1.statement",
+      "value": "Delegated agent tasks run in isolated git worktree sandboxes and cannot write to the main workspace without an approved proposal.",
+      "answeredAt": "2026-08-08T04:14:52.298Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-proof",
+      "slot": "requirements.2.criteria.1.proof",
+      "value": "executable",
+      "answeredAt": "2026-08-08T04:14:57.758Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-surface-kind",
+      "slot": "requirements.2.criteria.1.surface.kind",
+      "value": "integration",
+      "answeredAt": "2026-08-08T04:15:09.985Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-surface-interface",
+      "slot": "requirements.2.criteria.1.surface.interface",
+      "value": "DelegatedTaskSandboxOrchestrator::execute() -> filesystem path containment",
+      "answeredAt": "2026-08-08T04:15:14.667Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-surface-rationale",
+      "slot": "requirements.2.criteria.1.surface.rationale",
+      "value": "Unit-testing path validation alone would miss traversal attacks that only manifest when the sandbox orchestrator wires real worktree paths to the agent process.",
+      "answeredAt": "2026-08-08T04:15:19.852Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-surface-pins",
+      "slot": "requirements.2.criteria.1.surface.pins",
+      "value": "crates/legion-sandbox/tests/escape_attempts.rs, crates/legion-app/tests/worktree_evidence_workflow.rs, crates/legion-sandbox/src/lib.rs",
+      "answeredAt": "2026-08-08T04:15:36.263Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-acceptance-paths",
+      "slot": "requirements.2.criteria.1.acceptance-paths",
+      "value": "crates/legion-sandbox/tests/escape_attempts.rs, crates/legion-sandbox/tests/compile_profiles.rs, crates/legion-app/tests/worktree_evidence_workflow.rs, crates/legion-security/tests/graduated_approval.rs",
+      "answeredAt": "2026-08-08T04:15:40.852Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-more",
+      "slot": "requirements.2.criteria.1.more",
+      "value": false,
+      "answeredAt": "2026-08-08T04:15:44.246Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-more",
+      "slot": "requirements.2.more",
+      "value": false,
+      "answeredAt": "2026-08-08T04:15:56.465Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "non-goals",
+      "slot": "scope.non-goals",
+      "value": "VS Code extension host sidecar / runtime extension execution\nRemote development (SSH, devcontainers, cloud workspaces)\nReal-time collaboration / shared editing\nAdmin policy management console\nMarketplace / extension store\nProprietary next-edit prediction models\nMulti-language LSP parity beyond Rust-first",
+      "answeredAt": "2026-08-08T04:16:02.400Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "constraints",
+      "slot": "constraints.text",
+      "value": "Rust-only codebase, edition 2024, MSRV 1.92\negui/eframe 0.34 for desktop rendering\nNo hosted/cloud egress without explicit user consent\nAll AI provider interactions are metadata-only by default\nEvery file mutation goes through the proposal pipeline\nSandbox enforcement gaps must be honestly reported per-platform\nTerminal output must be redacted before projection\nPlugin WASM modules execute in wasmtime sandbox with capability limits\nDependency policy enforced via xtask check-deps\n21 standing gates must remain merge-blocking",
+      "answeredAt": "2026-08-08T04:16:10.789Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "risk-tier",
+      "slot": "risk.tier",
+      "value": "R3",
+      "answeredAt": "2026-08-08T04:16:15.968Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "risk-reason",
+      "slot": "risk.reason",
+      "value": "Handles API credentials, executes untrusted WASM, runs sandboxed agents with fs access, manages code-signing keys.",
+      "answeredAt": "2026-08-08T04:16:25.320Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "budget-files",
+      "slot": "budget.max-files-changed",
+      "value": "25",
+      "answeredAt": "2026-08-08T04:16:29.052Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "budget-lines",
+      "slot": "budget.max-lines-changed",
+      "value": "1000",
+      "answeredAt": "2026-08-08T04:16:33.707Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "budget-new-files",
+      "slot": "budget.max-new-files",
+      "value": "10",
+      "answeredAt": "2026-08-08T04:16:37.551Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "pref-verification",
+      "slot": "preferences.verification",
+      "value": "cargo run -p xtask -- check-deps",
+      "answeredAt": "2026-08-08T04:16:46.025Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "pref-notes",
+      "slot": "preferences.notes",
+      "value": "Brownfield project with 543 commits and 13 completed phases. Hexagonal port architecture: legion-protocol owns types, legion-app owns authority, legion-ui is projection-only, legion-desktop is the renderer edge. 45 ADRs accepted. 21 standing gates enforced via xtask. Dual-mode architecture throughout — fixture and production paths exist for most features. Design exploration at .legion/project/workflow/explore/ contains the 7-wave parallel production completion plan.",
+      "answeredAt": "2026-08-08T04:16:55.332Z",
+      "source": "human"
+    },
+    {
+      "nodeId": "req-2-ac-1-detail",
+      "slot": "requirements.2.criteria.1.detail",
+      "value": "cargo test -p legion-sandbox -- escape",
+      "answeredAt": "2026-08-08T04:17:06.200Z",
+      "source": "human"
+    }
+  ],
+  "injectedNodes": [],
+  "diagnostics": []
+}

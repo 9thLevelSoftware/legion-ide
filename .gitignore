@@ -29,3 +29,4 @@ __pycache__/
 .almanac/index.db-shm
 .almanac/runs/
 /target-load/
+.legion/var/
