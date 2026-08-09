@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "0.1.0",
+  "kind": "requirement-set",
+  "createdAt": "2026-08-08T03:51:25.463Z",
+  "projectId": "prj_legion-ide",
+  "intakeSessionId": "itk_20260808-035125463",
+  "graphVersion": "1.2.0",
+  "requirementSetHash": "sha256:c16e9ca799e6d99975883c01b33f4379d7170d39ba211dca8528c1c76f34be9d",
+  "enforcement": {
+    "risk": {
+      "tier": "R3",
+      "reason": "Handles API credentials, executes untrusted WASM, runs sandboxed agents with fs access, manages code-signing keys."
+    },
+    "budget": {
+      "maxFilesChanged": 25,
+      "maxLinesChanged": 1000,
+      "maxNewFiles": 10
+    },
+    "verification": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "-p",
+        "xtask",
+        "--",
+        "check-deps"
+      ]
+    }
+  },
+  "entries": [
+    {
+      "requirementId": "req_the-application-must-be-able-to-facilitate-the-w-1",
+      "path": ".legion/project/requirements/req_the-application-must-be-able-to-facilitate-the-w-1.json",
+      "sha256": "sha256:f49e1c92e52699b14d767656abe6291bf2a13f696f6aed1ba107442e582dc49c"
+    },
+    {
+      "requirementId": "req_all-automated-and-ai-assisted-operations-must-be-2",
+      "path": ".legion/project/requirements/req_all-automated-and-ai-assisted-operations-must-be-2.json",
+      "sha256": "sha256:929b1f5b8a6795d488a4c9411f8bc6e693b88b64fad9abd89ddf288d76dc9766"
+    }
+  ]
+}
