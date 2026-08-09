@@ -52,7 +52,7 @@ A secure IDE built entirely in Rust which various levels of configurable automat
 **Acceptance criteria**
 
 - [ ] All file types related to coding can be created/edited.
-  - `cargo test --workspace -F desktop -- file_type` must exit 0
+  - `cargo run -p xtask -- golden-path-1` must exit 0
 
 ## Phase 2: All automated and AI-assisted operations must be sandboxed behind trust boundaries and require explicit human approval before mutating the main workspace.
 

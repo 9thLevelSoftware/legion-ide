@@ -1,12 +1,12 @@
 # Legion IDE — Architecture Analysis
 
-> Generated 2026-08-07 · 943 source files · 30 crates · ~196k LOC Rust
+> Generated 2026-08-07 · 943 source files · 29 crates · ~196k LOC Rust
 
 ## 1. System Overview
 
 Legion IDE is a proprietary, Rust-native code editor with integrated AI-assisted
 development, multi-agent workflow orchestration, and defense-in-depth security.
-The codebase is a Cargo workspace of 30 crates plus an `xtask` automation suite,
+The codebase is a Cargo workspace of 29 crates plus an `xtask` automation suite,
 targeting Windows, macOS, and Linux.
 
 **Key design principles:**
@@ -238,9 +238,9 @@ before retention or export.
 | **Total** | **157** | **193** | **1.2:1** |
 
 **Golden-path smokes** (GP-1 through GP-4) exercise end-to-end product flows:
-fixture edit/LSP/git (GP-1), AI-enabled assist/prediction (GP-2), delegate task
-loop with scope denial and evidence TOML (GP-3), automate multi-agent workflow
-evidence (GP-4).
+fixture edit/LSP/git (GP-1), scope/sandbox/kill-switch with AI-assist routing
+(GP-2), delegate task loop with scope denial and evidence TOML (GP-3), automate
+multi-agent workflow evidence (GP-4).
 
 **21 standing gates** run on every PR via `xtask`: dependency policy, docs
 hygiene, claim audit, no-egui-textedit, release pipeline, format, check, test,
