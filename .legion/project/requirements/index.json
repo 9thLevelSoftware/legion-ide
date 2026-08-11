@@ -5,7 +5,7 @@
   "projectId": "prj_legion-ide",
   "intakeSessionId": "itk_20260808-035125463",
   "graphVersion": "1.2.0",
-  "requirementSetHash": "sha256:25a3ed644c997870a835997a89c9fc08253418c81ac1dd0d3586e81ebb722323",
+  "requirementSetHash": "sha256:d548475d021d608511ed019a971de867c265cf6d870fdd8cbfb08ee44930afb4",
   "enforcement": {
     "risk": {
       "tier": "R3",
@@ -31,7 +31,7 @@
     {
       "requirementId": "req_the-application-must-be-able-to-facilitate-the-w-1",
       "path": ".legion/project/requirements/req_the-application-must-be-able-to-facilitate-the-w-1.json",
-      "sha256": "sha256:938cfd8069ddc58e2520fde6974e6fa9238494d2608997112b8feb2deb9e4003"
+      "sha256": "sha256:0c709971fe6a405a0469bb6bcb1f9b2222beb72b381dbb38d72dad177472beb3"
     },
     {
       "requirementId": "req_all-automated-and-ai-assisted-operations-must-be-2",

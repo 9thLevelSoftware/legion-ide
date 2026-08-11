@@ -11,8 +11,8 @@
     "language": "The application must be able to facilitate the writing and refining of code in all languages/file formats.",
     "criteria": [
       {
-        "id": "ac_all-file-types-related-to-coding-can-be-created-1",
-        "statement": "All file types related to coding can be created/edited.",
+        "id": "ac_projection-rendering-pipeline-renders-editor-co-1",
+        "statement": "The projection rendering pipeline renders editor content, chrome, selections, and interactive surfaces through ShellProjectionSnapshot.",
         "proof": {
           "mode": "executable",
           "command": "cargo",
