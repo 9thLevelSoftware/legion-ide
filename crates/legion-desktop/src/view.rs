@@ -68,11 +68,12 @@ use code_canvas_painter::{CodeCanvasPainter, EguiCodeCanvasPainter};
 use legion_protocol::{
     BufferId, CanonicalPath, ContextManifestEgressStatus, ContextManifestInclusionState,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
-    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId, LegionToolKind,
-    LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
-    ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange,
-    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId,
+    LanguageProblemProjection, LegionToolKind, LineWrappingPolicy, PRODUCT_NAME,
+    PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
+    PrivacyInspectorRedactionState, ProposalId, ProposalLifecycleState, ProposalRejectionReason,
+    ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
@@ -2244,6 +2245,20 @@ fn render_code_lines(
                     paint_current_line_highlight(ui, line, &response, current_cursor);
                 }
                 paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                paint_diagnostic_underlines(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.language_tooling_projection.problems,
+                    char_width,
+                );
+                show_diagnostic_tooltip(
+                    ui,
+                    &response,
+                    line,
+                    &snapshot.language_tooling_projection.problems,
+                    char_width,
+                );
                 if let Some(ime_composition) = ime_composition.as_ref() {
                     paint_ime_composition(
                         ui,
@@ -2455,6 +2470,119 @@ fn paint_code_cursor(
         ],
         egui::Stroke::new(1.0_f32, theme::tokens().accent.cyan),
     );
+}
+
+fn paint_diagnostic_underlines(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    problems: &[LanguageProblemProjection],
+    char_width: f32,
+) {
+    let line_zero = line.number.saturating_sub(1);
+    for problem in problems {
+        let Some(range) = problem.range.as_ref() else {
+            continue;
+        };
+        if range.start.line > line_zero || range.end.line < line_zero {
+            continue;
+        }
+        let start_char = if range.start.line == line_zero {
+            range.start.character
+        } else {
+            0
+        };
+        let end_char = if range.end.line == line_zero {
+            range.end.character
+        } else {
+            line.text.chars().count() as u32
+        };
+        if start_char >= end_char {
+            continue;
+        }
+        let start_x = response.rect.left() + start_char as f32 * char_width;
+        let end_x = response.rect.left() + end_char as f32 * char_width;
+        let y = response.rect.bottom() - 1.0;
+        let color = match problem.severity {
+            ProtocolDiagnosticSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
+            ProtocolDiagnosticSeverity::Warning => egui::Color32::from_rgb(255, 165, 0),
+            ProtocolDiagnosticSeverity::Info => egui::Color32::from_rgb(0, 120, 215),
+            ProtocolDiagnosticSeverity::Hint => egui::Color32::from_rgb(150, 150, 150),
+        };
+        ui.painter().line_segment(
+            [egui::pos2(start_x, y), egui::pos2(end_x, y)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+    }
+}
+
+fn show_diagnostic_tooltip(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    line: &DesktopCodeLineViewModel,
+    problems: &[LanguageProblemProjection],
+    char_width: f32,
+) {
+    if !response.hovered() {
+        return;
+    }
+    let Some(hover_pos) = response.hover_pos() else {
+        return;
+    };
+    let hover_col = ((hover_pos.x - response.rect.left()) / char_width).max(0.0) as u32;
+    let line_zero = line.number.saturating_sub(1);
+    let matching: Vec<&LanguageProblemProjection> = problems
+        .iter()
+        .filter(|p| {
+            let Some(range) = p.range.as_ref() else {
+                return false;
+            };
+            if range.start.line > line_zero || range.end.line < line_zero {
+                return false;
+            }
+            let start_char = if range.start.line == line_zero {
+                range.start.character
+            } else {
+                0
+            };
+            let end_char = if range.end.line == line_zero {
+                range.end.character
+            } else {
+                line.text.chars().count() as u32
+            };
+            hover_col >= start_char && hover_col < end_char
+        })
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+    egui::Tooltip::always_open(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        ui.id().with("diag_tooltip"),
+        egui::PopupAnchor::Pointer,
+    )
+    .show(|ui: &mut egui::Ui| {
+        for (i, problem) in matching.iter().enumerate() {
+            if i > 0 {
+                ui.separator();
+            }
+            let color = match problem.severity {
+                ProtocolDiagnosticSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
+                ProtocolDiagnosticSeverity::Warning => egui::Color32::from_rgb(255, 165, 0),
+                ProtocolDiagnosticSeverity::Info => egui::Color32::from_rgb(0, 120, 215),
+                ProtocolDiagnosticSeverity::Hint => egui::Color32::from_rgb(150, 150, 150),
+            };
+            ui.colored_label(color, format!("{:?}", problem.severity));
+            ui.label(&problem.message);
+            if let Some(source) = &problem.source_label {
+                ui.label(theme::muted(source));
+            }
+            if let Some(code) = &problem.code_label {
+                ui.label(theme::muted(code));
+            }
+        }
+    });
 }
 
 fn paint_ime_composition(
