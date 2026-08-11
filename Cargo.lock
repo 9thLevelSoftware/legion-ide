@@ -3986,6 +3986,7 @@ dependencies = [
  "legion-protocol",
  "legion-text",
  "quickcheck",
+ "regex",
  "thiserror 2.0.18",
  "uuid",
 ]
