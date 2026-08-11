@@ -1,0 +1,66 @@
+{
+  "status": "failed",
+  "summary": "The recorded run was a fake no-op with no implementation diff, and the acceptance oracle remains unevaluated.",
+  "reviewVerdicts": {
+    "specification": "fail",
+    "integration": "fail",
+    "evidence": "fail"
+  },
+  "findings": [
+    {
+      "id": "missing-implementation-diff",
+      "title": "No Live LSP implementation was recorded",
+      "body": "executor-result.json reports filesChanged as empty, diff-observation.json reports zero changed lines and no new files, and the executor only reports a fake build. The task objective has no implementation evidence.",
+      "severity": "blocking"
+    },
+    {
+      "id": "oracle-not-evaluated",
+      "title": "Acceptance oracle remains unevaluated",
+      "body": "verification-report.json has empty oracleAttribution, no surface checks, and lists orc_phase-3-live-lsp-integration under unevaluatedOracleRefs. The oracle-verification evidence item is verdict unknown.",
+      "severity": "blocking"
+    },
+    {
+      "id": "insufficient-feature-verification",
+      "title": "Validation does not prove Live LSP integration",
+      "body": "The only recorded verification command is legion validate, while the executor used fake model and sandbox settings. This does not verify server launch, diagnostics, completion, hover, definition, or inlay-hint integration.",
+      "severity": "blocking"
+    }
+  ],
+  "filesChanged": [],
+  "commandsRun": [
+    {
+      "command": "Get-Content",
+      "args": [
+        ".legion/project/changes/chg_phase-3-live-lsp-integration/reviews/rev_phase-3-live-lsp-integration-review-1/context-pack.md",
+        ".legion/project/changes/chg_phase-3-live-lsp-integration/change.yaml",
+        ".legion/project/changes/chg_phase-3-live-lsp-integration/oracle/orc_phase-3-live-lsp-integration.yaml"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": "Get-ChildItem",
+      "args": [
+        ".legion/project/changes/chg_phase-3-live-lsp-integration/runs/run_phase-3-live-lsp-integration-attempt-1"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": "Get-Content",
+      "args": [
+        "task-run.json",
+        "executor-result.json",
+        "executor-redacted.log",
+        "verification-report.json",
+        "diff-observation.json"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": "legion review",
+      "args": [
+        "--json"
+      ],
+      "exitCode": 1
+    }
+  ]
+}
