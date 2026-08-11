@@ -68,7 +68,7 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple, language_for_path,
     register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
     tree_sitter_supports_path,
 };
@@ -11865,8 +11865,9 @@ fn tree_sitter_semantic_token_overlays_for_visible_lines(
     }
 
     // Parse outside the cache lock so rendering threads never block each other on tree-sitter work.
+    let lang_id = language_for_path(path)?;
     let mut captures = TreeSitterParser::new()
-        .highlight_captures_from_text(&LanguageId("rust".to_string()), full_text)
+        .highlight_captures_from_text(&lang_id, full_text)
         .ok()?;
     if captures.is_empty() {
         return None;
