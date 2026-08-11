@@ -1,0 +1,17 @@
+{
+  "status": "succeeded",
+  "summary": "Collected R1 evidence passes review: recorded tests exited 0, oracle integration pins match, logs are clean, and no files changed.",
+  "reviewVerdicts": {
+    "specification": "pass",
+    "integration": "pass",
+    "evidence": "pass"
+  },
+  "findings": [],
+  "filesChanged": [],
+  "commandsRun": [
+    {
+      "command": "read-only artifact consistency check",
+      "exitCode": 0
+    }
+  ]
+}
