@@ -811,6 +811,9 @@ impl ProjectionView {
         let model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         let mut actions = Vec::new();
 
+        // Central keyboard dispatch runs before hardcoded key checks.
+        dispatch_keybindings(ui.ctx(), &mut actions);
+
         egui::Panel::top("legion_desktop_top")
             .exact_size(52.0)
             .frame(theme::toolbar_frame())
@@ -880,6 +883,7 @@ impl ProjectionView {
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
         render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
+        render_find_bar(ui.ctx(), snapshot, &mut actions);
 
         ProjectionViewOutput {
             needs_repaint: false,
@@ -1515,6 +1519,279 @@ fn render_hover_tooltip(
                     });
                 });
         });
+}
+
+/// Map a string key label from `default_keymap()` to the corresponding `egui::Key`.
+///
+/// Only maps keys actually used in the default keymap.  Returns `None` for
+/// unrecognised labels so the dispatch loop simply skips them.
+fn key_label_to_egui(label: &str) -> Option<egui::Key> {
+    match label {
+        "S" => Some(egui::Key::S),
+        "F" => Some(egui::Key::F),
+        "H" => Some(egui::Key::H),
+        "G" => Some(egui::Key::G),
+        "P" => Some(egui::Key::P),
+        "Z" => Some(egui::Key::Z),
+        "W" => Some(egui::Key::W),
+        "Tab" => Some(egui::Key::Tab),
+        "F3" => Some(egui::Key::F3),
+        "F5" => Some(egui::Key::F5),
+        "F9" => Some(egui::Key::F9),
+        "F10" => Some(egui::Key::F10),
+        "F11" => Some(egui::Key::F11),
+        "F12" => Some(egui::Key::F12),
+        "Escape" => Some(egui::Key::Escape),
+        _ => None,
+    }
+}
+
+/// Map a keybinding action label to a `DesktopAction`, if applicable.
+///
+/// Context-dependent actions like GoToDefinition (already handled by inline key
+/// checks in the code canvas) are excluded here.
+fn action_label_to_desktop_action(label: &str) -> Option<DesktopAction> {
+    match label {
+        "SaveActive" => Some(DesktopAction::SaveActive),
+        "SaveAll" => Some(DesktopAction::SaveAll),
+        "ToggleFindBar" => Some(DesktopAction::ToggleFindBar),
+        "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
+        "FindNext" => Some(DesktopAction::FindNext),
+        "FindPrevious" => Some(DesktopAction::FindPrevious),
+        "Undo" => Some(DesktopAction::Undo),
+        "Redo" => Some(DesktopAction::Redo),
+        _ => None,
+    }
+}
+
+/// Central keyboard dispatch from `default_keymap()`.
+///
+/// Reads the keymap bindings and checks each combo against egui's current
+/// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
+/// hardcoded key checks so the keymap takes precedence for non-context-dependent
+/// actions.
+fn dispatch_keybindings(ctx: &egui::Context, actions: &mut Vec<DesktopAction>) {
+    let bindings = legion_ui::ui::default_keymap();
+    ctx.input(|input| {
+        for binding in &bindings {
+            let Some(key) = key_label_to_egui(&binding.combo.key) else {
+                continue;
+            };
+            if !input.key_pressed(key) {
+                continue;
+            }
+            if binding.combo.ctrl != input.modifiers.ctrl {
+                continue;
+            }
+            if binding.combo.shift != input.modifiers.shift {
+                continue;
+            }
+            if binding.combo.alt != input.modifiers.alt {
+                continue;
+            }
+            if let Some(action) = action_label_to_desktop_action(&binding.action_label) {
+                actions.push(action);
+            }
+        }
+    });
+}
+
+/// Adapter-local find bar text state stored in egui transient data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FindBarTextState {
+    query: String,
+    replace: String,
+    was_visible: bool,
+}
+
+/// Render the in-editor find/replace bar overlay.
+///
+/// Anchored to the top-right of the editor area via `egui::Area`.  Only visible
+/// when the snapshot's `find_bar_projection.visible` is true.  Emits find/replace
+/// `DesktopAction` variants for query changes, navigation, and replace operations.
+///
+/// Text edit state is stored in egui transient data (not in `DesktopProjectionViewState`)
+/// so the function works with an immutable `state` reference.
+fn render_find_bar(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let find_bar = &snapshot.find_bar_projection;
+    let state_id = egui::Id::new("legion_find_bar_text_state");
+
+    if !find_bar.visible {
+        // Clear was_visible when the bar is hidden.
+        ctx.data_mut(|d| {
+            if let Some(mut s) = d.get_temp::<FindBarTextState>(state_id) {
+                s.was_visible = false;
+                d.insert_temp(state_id, s);
+            }
+        });
+        return;
+    }
+
+    // Load or initialize the local text state.
+    let mut text_state: FindBarTextState =
+        ctx.data_mut(|d| d.get_temp(state_id).unwrap_or_default());
+    let just_opened = !text_state.was_visible;
+    if just_opened {
+        text_state.query = find_bar.query.clone();
+        text_state.replace = find_bar.replace_text.clone();
+    }
+    text_state.was_visible = true;
+
+    let tokens = theme::tokens();
+    let find_bar_id = egui::Id::new("legion_find_bar");
+
+    // Keyboard handling consumed before the popup frame.
+    let mut enter_pressed = false;
+    let mut shift_enter_pressed = false;
+    let mut escape_pressed = false;
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            escape_pressed = true;
+        }
+        if i.key_pressed(egui::Key::Enter) && i.modifiers.shift {
+            shift_enter_pressed = true;
+        } else if i.key_pressed(egui::Key::Enter) {
+            enter_pressed = true;
+        }
+    });
+
+    if escape_pressed {
+        actions.push(DesktopAction::CloseFindBar);
+        ctx.data_mut(|d| d.insert_temp(state_id, text_state));
+        return;
+    }
+    if shift_enter_pressed {
+        actions.push(DesktopAction::FindPrevious);
+    } else if enter_pressed {
+        actions.push(DesktopAction::FindNext);
+    }
+
+    egui::Area::new(find_bar_id)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 8.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    // Find row.
+                    ui.horizontal(|ui| {
+                        let query_response = ui.add(
+                            egui::TextEdit::singleline(&mut text_state.query)
+                                .desired_width(180.0)
+                                .hint_text("Find...")
+                                .id(egui::Id::new("legion_find_query_input")),
+                        );
+                        if just_opened {
+                            query_response.request_focus();
+                        }
+                        if query_response.changed() {
+                            actions.push(DesktopAction::SetFindQuery {
+                                query: text_state.query.clone(),
+                            });
+                        }
+
+                        // Match counter.
+                        if find_bar.match_count > 0 {
+                            ui.label(theme::muted(format!(
+                                "{} of {}",
+                                find_bar.current_match_index + 1,
+                                find_bar.match_count
+                            )));
+                        } else if !find_bar.query.is_empty() {
+                            ui.label(theme::muted("No results"));
+                        }
+
+                        // Navigation buttons.
+                        if ui.small_button("\u{25B2}").on_hover_text("Previous (Shift+Enter)").clicked() {
+                            actions.push(DesktopAction::FindPrevious);
+                        }
+                        if ui.small_button("\u{25BC}").on_hover_text("Next (Enter)").clicked() {
+                            actions.push(DesktopAction::FindNext);
+                        }
+
+                        // Option toggles.
+                        let case_label = if find_bar.case_sensitive {
+                            theme::body_strong("Aa")
+                        } else {
+                            theme::muted("Aa")
+                        };
+                        if ui.small_button(case_label).on_hover_text("Case sensitive").clicked() {
+                            actions.push(DesktopAction::SetFindCaseSensitive {
+                                enabled: !find_bar.case_sensitive,
+                            });
+                        }
+                        let word_label = if find_bar.whole_word {
+                            theme::body_strong("W")
+                        } else {
+                            theme::muted("W")
+                        };
+                        if ui.small_button(word_label).on_hover_text("Whole word").clicked() {
+                            actions.push(DesktopAction::SetFindWholeWord {
+                                enabled: !find_bar.whole_word,
+                            });
+                        }
+                        let regex_label = if find_bar.use_regex {
+                            theme::body_strong(".*")
+                        } else {
+                            theme::muted(".*")
+                        };
+                        if ui.small_button(regex_label).on_hover_text("Regex").clicked() {
+                            actions.push(DesktopAction::SetFindRegex {
+                                enabled: !find_bar.use_regex,
+                            });
+                        }
+
+                        // Toggle replace visibility.
+                        if ui.small_button(if find_bar.replace_visible { "\u{25B4}" } else { "\u{25BE}" })
+                            .on_hover_text("Toggle replace")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::ToggleFindReplace);
+                        }
+
+                        // Close button.
+                        if ui.small_button("\u{2715}").on_hover_text("Close (Esc)").clicked() {
+                            actions.push(DesktopAction::CloseFindBar);
+                        }
+                    });
+
+                    // Replace row (only when visible).
+                    if find_bar.replace_visible {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let replace_response = ui.add(
+                                egui::TextEdit::singleline(&mut text_state.replace)
+                                    .desired_width(180.0)
+                                    .hint_text("Replace...")
+                                    .id(egui::Id::new("legion_find_replace_input")),
+                            );
+                            if replace_response.changed() {
+                                actions.push(DesktopAction::SetFindReplaceText {
+                                    text: text_state.replace.clone(),
+                                });
+                            }
+
+                            if ui.small_button("Replace").on_hover_text("Replace current match").clicked() {
+                                actions.push(DesktopAction::ReplaceOne);
+                            }
+                            if ui.small_button("All").on_hover_text("Replace all matches").clicked() {
+                                actions.push(DesktopAction::ReplaceAll);
+                            }
+                        });
+                    }
+                });
+        });
+
+    // Persist the text state back to egui transient data.
+    ctx.data_mut(|d| d.insert_temp(state_id, text_state));
 }
 
 fn toast_accent_color(severity: StatusSeverity) -> egui::Color32 {
@@ -2252,6 +2529,13 @@ fn render_code_lines(
                     paint_current_line_highlight(ui, line, &response, current_cursor);
                 }
                 paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                paint_find_match_highlights(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.find_bar_projection,
+                    char_width,
+                );
                 paint_diagnostic_underlines(
                     ui,
                     line,
@@ -2552,6 +2836,59 @@ fn paint_code_cursor(
         ],
         egui::Stroke::new(1.0_f32, theme::tokens().accent.cyan),
     );
+}
+
+/// Paint semi-transparent highlight rectangles for find matches on a code line.
+///
+/// All matches are painted in yellow; the current match is painted in orange.
+fn paint_find_match_highlights(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    find_bar: &legion_ui::ui::FindBarProjection,
+    char_width: f32,
+) {
+    if !find_bar.visible || find_bar.matches.is_empty() {
+        return;
+    }
+    let line_zero = line.number.saturating_sub(1);
+    let yellow = egui::Color32::from_rgba_premultiplied(255, 235, 59, 80);
+    let orange = egui::Color32::from_rgba_premultiplied(255, 152, 0, 120);
+
+    for (i, m) in find_bar.matches.iter().enumerate() {
+        // Skip matches that don't overlap this line.
+        if m.start.line > line_zero || m.end.line < line_zero {
+            continue;
+        }
+        let start_char = if m.start.line == line_zero {
+            m.start.character
+        } else {
+            0
+        };
+        let end_char = if m.end.line == line_zero {
+            m.end.character
+        } else {
+            line.text.chars().count() as u32
+        };
+        if start_char >= end_char {
+            continue;
+        }
+        let start_x = response.rect.left() + start_char as f32 * char_width;
+        let end_x = response.rect.left() + end_char as f32 * char_width;
+        let color = if i == find_bar.current_match_index {
+            orange
+        } else {
+            yellow
+        };
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(start_x, response.rect.top()),
+                egui::pos2(end_x, response.rect.bottom()),
+            ),
+            egui::CornerRadius::ZERO,
+            color,
+        );
+    }
 }
 
 fn paint_diagnostic_underlines(

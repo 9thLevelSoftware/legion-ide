@@ -11601,6 +11601,20 @@ impl CommandDispatcher {
             | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
                 Ok(AppCommandRequest::Noop)
             }
+            // Find/replace intents are handled by AppComposition::dispatch_ui_intent
+            // before reaching this router; these arms satisfy exhaustiveness.
+            CommandDispatchIntent::ToggleFindBar
+            | CommandDispatchIntent::CloseFindBar
+            | CommandDispatchIntent::SetFindQuery { .. }
+            | CommandDispatchIntent::FindNext
+            | CommandDispatchIntent::FindPrevious
+            | CommandDispatchIntent::ToggleFindReplace
+            | CommandDispatchIntent::SetFindReplaceText { .. }
+            | CommandDispatchIntent::ReplaceOne
+            | CommandDispatchIntent::ReplaceAll
+            | CommandDispatchIntent::SetFindCaseSensitive { .. }
+            | CommandDispatchIntent::SetFindWholeWord { .. }
+            | CommandDispatchIntent::SetFindRegex { .. } => Ok(AppCommandRequest::Noop),
         }
     }
 
@@ -15960,6 +15974,8 @@ pub struct AppComposition {
     /// Defaults to in-memory only; swap to file-backed via
     /// [`Self::enable_checkpoint_persistence`].
     checkpoint_store: CheckpointStore,
+    /// In-editor find/replace state, owned by app composition for projection building.
+    buffer_search_state: legion_editor::BufferSearchState,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -16209,6 +16225,7 @@ impl AppComposition {
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
             checkpoint_store: CheckpointStore::new(),
+            buffer_search_state: legion_editor::BufferSearchState::default(),
         }
     }
 
@@ -18562,6 +18579,164 @@ impl AppComposition {
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
+        }
+
+        // Find/replace intents mutate buffer_search_state directly and return early.
+        match &intent {
+            CommandDispatchIntent::ToggleFindBar => {
+                self.buffer_search_state.find_bar_visible =
+                    !self.buffer_search_state.find_bar_visible;
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::CloseFindBar => {
+                self.buffer_search_state.find_bar_visible = false;
+                self.buffer_search_state.matches.clear();
+                self.buffer_search_state.current_match_index = 0;
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindQuery { query } => {
+                self.buffer_search_state.query = query.clone();
+                if !query.is_empty() {
+                    if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                        if let Ok(text) = self.editor.text(buffer_id) {
+                            let text = text.to_string();
+                            self.buffer_search_state.find_matches(&text);
+                        }
+                    }
+                } else {
+                    self.buffer_search_state.matches.clear();
+                    self.buffer_search_state.current_match_index = 0;
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::FindNext => {
+                self.buffer_search_state.next_match();
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::FindPrevious => {
+                self.buffer_search_state.prev_match();
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ToggleFindReplace => {
+                self.buffer_search_state.replace_visible =
+                    !self.buffer_search_state.replace_visible;
+                self.buffer_search_state.find_bar_visible = true;
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindReplaceText { text } => {
+                self.buffer_search_state.replace_text = text.clone();
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ReplaceOne => {
+                if let Some(current) = self.buffer_search_state.current_match() {
+                    if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                        let range = ProtocolTextRange {
+                            start: TextCoordinate {
+                                line: current.0,
+                                character: current.1,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                            end: TextCoordinate {
+                                line: current.2,
+                                character: current.3,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                        };
+                        let replacement = self.buffer_search_state.replace_text.clone();
+                        let edit = TextEdit::new(
+                            CommandDispatcher::editor_range(range),
+                            replacement,
+                        );
+                        let _ = self.apply_edit_to_buffer_with_correlation(
+                            buffer_id,
+                            edit,
+                            event_context.correlation_id,
+                        );
+                        if let Ok(text) = self.editor.text(buffer_id) {
+                            let text = text.to_string();
+                            self.buffer_search_state.find_matches(&text);
+                        }
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ReplaceAll => {
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    let replacement = self.buffer_search_state.replace_text.clone();
+                    // Iterate in reverse to preserve earlier match offsets.
+                    let matches_reversed: Vec<_> =
+                        self.buffer_search_state.matches.iter().copied().rev().collect();
+                    for (sl, sc, el, ec) in matches_reversed {
+                        let range = ProtocolTextRange {
+                            start: TextCoordinate {
+                                line: sl,
+                                character: sc,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                            end: TextCoordinate {
+                                line: el,
+                                character: ec,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                        };
+                        let edit = TextEdit::new(
+                            CommandDispatcher::editor_range(range),
+                            replacement.clone(),
+                        );
+                        let _ = self.apply_edit_to_buffer_with_correlation(
+                            buffer_id,
+                            edit,
+                            event_context.correlation_id,
+                        );
+                    }
+                    if let Ok(text) = self.editor.text(buffer_id) {
+                        let text = text.to_string();
+                        self.buffer_search_state.find_matches(&text);
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindCaseSensitive { enabled } => {
+                self.buffer_search_state.case_sensitive = *enabled;
+                if !self.buffer_search_state.query.is_empty() {
+                    if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                        if let Ok(text) = self.editor.text(buffer_id) {
+                            let text = text.to_string();
+                            self.buffer_search_state.find_matches(&text);
+                        }
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindWholeWord { enabled } => {
+                self.buffer_search_state.whole_word = *enabled;
+                if !self.buffer_search_state.query.is_empty() {
+                    if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                        if let Ok(text) = self.editor.text(buffer_id) {
+                            let text = text.to_string();
+                            self.buffer_search_state.find_matches(&text);
+                        }
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindRegex { enabled } => {
+                self.buffer_search_state.use_regex = *enabled;
+                if !self.buffer_search_state.query.is_empty() {
+                    if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                        if let Ok(text) = self.editor.text(buffer_id) {
+                            let text = text.to_string();
+                            self.buffer_search_state.find_matches(&text);
+                        }
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            _ => {}
         }
 
         let request = CommandDispatcher::route_intent(
@@ -28195,6 +28370,36 @@ impl AppComposition {
                 p
             },
             terminal_panel_projection: self.terminal_workflow.projection(),
+            find_bar_projection: legion_ui::ui::FindBarProjection {
+                visible: self.buffer_search_state.find_bar_visible,
+                query: self.buffer_search_state.query.clone(),
+                replace_text: self.buffer_search_state.replace_text.clone(),
+                replace_visible: self.buffer_search_state.replace_visible,
+                case_sensitive: self.buffer_search_state.case_sensitive,
+                whole_word: self.buffer_search_state.whole_word,
+                use_regex: self.buffer_search_state.use_regex,
+                match_count: self.buffer_search_state.matches.len(),
+                current_match_index: self.buffer_search_state.current_match_index,
+                matches: self
+                    .buffer_search_state
+                    .matches
+                    .iter()
+                    .map(|&(sl, sc, el, ec)| legion_ui::ui::FindMatchProjection {
+                        start: TextCoordinate {
+                            line: sl,
+                            character: sc,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                        end: TextCoordinate {
+                            line: el,
+                            character: ec,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                    })
+                    .collect(),
+            },
         })
     }
 
