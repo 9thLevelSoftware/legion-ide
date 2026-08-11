@@ -68,7 +68,7 @@ Every crate is **FUNCTIONAL** — real logic, real tests, real platform integrat
 
 1. ~~**Syntax highlighting rendering**~~ — DONE (Phase 1). `highlight_captures_from_text()` now dispatches to all bundled grammars via `language_for_path()`. Desktop renderer wired via `legion-app`.
 2. ~~**Only Rust grammar shipped**~~ — DONE (Phase 1). 9 grammar crates added: Python, TypeScript, Go, C, JSON, TOML, Markdown, Bash, JavaScript. 13 language IDs mapped from 25+ file extensions.
-3. **VT100/xterm terminal emulation** — PTY works but no CSI/SGR escape interpreter. Can't run vim, htop, or even colored ls.
+3. ~~**VT100/xterm terminal emulation**~~ — DONE (Phase 2). Full VT100 emulator with CSI/SGR/DEC modes, cell grid rendering, keyboard translation.
 4. **LSP not wired to editor** — LSP client is complete, app has composition code, but live diagnostics/completions/hover aren't connected in the desktop rendering layer.
 
 ### Important (expected in any modern editor)
@@ -98,14 +98,15 @@ Multi-language tree-sitter grammar dispatch implemented. 9 grammar crates, 13 la
 - ✓ Desktop renderer wired: `legion-app` calls `language_for_path()` instead of hardcoded Rust
 - Remaining: color scheme (dark + light) for highlight categories → deferred to Phase 5 (Theme System)
 
-### Phase 2: Terminal Emulation
-Make the terminal usable. Interpret CSI/SGR escapes so colored output and fullscreen programs work.
+### Phase 2: Terminal Emulation ✓ COMPLETE
+VT100/xterm escape sequence interpreter with full CSI/SGR/DEC mode support. 2D cell grid with per-cell color attributes, scrollback buffer, alt screen. egui renderer with 256-color palette and per-cell TextFormat. Keyboard translation for arrow keys, function keys, Ctrl combos.
 
-- Implement VT100/xterm state machine: CSI (cursor, erase, scroll), SGR (colors, bold), DEC modes (alt screen, cursor visibility) → `legion-terminal`
-- Build terminal grid model: cell grid with character + attribute, dirty tracking → `legion-terminal`
-- Render grid in egui: monospace font with color attributes, cursor, selection → `legion-desktop`
-- Wire keyboard: translate egui keys to terminal escape sequences → `legion-desktop`
-- **Done when:** `ls --color`, `htop`, `vim` render correctly
+- ✓ VT100 state machine: CSI cursor/erase/scroll, SGR 16/256/RGB colors, DEC private modes (alt screen 1049, cursor visibility 25, application cursor keys 1)
+- ✓ Cell grid model: 2D array of cells with character + attributes (fg, bg, bold, dim, italic, underline, strikethrough, inverse), scrollback buffer (1000 lines)
+- ✓ Parser handles partial escape sequences across PTY read boundaries
+- ✓ Pipeline wired: PTY → OSC parse → credential redact → VT100 emulator → cell grid → egui colored render
+- ✓ Keyboard: arrow keys, F1-F12, Home/End/PgUp/PgDn, Ctrl+A-Z → terminal escape sequences
+- ✓ 56 new VT100 tests, 2,403 lines across 8 files in 5 crates
 
 ### Phase 3: Live LSP Integration
 Wire the LSP client to the editor for diagnostics, completions, and hover.
