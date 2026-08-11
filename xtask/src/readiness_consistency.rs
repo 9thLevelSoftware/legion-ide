@@ -213,8 +213,7 @@ fn coordinated_list_bounds(
 
 fn is_list_separator(between: &str) -> bool {
     let connector = between.trim();
-    connector.chars().all(|ch| ch == ',')
-        || is_explicit_coordinator(connector)
+    connector.chars().all(|ch| ch == ',') || is_explicit_coordinator(connector)
 }
 
 fn is_explicit_coordinator(between: &str) -> bool {
