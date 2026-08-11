@@ -121,16 +121,16 @@ Desktop rendering layer wired to LSP projections. Diagnostic underlines, complet
 - ✓ `did_close_notification` added to `legion-lsp` with test
 - 3 files changed, 333 insertions across 2 plans (03-01 diagnostics + 03-02 completion/hover/definition/hints)
 
-### Phase 4: Navigation & UI Essentials
-File tree, find/replace, keybindings, persistent state.
+### Phase 4: Navigation & UI Essentials ✓ COMPLETE
+File tree, find/replace, keybindings, settings panel, session persistence — all built.
 
-- Build file tree panel from workspace file listing APIs → `legion-ui`, `legion-desktop`
-- In-editor find (Ctrl+F) with match highlighting and navigation → `legion-editor`, `legion-desktop`
-- Find-and-replace (Ctrl+H) → `legion-editor`, `legion-desktop`
-- Default keybinding map wired through intent system → `legion-ui`
-- Serialize open tabs / recent files / window geometry / dock layout on close, restore on startup → `legion-storage`, `legion-app`
-- Simple settings panel → `legion-desktop`
-- **Done when:** navigate via tree, Ctrl+F finds text, close and reopen restores tabs
+- ✓ File tree panel built end-to-end (completed pre-Phase 4: `FileTreeNode`, `ExplorerProjection`, `render_project_tree_panel()`)
+- ✓ In-editor find (Ctrl+F) with regex matching, match highlighting (yellow/orange), prev/next navigation → `legion-editor`, `legion-ui`, `legion-app`, `legion-desktop`
+- ✓ Find-and-replace (Ctrl+H) with replace-one and replace-all → same crates
+- ✓ Default keybinding map: 21 entries in `default_keymap()`, central dispatch in desktop view → `legion-ui`, `legion-desktop`
+- ✓ Settings panel built (completed pre-Phase 4: `render_settings_panel()` with theme, zoom, font, toggles)
+- ✓ Session persistence built (completed pre-Phase 4: `DesktopSessionStore`, `WorkspaceSessionRecord`)
+- 8 files changed, 1020 insertions across 2 plans (04-01 type layer + 04-02 wiring/rendering), 10 tests
 
 ### Phase 5: Theme System & Visual Polish
 Dark/light themes, consistent syntax colors, rendering polish.
