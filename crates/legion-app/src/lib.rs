@@ -7265,6 +7265,7 @@ impl TerminalWorkflow {
                     let shell_projection = outcome.shell_projection.clone();
                     self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
+                self.populate_cell_grid(session_id);
                 self.projection.generated_at = TimestampMillis::now();
                 self.record_audit(
                     session_id,
@@ -7463,6 +7464,42 @@ impl TerminalWorkflow {
                 }
                 Err(error) => self.fail(session_id, event_context, error.to_string()),
             }
+        }
+    }
+
+    fn populate_cell_grid(&mut self, session_id: TerminalSessionId) {
+        use legion_protocol::{TerminalCell, TerminalCellAttrs, TerminalCellRow, TerminalColor};
+        if let Some(snapshot) = self.runtime.emulator_snapshot(session_id) {
+            let convert_color = |c: &legion_terminal::vt100::Color| match c {
+                legion_terminal::vt100::Color::Default => TerminalColor::Default,
+                legion_terminal::vt100::Color::Indexed(n) => TerminalColor::Indexed(*n),
+                legion_terminal::vt100::Color::Rgb(r, g, b) => TerminalColor::Rgb(*r, *g, *b),
+            };
+            let convert_row = |row: &[legion_terminal::vt100::Cell]| TerminalCellRow {
+                cells: row
+                    .iter()
+                    .map(|cell| TerminalCell {
+                        ch: cell.ch,
+                        attrs: TerminalCellAttrs {
+                            fg: convert_color(&cell.attrs.fg),
+                            bg: convert_color(&cell.attrs.bg),
+                            bold: cell.attrs.bold,
+                            dim: cell.attrs.dim,
+                            italic: cell.attrs.italic,
+                            underline: cell.attrs.underline,
+                            strikethrough: cell.attrs.strikethrough,
+                            inverse: cell.attrs.inverse,
+                        },
+                    })
+                    .collect(),
+            };
+            self.projection.cell_grid =
+                Some(snapshot.grid.iter().map(|r| convert_row(r)).collect());
+            self.projection.cell_scrollback =
+                Some(snapshot.scrollback.iter().map(|r| convert_row(r)).collect());
+            self.projection.cursor_row = Some(snapshot.cursor_row);
+            self.projection.cursor_col = Some(snapshot.cursor_col);
+            self.projection.cursor_visible = Some(snapshot.cursor_visible);
         }
     }
 

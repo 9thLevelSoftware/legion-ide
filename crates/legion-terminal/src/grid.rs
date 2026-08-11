@@ -5,8 +5,8 @@
 //! introducing editor/app authority or retaining raw, unredacted terminal data.
 
 use legion_protocol::{
-    EventSequence, RedactionHint, TerminalOutputRowProjection, TerminalPanelProjection,
-    TerminalScrollbackProjection,
+    EventSequence, RedactionHint, TerminalCellRow, TerminalOutputRowProjection,
+    TerminalPanelProjection, TerminalScrollbackProjection,
 };
 
 /// Selection target for renderer copy operations.
@@ -25,6 +25,16 @@ pub struct TerminalGrid {
     pub rows: Vec<TerminalGridRow>,
     /// Scrollback metadata from the source projection.
     pub scrollback: TerminalScrollbackProjection,
+    /// VT100 cell grid rows, when the emulator is active.
+    pub cell_grid: Option<Vec<TerminalCellRow>>,
+    /// VT100 scrollback cell rows, when the emulator is active.
+    pub cell_scrollback: Option<Vec<TerminalCellRow>>,
+    /// Cursor row in the cell grid.
+    pub cursor_row: Option<usize>,
+    /// Cursor column in the cell grid.
+    pub cursor_col: Option<usize>,
+    /// Whether the cursor is visible.
+    pub cursor_visible: Option<bool>,
 }
 
 /// Renderer-friendly terminal output row.
@@ -57,6 +67,11 @@ impl TerminalGrid {
         Self {
             rows,
             scrollback: projection.scrollback.clone(),
+            cell_grid: projection.cell_grid.clone(),
+            cell_scrollback: projection.cell_scrollback.clone(),
+            cursor_row: projection.cursor_row,
+            cursor_col: projection.cursor_col,
+            cursor_visible: projection.cursor_visible,
         }
     }
 

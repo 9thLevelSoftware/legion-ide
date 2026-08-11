@@ -10,6 +10,8 @@ pub mod grid;
 pub mod osc;
 /// Per-session terminal metadata tracking.
 pub mod session;
+/// VT100/xterm escape sequence interpreter and 2D cell grid model.
+pub mod vt100;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::vt100::TerminalEmulator;
 use legion_platform::{PtyKillMode, PtyRequest, PtyService};
 use legion_protocol::{
     CanonicalPath, CausalityId, CorrelationId, DebugAdapterAuditRecord, DebugAdapterLaunchRequest,
@@ -398,6 +401,23 @@ pub struct TerminalRuntimeOutputPollRequest {
     pub causality_id: CausalityId,
 }
 
+/// Projection-only snapshot of the VT100 emulator cell grid.
+///
+/// All data is already credential-redacted and safe for renderer consumption.
+#[derive(Debug, Clone)]
+pub struct EmulatorSnapshot {
+    /// Current screen grid (rows x cols of cells).
+    pub grid: Vec<Vec<crate::vt100::Cell>>,
+    /// Lines scrolled off the top of the screen.
+    pub scrollback: Vec<Vec<crate::vt100::Cell>>,
+    /// Cursor row position.
+    pub cursor_row: usize,
+    /// Cursor column position.
+    pub cursor_col: usize,
+    /// Whether the cursor is visible.
+    pub cursor_visible: bool,
+}
+
 /// Terminal output poll outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalRuntimeOutputPollOutcome {
@@ -539,7 +559,6 @@ pub struct TerminalRuntime<P> {
     sessions: Mutex<HashMap<TerminalSessionId, RuntimeSession>>,
 }
 
-#[derive(Debug, Clone)]
 struct RuntimeSession {
     platform_session_id: String,
     next_sequence: u64,
@@ -559,6 +578,19 @@ struct RuntimeSession {
     closing: bool,
     /// Latest advisory OSC 7/133 metadata observed for this session.
     metadata: session::TerminalSessionMetadata,
+    /// VT100 emulator for this session, positioned after credential redaction.
+    emulator: TerminalEmulator,
+}
+
+impl std::fmt::Debug for RuntimeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeSession")
+            .field("platform_session_id", &self.platform_session_id)
+            .field("next_sequence", &self.next_sequence)
+            .field("closing", &self.closing)
+            .field("emulator", &"<TerminalEmulator>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Session-owned identity and limits resolved under the registry lock for a
@@ -658,6 +690,11 @@ impl<P: PtyService> TerminalRuntime<P> {
         let mut metadata = session::TerminalSessionMetadata::default();
         metadata.apply_shell_projection(&shell_projection);
         if native_pty {
+            // Default terminal size; resized by the first explicit resize call.
+            let mut emulator = TerminalEmulator::new(80, 24);
+            // Feed the launch output (already redacted) into the emulator so
+            // the cell grid is immediately available for rendering.
+            emulator.process(redacted.as_bytes());
             self.sessions
                 .lock()
                 .map_err(|_| TerminalRuntimeError::Backend {
@@ -675,6 +712,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                         idle_timeout,
                         closing: false,
                         metadata,
+                        emulator,
                     },
                 );
         }
@@ -775,6 +813,14 @@ impl<P: PtyService> TerminalRuntime<P> {
             .map_err(|err| TerminalRuntimeError::Backend {
                 reason: err.to_string(),
             })?;
+        // Resize the VT100 emulator to match the new terminal dimensions.
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(&resize.session_id)
+        {
+            session
+                .emulator
+                .resize(resize.cols as usize, resize.rows as usize);
+        }
         self.audit_record(
             resize.session_id,
             TerminalRuntimeState::Running,
@@ -853,11 +899,16 @@ impl<P: PtyService> TerminalRuntime<P> {
             })?;
         let shell_projection = crate::osc::parse_terminal_shell_output(&read.output);
         self.apply_session_metadata(request.session_id, &shell_projection)?;
+        let redacted =
+            redact_terminal_projection(&shell_projection.visible_output, effective_limit);
+        // Feed redacted output into the VT100 emulator (after credential
+        // redaction, preserving the security boundary). The emulator must be
+        // fed before session removal so the cell grid is up to date for the
+        // final poll of an exiting session.
+        self.feed_emulator(request.session_id, &redacted);
         if read.exited && !read.truncated {
             self.remove_session(request.session_id)?;
         }
-        let redacted =
-            redact_terminal_projection(&shell_projection.visible_output, effective_limit);
         let byte_count = read.output.len().min(effective_limit as usize) as u64;
         let state = if read.exited {
             TerminalRuntimeState::Exited
@@ -1096,6 +1147,57 @@ impl<P: PtyService> TerminalRuntime<P> {
             .ok_or_else(|| missing_session_error(session_id))?;
         session.metadata.apply_shell_projection(projection);
         Ok(())
+    }
+
+    /// Feed redacted output bytes into the session's VT100 emulator.
+    ///
+    /// If the emulator produces response bytes (DSR), they are sent back to the
+    /// PTY via the input channel so the terminal application receives them.
+    fn feed_emulator(&self, session_id: TerminalSessionId, redacted: &str) {
+        if redacted.is_empty() {
+            return;
+        }
+        let mut response_bytes = Vec::new();
+        let mut platform_id = None;
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(&session_id)
+        {
+            session.emulator.process(redacted.as_bytes());
+            let dsr = session.emulator.drain_response();
+            if !dsr.is_empty() {
+                response_bytes = dsr;
+                platform_id = Some(session.platform_session_id.clone());
+            }
+        }
+        // Send DSR response bytes back to the PTY outside the session lock.
+        if let Some(pid) = platform_id
+            && !response_bytes.is_empty()
+        {
+            let response_str = String::from_utf8_lossy(&response_bytes);
+            let _ = self.pty.write_pty(&pid, &response_str);
+        }
+    }
+
+    /// Return a snapshot of the VT100 emulator cell grid for a live session.
+    ///
+    /// The grid is projection-only (already redacted) and must not be used as
+    /// security policy authority.
+    pub fn emulator_snapshot(
+        &self,
+        session_id: TerminalSessionId,
+    ) -> Option<EmulatorSnapshot> {
+        self.sessions.lock().ok().and_then(|sessions| {
+            sessions.get(&session_id).map(|session| {
+                let (cursor_row, cursor_col) = session.emulator.cursor_position();
+                EmulatorSnapshot {
+                    grid: session.emulator.grid().to_vec(),
+                    scrollback: session.emulator.scrollback().to_vec(),
+                    cursor_row,
+                    cursor_col,
+                    cursor_visible: session.emulator.cursor_visible(),
+                }
+            })
+        })
     }
 
     fn remove_session(
