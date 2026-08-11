@@ -69,7 +69,7 @@ Every crate is **FUNCTIONAL** — real logic, real tests, real platform integrat
 1. ~~**Syntax highlighting rendering**~~ — DONE (Phase 1). `highlight_captures_from_text()` now dispatches to all bundled grammars via `language_for_path()`. Desktop renderer wired via `legion-app`.
 2. ~~**Only Rust grammar shipped**~~ — DONE (Phase 1). 9 grammar crates added: Python, TypeScript, Go, C, JSON, TOML, Markdown, Bash, JavaScript. 13 language IDs mapped from 25+ file extensions.
 3. ~~**VT100/xterm terminal emulation**~~ — DONE (Phase 2). Full VT100 emulator with CSI/SGR/DEC modes, cell grid rendering, keyboard translation.
-4. **LSP not wired to editor** — LSP client is complete, app has composition code, but live diagnostics/completions/hover aren't connected in the desktop rendering layer.
+4. ~~**LSP not wired to editor**~~ — DONE (Phase 3). Diagnostic underlines, completion popup, hover tooltip, go-to-definition (Ctrl+Click/F12), inlay hints, definition picker all rendered in desktop layer.
 
 ### Important (expected in any modern editor)
 
@@ -108,16 +108,18 @@ VT100/xterm escape sequence interpreter with full CSI/SGR/DEC mode support. 2D c
 - ✓ Keyboard: arrow keys, F1-F12, Home/End/PgUp/PgDn, Ctrl+A-Z → terminal escape sequences
 - ✓ 56 new VT100 tests, 2,403 lines across 8 files in 5 crates
 
-### Phase 3: Live LSP Integration
-Wire the LSP client to the editor for diagnostics, completions, and hover.
+### Phase 3: Live LSP Integration ✓ COMPLETE
+Desktop rendering layer wired to LSP projections. Diagnostic underlines, completion popup, hover tooltip, go-to-definition (Ctrl+Click + F12), inlay hints, definition picker. didClose notification added to LSP client.
 
-- Auto-launch language server when workspace opens → `legion-app`
-- Route `publishDiagnostics` to inline error/warning markers → `legion-app`, `legion-desktop`
-- Trigger completion on typing / Ctrl+Space, show popup, insert on accept → `legion-app`, `legion-ui`, `legion-desktop`
-- Show hover on mouse hover → `legion-desktop`
-- Go-to-definition on Ctrl+Click / F12 → `legion-app`, `legion-desktop`
-- Inlay hints rendering → `legion-desktop`
-- **Done when:** open Rust project, see red squiggles on errors, get completions, hover shows types
+- ✓ Diagnostic underlines: severity-colored (red/orange/blue/gray) line_segment overlays per problem
+- ✓ Diagnostic hover tooltip: severity, message, source, code via `egui::Tooltip::always_open()`
+- ✓ Completion popup: `egui::Area` dropdown with kind badge, label, detail, arrow/Enter/Tab/Escape nav
+- ✓ Hover tooltip: label + summary via `egui::Area`, Escape dismisses, position-change debouncing
+- ✓ Go-to-definition: Ctrl+Click and F12, single result auto-navigates, multi-result shows picker
+- ✓ Inlay hints: ghost text at 50% opacity with `: ` prefix for type hints
+- ✓ Ctrl+hover underline: link-colored word underline on Ctrl+hover
+- ✓ `did_close_notification` added to `legion-lsp` with test
+- 3 files changed, 333 insertions across 2 plans (03-01 diagnostics + 03-02 completion/hover/definition/hints)
 
 ### Phase 4: Navigation & UI Essentials
 File tree, find/replace, keybindings, persistent state.
