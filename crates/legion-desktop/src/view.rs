@@ -69,10 +69,11 @@ use legion_protocol::{
     BufferId, CanonicalPath, ContextManifestEgressStatus, ContextManifestInclusionState,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
     DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId,
-    LanguageProblemProjection, LegionToolKind, LineWrappingPolicy, PRODUCT_NAME,
-    PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    PrivacyInspectorRedactionState, ProposalId, ProposalLifecycleState, ProposalRejectionReason,
-    ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
+    LanguageInlayHintProjection, LanguageLocationProjection, LanguageProblemProjection,
+    LegionToolKind, LineWrappingPolicy, PRODUCT_NAME, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
+    ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel,
+    ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
     ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay,
 };
@@ -2216,6 +2217,12 @@ fn render_code_lines(
                                 range,
                             });
                         }
+                    } else if response.clicked()
+                        && ui.input(|i| i.modifiers.ctrl)
+                    {
+                        actions.push(DesktopAction::GoToDefinition {
+                            position: coordinate,
+                        });
                     } else if response.clicked() {
                         actions.push(DesktopAction::SetCursor {
                             buffer_id: Some(buffer_id),
@@ -2259,6 +2266,62 @@ fn render_code_lines(
                     &snapshot.language_tooling_projection.problems,
                     char_width,
                 );
+                paint_inlay_hints(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.language_tooling_projection.inlay_hints,
+                    char_width,
+                );
+                // Ctrl+hover: underline word as a go-to-definition affordance.
+                if response.hovered()
+                    && ui.input(|i| i.modifiers.ctrl)
+                    && let Some(hover_pos) = response.hover_pos()
+                {
+                    let hover_coord = editor_coordinate_for_line_x(
+                        line,
+                        hover_pos.x,
+                        response.rect.left(),
+                        char_width,
+                    );
+                    if let Some(range) = word_range_for_coordinate(line, hover_coord) {
+                        let start_x =
+                            response.rect.left() + range.start.character as f32 * char_width;
+                        let end_x =
+                            response.rect.left() + range.end.character as f32 * char_width;
+                        let y = response.rect.bottom() - 1.0;
+                        ui.painter().line_segment(
+                            [egui::pos2(start_x, y), egui::pos2(end_x, y)],
+                            egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgb(75, 156, 211),
+                            ),
+                        );
+                    }
+                }
+                // Hover request: dispatch RequestHover when the hover position changes.
+                if response.hovered()
+                    && !ui.input(|i| i.modifiers.ctrl)
+                    && let Some(hover_pos) = response.hover_pos()
+                {
+                    let hover_coord = editor_coordinate_for_line_x(
+                        line,
+                        hover_pos.x,
+                        response.rect.left(),
+                        char_width,
+                    );
+                    let hover_pos_id = egui::Id::new("lsp_last_hover_pos");
+                    let last_pos: Option<(u32, u32)> =
+                        ui.ctx().data_mut(|d| d.get_temp(hover_pos_id));
+                    let current_pos = (hover_coord.line, hover_coord.character);
+                    if last_pos != Some(current_pos) {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(hover_pos_id, current_pos));
+                        actions.push(DesktopAction::RequestHover {
+                            position: hover_coord,
+                        });
+                    }
+                }
                 if let Some(ime_composition) = ime_composition.as_ref() {
                     paint_ime_composition(
                         ui,
@@ -2281,6 +2344,25 @@ fn render_code_lines(
                 }
             });
         }
+
+        // F12 go-to-definition: dispatch using current cursor position.
+        if ui.input(|i| i.key_pressed(egui::Key::F12)) {
+            actions.push(DesktopAction::GoToDefinition {
+                position: current_cursor,
+            });
+        }
+
+        // Definition navigation: when definitions are available, navigate
+        // immediately for a single result or show a picker popup for multiple.
+        let definitions = &snapshot.language_tooling_projection.definitions;
+        if !definitions.is_empty() {
+            if definitions.len() == 1 {
+                actions.push(DesktopAction::NavigateToDefinition { index: 0 });
+            } else {
+                render_definition_picker(ui, definitions, actions);
+            }
+        }
+
         return;
     }
     let show_line_numbers = model.settings.line_numbers_visible;
@@ -2583,6 +2665,98 @@ fn show_diagnostic_tooltip(
             }
         }
     });
+}
+
+/// Render inlay hints as semi-transparent ghost text at their positions.
+fn paint_inlay_hints(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    inlay_hints: &[LanguageInlayHintProjection],
+    char_width: f32,
+) {
+    let line_zero = line.number.saturating_sub(1);
+    for hint in inlay_hints {
+        if hint.position.line != line_zero {
+            continue;
+        }
+        let mut x = response.rect.left() + hint.position.character as f32 * char_width;
+        if hint.padding_left {
+            x += char_width * 0.5;
+        }
+        let label = if hint.kind_label.contains("type") {
+            format!(": {}", hint.label)
+        } else {
+            hint.label.clone()
+        };
+        ui.painter().text(
+            egui::pos2(x, response.rect.top()),
+            egui::Align2::LEFT_TOP,
+            &label,
+            egui::FontId::monospace(theme::tokens().typography.code as f32),
+            egui::Color32::from_rgba_premultiplied(150, 150, 150, 128),
+        );
+    }
+}
+
+/// Show a picker popup when multiple definition locations are available.
+fn render_definition_picker(
+    ui: &mut egui::Ui,
+    definitions: &[LanguageLocationProjection],
+    actions: &mut Vec<DesktopAction>,
+) {
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_definition_picker".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -100.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(500.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(theme::body_strong("Go to Definition"));
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .id_salt("definition_picker_scroll")
+                        .show(ui, |ui| {
+                            for (i, def) in definitions.iter().enumerate() {
+                                let path_label = def
+                                    .path
+                                    .as_ref()
+                                    .map(|p| p.0.as_str())
+                                    .unwrap_or("<unknown>");
+                                let row = egui::Frame::new()
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(theme::body(&def.label));
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(
+                                                    egui::Align::Center,
+                                                ),
+                                                |ui| {
+                                                    ui.label(theme::code_muted(
+                                                        trim_middle(path_label, 60),
+                                                    ));
+                                                },
+                                            );
+                                        });
+                                    })
+                                    .response;
+                                if row.clicked() {
+                                    actions.push(DesktopAction::NavigateToDefinition {
+                                        index: i,
+                                    });
+                                }
+                            }
+                        });
+                });
+        });
 }
 
 fn paint_ime_composition(
