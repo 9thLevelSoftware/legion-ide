@@ -20,8 +20,8 @@
             "test",
             "-p",
             "legion-sandbox",
-            "--",
-            "escape"
+            "--test",
+            "escape_attempts"
           ],
           "expectedExitCode": 0,
           "surface": {

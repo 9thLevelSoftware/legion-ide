@@ -18,11 +18,10 @@
           "command": "cargo",
           "args": [
             "test",
-            "--workspace",
-            "-F",
-            "desktop",
-            "--",
-            "file_type"
+            "-p",
+            "legion-desktop",
+            "--test",
+            "projection_rendering"
           ],
           "expectedExitCode": 0,
           "surface": {
