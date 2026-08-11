@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "status": "preflight",
+  "createdAt": "2026-08-11T15:08:16.575Z",
+  "updatedAt": "2026-08-11T15:10:25.875Z",
+  "projectMode": "brownfield",
+  "map": {
+    "freshness": "fresh",
+    "reason": "The map matches the current source files.",
+    "scope": ".",
+    "sourceFingerprint": "11761a2b5c0862ee43e3b782a5473321a59232207dfec8324f74a9e40fd6dbff",
+    "sourceFileCount": 712,
+    "latestSourceFingerprint": "11761a2b5c0862ee43e3b782a5473321a59232207dfec8324f74a9e40fd6dbff",
+    "generatedAt": "2026-08-11T15:09:19.672Z",
+    "ageDays": 0.000766238425925926,
+    "mapArtifact": {
+      "path": ".legion/project/workflow/map/2026-08-11t15-09-19-672z-refresh/map.json",
+      "sha256": "sha256:5f64d08bb460937f7df7e3f00e7029d72545cd5352f0fac36a03ea031865b4ed"
+    },
+    "diagnostics": []
+  },
+  "compatibleExplorations": [],
+  "explorationSelectionIntent": {
+    "mode": "automatic"
+  },
+  "initiative": {
+    "value": "Finish Legion IDE for production: wire syntax highlighting from tree-sitter to egui rendering, add multi-language grammar support, implement VT100/xterm terminal emulation, connect LSP client to live editor integration (diagnostics, completions, hover, go-to-definition), build file tree panel, add find/replace, implement keybinding system, persist state across restarts, and add dark/light theme system.",
+    "source": "explicit"
+  },
+  "diagnostics": []
+}
