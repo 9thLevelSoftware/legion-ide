@@ -1,5 +1,0 @@
-Command: cargo fmt --all --check
-
-Final status: PASS
-
-Output: command completed without output.

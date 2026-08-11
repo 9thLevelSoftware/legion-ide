@@ -1,1 +1,0 @@
-{"commandsRun":[{"args":["fake","build"],"command":"legion-executor","exitCode":0}],"filesChanged":[],"findings":[],"ok":true,"status":"succeeded","summary":"Fake build executed ctr_guidance-explore."}
