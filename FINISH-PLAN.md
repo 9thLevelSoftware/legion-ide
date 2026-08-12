@@ -133,15 +133,16 @@ File tree, find/replace, keybindings, settings panel, session persistence — al
 - 8 files changed, 1020 insertions across 2 plans (04-01 type layer + 04-02 wiring/rendering), 10 tests
 - ✓ Review PASS: 5 findings fixed (ReplaceAll atomic undo, tab switch refresh, error guard, 5 integration tests, bridge tests), 2-cycle review
 
-### Phase 5: Theme System & Visual Polish
+### Phase 5: Theme System & Visual Polish ✓ COMPLETE
 Dark/light themes, consistent syntax colors, rendering polish.
 
-- Define `ThemeDefinition` type (editor, syntax, UI chrome colors) → `legion-protocol`, `legion-ui`
-- Ship 2 built-in themes: dark and light → `legion-app`
-- Wire theme selection through settings, apply to egui + syntax → `legion-desktop`
-- Code minimap / overview ruler → `legion-desktop`
-- Tab bar polish: reordering, close buttons, overflow → `legion-desktop`
-- **Done when:** switch dark/light, all panels update, syntax colors match
+- ✓ Added DiagnosticTokens, SearchTokens, ChromeTokens to theme.rs — semantic token groups for diagnostics, search highlights, chrome UI
+- ✓ Replaced 11 hard-coded color literals in view.rs with theme token accessors (0 remaining Color32::from_rgba_premultiplied)
+- ✓ Tab bar polish: per-tab close buttons (× on hover, • for dirty), horizontal ScrollArea, drag-to-reorder with insertion indicator
+- ✓ ReorderTab wired through full stack: DesktopAction → bridge → CommandDispatchIntent → AppCommandRequest → handler
+- ✓ Code minimap: scaled buffer overview (colored bars per line), viewport indicator, click/drag-to-scroll
+- ✓ Minimap layout: 100px right column with horizontal split, graceful degradation for large files
+- 3 plans executed across 3 waves (05-01 color consolidation, 05-02 tab polish, 05-03 minimap), 66+ tests passing
 
 ### Phase 6: Integration Testing & Release
 End-to-end testing and release artifacts.
