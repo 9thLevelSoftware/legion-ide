@@ -204,6 +204,35 @@ impl TerminalEmulator {
         let cols = cols.max(1);
         let rows = rows.max(1);
 
+        // The primary screen is kept separately while an alternate-screen
+        // application (for example, Vim) is active.  Keep that saved screen
+        // in lockstep with the terminal dimensions too; otherwise exiting the
+        // alternate screen would restore rows with the old width/height while
+        // the cursor and bounds use the new dimensions.
+        if let Some(saved) = &mut self.alt_screen {
+            for row in &mut saved.grid {
+                row.resize(cols, Cell::default());
+            }
+            match rows.cmp(&saved.grid.len()) {
+                std::cmp::Ordering::Greater => {
+                    saved
+                        .grid
+                        .extend((0..rows - saved.grid.len()).map(|_| vec![Cell::default(); cols]));
+                }
+                std::cmp::Ordering::Less => {
+                    let excess = saved.grid.len() - rows;
+                    let removed = saved.grid.drain(..excess).collect::<Vec<_>>();
+                    saved.scrollback.extend(removed);
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+            for row in &mut saved.scrollback {
+                row.resize(cols, Cell::default());
+            }
+            saved.cursor_row = saved.cursor_row.min(rows - 1);
+            saved.cursor_col = saved.cursor_col.min(cols - 1);
+        }
+
         // Resize each existing row to the new column width
         for row in &mut self.grid {
             row.resize(cols, Cell::default());
@@ -890,7 +919,6 @@ impl TerminalEmulator {
 
     fn linefeed(&mut self) {
         self.pending_wrap = false;
-        self.cursor_col = 0;
         if self.cursor_row == self.scroll_bottom {
             self.scroll_up_one();
         } else if self.cursor_row < self.rows - 1 {
@@ -1285,8 +1313,8 @@ mod tests {
         let mut emu = TerminalEmulator::new(10, 5);
         // Write text on first line
         emu.process(b"line1");
-        emu.process(b"\nline2");
-        emu.process(b"\nline3");
+        emu.process(b"\r\nline2");
+        emu.process(b"\r\nline3");
         emu.resize(10, 2);
         assert_eq!(emu.rows(), 2);
         assert_eq!(emu.grid().len(), 2);
@@ -1307,7 +1335,7 @@ mod tests {
     #[test]
     fn newline_moves_cursor_down() {
         let mut emu = TerminalEmulator::new(80, 24);
-        emu.process(b"line1\nline2");
+        emu.process(b"line1\r\nline2");
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
         assert_eq!(emu.cursor_position(), (1, 5));
@@ -1327,6 +1355,19 @@ mod tests {
         emu.process(b"line1\r\nline2");
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
+    }
+
+    #[test]
+    fn bare_linefeed_preserves_cursor_column() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        emu.process(b"abc\nx");
+
+        assert_eq!(emu.grid()[0][0].ch, 'a');
+        assert_eq!(emu.grid()[0][1].ch, 'b');
+        assert_eq!(emu.grid()[0][2].ch, 'c');
+        assert_eq!(emu.grid()[1][0].ch, ' ');
+        assert_eq!(emu.grid()[1][3].ch, 'x');
+        assert_eq!(emu.cursor_position(), (1, 4));
     }
 
     #[test]
@@ -1536,8 +1577,8 @@ mod tests {
     fn erase_in_display_below() {
         let mut emu = TerminalEmulator::new(10, 5);
         emu.process(b"aaaaaaaaaa");
-        emu.process(b"\nbbbbbbbbbb");
-        emu.process(b"\ncccccccccc");
+        emu.process(b"\r\nbbbbbbbbbb");
+        emu.process(b"\r\ncccccccccc");
         emu.process(b"\x1b[2;3H"); // Row 2, Col 3
         emu.process(b"\x1b[0J"); // Erase below
         assert_eq!(row_text(&emu, 0), "aaaaaaaaaa");
@@ -1583,7 +1624,7 @@ mod tests {
     fn erase_scrollback() {
         let mut emu = TerminalEmulator::new(5, 3);
         // Fill enough lines to generate scrollback
-        emu.process(b"line1\nline2\nline3\nline4\nline5");
+        emu.process(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
         assert!(!emu.scrollback().is_empty());
         emu.process(b"\x1b[3J");
         assert!(emu.scrollback().is_empty());
@@ -1594,12 +1635,12 @@ mod tests {
     #[test]
     fn scroll_region_limits_scrolling() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         // Set scroll region to rows 2-4 (1-indexed)
         emu.process(b"\x1b[2;4r");
         // Move cursor to bottom of scroll region and add a line
         emu.process(b"\x1b[4;1H"); // Row 4 (1-indexed), the bottom of region
-        emu.process(b"\nnew");
+        emu.process(b"\r\nnew");
         // Row 0 (outside region) should be unchanged
         assert_eq!(row_text(&emu, 0), "line0");
         // Row 4 (outside region, 0-indexed) should be unchanged
@@ -1619,7 +1660,7 @@ mod tests {
     #[test]
     fn insert_lines() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;1H"); // Row 2 (1-indexed)
         emu.process(b"\x1b[1L"); // Insert 1 line
         assert_eq!(row_text(&emu, 0), "line0");
@@ -1630,7 +1671,7 @@ mod tests {
     #[test]
     fn delete_lines() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;1H"); // Row 2 (1-indexed)
         emu.process(b"\x1b[1M"); // Delete 1 line
         assert_eq!(row_text(&emu, 0), "line0");
@@ -1686,6 +1727,26 @@ mod tests {
         emu.process(b"\x1b[?1049l");
         assert!(!emu.is_alt_screen());
         assert_eq!(row_text(&emu, 0), "primary"); // Primary content restored
+    }
+
+    #[test]
+    fn resizing_alt_screen_resizes_saved_primary_before_restore() {
+        let mut emu = TerminalEmulator::new(10, 5);
+        emu.process(b"primary");
+        emu.process(b"\x1b[?1049h");
+        emu.resize(20, 10);
+        emu.process(b"\x1b[?1049l");
+
+        assert_eq!(emu.rows(), 10);
+        assert_eq!(emu.cols(), 20);
+        assert_eq!(emu.grid().len(), 10);
+        assert!(emu.grid().iter().all(|row| row.len() == 20));
+        assert_eq!(row_text(&emu, 0), "primary");
+
+        // The restored grid must use the new dimensions for subsequent
+        // cursor movement and writes as well.
+        emu.process(b"\x1b[10;20Hx");
+        assert_eq!(emu.grid()[9][19].ch, 'x');
     }
 
     #[test]
@@ -1752,7 +1813,7 @@ mod tests {
     #[test]
     fn scroll_up_command() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[1S"); // Scroll up 1
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
@@ -1764,7 +1825,7 @@ mod tests {
     #[test]
     fn scroll_down_command() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[1T"); // Scroll down 1
         assert_eq!(row_text(&emu, 0), "");
         assert_eq!(row_text(&emu, 1), "line0");
@@ -1777,7 +1838,7 @@ mod tests {
     fn scrollback_accumulates_on_scroll() {
         let mut emu = TerminalEmulator::new(10, 3);
         for i in 0..10 {
-            emu.process(format!("line{i}\n").as_bytes());
+            emu.process(format!("line{i}\r\n").as_bytes());
         }
         assert!(!emu.scrollback().is_empty());
     }
@@ -1787,7 +1848,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(10, 2);
         emu.scrollback_limit = 5;
         for i in 0..20 {
-            emu.process(format!("l{i}\n").as_bytes());
+            emu.process(format!("l{i}\r\n").as_bytes());
         }
         assert!(emu.scrollback().len() <= 5);
     }
@@ -1950,7 +2011,7 @@ mod tests {
     #[test]
     fn reverse_index_at_top_scrolls_down() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[H"); // Home
         emu.process(b"\x1bM"); // Reverse index
         assert_eq!(row_text(&emu, 0), "");
@@ -1975,10 +2036,10 @@ mod tests {
     #[test]
     fn scrollback_not_added_for_scroll_region() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;4r"); // Scroll region rows 2-4
         let sb_before = emu.scrollback().len();
-        emu.process(b"\x1b[4;1H\n"); // Scroll within region
+        emu.process(b"\x1b[4;1H\r\n"); // Scroll within region
         // Scrollback should not grow for region-internal scrolls
         assert_eq!(emu.scrollback().len(), sb_before);
     }

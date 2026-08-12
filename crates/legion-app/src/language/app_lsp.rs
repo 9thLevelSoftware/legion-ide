@@ -103,6 +103,8 @@ pub enum LspWorkerRequest {
         version: i64,
         text: String,
     },
+    /// Fire-and-forget: send a `textDocument/didClose` notification.
+    DidClose { uri: String },
 }
 
 /// Message sent from the worker thread back to the frame path.
@@ -559,6 +561,15 @@ impl LspSessionHandle {
         worker.request_tx.try_send(request).is_ok()
     }
 
+    /// Send a fire-and-forget `textDocument/didClose` notification.
+    pub fn send_did_close(&mut self, uri: String) -> bool {
+        let LspSessionState::Live(worker) = &mut self.state else {
+            return false;
+        };
+        let request = LspWorkerRequest::DidClose { uri };
+        worker.request_tx.try_send(request).is_ok()
+    }
+
     /// Returns the current health record if the session is live (or a
     /// synthetic unavailable record if refused/failed/backing-off).  Returns
     /// `None` when idle or starting.
@@ -662,6 +673,9 @@ fn run_session_worker(
                 text,
             }) => {
                 let _ = session.did_open(&uri, &language_id, version, &text);
+            }
+            Ok(LspWorkerRequest::DidClose { uri }) => {
+                let _ = session.did_close(&uri);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // No requests pending.  Drain any buffered diagnostic
