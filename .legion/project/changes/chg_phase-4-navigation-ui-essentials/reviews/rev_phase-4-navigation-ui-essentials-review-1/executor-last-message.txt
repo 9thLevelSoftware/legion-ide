@@ -1,0 +1,34 @@
+{
+  "status": "failed",
+  "summary": "The only successful task run used a fake build; the oracle remains unevaluated, and the prior executor timed out with full cargo check failing.",
+  "reviewVerdicts": {
+    "specification": "pass",
+    "integration": "fail",
+    "evidence": "fail"
+  },
+  "findings": [
+    {
+      "id": "fake-build-evidence",
+      "title": "Successful run is only a fake build",
+      "body": "Attempt 2 reports legion-executor fake build with no changed files or real build commands.",
+      "severity": "blocking"
+    },
+    {
+      "id": "oracle-not-evaluated",
+      "title": "Acceptance oracle remains unevaluated",
+      "body": "Both verification reports have empty oracleAttribution and list the phase oracle under unevaluatedOracleRefs.",
+      "severity": "blocking"
+    },
+    {
+      "id": "full-build-not-green",
+      "title": "Full verification did not complete successfully",
+      "body": "Attempt 1 timed out after 300000ms; its redacted log records cargo check --workspace --all-targets exiting 1.",
+      "severity": "blocking"
+    }
+  ],
+  "filesChanged": [],
+  "commandsRun": [
+    "legion review --json",
+    "git status --short"
+  ]
+}
