@@ -2379,6 +2379,8 @@ struct TabDragState {
     dragging: Option<BufferId>,
     /// Original index of the dragged tab (at drag start).
     source_index: usize,
+    /// Index of the tab currently under the pointer during a drag.
+    drop_target: Option<usize>,
 }
 
 fn render_tab_strip(
@@ -2411,10 +2413,11 @@ fn render_tab_strip(
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    // Load current drag state.
+                    // Load current drag state and reset per-frame target.
                     let mut drag: TabDragState = ui
                         .ctx()
                         .data_mut(|d| d.get_temp(drag_state_id).unwrap_or_default());
+                    drag.drop_target = None;
 
                     for (tab_index, tab) in tabs.iter().enumerate() {
                         // --- build tab label ---
@@ -2496,11 +2499,16 @@ fn render_tab_strip(
                                 drag.source_index = tab_index;
                             }
 
-                            // While dragging, check if the cursor is over this tab
-                            // to determine the drop target.
+                            // While dragging, check if the cursor is over this
+                            // tab to determine the drop target.  Uses
+                            // `contains_pointer()` instead of `hovered()` because
+                            // egui suppresses `hovered` on non-source widgets
+                            // during a drag.
                             if let Some(dragging_id) = drag.dragging {
-                                if dragging_id != tab.buffer_id && tab_response.hovered() {
-                                    // Draw insertion indicator.
+                                if dragging_id != tab.buffer_id
+                                    && tab_response.contains_pointer()
+                                {
+                                    drag.drop_target = Some(tab_index);
                                     let rect = tab_response.rect;
                                     let indicator_x = rect.left();
                                     let painter = ui.painter();
@@ -2515,21 +2523,6 @@ fn render_tab_strip(
                                         ),
                                     );
                                 }
-                            }
-                        }
-
-                        // On drag release over a tab, fire ReorderTab.
-                        if tab_response.drag_stopped() {
-                            if let Some(dragging_id) = drag.dragging.take() {
-                                // The drag stopped on this tab; use its index as the
-                                // drop target.
-                                if tab_index != drag.source_index {
-                                    actions.push(DesktopAction::ReorderTab {
-                                        buffer_id: dragging_id,
-                                        new_index: tab_index,
-                                    });
-                                }
-                                drag.dragging = None;
                             }
                         }
 
@@ -2569,9 +2562,20 @@ fn render_tab_strip(
                         });
                     }
 
-                    // Handle global drag release (pointer released outside any tab).
+                    // Handle pointer release: fire ReorderTab if dropped on
+                    // a valid target, then clear drag state.
                     if ui.input(|i| i.pointer.any_released()) {
-                        drag.dragging = None;
+                        if let Some(dragging_id) = drag.dragging.take() {
+                            if let Some(target) = drag.drop_target.take() {
+                                if target != drag.source_index {
+                                    actions.push(DesktopAction::ReorderTab {
+                                        buffer_id: dragging_id,
+                                        new_index: target,
+                                    });
+                                }
+                            }
+                        }
+                        drag.drop_target = None;
                     }
 
                     // Persist drag state.
