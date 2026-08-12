@@ -20,12 +20,13 @@ use legion_protocol::{
     AgentRunId, BufferId, CanonicalPath, CollaborationOperationId, CollaborationParticipantId,
     CollaborationSessionId, CollaborationSharedProposalApproval, CollaborationTransportEnvelope,
     DelegatedTaskPlanContract, DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition,
-    DelegatedTaskRuntimeActivationState, LegionWorkflowMergeReadinessState,
-    LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason, PluginHostCallResponse, PluginId,
-    PluginManifest, PrincipalId, ProposalId, ProposalLifecycleState, ProposalLifecycleTransition,
-    ProposalResponse, ProtocolTextRange, RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor,
-    RemoteWorkspaceSessionId, SessionDockLayout, SessionDockSideLayout, SessionPanelState,
-    TextCoordinate, ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
+    DelegatedTaskRuntimeActivationState, LanguageToolingOperationKind,
+    LegionWorkflowMergeReadinessState, LegionWorkflowSessionId, PRODUCT_NAME, PluginDenialReason,
+    PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
+    ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
+    RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
+    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, ViewportScroll,
+    WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
@@ -65,6 +66,10 @@ use crate::{
 
 const WINDOW_TITLE: &str = PRODUCT_NAME;
 const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
+
+fn is_new_definition_response(last_operation_id: Option<&str>, operation_id: Option<&str>) -> bool {
+    operation_id.is_some_and(|current| last_operation_id != Some(current))
+}
 
 /// Process launch configuration for the desktop adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -587,8 +592,10 @@ pub struct DesktopRuntime {
     hover_tooltip_visible: bool,
     /// Whether a GoToDefinition response navigation is pending (T7).
     definition_navigation_queued: bool,
-    /// Definition count from the last projection refresh, for detecting new arrivals (T7).
-    last_definition_count: usize,
+    /// Definition operation identity from the last projection refresh (T7).
+    /// Operation identity is required because consecutive responses can have
+    /// the same number of locations.
+    last_definition_operation_id: Option<String>,
     /// Keyboard-focused row index in the Problems panel (T4).
     problems_selected_index: usize,
     /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
@@ -701,7 +708,7 @@ impl DesktopRuntime {
             completion_selected_index: 0,
             hover_tooltip_visible: false,
             definition_navigation_queued: false,
-            last_definition_count: 0,
+            last_definition_operation_id: None,
             problems_selected_index: 0,
             review_hunk_selected_index: 0,
             hunk_dispositions: ProposalHunkDispositionState::new(),
@@ -2916,10 +2923,18 @@ impl DesktopRuntime {
 
         // T7: auto-navigate to definition when a queued GoToDefinition response arrives.
         let new_def_count = snapshot.language_tooling_projection.definitions.len();
-        if self.definition_navigation_queued
-            && new_def_count == 1
-            && new_def_count != self.last_definition_count
-        {
+        let definition_operation_id = snapshot
+            .language_tooling_projection
+            .operations
+            .iter()
+            .rev()
+            .find(|operation| operation.kind == LanguageToolingOperationKind::Definition)
+            .map(|operation| operation.operation_id.clone());
+        let new_definition_response = is_new_definition_response(
+            self.last_definition_operation_id.as_deref(),
+            definition_operation_id.as_deref(),
+        );
+        if self.definition_navigation_queued && new_def_count == 1 && new_definition_response {
             self.definition_navigation_queued = false;
             // Navigate to the first definition location.  Non-fatal if unavailable.
             if let Some(def) = snapshot.language_tooling_projection.definitions.first()
@@ -2932,12 +2947,16 @@ impl DesktopRuntime {
                         position: range.start,
                     });
             }
+            // The app clears its authoritative definition projection when the
+            // destination opens; clear this frame's copy as well so the picker
+            // cannot render stale source-file results.
+            snapshot.language_tooling_projection.definitions.clear();
         } else if self.definition_navigation_queued && new_def_count > 1 {
             // Leave multiple definitions for the picker rendered by the view;
             // auto-opening the first result would hide the user's choices.
             self.definition_navigation_queued = false;
         }
-        self.last_definition_count = new_def_count;
+        self.last_definition_operation_id = definition_operation_id;
 
         if let Some(status) = &self.last_status {
             snapshot.status_messages.push(status.clone());
@@ -3559,6 +3578,9 @@ impl DesktopEframeApp {
         // frames. While any widget owns keyboard focus, do not also dispatch
         // typed characters / Backspace into the code canvas (key leakage).
         let interactive_widget_focused = ui.memory(|mem| mem.focused().is_some());
+        let terminal_input_focused = ui.memory(|mem| {
+            mem.focused() == Some(crate::view::interactive_fields::terminal_input_widget_id())
+        });
         let editor_input_enabled =
             self.runtime.editor_input_enabled(&snapshot) && !interactive_widget_focused;
 
@@ -3593,6 +3615,11 @@ impl DesktopEframeApp {
             if input.key_pressed(egui::Key::Tab) {
                 actions.push(DesktopAction::CompletePaletteSelection);
             }
+        } else if terminal_input_focused {
+            // The terminal input widget owns all keyboard controls while it is
+            // focused.  In particular, do not let Ctrl/Cmd+Z, W, P, or Tab
+            // also dispatch editor undo, tab close, palette, or tab-switch
+            // actions in the same frame as the terminal's raw control byte.
         } else {
             // Route every published default keymap entry through one central
             // dispatcher before context-specific editor input handling.
@@ -4648,6 +4675,22 @@ mod tests {
     use super::*;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn repeated_single_definition_responses_are_distinguished_by_operation() {
+        assert!(!is_new_definition_response(
+            Some("language:Definition:1"),
+            Some("language:Definition:1")
+        ));
+        assert!(is_new_definition_response(
+            Some("language:Definition:1"),
+            Some("language:Definition:2")
+        ));
+        assert!(!is_new_definition_response(
+            Some("language:Definition:1"),
+            None
+        ));
+    }
 
     #[test]
     fn startup_reaper_targets_the_selected_workspace_sandbox_root() {

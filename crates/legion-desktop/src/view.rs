@@ -15,7 +15,7 @@ pub mod fleet_card;
 /// Inline edit diff overlay view model and per-hunk accept/reject helpers (PKT-INLINE).
 pub mod inline_edit;
 /// Interactive text fields (terminal input, BYOK) outside the code-canvas gate.
-mod interactive_fields;
+pub(crate) mod interactive_fields;
 /// Pre-invocation context manifest panel with per-item exclusion toggles.
 pub mod manifest_panel;
 /// Editable plan editor projection.
@@ -2965,6 +2965,14 @@ struct TabDragState {
     drop_target: Option<usize>,
 }
 
+fn adjusted_tab_drop_target(source_index: usize, target_index: usize) -> usize {
+    if source_index < target_index {
+        target_index.saturating_sub(1)
+    } else {
+        target_index
+    }
+}
+
 fn render_tab_strip(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -3099,9 +3107,25 @@ fn render_tab_strip(
                                 && dragging_id != tab.buffer_id
                                 && tab_response.contains_pointer()
                             {
-                                drag.drop_target = Some(tab_index);
+                                // Treat the left and right halves of a tab as
+                                // distinct insertion slots. The slot is
+                                // measured before removing the source tab,
+                                // then adjusted once at release.
+                                let insert_after = tab_response
+                                    .interact_pointer_pos()
+                                    .is_some_and(|pos| pos.x >= tab_response.rect.center().x);
+                                let target_index = if insert_after {
+                                    tab_index.saturating_add(1)
+                                } else {
+                                    tab_index
+                                };
+                                drag.drop_target = Some(target_index);
                                 let rect = tab_response.rect;
-                                let indicator_x = rect.left();
+                                let indicator_x = if insert_after {
+                                    rect.right()
+                                } else {
+                                    rect.left()
+                                };
                                 let painter = ui.painter();
                                 painter.line_segment(
                                     [
@@ -3154,12 +3178,18 @@ fn render_tab_strip(
                     if ui.input(|i| i.pointer.any_released()) {
                         if let Some(dragging_id) = drag.dragging.take()
                             && let Some(target) = drag.drop_target.take()
-                            && target != drag.source_index
                         {
-                            actions.push(DesktopAction::ReorderTab {
-                                buffer_id: dragging_id,
-                                new_index: target,
-                            });
+                            // `target` is a pre-removal insertion slot.
+                            // Removing a tab from the left shifts every later
+                            // slot by one before insertion.
+                            let adjusted_target =
+                                adjusted_tab_drop_target(drag.source_index, target);
+                            if adjusted_target != drag.source_index {
+                                actions.push(DesktopAction::ReorderTab {
+                                    buffer_id: dragging_id,
+                                    new_index: adjusted_target,
+                                });
+                            }
                         }
                         drag.drop_target = None;
                     }
@@ -3495,29 +3525,13 @@ fn render_code_lines(
             });
         }
 
-        // Definition navigation: when definitions are available, navigate
-        // immediately for a single result or show a picker popup for multiple.
-        // Keep the handled location id in egui's temporary frame state because
-        // the projection remains populated after the action is dispatched.
+        // Multiple definitions stay in the picker so the user can choose the
+        // destination.  A single definition is navigated by
+        // DesktopRuntime::refresh_projection after the queued request returns;
+        // keeping that side effect out of rendering prevents a persistent
+        // projection from re-enqueuing navigation on every frame.
         let definitions = &snapshot.language_tooling_projection.definitions;
-        let definition_handled_id = egui::Id::new("lsp_last_definition_location");
-        if definitions.is_empty() {
-            ui.ctx()
-                .data_mut(|data| data.remove::<String>(definition_handled_id));
-        } else if definitions.len() == 1 {
-            let location_id = definitions[0].location_id.clone();
-            let should_navigate = ui.ctx().data_mut(|data| {
-                let already_handled = data.get_temp::<String>(definition_handled_id);
-                let changed = already_handled.as_deref() != Some(location_id.as_str());
-                if changed {
-                    data.insert_temp(definition_handled_id, location_id);
-                }
-                changed
-            });
-            if should_navigate {
-                actions.push(DesktopAction::NavigateToDefinition { index: 0 });
-            }
-        } else {
+        if definitions.len() > 1 {
             render_definition_picker(ui, definitions, actions);
         }
 
@@ -10160,6 +10174,18 @@ mod tests {
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
     use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection};
+
+    #[test]
+    fn tab_drop_target_accounts_for_source_removal() {
+        // Before B: no-op for A; after B: [B, A, C].
+        assert_eq!(adjusted_tab_drop_target(0, 1), 0);
+        assert_eq!(adjusted_tab_drop_target(0, 2), 1);
+        // Before C: no-op for B; after C: [A, C, B].
+        assert_eq!(adjusted_tab_drop_target(1, 2), 1);
+        assert_eq!(adjusted_tab_drop_target(1, 3), 2);
+        assert_eq!(adjusted_tab_drop_target(2, 0), 0);
+        assert_eq!(adjusted_tab_drop_target(1, 1), 1);
+    }
 
     #[test]
     fn automate_permission_session_is_parsed_from_request_labels() {

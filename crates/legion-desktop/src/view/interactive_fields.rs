@@ -206,6 +206,7 @@ pub(crate) fn render_terminal_input_line(
         ui.label(theme::code_muted("$"));
         let response = ui.add(
             egui::TextEdit::singleline(&mut draft)
+                .id(terminal_input_widget_id())
                 .desired_width((ui.available_width() - 80.0).max(40.0))
                 .hint_text("type and press Enter to send to the PTY"),
         );
@@ -256,6 +257,10 @@ pub(crate) fn render_terminal_input_line(
             data.insert_temp(draft_id, draft);
         });
     });
+}
+
+pub(crate) fn terminal_input_widget_id() -> egui::Id {
+    egui::Id::new("legion-terminal-input")
 }
 
 #[cfg(test)]
