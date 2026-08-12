@@ -347,6 +347,8 @@ enum EvidencePhase {
     GuiPhase8,
     /// Phase 8 production GA scaffold or acceptance evidence.
     Phase8,
+    /// Finish-plan Phase 6 acceptance evidence (user journey, GP-5, release pipeline).
+    FinishPhase6,
 }
 
 #[derive(Debug, Subcommand)]
@@ -578,6 +580,7 @@ fn run_evidence_check(workspace: PathBuf, phase: EvidencePhase) -> Result<()> {
         EvidencePhase::GuiPhase7 => check_gui_phase7_evidence(&workspace, &mut issues),
         EvidencePhase::GuiPhase8 => check_gui_phase8_evidence(&workspace, &mut issues),
         EvidencePhase::Phase8 => check_phase8_evidence(&workspace, &mut issues),
+        EvidencePhase::FinishPhase6 => check_finish_phase6_evidence(&workspace, &mut issues),
     }
     finish_issue_report("Evidence check", &workspace, issues)
 }
@@ -997,6 +1000,26 @@ fn check_phase8_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) 
             );
         }
     }
+}
+
+fn check_finish_phase6_evidence(workspace: &std::path::Path, issues: &mut Vec<String>) {
+    require_file(
+        workspace,
+        "crates/legion-desktop/tests/user_journey_rendering.rs",
+        issues,
+    );
+    require_file(
+        workspace,
+        "crates/legion-app/src/bin/golden_path_5.rs",
+        issues,
+    );
+    require_file(workspace, ".github/workflows/legion-release.yml", issues);
+    require_file(
+        workspace,
+        "crates/legion-app/tests/phase6_acceptance.rs",
+        issues,
+    );
+    require_file(workspace, "xtask/src/golden_path_5.rs", issues);
 }
 
 fn validate_phase8_final_artifact_contents(workspace: &std::path::Path, issues: &mut Vec<String>) {
