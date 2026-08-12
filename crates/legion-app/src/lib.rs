@@ -7480,12 +7480,13 @@ fn terminal_input_payload_to_send(payload: &str) -> String {
 }
 
 fn terminal_input_is_raw_control(payload: &str) -> bool {
-    payload.ends_with('\n')
-        || payload.ends_with('\r')
-        || payload.starts_with('\x1b')
-        || payload
-            .chars()
-            .all(|character| character.is_ascii_control())
+    !payload.is_empty()
+        && (payload.ends_with('\n')
+            || payload.ends_with('\r')
+            || payload.starts_with('\x1b')
+            || payload
+                .chars()
+                .all(|character| character.is_ascii_control()))
 }
 
 fn terminal_command_block_finish_payload(
@@ -20759,6 +20760,9 @@ impl AppComposition {
                 if let Some(buffer_id) = self.active_documents.active_buffer_id {
                     self.set_buffer_cursor(buffer_id, position)?;
                 }
+                // A definition result is a one-shot navigation surface. Do
+                // not carry the source file's picker data into the destination.
+                self.language_tooling.projection.definitions.clear();
                 Ok(AppCommandOutcome::Opened(outcome))
             }
             AppCommandRequest::StartAiRun { instruction_label } => Ok(
@@ -35034,6 +35038,7 @@ mod tests {
     #[test]
     fn terminal_control_input_is_not_line_normalized() {
         assert_eq!(terminal_input_payload_to_send("echo ready"), "echo ready\n");
+        assert_eq!(terminal_input_payload_to_send(""), "\n");
         assert_eq!(terminal_input_payload_to_send("\r"), "\r");
         assert_eq!(terminal_input_payload_to_send("\x03"), "\x03");
         assert_eq!(terminal_input_payload_to_send("\x1b[A"), "\x1b[A");
