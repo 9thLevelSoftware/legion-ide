@@ -3559,6 +3559,8 @@ impl DesktopEframeApp {
         // frames. While any widget owns keyboard focus, do not also dispatch
         // typed characters / Backspace into the code canvas (key leakage).
         let interactive_widget_focused = ui.memory(|mem| mem.focused().is_some());
+        let terminal_input_focused =
+            ui.memory(|mem| mem.focused() == Some(crate::view::terminal_input_widget_id()));
         let editor_input_enabled =
             self.runtime.editor_input_enabled(&snapshot) && !interactive_widget_focused;
 
@@ -3593,6 +3595,11 @@ impl DesktopEframeApp {
             if input.key_pressed(egui::Key::Tab) {
                 actions.push(DesktopAction::CompletePaletteSelection);
             }
+        } else if terminal_input_focused {
+            // The terminal input widget owns all keyboard controls while it is
+            // focused.  In particular, do not let Ctrl/Cmd+Z, W, P, or Tab
+            // also dispatch editor undo, tab close, palette, or tab-switch
+            // actions in the same frame as the terminal's raw control byte.
         } else {
             // Route every published default keymap entry through one central
             // dispatcher before context-specific editor input handling.

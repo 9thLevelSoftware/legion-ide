@@ -58,6 +58,10 @@ pub use plan_editor::{
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
+pub(crate) fn terminal_input_widget_id() -> egui::Id {
+    interactive_fields::terminal_input_widget_id()
+}
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -2965,6 +2969,14 @@ struct TabDragState {
     drop_target: Option<usize>,
 }
 
+fn adjusted_tab_drop_target(source_index: usize, target_index: usize) -> usize {
+    if source_index < target_index {
+        target_index.saturating_sub(1)
+    } else {
+        target_index
+    }
+}
+
 fn render_tab_strip(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -3154,12 +3166,19 @@ fn render_tab_strip(
                     if ui.input(|i| i.pointer.any_released()) {
                         if let Some(dragging_id) = drag.dragging.take()
                             && let Some(target) = drag.drop_target.take()
-                            && target != drag.source_index
                         {
-                            actions.push(DesktopAction::ReorderTab {
-                                buffer_id: dragging_id,
-                                new_index: target,
-                            });
+                            // `target` is measured in the list before the
+                            // source is removed.  Removing a tab from the
+                            // left shifts every later insertion point by
+                            // one (A→C in [A,B,C] must insert at 1, not 2).
+                            let adjusted_target =
+                                adjusted_tab_drop_target(drag.source_index, target);
+                            if adjusted_target != drag.source_index {
+                                actions.push(DesktopAction::ReorderTab {
+                                    buffer_id: dragging_id,
+                                    new_index: adjusted_target,
+                                });
+                            }
                         }
                         drag.drop_target = None;
                     }
@@ -3495,29 +3514,13 @@ fn render_code_lines(
             });
         }
 
-        // Definition navigation: when definitions are available, navigate
-        // immediately for a single result or show a picker popup for multiple.
-        // Keep the handled location id in egui's temporary frame state because
-        // the projection remains populated after the action is dispatched.
+        // Multiple definitions stay in the picker so the user can choose the
+        // destination.  A single definition is navigated by
+        // DesktopRuntime::refresh_projection after the queued request returns;
+        // keeping that side effect out of rendering prevents a persistent
+        // projection from re-enqueuing navigation on every frame.
         let definitions = &snapshot.language_tooling_projection.definitions;
-        let definition_handled_id = egui::Id::new("lsp_last_definition_location");
-        if definitions.is_empty() {
-            ui.ctx()
-                .data_mut(|data| data.remove::<String>(definition_handled_id));
-        } else if definitions.len() == 1 {
-            let location_id = definitions[0].location_id.clone();
-            let should_navigate = ui.ctx().data_mut(|data| {
-                let already_handled = data.get_temp::<String>(definition_handled_id);
-                let changed = already_handled.as_deref() != Some(location_id.as_str());
-                if changed {
-                    data.insert_temp(definition_handled_id, location_id);
-                }
-                changed
-            });
-            if should_navigate {
-                actions.push(DesktopAction::NavigateToDefinition { index: 0 });
-            }
-        } else {
+        if definitions.len() > 1 {
             render_definition_picker(ui, definitions, actions);
         }
 
@@ -10160,6 +10163,13 @@ mod tests {
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
     use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection};
+
+    #[test]
+    fn tab_drop_target_accounts_for_source_removal() {
+        assert_eq!(adjusted_tab_drop_target(0, 2), 1);
+        assert_eq!(adjusted_tab_drop_target(2, 0), 0);
+        assert_eq!(adjusted_tab_drop_target(1, 1), 1);
+    }
 
     #[test]
     fn automate_permission_session_is_parsed_from_request_labels() {
