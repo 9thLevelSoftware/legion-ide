@@ -155,11 +155,13 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .unwrap_or(line.len());
 
     let coordinated = coordinated_list_bounds(line, mention, siblings);
+    let independent_start = coordinated.map_or(mention.start, |(run_start, _)| run_start);
+    let independent_end = coordinated.map_or(mention.end, |(_, run_end)| run_end);
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
-        .filter(|other| coordinated.map_or(true, |(run_start, _)| other.start < run_start))
-        .map(|other| other.end)
+        .filter(|other| coordinated.is_none_or(|(run_start, _)| other.start < run_start))
+        .map(|other| independent_claim_start(line, other.end, independent_start))
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
         .max(clause_start(line, mention.start))
@@ -170,8 +172,8 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
-        .filter(|other| coordinated.map_or(true, |(_, run_end)| other.end > run_end))
-        .map(|other| other.start)
+        .filter(|other| coordinated.is_none_or(|(_, run_end)| other.end > run_end))
+        .map(|other| independent_claim_end(line, independent_end, other.start))
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
         .min(clause_end(line, mention.end))
@@ -181,6 +183,23 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         ));
 
     line[start..end].to_lowercase()
+}
+
+/// Clamp an independent claim after the last comma between adjacent task IDs.
+/// The text before that comma is the previous task's predicate, not context for
+/// the current task (for example, `T1 landed, T2 remains open`).
+fn independent_claim_start(line: &str, previous_end: usize, current_start: usize) -> usize {
+    line[previous_end..current_start]
+        .rfind(',')
+        .map_or(previous_end, |offset| previous_end + offset + 1)
+}
+
+/// Clamp an independent claim before the first comma between adjacent task IDs.
+/// Coordinated task lists bypass this boundary in [`context_around`].
+fn independent_claim_end(line: &str, current_end: usize, next_start: usize) -> usize {
+    line[current_end..next_start]
+        .find(',')
+        .map_or(next_start, |offset| current_end + offset)
 }
 
 /// Return the span of a coordinated task-id list containing `mention`.
@@ -263,10 +282,34 @@ fn comma_boundary_before(line: &str, before: usize) -> usize {
     line[..before].rfind(',').map_or(0, |index| index + 1)
 }
 
+// These conjunctions introduce an appositive predicate that belongs to the
+// preceding task claim; they are not independent-claim delimiters.
+const APPOSITIVE_CONTINUATION_PREFIXES: &[&str] = &[
+    "which ", "that ", "who ", "whom ", "whose ", "where ", "when ",
+];
+
 fn comma_boundary_after(line: &str, after: usize) -> usize {
-    line[after..]
-        .find(',')
-        .map_or(line.len(), |index| after + index)
+    let mut search_from = after;
+    while let Some(offset) = line[search_from..].find(',') {
+        let index = search_from + offset;
+        let continuation = line[index + 1..].trim_start();
+        if is_appositive_continuation(continuation) {
+            // In `T1, which remains open`, the comma introduces a predicate
+            // about T1 rather than a new independent task claim.  Continue
+            // looking so a later comma can still delimit the full claim.
+            search_from = index + 1;
+            continue;
+        }
+        return index;
+    }
+    line.len()
+}
+
+fn is_appositive_continuation(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    APPOSITIVE_CONTINUATION_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// Compare the ledger text against backlog statuses.
@@ -484,6 +527,57 @@ mod tests {
             &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
         );
         assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn appositive_comma_keeps_predicate_with_task_claim() {
+        let ledger = "P1.F1.T1, which remains open, despite the current plan.";
+        let violations = check_consistency(ledger, &statuses(&[("P1.F1.T1", "done")]));
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T1");
+        assert!(violations[0].message.contains("open or blocking"));
+    }
+
+    #[test]
+    fn mixed_leading_coordinated_list_keeps_shared_leading_predicate() {
+        let ledger = "P9.F9.T9 landed, delivered P1.F1.T1, P1.F1.T2 and P1.F1.T3.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[
+                ("P9.F9.T9", "done"),
+                ("P1.F1.T1", "todo"),
+                ("P1.F1.T2", "todo"),
+                ("P1.F1.T3", "todo"),
+            ]),
+        );
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P1.F1.T1", "P1.F1.T2", "P1.F1.T3"]
+        );
+    }
+
+    #[test]
+    fn mixed_trailing_coordinated_list_keeps_shared_trailing_predicate() {
+        let ledger = "P1.F1.T1, P1.F1.T2 and P1.F1.T3 remain outstanding, P2.F2.T1 landed.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[
+                ("P1.F1.T1", "done"),
+                ("P1.F1.T2", "done"),
+                ("P1.F1.T3", "done"),
+                ("P2.F2.T1", "done"),
+            ]),
+        );
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P1.F1.T1", "P1.F1.T2", "P1.F1.T3"]
+        );
     }
 
     #[test]

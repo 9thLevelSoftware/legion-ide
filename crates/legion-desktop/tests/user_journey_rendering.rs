@@ -381,6 +381,7 @@ fn terminal_session_content_appears_in_terminal_rows() {
         cursor_row: None,
         cursor_col: None,
         cursor_visible: None,
+        application_cursor_keys: None,
         generated_at: TimestampMillis(100),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
@@ -413,10 +414,7 @@ fn terminal_session_content_appears_in_terminal_rows() {
     );
     // Verify session ID is surfaced in the summary row.
     assert!(
-        model
-            .terminal_rows
-            .iter()
-            .any(|row| row.contains("42")),
+        model.terminal_rows.iter().any(|row| row.contains("42")),
         "terminal_rows should reference the session ID"
     );
 }
@@ -558,18 +556,12 @@ fn git_status_appears_in_git_rows() {
         "git_rows should contain the branch label"
     );
     assert!(
-        model
-            .git_rows
-            .iter()
-            .any(|row| row.contains("abc1234")),
+        model.git_rows.iter().any(|row| row.contains("abc1234")),
         "git_rows should contain the HEAD short hash"
     );
     // Git rows should contain file change entries.
     assert!(
-        model
-            .git_rows
-            .iter()
-            .any(|row| row.contains("src/main.rs")),
+        model.git_rows.iter().any(|row| row.contains("src/main.rs")),
         "git_rows should contain the modified file path"
     );
     assert!(
@@ -581,10 +573,7 @@ fn git_status_appears_in_git_rows() {
     );
     // Verify changed file count is in the summary row.
     assert!(
-        model
-            .git_rows
-            .iter()
-            .any(|row| row.contains("changes=2")),
+        model.git_rows.iter().any(|row| row.contains("changes=2")),
         "git_rows summary should report 2 changes"
     );
 }
@@ -605,7 +594,10 @@ fn empty_shell_produces_no_panic() {
         "Empty shell should have no code lines"
     );
     assert!(
-        model.tab_rows.iter().any(|row| row.contains("<no open tabs>")),
+        model
+            .tab_rows
+            .iter()
+            .any(|row| row.contains("<no open tabs>")),
         "Empty shell should show no-tabs placeholder"
     );
 }

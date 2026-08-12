@@ -16654,20 +16654,15 @@ pub struct TerminalPolicyProjection {
 }
 
 /// Terminal color for projection-only cell grid rendering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TerminalColor {
     /// Terminal default color (foreground or background).
+    #[default]
     Default,
     /// Indexed color (0-255).
     Indexed(u8),
     /// 24-bit true color.
     Rgb(u8, u8, u8),
-}
-
-impl Default for TerminalColor {
-    fn default() -> Self {
-        TerminalColor::Default
-    }
 }
 
 /// Per-cell display attributes for terminal cell grid rendering.
@@ -16689,6 +16684,8 @@ pub struct TerminalCellAttrs {
     pub strikethrough: bool,
     /// Inverse (swap foreground/background).
     pub inverse: bool,
+    /// Hidden/concealed text (SGR 8), rendered as blank cells.
+    pub hidden: bool,
 }
 
 /// A single terminal cell for projection-only rendering.
@@ -16698,6 +16695,12 @@ pub struct TerminalCell {
     pub ch: char,
     /// Display attributes for this cell.
     pub attrs: TerminalCellAttrs,
+    /// Whether this cell continues a wide character from the preceding cell.
+    #[serde(default)]
+    pub continuation: bool,
+    /// Combining marks attached to the base character in this cell.
+    #[serde(default)]
+    pub combining: String,
 }
 
 impl Default for TerminalCell {
@@ -16705,6 +16708,8 @@ impl Default for TerminalCell {
         Self {
             ch: ' ',
             attrs: TerminalCellAttrs::default(),
+            continuation: false,
+            combining: String::new(),
         }
     }
 }
@@ -16800,6 +16805,8 @@ pub struct TerminalPanelProjection {
     pub cursor_col: Option<usize>,
     /// Whether the cursor is visible in the cell grid.
     pub cursor_visible: Option<bool>,
+    /// Whether terminal application-cursor-key mode is enabled (DECCKM).
+    pub application_cursor_keys: Option<bool>,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Redaction hints for the whole projection.
@@ -16842,6 +16849,7 @@ impl TerminalPanelProjection {
             cursor_row: None,
             cursor_col: None,
             cursor_visible: None,
+            application_cursor_keys: None,
             generated_at: TimestampMillis(0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -23856,6 +23864,20 @@ pub trait CapabilityBrokerPort {
 pub trait EventSinkPort {
     /// Emit event.
     fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()>;
+
+    /// Atomically emit a batch of events.
+    ///
+    /// Implementations that do not provide an atomic batch boundary fail
+    /// before emitting any item. Callers must not emulate this with repeated
+    /// [`Self::emit`] calls because a later failure would expose a partial batch.
+    /// Implementations must make identical retries idempotent by event id and
+    /// reject a reused event id whose content differs from the accepted event.
+    fn emit_batch(&self, _requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
+        Err(ProtocolError {
+            code: "event_batch_unsupported".to_string(),
+            message: "event sink does not support atomic batch emission".to_string(),
+        })
+    }
 }
 
 /// Service-port for storage repos.

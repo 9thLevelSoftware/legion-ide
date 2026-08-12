@@ -30,3 +30,7 @@ __pycache__/
 .almanac/runs/
 /target-load/
 .legion/var/
+.legion/project/workflow/map/*/map.json
+.legion/project/workflow/map/*/symbols.json
+.legion/project/workflow/map/*/search.md
+.legion/project/workflow/map/*/index.jsonl

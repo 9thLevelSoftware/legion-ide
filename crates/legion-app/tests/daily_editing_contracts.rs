@@ -625,7 +625,9 @@ fn minimap_toggle_persists_through_settings() {
         "expected SettingsUpdated outcome"
     );
 
-    let snapshot = app.shell_projection_snapshot("daily").expect("snapshot after enable");
+    let snapshot = app
+        .shell_projection_snapshot("daily")
+        .expect("snapshot after enable");
     assert!(
         snapshot.settings_projection.editor.minimap_visible,
         "minimap should be visible after toggle on"
@@ -640,7 +642,9 @@ fn minimap_toggle_persists_through_settings() {
         "expected SettingsUpdated outcome"
     );
 
-    let snapshot = app.shell_projection_snapshot("daily").expect("snapshot after disable");
+    let snapshot = app
+        .shell_projection_snapshot("daily")
+        .expect("snapshot after disable");
     assert!(
         !snapshot.settings_projection.editor.minimap_visible,
         "minimap should be hidden after toggle off"

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "0.3.0",
+  "createdAt": "2026-08-08T03:51:25.463Z",
+  "kind": "requirement",
+  "id": "req_the-application-must-be-able-to-facilitate-the-w-1",
+  "projectId": "prj_legion-ide",
+  "priority": "must",
+  "category": "behavior",
+  "statement": "The application must be able to facilitate the writing and refining of code in all languages/file formats.",
+  "acceptance": {
+    "language": "The application must be able to facilitate the writing and refining of code in all languages/file formats.",
+    "criteria": [
+      {
+        "id": "ac_all-file-types-related-to-coding-can-be-created-1",
+        "statement": "All file types related to coding can be created/edited.",
+        "proof": {
+          "mode": "executable",
+          "command": "cargo",
+          "args": [
+            "test",
+            "--workspace",
+            "-F",
+            "desktop",
+            "--",
+            "file_type"
+          ],
+          "expectedExitCode": 0,
+          "surface": {
+            "kind": "integration",
+            "interface": "EditorBufferManager::open_file() -> ShellProjectionSnapshot",
+            "rationale": "A unit test on the buffer alone would miss projection boundary failures where file open succeeds but the GUI never receives the snapshot to render.",
+            "pinned": [
+              {
+                "path": "crates/legion-editor/src/lib.rs",
+                "sha256": "sha256:397818adbda9b26b0badb00a5c261f39283652b3c3e919f3c25f75e4b90851b3"
+              },
+              {
+                "path": "crates/legion-app/src/lib.rs",
+                "sha256": "sha256:feb070300c379e543aba3b8b249452535de867c38efa0bcfff41ccf2e44c694e"
+              },
+              {
+                "path": "crates/legion-ui/src/lib.rs",
+                "sha256": "sha256:71d703d66a42a1d5586374465662c7c3e988f0ba1489ee95ac366d84aabc9336"
+              },
+              {
+                "path": "crates/legion-desktop/tests/projection_rendering.rs",
+                "sha256": "sha256:c15d97a7a7ac12e14e70cd538a8234ea39dc7589a82787025f83aa69bb13586a"
+              }
+            ]
+          },
+          "acceptancePaths": [
+            "crates/legion-desktop/tests/projection_rendering.rs",
+            "crates/legion-desktop/tests/headless_input.rs",
+            "crates/legion-desktop/tests/save_all_conflict.rs",
+            "crates/legion-app/src/bin/golden_path_1.rs"
+          ]
+        }
+      }
+    ],
+    "oracleRefs": []
+  },
+  "traceRefs": [
+    {
+      "path": ".legion/project/intake/itk_20260808-035125463/session.json",
+      "anchor": "requirements.1",
+      "relation": "records",
+      "entity": {
+        "kind": "requirement",
+        "id": "req_the-application-must-be-able-to-facilitate-the-w-1"
+      }
+    }
+  ],
+  "supersedes": [],
+  "status": "accepted"
+}

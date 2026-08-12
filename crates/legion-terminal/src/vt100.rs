@@ -4,22 +4,25 @@
 //! a character and display attributes (foreground, background, bold, italic,
 //! underline, inverse, etc.). Handles partial escape sequences across buffer
 //! boundaries.
+//!
+//! The emulator intentionally remains a Legion-owned parser rather than a
+//! wrapper around an upstream VT100 crate: the public contract exposes a
+//! per-cell grid with Legion-specific color, mode, cursor, scrollback, and
+//! redaction metadata. Redaction happens before bytes reach this parser, and
+//! retaining the local state machine keeps that projection contract explicit.
+
+use unicode_width::UnicodeWidthChar;
 
 /// Terminal color model supporting default, 16 standard, 256 indexed, and 24-bit RGB.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Color {
     /// Terminal default color (foreground or background).
+    #[default]
     Default,
     /// Indexed color: 0-15 standard, 16-231 cube, 232-255 grayscale.
     Indexed(u8),
     /// 24-bit true color.
     Rgb(u8, u8, u8),
-}
-
-impl Default for Color {
-    fn default() -> Self {
-        Color::Default
-    }
 }
 
 /// Per-cell display attributes applied to rendered characters.
@@ -68,6 +71,10 @@ pub struct Cell {
     pub ch: char,
     /// Display attributes for this cell.
     pub attrs: CellAttributes,
+    /// Whether this cell is the continuation column of a wide character.
+    pub continuation: bool,
+    /// Combining marks attached to the base character in this cell.
+    pub combining: String,
 }
 
 impl Default for Cell {
@@ -75,6 +82,8 @@ impl Default for Cell {
         Self {
             ch: ' ',
             attrs: CellAttributes::default(),
+            continuation: false,
+            combining: String::new(),
         }
     }
 }
@@ -91,9 +100,10 @@ struct AltScreenState {
 }
 
 /// Parser state machine for incremental escape sequence processing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum ParserState {
     /// Normal character processing.
+    #[default]
     Ground,
     /// ESC byte seen, awaiting next byte.
     Escape,
@@ -109,12 +119,6 @@ enum ParserState {
         /// Accumulated OSC content.
         content: Vec<u8>,
     },
-}
-
-impl Default for ParserState {
-    fn default() -> Self {
-        ParserState::Ground
-    }
 }
 
 /// VT100/xterm terminal emulator with 2D cell grid and scrollback buffer.
@@ -156,6 +160,9 @@ pub struct TerminalEmulator {
     // Parser state for handling partial sequences
     parser_state: ParserState,
 
+    // Partial UTF-8 character carried across process() calls.
+    utf8_pending: Vec<u8>,
+
     // Response buffer for device status reports (DSR)
     response_buf: Vec<u8>,
 }
@@ -187,6 +194,7 @@ impl TerminalEmulator {
             _origin_mode: false,
             pending_wrap: false,
             parser_state: ParserState::Ground,
+            utf8_pending: Vec::new(),
             response_buf: Vec::new(),
         }
     }
@@ -195,6 +203,39 @@ impl TerminalEmulator {
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let cols = cols.max(1);
         let rows = rows.max(1);
+
+        // The primary screen is kept separately while an alternate-screen
+        // application (for example, Vim) is active.  Keep that saved screen
+        // in lockstep with the terminal dimensions too; otherwise exiting the
+        // alternate screen would restore rows with the old width/height while
+        // the cursor and bounds use the new dimensions.
+        if let Some(saved) = &mut self.alt_screen {
+            for row in &mut saved.grid {
+                row.resize(cols, Cell::default());
+            }
+            match rows.cmp(&saved.grid.len()) {
+                std::cmp::Ordering::Greater => {
+                    saved
+                        .grid
+                        .extend((0..rows - saved.grid.len()).map(|_| vec![Cell::default(); cols]));
+                }
+                std::cmp::Ordering::Less => {
+                    let excess = saved.grid.len() - rows;
+                    let removed = saved.grid.drain(..excess).collect::<Vec<_>>();
+                    saved.scrollback.extend(removed);
+                    let scrollback_limit = self.scrollback_limit;
+                    while saved.scrollback.len() > scrollback_limit {
+                        saved.scrollback.remove(0);
+                    }
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+            for row in &mut saved.scrollback {
+                row.resize(cols, Cell::default());
+            }
+            saved.cursor_row = saved.cursor_row.min(rows - 1);
+            saved.cursor_col = saved.cursor_col.min(cols - 1);
+        }
 
         // Resize each existing row to the new column width
         for row in &mut self.grid {
@@ -295,7 +336,10 @@ impl TerminalEmulator {
                 ParserState::Escape => {
                     self.process_escape(byte);
                 }
-                ParserState::CsiParam { mut params, private } => {
+                ParserState::CsiParam {
+                    mut params,
+                    private,
+                } => {
                     match byte {
                         // Parameter bytes: digits, semicolons, colons
                         b'0'..=b'9' | b';' | b':' => {
@@ -356,13 +400,22 @@ impl TerminalEmulator {
     }
 
     fn process_ground(&mut self, byte: u8) {
+        if !self.utf8_pending.is_empty() && !(0x80..=0xbf).contains(&byte) {
+            self.flush_utf8_pending();
+        }
+
+        if byte >= 0x80 {
+            self.process_utf8_byte(byte);
+            return;
+        }
+
         match byte {
             // ESC
             0x1b => {
                 self.parser_state = ParserState::Escape;
             }
             // LF, VT, FF — all treated as newline
-            0x0a | 0x0b | 0x0c => {
+            0x0a..=0x0c => {
                 self.linefeed();
             }
             // CR
@@ -392,25 +445,22 @@ impl TerminalEmulator {
             0x00..=0x06 | 0x0e..=0x1a | 0x1c..=0x1f => {
                 // Ignore
             }
-            // Printable ASCII (and everything else treated as UTF-8 lead bytes)
+            // Printable ASCII
             _ => {
-                self.put_char(byte);
+                self.put_char(byte as char);
             }
         }
     }
 
-    fn put_char(&mut self, first_byte: u8) {
-        // Decode the character. For simplicity in this byte-oriented parser,
-        // we handle ASCII directly and treat multi-byte UTF-8 as individual
-        // replacement characters. A production parser would accumulate UTF-8
-        // sequences, but the vast majority of terminal output is ASCII.
-        let ch = if first_byte < 0x80 {
-            first_byte as char
-        } else {
-            // Non-ASCII byte outside a complete UTF-8 sequence context.
-            // Replace with Unicode replacement character.
-            '\u{FFFD}'
+    fn put_char(&mut self, ch: char) {
+        let Some(mut display_width) = ch.width() else {
+            return;
         };
+        if display_width == 0 {
+            self.append_combining_mark(ch);
+            return;
+        }
+        display_width = display_width.min(2);
 
         if self.pending_wrap && self.auto_wrap {
             self.pending_wrap = false;
@@ -418,18 +468,119 @@ impl TerminalEmulator {
             self.linefeed();
         }
 
+        // A wide character cannot start in the final column.  Wrap it before
+        // writing when autowrap is enabled; otherwise degrade to a single-cell
+        // glyph rather than writing past the grid boundary.
+        if display_width == 2 && self.cursor_col == self.cols - 1 {
+            if self.auto_wrap {
+                self.cursor_col = 0;
+                self.linefeed();
+            } else {
+                display_width = 1;
+            }
+        }
+
         if self.cursor_row < self.rows && self.cursor_col < self.cols {
+            self.clear_wide_cell_at(self.cursor_row, self.cursor_col);
             self.grid[self.cursor_row][self.cursor_col] = Cell {
                 ch,
                 attrs: self.current_attrs.clone(),
+                continuation: false,
+                combining: String::new(),
             };
+            if display_width == 2 && self.cursor_col + 1 < self.cols {
+                self.clear_wide_cell_at(self.cursor_row, self.cursor_col + 1);
+                self.grid[self.cursor_row][self.cursor_col + 1] = Cell {
+                    ch: ' ',
+                    attrs: self.current_attrs.clone(),
+                    continuation: true,
+                    combining: String::new(),
+                };
+            }
         }
 
-        if self.cursor_col >= self.cols - 1 {
+        if display_width == 2 {
+            if self.cursor_col + 2 >= self.cols {
+                self.cursor_col = self.cols - 1;
+                self.pending_wrap = true;
+            } else {
+                self.cursor_col += 2;
+            }
+        } else if self.cursor_col >= self.cols - 1 {
             // At last column: set pending wrap flag
             self.pending_wrap = true;
         } else {
             self.cursor_col += 1;
+        }
+    }
+
+    fn append_combining_mark(&mut self, ch: char) {
+        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+            return;
+        }
+
+        let base_col = if self.pending_wrap {
+            if self.grid[self.cursor_row][self.cursor_col].continuation {
+                self.cursor_col.saturating_sub(1)
+            } else {
+                self.cursor_col
+            }
+        } else if self.cursor_col > 0
+            && self.grid[self.cursor_row][self.cursor_col - 1].continuation
+        {
+            self.cursor_col.saturating_sub(2)
+        } else if self.cursor_col > 0 {
+            self.cursor_col - 1
+        } else {
+            self.cursor_col
+        };
+
+        if base_col < self.cols {
+            self.grid[self.cursor_row][base_col].combining.push(ch);
+        }
+    }
+
+    fn clear_wide_cell_at(&mut self, row: usize, col: usize) {
+        if self.grid[row][col].continuation && col > 0 {
+            self.grid[row][col - 1] = Cell::default();
+        }
+        if col + 1 < self.cols && self.grid[row][col + 1].continuation {
+            self.grid[row][col + 1] = Cell::default();
+        }
+    }
+
+    fn process_utf8_byte(&mut self, byte: u8) {
+        if self.utf8_pending.is_empty() {
+            if (0xc2..=0xf4).contains(&byte) {
+                self.utf8_pending.push(byte);
+            } else {
+                self.put_char('\u{FFFD}');
+            }
+            return;
+        }
+
+        self.utf8_pending.push(byte);
+        let expected_len = match self.utf8_pending[0] {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => 0,
+        };
+
+        if expected_len == 0 || self.utf8_pending.len() >= expected_len {
+            let bytes = std::mem::take(&mut self.utf8_pending);
+            let ch = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| text.chars().next())
+                .unwrap_or('\u{FFFD}');
+            self.put_char(ch);
+        }
+    }
+
+    fn flush_utf8_pending(&mut self) {
+        if !self.utf8_pending.is_empty() {
+            self.utf8_pending.clear();
+            self.put_char('\u{FFFD}');
         }
     }
 
@@ -450,11 +601,8 @@ impl TerminalEmulator {
             }
             // Save cursor (DECSC)
             b'7' => {
-                self.saved_cursor = Some((
-                    self.cursor_row,
-                    self.cursor_col,
-                    self.current_attrs.clone(),
-                ));
+                self.saved_cursor =
+                    Some((self.cursor_row, self.cursor_col, self.current_attrs.clone()));
             }
             // Restore cursor (DECRC)
             b'8' => {
@@ -592,22 +740,14 @@ impl TerminalEmulator {
                 let mode = parsed.first().copied().unwrap_or(0);
                 if mode == 6 {
                     // Report cursor position
-                    let response = format!(
-                        "\x1b[{};{}R",
-                        self.cursor_row + 1,
-                        self.cursor_col + 1
-                    );
+                    let response = format!("\x1b[{};{}R", self.cursor_row + 1, self.cursor_col + 1);
                     self.response_buf.extend_from_slice(response.as_bytes());
                 }
             }
             // DECSTBM — Set Scrolling Region
             b'r' => {
                 let top = parsed.first().copied().unwrap_or(1).max(1) as usize;
-                let bottom = parsed
-                    .get(1)
-                    .copied()
-                    .unwrap_or(self.rows as u32)
-                    .max(1) as usize;
+                let bottom = parsed.get(1).copied().unwrap_or(self.rows as u32).max(1) as usize;
                 if top < bottom && top >= 1 && bottom <= self.rows {
                     self.scroll_top = top - 1;
                     self.scroll_bottom = bottom - 1;
@@ -619,11 +759,8 @@ impl TerminalEmulator {
             }
             // DECSC — Save Cursor Position (CSI s)
             b's' => {
-                self.saved_cursor = Some((
-                    self.cursor_row,
-                    self.cursor_col,
-                    self.current_attrs.clone(),
-                ));
+                self.saved_cursor =
+                    Some((self.cursor_row, self.cursor_col, self.current_attrs.clone()));
             }
             // DECRC — Restore Cursor Position (CSI u)
             b'u' => {
@@ -725,18 +862,15 @@ impl TerminalEmulator {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.current_attrs.fg =
-                                        Color::Indexed(params[i] as u8);
+                                    self.current_attrs.fg = Color::Indexed(params[i] as u8);
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    let r = params[i + 1] as u8;
-                                    let g = params[i + 2] as u8;
-                                    let b = params[i + 3] as u8;
-                                    self.current_attrs.fg = Color::Rgb(r, g, b);
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                let r = params[i + 1] as u8;
+                                let g = params[i + 2] as u8;
+                                let b = params[i + 3] as u8;
+                                self.current_attrs.fg = Color::Rgb(r, g, b);
+                                i += 3;
                             }
                             _ => {}
                         }
@@ -756,18 +890,15 @@ impl TerminalEmulator {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.current_attrs.bg =
-                                        Color::Indexed(params[i] as u8);
+                                    self.current_attrs.bg = Color::Indexed(params[i] as u8);
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    let r = params[i + 1] as u8;
-                                    let g = params[i + 2] as u8;
-                                    let b = params[i + 3] as u8;
-                                    self.current_attrs.bg = Color::Rgb(r, g, b);
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                let r = params[i + 1] as u8;
+                                let g = params[i + 2] as u8;
+                                let b = params[i + 3] as u8;
+                                self.current_attrs.bg = Color::Rgb(r, g, b);
+                                i += 3;
                             }
                             _ => {}
                         }
@@ -792,7 +923,6 @@ impl TerminalEmulator {
 
     fn linefeed(&mut self) {
         self.pending_wrap = false;
-        self.cursor_col = 0;
         if self.cursor_row == self.scroll_bottom {
             self.scroll_up_one();
         } else if self.cursor_row < self.rows - 1 {
@@ -1030,6 +1160,7 @@ mod tests {
     fn row_text(emu: &TerminalEmulator, row: usize) -> String {
         emu.grid()[row]
             .iter()
+            .filter(|cell| !cell.continuation)
             .map(|cell| cell.ch)
             .collect::<String>()
             .trim_end()
@@ -1041,6 +1172,24 @@ mod tests {
     #[test]
     fn color_default_is_default() {
         assert_eq!(Color::default(), Color::Default);
+    }
+
+    #[test]
+    fn utf8_characters_decode_across_process_calls() {
+        let mut emu = TerminalEmulator::new(20, 2);
+        emu.process(b"caf");
+        emu.process(&[0xc3]);
+        emu.process(&[0xa9]);
+
+        assert_eq!(row_text(&emu, 0), "café");
+    }
+
+    #[test]
+    fn utf8_characters_decode_in_a_single_process_call() {
+        let mut emu = TerminalEmulator::new(20, 2);
+        emu.process("π 日本".as_bytes());
+
+        assert_eq!(row_text(&emu, 0), "π 日本");
     }
 
     #[test]
@@ -1073,9 +1222,55 @@ mod tests {
                 bold: true,
                 ..CellAttributes::default()
             },
+            continuation: false,
+            combining: String::new(),
         };
         let cloned = cell.clone();
         assert_eq!(cell, cloned);
+    }
+
+    #[test]
+    fn wide_char_occupies_two_cells_and_advances_by_two() {
+        let mut emu = TerminalEmulator::new(8, 2);
+        emu.process("a界b".as_bytes());
+
+        assert_eq!(emu.grid()[0][0].ch, 'a');
+        assert_eq!(emu.grid()[0][1].ch, '界');
+        assert!(emu.grid()[0][2].continuation);
+        assert_eq!(emu.grid()[0][3].ch, 'b');
+        assert_eq!(emu.cursor_position(), (0, 4));
+    }
+
+    #[test]
+    fn combining_mark_stays_with_base_without_advancing() {
+        let mut emu = TerminalEmulator::new(8, 2);
+        emu.process("e\u{301}x".as_bytes());
+
+        assert_eq!(emu.grid()[0][0].ch, 'e');
+        assert_eq!(emu.grid()[0][0].combining, "\u{301}");
+        assert_eq!(emu.grid()[0][1].ch, 'x');
+        assert_eq!(emu.cursor_position(), (0, 2));
+    }
+
+    #[test]
+    fn combining_mark_after_last_cell_stays_on_pending_wrap_cell() {
+        let mut emu = TerminalEmulator::new(3, 2);
+        emu.process("abc\u{301}".as_bytes());
+
+        assert_eq!(emu.grid()[0][2].ch, 'c');
+        assert_eq!(emu.grid()[0][2].combining, "\u{301}");
+        assert_eq!(emu.cursor_position(), (0, 2));
+    }
+
+    #[test]
+    fn writing_over_wide_continuation_clears_the_base_cell() {
+        let mut emu = TerminalEmulator::new(6, 1);
+        emu.process("界".as_bytes());
+        emu.process(b"\x1b[1;2Hx");
+
+        assert_eq!(emu.grid()[0][0], Cell::default());
+        assert_eq!(emu.grid()[0][1].ch, 'x');
+        assert!(!emu.grid()[0][1].continuation);
     }
 
     // ---- Task 2: TerminalEmulator construction and accessors ----
@@ -1122,8 +1317,8 @@ mod tests {
         let mut emu = TerminalEmulator::new(10, 5);
         // Write text on first line
         emu.process(b"line1");
-        emu.process(b"\nline2");
-        emu.process(b"\nline3");
+        emu.process(b"\r\nline2");
+        emu.process(b"\r\nline3");
         emu.resize(10, 2);
         assert_eq!(emu.rows(), 2);
         assert_eq!(emu.grid().len(), 2);
@@ -1144,7 +1339,7 @@ mod tests {
     #[test]
     fn newline_moves_cursor_down() {
         let mut emu = TerminalEmulator::new(80, 24);
-        emu.process(b"line1\nline2");
+        emu.process(b"line1\r\nline2");
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
         assert_eq!(emu.cursor_position(), (1, 5));
@@ -1164,6 +1359,19 @@ mod tests {
         emu.process(b"line1\r\nline2");
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
+    }
+
+    #[test]
+    fn bare_linefeed_preserves_cursor_column() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        emu.process(b"abc\nx");
+
+        assert_eq!(emu.grid()[0][0].ch, 'a');
+        assert_eq!(emu.grid()[0][1].ch, 'b');
+        assert_eq!(emu.grid()[0][2].ch, 'c');
+        assert_eq!(emu.grid()[1][0].ch, ' ');
+        assert_eq!(emu.grid()[1][3].ch, 'x');
+        assert_eq!(emu.cursor_position(), (1, 4));
     }
 
     #[test]
@@ -1373,8 +1581,8 @@ mod tests {
     fn erase_in_display_below() {
         let mut emu = TerminalEmulator::new(10, 5);
         emu.process(b"aaaaaaaaaa");
-        emu.process(b"\nbbbbbbbbbb");
-        emu.process(b"\ncccccccccc");
+        emu.process(b"\r\nbbbbbbbbbb");
+        emu.process(b"\r\ncccccccccc");
         emu.process(b"\x1b[2;3H"); // Row 2, Col 3
         emu.process(b"\x1b[0J"); // Erase below
         assert_eq!(row_text(&emu, 0), "aaaaaaaaaa");
@@ -1420,7 +1628,7 @@ mod tests {
     fn erase_scrollback() {
         let mut emu = TerminalEmulator::new(5, 3);
         // Fill enough lines to generate scrollback
-        emu.process(b"line1\nline2\nline3\nline4\nline5");
+        emu.process(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
         assert!(!emu.scrollback().is_empty());
         emu.process(b"\x1b[3J");
         assert!(emu.scrollback().is_empty());
@@ -1431,12 +1639,12 @@ mod tests {
     #[test]
     fn scroll_region_limits_scrolling() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         // Set scroll region to rows 2-4 (1-indexed)
         emu.process(b"\x1b[2;4r");
         // Move cursor to bottom of scroll region and add a line
         emu.process(b"\x1b[4;1H"); // Row 4 (1-indexed), the bottom of region
-        emu.process(b"\nnew");
+        emu.process(b"\r\nnew");
         // Row 0 (outside region) should be unchanged
         assert_eq!(row_text(&emu, 0), "line0");
         // Row 4 (outside region, 0-indexed) should be unchanged
@@ -1456,7 +1664,7 @@ mod tests {
     #[test]
     fn insert_lines() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;1H"); // Row 2 (1-indexed)
         emu.process(b"\x1b[1L"); // Insert 1 line
         assert_eq!(row_text(&emu, 0), "line0");
@@ -1467,7 +1675,7 @@ mod tests {
     #[test]
     fn delete_lines() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;1H"); // Row 2 (1-indexed)
         emu.process(b"\x1b[1M"); // Delete 1 line
         assert_eq!(row_text(&emu, 0), "line0");
@@ -1523,6 +1731,26 @@ mod tests {
         emu.process(b"\x1b[?1049l");
         assert!(!emu.is_alt_screen());
         assert_eq!(row_text(&emu, 0), "primary"); // Primary content restored
+    }
+
+    #[test]
+    fn resizing_alt_screen_resizes_saved_primary_before_restore() {
+        let mut emu = TerminalEmulator::new(10, 5);
+        emu.process(b"primary");
+        emu.process(b"\x1b[?1049h");
+        emu.resize(20, 10);
+        emu.process(b"\x1b[?1049l");
+
+        assert_eq!(emu.rows(), 10);
+        assert_eq!(emu.cols(), 20);
+        assert_eq!(emu.grid().len(), 10);
+        assert!(emu.grid().iter().all(|row| row.len() == 20));
+        assert_eq!(row_text(&emu, 0), "primary");
+
+        // The restored grid must use the new dimensions for subsequent
+        // cursor movement and writes as well.
+        emu.process(b"\x1b[10;20Hx");
+        assert_eq!(emu.grid()[9][19].ch, 'x');
     }
 
     #[test]
@@ -1589,7 +1817,7 @@ mod tests {
     #[test]
     fn scroll_up_command() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[1S"); // Scroll up 1
         assert_eq!(row_text(&emu, 0), "line1");
         assert_eq!(row_text(&emu, 1), "line2");
@@ -1601,7 +1829,7 @@ mod tests {
     #[test]
     fn scroll_down_command() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[1T"); // Scroll down 1
         assert_eq!(row_text(&emu, 0), "");
         assert_eq!(row_text(&emu, 1), "line0");
@@ -1614,7 +1842,7 @@ mod tests {
     fn scrollback_accumulates_on_scroll() {
         let mut emu = TerminalEmulator::new(10, 3);
         for i in 0..10 {
-            emu.process(format!("line{i}\n").as_bytes());
+            emu.process(format!("line{i}\r\n").as_bytes());
         }
         assert!(!emu.scrollback().is_empty());
     }
@@ -1624,7 +1852,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(10, 2);
         emu.scrollback_limit = 5;
         for i in 0..20 {
-            emu.process(format!("l{i}\n").as_bytes());
+            emu.process(format!("l{i}\r\n").as_bytes());
         }
         assert!(emu.scrollback().len() <= 5);
     }
@@ -1787,7 +2015,7 @@ mod tests {
     #[test]
     fn reverse_index_at_top_scrolls_down() {
         let mut emu = TerminalEmulator::new(10, 3);
-        emu.process(b"line0\nline1\nline2");
+        emu.process(b"line0\r\nline1\r\nline2");
         emu.process(b"\x1b[H"); // Home
         emu.process(b"\x1bM"); // Reverse index
         assert_eq!(row_text(&emu, 0), "");
@@ -1812,10 +2040,10 @@ mod tests {
     #[test]
     fn scrollback_not_added_for_scroll_region() {
         let mut emu = TerminalEmulator::new(10, 5);
-        emu.process(b"line0\nline1\nline2\nline3\nline4");
+        emu.process(b"line0\r\nline1\r\nline2\r\nline3\r\nline4");
         emu.process(b"\x1b[2;4r"); // Scroll region rows 2-4
         let sb_before = emu.scrollback().len();
-        emu.process(b"\x1b[4;1H\n"); // Scroll within region
+        emu.process(b"\x1b[4;1H\r\n"); // Scroll within region
         // Scrollback should not grow for region-internal scrolls
         assert_eq!(emu.scrollback().len(), sb_before);
     }

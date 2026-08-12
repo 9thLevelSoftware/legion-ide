@@ -2305,9 +2305,7 @@ impl DesktopCommandBridge {
             DesktopAction::SetFindQuery { query } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindQuery { query })
             }
-            DesktopAction::FindNext => {
-                DesktopBridgeOutput::Intent(CommandDispatchIntent::FindNext)
-            }
+            DesktopAction::FindNext => DesktopBridgeOutput::Intent(CommandDispatchIntent::FindNext),
             DesktopAction::FindPrevious => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::FindPrevious)
             }

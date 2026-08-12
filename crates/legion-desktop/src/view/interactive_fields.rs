@@ -5,6 +5,8 @@
 //! `code_canvas_painter.rs`; this module is the approved home for terminal
 //! input, BYOK key entry, and similar adapter-local forms.
 
+use std::borrow::Cow;
+
 use crate::bridge::{DesktopAction, SensitiveString};
 use crate::theme;
 
@@ -27,7 +29,11 @@ pub(crate) fn render_preferred_provider_picker(
         ] {
             let selected = active_preference.eq_ignore_ascii_case(id);
             if ui
-                .selectable_label(selected, label)
+                .add(
+                    egui::Button::new(theme::label(label))
+                        .selected(selected)
+                        .min_size(egui::vec2(24.0, 24.0)),
+                )
                 .on_hover_text(format!("Set preferred AI provider to {id}"))
                 .clicked()
             {
@@ -62,7 +68,7 @@ pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<De
         });
     }
     ui.horizontal(|ui| {
-        if ui.small_button("Save Anthropic key").clicked() {
+        if super::soft_button(ui, "Save Anthropic key").clicked() {
             let key = draft.trim().to_string();
             if !key.is_empty() {
                 actions.push(DesktopAction::SetProviderApiKey {
@@ -74,7 +80,7 @@ pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<De
                 });
             }
         }
-        if ui.small_button("Clear Anthropic key").clicked() {
+        if super::soft_button(ui, "Clear Anthropic key").clicked() {
             actions.push(DesktopAction::DeleteProviderApiKey {
                 provider_id: "anthropic".to_string(),
             });
@@ -187,7 +193,11 @@ pub(crate) fn translate_key_to_escape(
 ///
 /// Intercepts special keys (arrows, function keys, Ctrl combinations) and
 /// translates them to terminal escape sequences. Regular text is sent as-is.
-pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
+pub(crate) fn render_terminal_input_line(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<DesktopAction>,
+    application_cursor_keys: bool,
+) {
     let draft_id = egui::Id::new("legion-terminal-input-draft");
     let mut draft = ui
         .ctx()
@@ -196,10 +206,10 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
         ui.label(theme::code_muted("$"));
         let response = ui.add(
             egui::TextEdit::singleline(&mut draft)
+                .id(terminal_input_widget_id())
                 .desired_width((ui.available_width() - 80.0).max(40.0))
                 .hint_text("type and press Enter to send to the PTY"),
         );
-
         // Intercept special keys when the text field has focus.
         if response.has_focus() {
             ui.input(|input| {
@@ -210,36 +220,32 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
                         modifiers,
                         ..
                     } = event
+                        && let Some(escape_bytes) =
+                            translate_key_to_escape(key, modifiers, application_cursor_keys)
                     {
-                        if let Some(escape_bytes) =
-                            translate_key_to_escape(key, modifiers, false)
-                        {
-                            // Enter: send the draft content with \r (not \n)
-                            if *key == egui::Key::Enter {
-                                if !draft.is_empty() {
-                                    let mut payload = draft.clone();
-                                    payload.push('\r');
-                                    actions.push(DesktopAction::TerminalInput { payload });
-                                    draft.clear();
-                                } else {
-                                    // Empty draft: send bare CR
-                                    let payload =
-                                        String::from_utf8_lossy(&escape_bytes).into_owned();
-                                    actions.push(DesktopAction::TerminalInput { payload });
-                                }
+                        // Enter: send the draft content with \r (not \n)
+                        if *key == egui::Key::Enter {
+                            if !draft.is_empty() {
+                                let mut payload = draft.clone();
+                                payload.push('\r');
+                                actions.push(DesktopAction::TerminalInput { payload });
+                                draft.clear();
                             } else {
-                                // Special key: send the escape sequence directly
-                                let payload =
-                                    String::from_utf8_lossy(&escape_bytes).into_owned();
+                                // Empty draft: send bare CR
+                                let payload = String::from_utf8_lossy(&escape_bytes).into_owned();
                                 actions.push(DesktopAction::TerminalInput { payload });
                             }
+                        } else {
+                            // Special key: send the escape sequence directly
+                            let payload = String::from_utf8_lossy(&escape_bytes).into_owned();
+                            actions.push(DesktopAction::TerminalInput { payload });
                         }
                     }
                 }
             });
         }
 
-        if ui.small_button("Send").clicked() && !draft.is_empty() {
+        if super::soft_button(ui, "Send").clicked() && !draft.is_empty() {
             let mut payload = draft.clone();
             payload.push('\r');
             actions.push(DesktopAction::TerminalInput { payload });
@@ -251,4 +257,132 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
             data.insert_temp(draft_id, draft);
         });
     });
+}
+
+pub(crate) fn terminal_input_widget_id() -> egui::Id {
+    egui::Id::new("legion-terminal-input")
+}
+
+#[cfg(test)]
+mod terminal_key_tests {
+    use super::translate_key_to_escape;
+
+    #[test]
+    fn application_cursor_mode_uses_application_arrow_sequences() {
+        assert_eq!(
+            translate_key_to_escape(&egui::Key::ArrowUp, &egui::Modifiers::NONE, true),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            translate_key_to_escape(&egui::Key::ArrowRight, &egui::Modifiers::NONE, false),
+            Some(b"\x1b[C".to_vec())
+        );
+    }
+}
+
+/// Build a single-line text editor for search and replace overlays.
+///
+/// Search inputs are interactive fields outside the code-canvas renderer, so
+/// they intentionally use egui's standard text-edit widget. Keeping the
+/// construction here prevents the code-canvas module from depending on it.
+pub(crate) fn find_bar_text_edit<'a>(
+    text: &'a mut String,
+    hint: &'static str,
+    id: egui::Id,
+) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .desired_width(180.0)
+        .hint_text(hint)
+        .id(id)
+}
+
+/// Render the adapter-local, unsent Delegate task draft.
+///
+/// The returned value contains the trimmed task only when the user activates
+/// the CTA with a non-empty draft. The caller remains responsible for
+/// constructing the projected scope and dispatching the product action.
+pub(crate) fn render_delegate_task_draft(
+    ui: &mut egui::Ui,
+    canonical_scope_available: bool,
+) -> Option<String> {
+    let draft_id = egui::Id::new("legion-delegate-task-draft-value");
+    let mut draft = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
+    draft = bounded_delegate_task_draft(&draft).into_owned();
+    let label = ui
+        .push_id("legion-delegate-task-label", |ui| {
+            ui.label(theme::label("Task description"))
+        })
+        .inner;
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut draft)
+            .id_source("legion-delegate-task-draft")
+            .char_limit(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
+            .desired_rows(3)
+            .desired_width(ui.available_width())
+            .hint_text("Describe a bounded task for Delegate"),
+    );
+    response.labelled_by(label.id);
+    draft = bounded_delegate_task_draft(&draft).into_owned();
+    let ready = canonical_scope_available && !draft.trim().is_empty();
+    let submitted = ui
+        .push_id("legion-delegate-task-submit", |ui| {
+            super::primary_button_enabled(ui, "Delegate task", theme::tokens().accent.amber, ready)
+                .on_hover_text("Start a proposal-mediated delegated task")
+                .clicked()
+        })
+        .inner;
+    let task = (submitted && ready).then(|| draft.trim().to_string());
+    if task.is_some() {
+        draft.clear();
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
+    task
+}
+
+/// Return the longest valid UTF-8 prefix inside both Delegate draft budgets.
+///
+/// This boundary is applied before retaining an adapter-local draft and again
+/// before the caller constructs a dispatch action.
+pub(crate) fn bounded_delegate_task_draft(value: &str) -> Cow<'_, str> {
+    let char_end = value
+        .char_indices()
+        .nth(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
+        .map_or(value.len(), |(index, _)| index);
+    let mut end = char_end.min(super::DELEGATE_TASK_DRAFT_MAX_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == value.len() {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(value[..end].to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_delegate_task_draft;
+    use crate::view::{DELEGATE_TASK_DRAFT_MAX_BYTES, DELEGATE_TASK_DRAFT_MAX_CHARS};
+
+    #[test]
+    fn delegate_draft_bound_preserves_a_valid_utf8_prefix() {
+        let oversized = "🦀".repeat(DELEGATE_TASK_DRAFT_MAX_CHARS + 10);
+
+        let bounded = bounded_delegate_task_draft(&oversized);
+
+        assert_eq!(bounded.chars().count(), DELEGATE_TASK_DRAFT_MAX_CHARS);
+        assert_eq!(bounded.len(), DELEGATE_TASK_DRAFT_MAX_BYTES);
+        assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
+    #[test]
+    fn delegate_draft_bound_limits_ascii_by_character_budget() {
+        let oversized = "x".repeat(DELEGATE_TASK_DRAFT_MAX_CHARS + 10);
+
+        let bounded = bounded_delegate_task_draft(&oversized);
+
+        assert_eq!(bounded.len(), DELEGATE_TASK_DRAFT_MAX_CHARS);
+    }
 }

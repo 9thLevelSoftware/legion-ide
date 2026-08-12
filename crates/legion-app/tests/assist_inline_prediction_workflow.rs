@@ -69,7 +69,7 @@ fn manual_mode_rejects_assist_inline_prediction_request() {
     assert!(matches!(
         error,
         AppCompositionError::AiRuntime(message)
-            if message.contains("requires Assist, Delegate, or Automate")
+            if message.contains("requires Assist, Delegate, or Legion Workflows")
     ));
 
     let _ = std::fs::remove_dir_all(root);

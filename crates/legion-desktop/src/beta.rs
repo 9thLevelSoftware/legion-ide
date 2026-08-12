@@ -905,7 +905,7 @@ fn unsupported_surfaces() -> Vec<String> {
         "Hosted provider activation: unsupported".to_string(),
         "Signed installer: unsupported".to_string(),
         "Cross-platform parity: unsupported".to_string(),
-        "Autonomous apply: unsupported".to_string(),
+        "Legion Workflows apply: unsupported".to_string(),
     ]
 }
 

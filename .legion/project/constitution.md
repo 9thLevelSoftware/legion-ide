@@ -27,3 +27,69 @@ Migrations must be loss-aware, reversible where practical, and backed by dry-run
 ## Human Approval
 
 Human approval is policy-controlled durable authorization, not an ad hoc chat acknowledgement. Destructive, public, security-sensitive, or hard-to-reverse actions require explicit approval before dispatch.
+
+## Project Constraints
+
+Recorded during intake. These outrank generated plans.
+
+- Rust-only codebase, edition 2024, MSRV 1.92
+- egui/eframe 0.34 for desktop rendering
+- No hosted/cloud egress without explicit user consent
+- All AI provider interactions are metadata-only by default
+- Every file mutation goes through the proposal pipeline
+- Sandbox enforcement gaps must be honestly reported per-platform
+- Terminal output must be redacted before projection
+- Plugin WASM modules execute in wasmtime sandbox with capability limits
+- Dependency policy enforced via xtask check-deps
+- 21 standing gates must remain merge-blocking
+
+## Out Of Scope
+
+- VS Code extension host sidecar / runtime extension execution
+- Remote development (SSH, devcontainers, cloud workspaces)
+- Real-time collaboration / shared editing
+- Admin policy management console
+- Marketplace / extension store
+- Proprietary next-edit prediction models
+- Multi-language LSP parity beyond Rust-first
+
+## Project Verification
+
+`cargo run -p xtask -- check-deps` must pass before a change is shippable.
+
+## Implementer Notes
+
+Brownfield project with 543 commits and 13 completed phases. Hexagonal port architecture: legion-protocol owns types, legion-app owns authority, legion-ui is projection-only, legion-desktop is the renderer edge. 45 ADRs accepted. 21 standing gates enforced via xtask. Dual-mode architecture throughout — fixture and production paths exist for most features. Design exploration at .legion/project/workflow/explore/ contains the 7-wave parallel production completion plan.
+
+## Project Constraints
+
+Recorded during intake. These outrank generated plans.
+
+- Rust-only codebase, edition 2024, MSRV 1.92
+- egui/eframe 0.34 for desktop rendering
+- No hosted/cloud egress without explicit user consent
+- All AI provider interactions are metadata-only by default
+- Every file mutation goes through the proposal pipeline
+- Sandbox enforcement gaps must be honestly reported per-platform
+- Terminal output must be redacted before projection
+- Plugin WASM modules execute in wasmtime sandbox with capability limits
+- Dependency policy enforced via xtask check-deps
+- 21 standing gates must remain merge-blocking
+
+## Out Of Scope
+
+- VS Code extension host sidecar / runtime extension execution
+- Remote development (SSH, devcontainers, cloud workspaces)
+- Real-time collaboration / shared editing
+- Admin policy management console
+- Marketplace / extension store
+- Proprietary next-edit prediction models
+- Multi-language LSP parity beyond Rust-first
+
+## Project Verification
+
+`cargo run -p xtask -- check-deps` must pass before a change is shippable.
+
+## Implementer Notes
+
+Brownfield project with 543 commits and 13 completed phases. Hexagonal port architecture: legion-protocol owns types, legion-app owns authority, legion-ui is projection-only, legion-desktop is the renderer edge. 45 ADRs accepted. 21 standing gates enforced via xtask. Dual-mode architecture throughout — fixture and production paths exist for most features. Design exploration at .legion/project/workflow/explore/ contains the 7-wave parallel production completion plan.

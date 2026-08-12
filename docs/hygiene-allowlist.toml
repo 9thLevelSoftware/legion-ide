@@ -3,6 +3,8 @@
 # New active documentation should use Legion naming and valid relative paths.
 
 allowlisted_paths = [
+  # Generated Legion planning/evidence artifacts may quote historical rename markers.
+  ".legion/",
   ".planning/",
   "plans/archive/",
   "audit-reports/",

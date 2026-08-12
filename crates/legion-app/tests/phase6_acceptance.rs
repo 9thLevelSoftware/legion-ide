@@ -351,18 +351,16 @@ fn acceptance_full_journey() {
         AppCommandOutcome::TerminalPanelUpdated(p) => {
             if p.status.kind == TerminalPanelStatusKind::Running {
                 if let Some(session_id) = p.active_session_id {
-                    let _ = app.dispatch_ui_intent(
-                        CommandDispatchIntent::TerminalOutputPoll { session_id },
-                    );
+                    let _ = app.dispatch_ui_intent(CommandDispatchIntent::TerminalOutputPoll {
+                        session_id,
+                    });
                 }
                 eprintln!("[phase6-full-journey] step 3: terminal available");
             } else {
-                let reason = p.last_denial.unwrap_or_else(|| {
-                    format!("terminal status={:?}", p.status.kind)
-                });
-                eprintln!(
-                    "[phase6-full-journey] step 3: terminal not available -- SKIP: {reason}"
-                );
+                let reason = p
+                    .last_denial
+                    .unwrap_or_else(|| format!("terminal status={:?}", p.status.kind));
+                eprintln!("[phase6-full-journey] step 3: terminal not available -- SKIP: {reason}");
             }
         }
         other => {

@@ -71,6 +71,7 @@ struct Args {
     fixture_dir: PathBuf,
     out_dir: PathBuf,
     evidence_dir: Option<PathBuf>,
+    workspace_root: PathBuf,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -78,6 +79,7 @@ fn parse_args() -> Result<Args, String> {
     let mut fixture_dir: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut evidence_dir: Option<PathBuf> = None;
+    let mut workspace_root: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -97,6 +99,12 @@ fn parse_args() -> Result<Args, String> {
                     args.get(i).ok_or("--record-evidence needs value")?,
                 ));
             }
+            "--workspace-root" => {
+                i += 1;
+                workspace_root = Some(PathBuf::from(
+                    args.get(i).ok_or("--workspace-root needs value")?,
+                ));
+            }
             _ => {}
         }
         i += 1;
@@ -105,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
         fixture_dir: fixture_dir.ok_or("--fixture-dir required")?,
         out_dir: out_dir.unwrap_or_else(|| PathBuf::from("target/golden-path")),
         evidence_dir,
+        workspace_root: workspace_root.ok_or("--workspace-root required")?,
     })
 }
 
@@ -333,9 +342,7 @@ fn run_s2(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
 fn run_s3(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
     let main_rs = temp_dir.join("src").join("main.rs");
 
-    let buffer_id = app
-        .active_buffer_id()
-        .ok_or("s3: no active buffer")?;
+    let buffer_id = app.active_buffer_id().ok_or("s3: no active buffer")?;
 
     let text = app
         .editor()
@@ -363,12 +370,13 @@ fn run_s3(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
     let disk_content =
         fs::read_to_string(&main_rs).map_err(|e| format!("s3: read main.rs from disk: {e}"))?;
     if !disk_content.contains("smoke-edited-by-gp5") {
-        return Err(
-            "s3: saved file does not contain the expected edit marker on disk".to_string(),
-        );
+        return Err("s3: saved file does not contain the expected edit marker on disk".to_string());
     }
 
-    eprintln!("[s3] edit+save verified on disk ({} bytes)", disk_content.len());
+    eprintln!(
+        "[s3] edit+save verified on disk ({} bytes)",
+        disk_content.len()
+    );
     Ok(())
 }
 
@@ -378,8 +386,7 @@ fn run_s3(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
 
 fn run_s4(temp_dir: &Path) -> Result<(), String> {
     let main_rs = temp_dir.join("src").join("main.rs");
-    let text =
-        fs::read_to_string(&main_rs).map_err(|e| format!("s4: read main.rs: {e}"))?;
+    let text = fs::read_to_string(&main_rs).map_err(|e| format!("s4: read main.rs: {e}"))?;
 
     let parser = TreeSitterParser::new();
     let lang_id = LanguageId("rust".to_string());
@@ -388,12 +395,13 @@ fn run_s4(temp_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("s4: highlight_captures_from_text failed: {e:?}"))?;
 
     if captures.is_empty() {
-        return Err(
-            "s4: expected non-empty highlight captures for Rust source; got 0".to_string(),
-        );
+        return Err("s4: expected non-empty highlight captures for Rust source; got 0".to_string());
     }
 
-    eprintln!("[s4] syntax check passed: {} highlight captures", captures.len());
+    eprintln!(
+        "[s4] syntax check passed: {} highlight captures",
+        captures.len()
+    );
     Ok(())
 }
 
@@ -630,7 +638,7 @@ fn main() {
         Err(e) => {
             eprintln!("golden-path-5: argument error: {e}");
             eprintln!(
-                "Usage: golden_path_5 --fixture-dir <path> [--out-dir <path>] [--record-evidence <path>]"
+                "Usage: golden_path_5 --fixture-dir <path> --workspace-root <path> [--out-dir <path>] [--record-evidence <path>]"
             );
             process::exit(2);
         }
@@ -639,8 +647,7 @@ fn main() {
     let started_utc = utc_now();
     let mut steps: Vec<StepRecord> = Vec::new();
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let legion_sha = resolve_legion_git_sha(&cwd);
+    let legion_sha = resolve_legion_git_sha(&args.workspace_root);
     eprintln!("[gp5] Legion git SHA: {legion_sha}");
     eprintln!("[gp5] fixture dir: {}", args.fixture_dir.display());
 
@@ -747,7 +754,10 @@ fn main() {
             record_step!(
                 "s4",
                 StepStatus::Passed,
-                format!("TreeSitterParser highlight captures non-empty ({}ms)", s4_ms),
+                format!(
+                    "TreeSitterParser highlight captures non-empty ({}ms)",
+                    s4_ms
+                ),
                 s4_ms,
                 s4_start,
                 s4_end
@@ -769,7 +779,10 @@ fn main() {
             record_step!(
                 "s5",
                 StepStatus::Passed,
-                format!("echo marker received via product terminal gate ({}ms)", s5_ms),
+                format!(
+                    "echo marker received via product terminal gate ({}ms)",
+                    s5_ms
+                ),
                 s5_ms,
                 s5_start,
                 s5_end
@@ -815,44 +828,22 @@ fn main() {
     }
 
     // ── s7 ──────────────────────────────────────────────────────────────────
+    // Build the complete step vector before serializing it.  This keeps the
+    // evidence report atomic and avoids a preliminary file that is immediately
+    // rewritten just to append its own record.
     let s7_start = utc_now();
     let s7_wall = Instant::now();
-    let finished_utc = utc_now();
-    let first_result = write_evidence(
-        &args.out_dir,
-        None,
-        &legion_sha,
-        &started_utc,
-        &finished_utc,
-        &steps,
-    );
-    let s7_ms = s7_wall.elapsed().as_millis();
     let s7_end = utc_now();
-
-    match &first_result {
-        Ok(path) => eprintln!(
-            "[s7] evidence written (preliminary, s1-s6): {}",
-            path.display()
-        ),
-        Err(e) => eprintln!("[s7] FAILED to write evidence (pass 1): {e}"),
-    }
+    let s7_ms = s7_wall.elapsed().as_millis();
     steps.push(StepRecord {
         id: "s7",
         started_utc: s7_start,
         finished_utc: s7_end.clone(),
         duration_ms: s7_ms,
-        status: if first_result.is_ok() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
-        },
-        detail: match &first_result {
-            Ok(_) => format!("evidence TOML written ({}ms)", s7_ms),
-            Err(e) => e.clone(),
-        },
+        status: StepStatus::Passed,
+        detail: format!("evidence TOML written ({}ms)", s7_ms),
     });
 
-    // Pass 2: rewrite with all steps including s7, and copy to evidence_dir.
     match write_evidence(
         &args.out_dir,
         args.evidence_dir.as_deref(),
@@ -861,8 +852,14 @@ fn main() {
         &s7_end,
         &steps,
     ) {
-        Ok(path) => eprintln!("[s7] evidence rewritten (final, s1-s7): {}", path.display()),
-        Err(e) => eprintln!("[s7] WARNING: pass-2 rewrite failed: {e}"),
+        Ok(path) => eprintln!("[s7] evidence written (s1-s7): {}", path.display()),
+        Err(e) => {
+            eprintln!("[s7] FAILED to write evidence: {e}");
+            if let Some(step) = steps.iter_mut().find(|step| step.id == "s7") {
+                step.status = StepStatus::Failed;
+                step.detail = e;
+            }
+        }
     }
 
     // Print per-step summary.
@@ -873,7 +870,7 @@ fn main() {
             step.id,
             step.status.as_str(),
             step.duration_ms,
-            &step.detail[..step.detail.len().min(80)]
+            step.detail.chars().take(80).collect::<String>()
         );
     }
 
