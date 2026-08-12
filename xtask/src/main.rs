@@ -769,6 +769,31 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// Run the scripted GP-5 golden-path acceptance smoke against a throwaway fixture workspace.
+    ///
+    /// Drives the core IDE user journey through AppComposition: open workspace,
+    /// open file, edit+save, syntax-check (TreeSitterParser), terminal echo,
+    /// git commit.  Writes `target/golden-path/gp5_report.toml`.
+    ///
+    /// Compiled with `--no-default-features` (no AI).
+    ///
+    /// Failures are non-blocking for PRs (runs in the separate legion-smoke
+    /// workflow); pass `--record-evidence <dir>` to also copy the report into
+    /// the plans/evidence tree.
+    #[command(name = "golden-path-5")]
+    GoldenPath5 {
+        /// Path to the fixture directory relative to workspace root.
+        #[arg(long, default_value = "fixtures/gp1-rust")]
+        fixture_dir: String,
+        /// Output directory for the evidence TOML.
+        #[arg(long, default_value = "target/golden-path")]
+        out_dir: String,
+        /// If provided, copy the evidence TOML to this directory after the
+        /// smoke completes.
+        /// Omit for routine runs to avoid churning the evidence tree.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
     /// Run the hostile eval suite and write a hostile eval report.
     ///
     /// Scores the 4 adversarial scenarios (exfiltration, prompt injection,
@@ -893,6 +918,11 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_4_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::GoldenPath5 {
+            fixture_dir,
+            out_dir,
+            record_evidence,
+        } => run_golden_path_5_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
         Commands::HostileEvals { out } => run_hostile_evals_command(&out),
         Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
         Commands::UpdateDrill { out } => run_update_drill_command(&out),
@@ -1924,6 +1954,44 @@ fn run_golden_path_4_command(
             workspace_root
                 .join(out_dir)
                 .join("gp4_report.toml")
+                .display()
+        );
+    }
+    code
+}
+
+fn run_golden_path_5_command(
+    fixture_dir: &str,
+    out_dir: &str,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("golden-path-5 failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::golden_path_5::GoldenPath5Options {
+        fixture_dir: fixture_dir.to_string(),
+        out_dir: out_dir.to_string(),
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    let code = xtask::golden_path_5::run_golden_path_5(&workspace_root, &opts);
+    if code == 0 {
+        println!(
+            "golden-path-5: smoke passed; report written to {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp5_report.toml")
+                .display()
+        );
+    } else {
+        eprintln!(
+            "golden-path-5: smoke exited with code {code}; check {}",
+            workspace_root
+                .join(out_dir)
+                .join("gp5_report.toml")
                 .display()
         );
     }
