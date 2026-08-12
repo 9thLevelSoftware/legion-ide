@@ -282,6 +282,12 @@ fn comma_boundary_before(line: &str, before: usize) -> usize {
     line[..before].rfind(',').map_or(0, |index| index + 1)
 }
 
+// These conjunctions introduce an appositive predicate that belongs to the
+// preceding task claim; they are not independent-claim delimiters.
+const APPOSITIVE_CONTINUATION_PREFIXES: &[&str] = &[
+    "which ", "that ", "who ", "whom ", "whose ", "where ", "when ",
+];
+
 fn comma_boundary_after(line: &str, after: usize) -> usize {
     let mut search_from = after;
     while let Some(offset) = line[search_from..].find(',') {
@@ -301,11 +307,9 @@ fn comma_boundary_after(line: &str, after: usize) -> usize {
 
 fn is_appositive_continuation(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
-    [
-        "which ", "that ", "who ", "whom ", "whose ", "where ", "when ",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
+    APPOSITIVE_CONTINUATION_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// Compare the ledger text against backlog statuses.

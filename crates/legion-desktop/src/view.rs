@@ -15,7 +15,7 @@ pub mod fleet_card;
 /// Inline edit diff overlay view model and per-hunk accept/reject helpers (PKT-INLINE).
 pub mod inline_edit;
 /// Interactive text fields (terminal input, BYOK) outside the code-canvas gate.
-mod interactive_fields;
+pub(crate) mod interactive_fields;
 /// Pre-invocation context manifest panel with per-item exclusion toggles.
 pub mod manifest_panel;
 /// Editable plan editor projection.
@@ -57,10 +57,6 @@ pub use plan_editor::{
 };
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
-
-pub(crate) fn terminal_input_widget_id() -> egui::Id {
-    interactive_fields::terminal_input_widget_id()
-}
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -3111,9 +3107,25 @@ fn render_tab_strip(
                                 && dragging_id != tab.buffer_id
                                 && tab_response.contains_pointer()
                             {
-                                drag.drop_target = Some(tab_index);
+                                // Treat the left and right halves of a tab as
+                                // distinct insertion slots. The slot is
+                                // measured before removing the source tab,
+                                // then adjusted once at release.
+                                let insert_after = tab_response
+                                    .interact_pointer_pos()
+                                    .is_some_and(|pos| pos.x >= tab_response.rect.center().x);
+                                let target_index = if insert_after {
+                                    tab_index.saturating_add(1)
+                                } else {
+                                    tab_index
+                                };
+                                drag.drop_target = Some(target_index);
                                 let rect = tab_response.rect;
-                                let indicator_x = rect.left();
+                                let indicator_x = if insert_after {
+                                    rect.right()
+                                } else {
+                                    rect.left()
+                                };
                                 let painter = ui.painter();
                                 painter.line_segment(
                                     [
@@ -3167,10 +3179,9 @@ fn render_tab_strip(
                         if let Some(dragging_id) = drag.dragging.take()
                             && let Some(target) = drag.drop_target.take()
                         {
-                            // `target` is measured in the list before the
-                            // source is removed.  Removing a tab from the
-                            // left shifts every later insertion point by
-                            // one (A→C in [A,B,C] must insert at 1, not 2).
+                            // `target` is a pre-removal insertion slot.
+                            // Removing a tab from the left shifts every later
+                            // slot by one before insertion.
                             let adjusted_target =
                                 adjusted_tab_drop_target(drag.source_index, target);
                             if adjusted_target != drag.source_index {
@@ -10166,7 +10177,12 @@ mod tests {
 
     #[test]
     fn tab_drop_target_accounts_for_source_removal() {
+        // Before B: no-op for A; after B: [B, A, C].
+        assert_eq!(adjusted_tab_drop_target(0, 1), 0);
         assert_eq!(adjusted_tab_drop_target(0, 2), 1);
+        // Before C: no-op for B; after C: [A, C, B].
+        assert_eq!(adjusted_tab_drop_target(1, 2), 1);
+        assert_eq!(adjusted_tab_drop_target(1, 3), 2);
         assert_eq!(adjusted_tab_drop_target(2, 0), 0);
         assert_eq!(adjusted_tab_drop_target(1, 1), 1);
     }
