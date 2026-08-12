@@ -155,6 +155,14 @@ End-to-end testing and release artifacts.
 - 3 plans executed across 2 waves (06-01 view-model tests, 06-02 GP-5 + release, 06-03 acceptance proof)
 - **Done when:** install from release artifact on clean machine, open project, edit, run, commit
 
+## Ship Status
+
+**Shipped**: 2026-08-12
+**PR**: https://github.com/9thLevelSoftware/legion-ide/pull/125
+**Quality gates**: 7/7 passed (build, tests, review, evidence, escalations, verification, clean tree)
+**Tests**: 2,112 passed, 0 failed across 29 crates
+**Plans executed**: 12 across 6 phases
+
 ## Deliberately Deferred
 
 These have production-grade client code already built. They need server-side infrastructure that's out of scope for the IDE finish:
