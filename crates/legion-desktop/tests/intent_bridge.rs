@@ -353,6 +353,19 @@ fn intent_bridge_routes_daily_editing_actions() {
     );
     assert_eq!(
         bridge.translate(
+            DesktopAction::ReorderTab {
+                buffer_id: BufferId(10),
+                new_index: 0,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ReorderTab {
+            buffer_id: BufferId(10),
+            new_index: 0,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
             DesktopAction::SetCursor {
                 buffer_id: None,
                 cursor,

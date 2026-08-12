@@ -79,6 +79,13 @@ pub enum DesktopAction {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a projected tab to a new position.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save the buffer currently represented by a dirty-close prompt.
     SaveDirtyClose {
         /// Prompt buffer identifier.
@@ -1371,6 +1378,15 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::CloseTab { buffer_id }
                 })
             }
+            DesktopAction::ReorderTab {
+                buffer_id,
+                new_index,
+            } => self.with_known_tab(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::ReorderTab {
+                    buffer_id,
+                    new_index,
+                }
+            }),
             DesktopAction::SaveDirtyClose { buffer_id } => {
                 self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
                     DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })

@@ -10063,6 +10063,13 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a tab to a new position.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save every open buffer through app-owned save workflows.
     SaveAll,
     /// Set the primary cursor for a buffer.
@@ -10858,6 +10865,7 @@ impl CommandExecutionService {
             | AppCommandRequest::SetProductMode { .. }
             | AppCommandRequest::SwitchTab { .. }
             | AppCommandRequest::CloseTab { .. }
+            | AppCommandRequest::ReorderTab { .. }
             | AppCommandRequest::SaveAll
             | AppCommandRequest::SetCursor { .. }
             | AppCommandRequest::SetSelection { .. }
@@ -11084,6 +11092,13 @@ impl CommandDispatcher {
             CommandDispatchIntent::CloseTab { buffer_id } => {
                 Ok(AppCommandRequest::CloseTab { buffer_id })
             }
+            CommandDispatchIntent::ReorderTab {
+                buffer_id,
+                new_index,
+            } => Ok(AppCommandRequest::ReorderTab {
+                buffer_id,
+                new_index,
+            }),
             CommandDispatchIntent::SaveAll => Ok(AppCommandRequest::SaveAll),
             CommandDispatchIntent::SetCursor { buffer_id, cursor } => {
                 Ok(AppCommandRequest::SetCursor { buffer_id, cursor })
@@ -18834,6 +18849,13 @@ impl AppComposition {
             AppCommandRequest::CloseTab { buffer_id } => {
                 Ok(AppCommandOutcome::TabClose(self.close_tab(buffer_id)?))
             }
+            AppCommandRequest::ReorderTab {
+                buffer_id,
+                new_index,
+            } => {
+                self.reorder_tab(buffer_id, new_index);
+                Ok(AppCommandOutcome::TabSwitched(buffer_id))
+            }
             AppCommandRequest::SaveAll => Ok(AppCommandOutcome::SaveAll(self.save_all()?)),
             AppCommandRequest::SetCursor { buffer_id, cursor } => {
                 self.set_buffer_cursor(buffer_id, cursor)?;
@@ -24537,6 +24559,18 @@ impl AppComposition {
     /// Switch the active tab to an already-open buffer.
     pub fn switch_tab(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
         self.active_documents.switch_to_buffer(buffer_id)
+    }
+
+    /// Reorder a tab to a new position in the open tabs list.
+    pub fn reorder_tab(&mut self, buffer_id: BufferId, new_index: usize) {
+        let tabs = &mut self.active_documents.open_tabs;
+        if let Some(current_index) = tabs.iter().position(|id| *id == buffer_id) {
+            let clamped = new_index.min(tabs.len().saturating_sub(1));
+            if current_index != clamped {
+                let id = tabs.remove(current_index);
+                tabs.insert(clamped, id);
+            }
+        }
     }
 
     /// Close a tab when clean; dirty tabs produce a prompt projection and remain open.

@@ -2214,76 +2214,212 @@ fn render_editor_canvas(
     render_close_dirty_prompt_controls(ui, snapshot, actions);
 }
 
+/// Persistent drag state for tab reorder, stored in `egui::Context::data_mut`.
+#[derive(Clone, Default)]
+struct TabDragState {
+    /// Buffer id of the tab currently being dragged.
+    dragging: Option<BufferId>,
+    /// Original index of the dragged tab (at drag start).
+    source_index: usize,
+}
+
 fn render_tab_strip(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
+    let drag_state_id = egui::Id::new("tab_strip_drag_state");
+
     theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
         ui.set_height(34.0);
-        ui.horizontal(|ui| {
-            let tabs = &snapshot.daily_editing_projection.tabs.tabs;
-            if tabs.is_empty() {
+        let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+        if tabs.is_empty() {
+            ui.horizontal(|ui| {
                 ui.label(theme::muted("<no open tabs>"));
-            }
-            for tab in tabs {
-                let mut title = tab.title.clone();
-                if tab.dirty {
-                    title.push_str(" *");
-                }
-                let color = if tab.active {
-                    theme::tokens().text.primary
-                } else {
-                    theme::tokens().text.muted
-                };
-                let response = ui.add(
-                    egui::Button::new(theme::accent(title, color))
-                        .fill(if tab.active {
+            });
+            return;
+        }
+
+        // Wrap tabs in a horizontal scroll area.  Drag-to-scroll is disabled so
+        // that pointer drag is reserved for tab reorder; users scroll with the
+        // mouse wheel.
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .scroll_source(egui::scroll_area::ScrollSource {
+                scroll_bar: true,
+                drag: false,
+                mouse_wheel: true,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Load current drag state.
+                    let mut drag: TabDragState = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp(drag_state_id).unwrap_or_default());
+
+                    for (tab_index, tab) in tabs.iter().enumerate() {
+                        // --- build tab label ---
+                        let color = if tab.active {
+                            theme::tokens().text.primary
+                        } else {
+                            theme::tokens().text.muted
+                        };
+                        let tab_fill = if tab.active {
                             theme::tokens().bg.code
                         } else {
                             theme::tokens().bg.panel
-                        })
-                        .stroke(egui::Stroke::new(
+                        };
+                        let tab_stroke = egui::Stroke::new(
                             1.0_f32,
                             if tab.active {
                                 theme::tokens().border.default
                             } else {
                                 theme::tokens().bg.panel
                             },
-                        ))
-                        .corner_radius(egui::CornerRadius::same(6)),
-                );
-                if response.clicked() {
-                    actions.push(DesktopAction::SwitchTab {
-                        buffer_id: tab.buffer_id,
-                    });
-                }
-                response.context_menu(|ui| {
-                    if ui.button("Close").clicked() {
-                        actions.push(DesktopAction::CloseTab {
-                            buffer_id: tab.buffer_id,
+                        );
+
+                        // Render tab button with click_and_drag sense.
+                        let tab_response = ui.add(
+                            egui::Button::new(
+                                theme::accent(tab.title.clone(), color),
+                            )
+                            .fill(tab_fill)
+                            .stroke(tab_stroke)
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .sense(egui::Sense::click_and_drag()),
+                        );
+
+                        let tab_hovered = tab_response.hovered();
+
+                        // --- close button / dirty indicator ---
+                        // Show close button when tab is hovered or active.
+                        // For dirty tabs: show bullet when not hovered, x when hovered.
+                        let show_close = tab_hovered || tab.active;
+                        let mut close_clicked = false;
+
+                        if show_close || tab.dirty {
+                            let close_glyph = if tab.dirty && !tab_hovered {
+                                "\u{2022}" // bullet
+                            } else {
+                                "\u{00d7}" // multiplication sign as x
+                            };
+                            let close_color = if tab_hovered {
+                                theme::tokens().text.primary
+                            } else {
+                                theme::tokens().text.muted
+                            };
+                            // Place the close/dirty indicator right after the tab label
+                            // as a small clickable label.
+                            let close_response = ui.add(
+                                egui::Button::new(
+                                    theme::accent(close_glyph, close_color),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::same(3))
+                                .min_size(egui::vec2(16.0, 16.0)),
+                            );
+                            if close_response.clicked() {
+                                close_clicked = true;
+                                actions.push(DesktopAction::CloseTab {
+                                    buffer_id: tab.buffer_id,
+                                });
+                            }
+                        }
+
+                        // Add a small gap between tabs.
+                        ui.add_space(2.0);
+
+                        // --- drag-to-reorder ---
+                        if !close_clicked {
+                            if tab_response.drag_started() {
+                                drag.dragging = Some(tab.buffer_id);
+                                drag.source_index = tab_index;
+                            }
+
+                            // While dragging, check if the cursor is over this tab
+                            // to determine the drop target.
+                            if let Some(dragging_id) = drag.dragging {
+                                if dragging_id != tab.buffer_id && tab_response.hovered() {
+                                    // Draw insertion indicator.
+                                    let rect = tab_response.rect;
+                                    let indicator_x = rect.left();
+                                    let painter = ui.painter();
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(indicator_x, rect.top()),
+                                            egui::pos2(indicator_x, rect.bottom()),
+                                        ],
+                                        egui::Stroke::new(
+                                            2.0_f32,
+                                            theme::tokens().accent.blue,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+
+                        // On drag release over a tab, fire ReorderTab.
+                        if tab_response.drag_stopped() {
+                            if let Some(dragging_id) = drag.dragging.take() {
+                                // The drag stopped on this tab; use its index as the
+                                // drop target.
+                                if tab_index != drag.source_index {
+                                    actions.push(DesktopAction::ReorderTab {
+                                        buffer_id: dragging_id,
+                                        new_index: tab_index,
+                                    });
+                                }
+                                drag.dragging = None;
+                            }
+                        }
+
+                        // --- left-click to switch tab ---
+                        if !close_clicked && tab_response.clicked() {
+                            actions.push(DesktopAction::SwitchTab {
+                                buffer_id: tab.buffer_id,
+                            });
+                        }
+
+                        // --- context menu ---
+                        tab_response.context_menu(|ui| {
+                            if ui.button("Close").clicked() {
+                                actions.push(DesktopAction::CloseTab {
+                                    buffer_id: tab.buffer_id,
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Close Others").clicked() {
+                                for other in
+                                    tabs.iter().filter(|other| other.buffer_id != tab.buffer_id)
+                                {
+                                    actions.push(DesktopAction::CloseTab {
+                                        buffer_id: other.buffer_id,
+                                    });
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Close All").clicked() {
+                                for other in tabs {
+                                    actions.push(DesktopAction::CloseTab {
+                                        buffer_id: other.buffer_id,
+                                    });
+                                }
+                                ui.close();
+                            }
                         });
-                        ui.close();
                     }
-                    if ui.button("Close Others").clicked() {
-                        for other in tabs.iter().filter(|other| other.buffer_id != tab.buffer_id) {
-                            actions.push(DesktopAction::CloseTab {
-                                buffer_id: other.buffer_id,
-                            });
-                        }
-                        ui.close();
+
+                    // Handle global drag release (pointer released outside any tab).
+                    if ui.input(|i| i.pointer.any_released()) {
+                        drag.dragging = None;
                     }
-                    if ui.button("Close All").clicked() {
-                        for other in tabs {
-                            actions.push(DesktopAction::CloseTab {
-                                buffer_id: other.buffer_id,
-                            });
-                        }
-                        ui.close();
-                    }
+
+                    // Persist drag state.
+                    ui.ctx().data_mut(|d| d.insert_temp(drag_state_id, drag));
                 });
-            }
-        });
+            });
     });
 }
 

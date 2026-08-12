@@ -2665,6 +2665,13 @@ pub enum CommandDispatchIntent {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a tab to a new position through app authority.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save all open buffers through app-owned save workflows.
     SaveAll,
     /// Set primary cursor through editor authority.
