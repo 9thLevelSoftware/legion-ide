@@ -18649,14 +18649,18 @@ impl AppComposition {
                             CommandDispatcher::editor_range(range),
                             replacement,
                         );
-                        let _ = self.apply_edit_to_buffer_with_correlation(
-                            buffer_id,
-                            edit,
-                            event_context.correlation_id,
-                        );
-                        if let Ok(text) = self.editor.text(buffer_id) {
-                            let text = text.to_string();
-                            self.buffer_search_state.find_matches(&text);
+                        if self
+                            .apply_edit_to_buffer_with_correlation(
+                                buffer_id,
+                                edit,
+                                event_context.correlation_id,
+                            )
+                            .is_ok()
+                        {
+                            if let Ok(text) = self.editor.text(buffer_id) {
+                                let text = text.to_string();
+                                self.buffer_search_state.find_matches(&text);
+                            }
                         }
                     }
                 }
@@ -18665,32 +18669,39 @@ impl AppComposition {
             CommandDispatchIntent::ReplaceAll => {
                 if let Some(buffer_id) = self.active_documents.active_buffer_id {
                     let replacement = self.buffer_search_state.replace_text.clone();
-                    // Iterate in reverse to preserve earlier match offsets.
-                    let matches_reversed: Vec<_> =
-                        self.buffer_search_state.matches.iter().copied().rev().collect();
-                    for (sl, sc, el, ec) in matches_reversed {
-                        let range = ProtocolTextRange {
-                            start: TextCoordinate {
-                                line: sl,
-                                character: sc,
-                                byte_offset: None,
-                                utf16_offset: None,
-                            },
-                            end: TextCoordinate {
-                                line: el,
-                                character: ec,
-                                byte_offset: None,
-                                utf16_offset: None,
-                            },
-                        };
-                        let edit = TextEdit::new(
-                            CommandDispatcher::editor_range(range),
-                            replacement.clone(),
-                        );
-                        let _ = self.apply_edit_to_buffer_with_correlation(
+                    let edits: Vec<TextEdit> = self
+                        .buffer_search_state
+                        .matches
+                        .iter()
+                        .copied()
+                        .map(|(sl, sc, el, ec)| {
+                            let range = ProtocolTextRange {
+                                start: TextCoordinate {
+                                    line: sl,
+                                    character: sc,
+                                    byte_offset: None,
+                                    utf16_offset: None,
+                                },
+                                end: TextCoordinate {
+                                    line: el,
+                                    character: ec,
+                                    byte_offset: None,
+                                    utf16_offset: None,
+                                },
+                            };
+                            TextEdit::new(
+                                CommandDispatcher::editor_range(range),
+                                replacement.clone(),
+                            )
+                        })
+                        .collect();
+                    if !edits.is_empty() {
+                        let _ = self.editor.apply_edits(
                             buffer_id,
-                            edit,
-                            event_context.correlation_id,
+                            edits,
+                            TransactionSource::User,
+                            None,
+                            Some(event_context.correlation_id),
                         );
                     }
                     if let Ok(text) = self.editor.text(buffer_id) {
@@ -18810,6 +18821,14 @@ impl AppComposition {
             }
             AppCommandRequest::SwitchTab { buffer_id } => {
                 self.switch_tab(buffer_id)?;
+                if self.buffer_search_state.find_bar_visible
+                    && !self.buffer_search_state.query.is_empty()
+                {
+                    if let Ok(text) = self.editor.text(buffer_id) {
+                        let text = text.to_string();
+                        self.buffer_search_state.find_matches(&text);
+                    }
+                }
                 Ok(AppCommandOutcome::TabSwitched(buffer_id))
             }
             AppCommandRequest::CloseTab { buffer_id } => {

@@ -20,7 +20,7 @@ pub use ui::{
     DebugStatusKindProjection, DebugStatusProjection, DebugStepKindProjection,
     DebugVariableProjection, DebugWatchProjection, DockLayout, DockMode, DockPanel,
     DockPanelDescriptor, DockPanelStateError, DockSide, DockSideLayout, EditorSettingsProjection,
-    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
+    ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection, FindBarProjection,
     GitBlameLineProjection, GitCommitProjection, GitConflictChoiceProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
     GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
