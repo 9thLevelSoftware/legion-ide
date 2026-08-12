@@ -1,3 +1,0 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
-     Running `target\debug\xtask.exe check-deps`
-dependency policy checks passed
