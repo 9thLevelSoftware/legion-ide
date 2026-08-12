@@ -11,6 +11,8 @@
 //! redaction metadata. Redaction happens before bytes reach this parser, and
 //! retaining the local state machine keeps that projection contract explicit.
 
+use unicode_width::UnicodeWidthChar;
+
 /// Terminal color model supporting default, 16 standard, 256 indexed, and 24-bit RGB.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Color {
@@ -69,6 +71,10 @@ pub struct Cell {
     pub ch: char,
     /// Display attributes for this cell.
     pub attrs: CellAttributes,
+    /// Whether this cell is the continuation column of a wide character.
+    pub continuation: bool,
+    /// Combining marks attached to the base character in this cell.
+    pub combining: String,
 }
 
 impl Default for Cell {
@@ -76,6 +82,8 @@ impl Default for Cell {
         Self {
             ch: ' ',
             attrs: CellAttributes::default(),
+            continuation: false,
+            combining: String::new(),
         }
     }
 }
@@ -412,24 +420,99 @@ impl TerminalEmulator {
     }
 
     fn put_char(&mut self, ch: char) {
+        let Some(mut display_width) = ch.width() else {
+            return;
+        };
+        if display_width == 0 {
+            self.append_combining_mark(ch);
+            return;
+        }
+        display_width = display_width.min(2);
+
         if self.pending_wrap && self.auto_wrap {
             self.pending_wrap = false;
             self.cursor_col = 0;
             self.linefeed();
         }
 
+        // A wide character cannot start in the final column.  Wrap it before
+        // writing when autowrap is enabled; otherwise degrade to a single-cell
+        // glyph rather than writing past the grid boundary.
+        if display_width == 2 && self.cursor_col == self.cols - 1 {
+            if self.auto_wrap {
+                self.cursor_col = 0;
+                self.linefeed();
+            } else {
+                display_width = 1;
+            }
+        }
+
         if self.cursor_row < self.rows && self.cursor_col < self.cols {
+            self.clear_wide_cell_at(self.cursor_row, self.cursor_col);
             self.grid[self.cursor_row][self.cursor_col] = Cell {
                 ch,
                 attrs: self.current_attrs.clone(),
+                continuation: false,
+                combining: String::new(),
             };
+            if display_width == 2 && self.cursor_col + 1 < self.cols {
+                self.clear_wide_cell_at(self.cursor_row, self.cursor_col + 1);
+                self.grid[self.cursor_row][self.cursor_col + 1] = Cell {
+                    ch: ' ',
+                    attrs: self.current_attrs.clone(),
+                    continuation: true,
+                    combining: String::new(),
+                };
+            }
         }
 
-        if self.cursor_col >= self.cols - 1 {
+        if display_width == 2 {
+            if self.cursor_col + 2 >= self.cols {
+                self.cursor_col = self.cols - 1;
+                self.pending_wrap = true;
+            } else {
+                self.cursor_col += 2;
+            }
+        } else if self.cursor_col >= self.cols - 1 {
             // At last column: set pending wrap flag
             self.pending_wrap = true;
         } else {
             self.cursor_col += 1;
+        }
+    }
+
+    fn append_combining_mark(&mut self, ch: char) {
+        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+            return;
+        }
+
+        let base_col = if self.pending_wrap {
+            if self.grid[self.cursor_row][self.cursor_col].continuation {
+                self.cursor_col.saturating_sub(1)
+            } else {
+                self.cursor_col
+            }
+        } else if self.cursor_col > 0
+            && self.grid[self.cursor_row][self.cursor_col - 1].continuation
+        {
+            self.cursor_col.saturating_sub(2)
+        } else if self.cursor_col > 0 {
+            self.cursor_col - 1
+        } else {
+            self.cursor_col
+        };
+
+        if base_col < self.cols {
+            self.grid[self.cursor_row][base_col].combining.push(ch);
+        }
+    }
+
+    fn clear_wide_cell_at(&mut self, row: usize, col: usize) {
+        if self.grid[row][col].continuation && col > 0 {
+            self.grid[row][col - 1] = Cell::default();
+        }
+        if col + 1 < self.cols && self.grid[row][col + 1].continuation {
+            self.grid[row][col + 1] = Cell::default();
         }
     }
 
@@ -1045,6 +1128,7 @@ mod tests {
     fn row_text(emu: &TerminalEmulator, row: usize) -> String {
         emu.grid()[row]
             .iter()
+            .filter(|cell| !cell.continuation)
             .map(|cell| cell.ch)
             .collect::<String>()
             .trim_end()
@@ -1106,9 +1190,55 @@ mod tests {
                 bold: true,
                 ..CellAttributes::default()
             },
+            continuation: false,
+            combining: String::new(),
         };
         let cloned = cell.clone();
         assert_eq!(cell, cloned);
+    }
+
+    #[test]
+    fn wide_char_occupies_two_cells_and_advances_by_two() {
+        let mut emu = TerminalEmulator::new(8, 2);
+        emu.process("a界b".as_bytes());
+
+        assert_eq!(emu.grid()[0][0].ch, 'a');
+        assert_eq!(emu.grid()[0][1].ch, '界');
+        assert!(emu.grid()[0][2].continuation);
+        assert_eq!(emu.grid()[0][3].ch, 'b');
+        assert_eq!(emu.cursor_position(), (0, 4));
+    }
+
+    #[test]
+    fn combining_mark_stays_with_base_without_advancing() {
+        let mut emu = TerminalEmulator::new(8, 2);
+        emu.process("e\u{301}x".as_bytes());
+
+        assert_eq!(emu.grid()[0][0].ch, 'e');
+        assert_eq!(emu.grid()[0][0].combining, "\u{301}");
+        assert_eq!(emu.grid()[0][1].ch, 'x');
+        assert_eq!(emu.cursor_position(), (0, 2));
+    }
+
+    #[test]
+    fn combining_mark_after_last_cell_stays_on_pending_wrap_cell() {
+        let mut emu = TerminalEmulator::new(3, 2);
+        emu.process("abc\u{301}".as_bytes());
+
+        assert_eq!(emu.grid()[0][2].ch, 'c');
+        assert_eq!(emu.grid()[0][2].combining, "\u{301}");
+        assert_eq!(emu.cursor_position(), (0, 2));
+    }
+
+    #[test]
+    fn writing_over_wide_continuation_clears_the_base_cell() {
+        let mut emu = TerminalEmulator::new(6, 1);
+        emu.process("界".as_bytes());
+        emu.process(b"\x1b[1;2Hx");
+
+        assert_eq!(emu.grid()[0][0], Cell::default());
+        assert_eq!(emu.grid()[0][1].ch, 'x');
+        assert!(!emu.grid()[0][1].continuation);
     }
 
     // ---- Task 2: TerminalEmulator construction and accessors ----

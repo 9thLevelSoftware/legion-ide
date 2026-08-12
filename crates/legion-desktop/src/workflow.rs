@@ -2917,7 +2917,7 @@ impl DesktopRuntime {
         // T7: auto-navigate to definition when a queued GoToDefinition response arrives.
         let new_def_count = snapshot.language_tooling_projection.definitions.len();
         if self.definition_navigation_queued
-            && new_def_count > 0
+            && new_def_count == 1
             && new_def_count != self.last_definition_count
         {
             self.definition_navigation_queued = false;
@@ -2932,6 +2932,10 @@ impl DesktopRuntime {
                         position: range.start,
                     });
             }
+        } else if self.definition_navigation_queued && new_def_count > 1 {
+            // Leave multiple definitions for the picker rendered by the view;
+            // auto-opening the first result would hide the user's choices.
+            self.definition_navigation_queued = false;
         }
         self.last_definition_count = new_def_count;
 

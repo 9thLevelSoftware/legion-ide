@@ -16695,6 +16695,12 @@ pub struct TerminalCell {
     pub ch: char,
     /// Display attributes for this cell.
     pub attrs: TerminalCellAttrs,
+    /// Whether this cell continues a wide character from the preceding cell.
+    #[serde(default)]
+    pub continuation: bool,
+    /// Combining marks attached to the base character in this cell.
+    #[serde(default)]
+    pub combining: String,
 }
 
 impl Default for TerminalCell {
@@ -16702,6 +16708,8 @@ impl Default for TerminalCell {
         Self {
             ch: ' ',
             attrs: TerminalCellAttrs::default(),
+            continuation: false,
+            combining: String::new(),
         }
     }
 }

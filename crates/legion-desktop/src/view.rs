@@ -5839,10 +5839,15 @@ fn render_terminal_stream(
             // Cell grid path: when the VT100 emulator has produced a cell grid,
             // render with per-cell colors. Otherwise fall back to text rows.
             if let Some(cell_grid) = &render_model.grid.cell_grid {
+                let cell_scrollback = render_model.grid.cell_scrollback.as_deref().unwrap_or(&[]);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .max_height(280.0)
                     .show(ui, |ui| {
+                        if !cell_scrollback.is_empty() {
+                            render_terminal_cell_grid(ui, cell_scrollback, None, None, Some(false));
+                            ui.separator();
+                        }
                         render_terminal_cell_grid(
                             ui,
                             cell_grid,
@@ -6101,8 +6106,17 @@ fn render_terminal_cell_grid(
                 text_format.color = cursor_fg;
             }
 
-            let ch = if cell.attrs.hidden { ' ' } else { cell.ch };
-            job.append(&ch.to_string(), 0.0, text_format);
+            if cell.continuation && !is_cursor {
+                continue;
+            }
+            let text = if cell.attrs.hidden || cell.continuation {
+                " ".to_string()
+            } else if cell.combining.is_empty() {
+                cell.ch.to_string()
+            } else {
+                format!("{}{}", cell.ch, cell.combining)
+            };
+            job.append(&text, 0.0, text_format);
         }
 
         ui.label(job);

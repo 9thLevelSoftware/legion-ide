@@ -8114,6 +8114,8 @@ impl TerminalWorkflow {
                             inverse: cell.attrs.inverse,
                             hidden: cell.attrs.hidden,
                         },
+                        continuation: cell.continuation,
+                        combining: cell.combining.clone(),
                     })
                     .collect(),
             };
@@ -19766,8 +19768,16 @@ impl AppComposition {
         // Find/replace intents mutate buffer_search_state directly and return early.
         match &intent {
             CommandDispatchIntent::ToggleFindBar => {
-                self.buffer_search_state.find_bar_visible =
-                    !self.buffer_search_state.find_bar_visible;
+                let was_visible = self.buffer_search_state.find_bar_visible;
+                self.buffer_search_state.find_bar_visible = !was_visible;
+                if !was_visible
+                    && !self.buffer_search_state.query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
                 return Ok(AppCommandOutcome::Noop);
             }
             CommandDispatchIntent::CloseFindBar => {

@@ -283,3 +283,29 @@ fn find_navigation_reveals_selected_match() {
     assert_eq!(viewport.cursor.line, 3);
     assert_eq!(viewport.scroll.top_line, 3);
 }
+
+#[test]
+fn reopening_find_bar_recomputes_preserved_query_matches() {
+    let (_root, mut app) = setup_with_content("needle other needle\n");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindBar)
+        .expect("open find bar");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindQuery {
+        query: "needle".into(),
+    })
+    .expect("set query");
+    assert_eq!(find_bar(&mut app).match_count, 2);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::CloseFindBar)
+        .expect("close find bar");
+    let closed = find_bar(&mut app);
+    assert!(!closed.visible);
+    assert_eq!(closed.match_count, 0);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindBar)
+        .expect("reopen find bar");
+    let reopened = find_bar(&mut app);
+    assert!(reopened.visible);
+    assert_eq!(reopened.query, "needle");
+    assert_eq!(reopened.match_count, 2);
+}

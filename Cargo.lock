@@ -4200,6 +4200,7 @@ dependencies = [
  "legion-protocol",
  "serde_json",
  "thiserror 2.0.18",
+ "unicode-width",
  "uuid",
 ]
 
