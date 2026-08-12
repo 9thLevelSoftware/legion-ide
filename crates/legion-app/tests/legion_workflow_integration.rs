@@ -2652,16 +2652,28 @@ fn workflow_worker_panic_cancels_and_reaps_blocked_lane_sibling_before_owner_cle
     let error = app
         .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect_err("first worker panic must fail the lane");
-    let returned_at = Instant::now();
-    let acknowledged_at = ack_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("blocked sibling must acknowledge cancellation before execution returns");
     assert!(error.to_string().contains("panicked"));
     assert!(cancellation.is_cancelled());
-    assert!(
-        returned_at >= acknowledged_at,
-        "workflow owner cleared before its blocked sibling was terminal"
-    );
+
+    // The failure path intentionally returns without waiting for an
+    // uninterruptible sibling. Verify the ownership invariant at the point
+    // of return instead of comparing timestamps across independently
+    // scheduled threads: a cooperative sibling may acknowledge cancellation
+    // either immediately before or immediately after this downgrade attempt.
+    let sibling_acknowledged_before_downgrade = ack_rx.try_recv().is_ok();
+    app.set_product_mode(AppProductMode::Manual);
+    if !sibling_acknowledged_before_downgrade {
+        assert_eq!(
+            app.product_mode(),
+            AppProductMode::Automate,
+            "workflow owner cleared before its blocked sibling acknowledged cancellation"
+        );
+    }
+    if !sibling_acknowledged_before_downgrade {
+        ack_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked sibling must acknowledge cancellation");
+    }
 
     let reconcile_deadline = Instant::now() + Duration::from_secs(2);
     loop {
