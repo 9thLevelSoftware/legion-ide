@@ -2192,7 +2192,7 @@ fn render_editor_canvas(
     }
     theme::code_frame().show(ui, |ui| {
         let minimap_visible = model.settings.minimap_visible;
-        let minimap_width = if minimap_visible { 100.0_f32 } else { 0.0 };
+        let minimap_width = if minimap_visible { MINIMAP_WIDTH } else { 0.0 };
         let full_rect = ui.available_rect_before_wrap();
 
         // Code area: left portion, up to the minimap boundary.
@@ -2245,6 +2245,9 @@ fn render_editor_canvas(
     render_close_dirty_prompt_controls(ui, snapshot, actions);
 }
 
+const MINIMAP_WIDTH: f32 = 100.0;
+const MINIMAP_ASSUMED_MAX_COLS: f32 = 80.0;
+
 /// Render a scaled-down code minimap to the right of the code area.
 ///
 /// For small files (where `small_buffer_preview` is available) each source line
@@ -2296,7 +2299,6 @@ fn render_minimap(
 
     // Pixels per source line, clamped to a readable range.
     let px_per_line = (panel_height / total_lines as f32).clamp(0.5, 3.0);
-    let assumed_max_cols = 80.0_f32;
 
     if let Some(lengths) = &line_lengths {
         // Small file: render a colored bar per line.
@@ -2309,7 +2311,7 @@ fn render_minimap(
             if y > minimap_rect.bottom() {
                 break;
             }
-            let bar_w = (len as f32 / assumed_max_cols * (panel_width - 8.0))
+            let bar_w = (len as f32 / MINIMAP_ASSUMED_MAX_COLS * (panel_width - 8.0))
                 .clamp(2.0, panel_width - 8.0);
             let bar_rect = egui::Rect::from_min_size(
                 egui::pos2(minimap_rect.left() + 4.0, y),
@@ -2371,6 +2373,9 @@ fn render_minimap(
         }
     }
 }
+
+const TAB_DIRTY_GLYPH: &str = "\u{2022}";
+const TAB_CLOSE_GLYPH: &str = "\u{00d7}";
 
 /// Persistent drag state for tab reorder, stored in `egui::Context::data_mut`.
 #[derive(Clone, Default)]
@@ -2461,9 +2466,9 @@ fn render_tab_strip(
 
                         if show_close || tab.dirty {
                             let close_glyph = if tab.dirty && !tab_hovered {
-                                "\u{2022}" // bullet
+                                TAB_DIRTY_GLYPH
                             } else {
-                                "\u{00d7}" // multiplication sign as x
+                                TAB_CLOSE_GLYPH
                             };
                             let close_color = if tab_hovered {
                                 theme::tokens().text.primary
