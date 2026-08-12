@@ -1,0 +1,15 @@
+Command: cargo test -p devil-agent --all-targets
+   Compiling devil-agent v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running unittests src\lib.rs (target\debug\deps\devil_agent-32d686323ad0a694.exe)
+
+running 5 tests
+test tests::replay_refuses_raw_provider_payload_markers ... ok
+test tests::state_machine_accepts_legal_transitions_and_records_metadata ... ok
+test tests::cancellation_preserves_metadata_without_applying_proposals ... ok
+test tests::state_machine_refuses_illegal_transition_without_recording_metadata ... ok
+test tests::replay_reconstructs_recovery_state_from_metadata_only_manifest ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0

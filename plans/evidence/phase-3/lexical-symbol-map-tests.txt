@@ -1,0 +1,18 @@
+Command: cargo test -p devil-index --all-targets
+Date: 2026-05-24
+Result: passed; 28 tests passed, 0 failed, 0 ignored
+
+Lexical symbol-map coverage:
+- `lexical_indexer_extracts_symbol_maps_graph_records_and_invalidation_keys`
+- `lease_chunk_indexing_records_hashes_ranges_and_not_source_bodies`
+- `small_snapshot_full_text_indexing_is_explicit_bounded_optimization`
+- `large_snapshot_descriptor_first_indexing_uses_chunks_without_full_source`
+- `semantic_metadata_record_for_large_descriptor_persists_only_hashes_ranges_and_metadata`
+- `live_snapshot_supersedes_slower_background_work_by_generation_and_hash`
+- `generation_bump_with_reset_content_version_supersedes_old_work`
+
+Accepted behavior:
+- Lexical extraction produces symbol-file records before LSP enrichment is available.
+- Chunk leases can produce symbols without durable full-source retention.
+- Descriptor-only large snapshots remain partial/degraded and do not leak source bodies.
+- Live snapshot identity supersedes stale background lexical work.

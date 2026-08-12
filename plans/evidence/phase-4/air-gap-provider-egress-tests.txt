@@ -1,0 +1,37 @@
+Command: cargo test -p devil-security --all-targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src\lib.rs (target\debug\deps\devil_security-fd2e468024ddbbd6.exe)
+
+running 18 tests
+test tests::broker_request_is_denied_when_namespace_empty ... ok
+test tests::ai_provider_invoke_allows_loopback_for_trusted_workspace ... ok
+test tests::memory_retain_denied_without_explicit_consent ... ok
+test tests::broker_rejects_unknown_trust_for_sensitive_requests ... ok
+test tests::air_gap_denies_hosted_provider_telemetry_embeddings_and_gateway ... ok
+test tests::protocol_handle_request_returns_decision ... ok
+test tests::file_write_blocked_by_extension ... ok
+test tests::command_taxonomy_classifies_known_commands ... ok
+test tests::file_write_is_blocked_by_extension_policy ... ok
+test tests::path_policy_parent_escape_is_rejected ... ok
+test tests::path_policy_rejects_sibling_prefix_escape ... ok
+test tests::network_fetch_requires_allowlisted_target_even_when_trusted ... ok
+test tests::path_policy_blocks_bad_roots ... ok
+test tests::deny_by_default_for_unknown_capability ... ok
+test tests::provider_policy_can_disable_local_loopback_invocation ... ok
+test tests::terminal_decision_is_blocked_for_unknown_workspace ... ok
+test tests::trust_state_conversion_roundtrips ... ok
+test tests::provider_policy_denies_remote_even_when_network_allowlist_permits_host ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\path_policy_windows.rs (target\debug\deps\path_policy_windows-50a03cdbf9320cfb.exe)
+
+running 4 tests
+test sibling_prefix_escape_is_rejected_cross_platform ... ok
+test windows_drive_letter_case_and_slash_normalization_are_supported ... ok
+test windows_blocked_root_precedence_is_enforced ... ok
+test windows_long_path_prefix_is_supported ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0

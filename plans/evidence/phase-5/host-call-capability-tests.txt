@@ -1,0 +1,11 @@
+Commands:
+- cargo test -p devil-security --all-targets
+- cargo test -p devil-plugin --all-targets
+
+Observed focused coverage:
+- plugin_manifest_context_is_required_and_unknown_capabilities_are_denied
+- plugin_network_process_filesystem_and_untrusted_workspace_are_denied
+- plugin_runtime_denies_undeclared_host_call
+- plugin_runtime_host_call_quota_fails_closed
+
+Status: PASS in focused runs before final workspace gates.

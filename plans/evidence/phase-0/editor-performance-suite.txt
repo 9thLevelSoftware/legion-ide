@@ -1,0 +1,46 @@
+Phase 6 editor performance-suite evidence / reservation
+Generated: 2026-05-14T00:14:46Z
+Platform: Windows 11, cmd.exe, workspace `C:/Users/dasbl/RustroverProjects/devil-ide`
+
+Command attempted:
+`cargo test -p devil-editor --test performance_suite -- --ignored --nocapture > plans\evidence\phase-0\editor-performance-suite.txt 2>&1`
+
+Result: BLOCKED / reservation, not benchmark evidence.
+
+Captured output from the attempted ignored suite:
+
+```text
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests\performance_suite.rs (target\debug\deps\performance_suite-5269391746ef1b62.exe)
+
+running 3 tests
+test snapshot_retention_and_release ... ok
+
+thread 'large_file_100mb_keystroke_latency' (62740) panicked at crates\devil-editor\tests\performance_suite.rs:121:10:
+open large buffer: Text(FullCacheBudgetExceeded { byte_len: 104857600, budget: 5242880 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test large_file_100mb_keystroke_latency ... FAILED
+
+thread 'undo_redo_latency_under_edit_burst' (48588) panicked at crates\devil-editor\tests\performance_suite.rs:176:43:
+undo: NothingToUndo
+test undo_redo_latency_under_edit_burst ... FAILED
+
+failures:
+
+failures:
+    large_file_100mb_keystroke_latency
+    undo_redo_latency_under_edit_burst
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.34s
+
+error: test failed, to rerun pass `-p devil-editor --test performance_suite`
+```
+
+Reason:
+- The 100MB ignored workload now correctly hits Phase 6 full-cache/degraded-mode enforcement (`FullCacheBudgetExceeded`) before a streaming/degraded large-file editor path exists.
+- The legacy ignored 2,000-edit undo/redo burst exceeds the new bounded snapshot retention policy default and therefore cannot assume all 2,000 undo entries remain retained.
+
+Follow-up requirement:
+- Add a dedicated degraded/streaming large-file performance harness once that architecture exists.
+- Update the heavy undo/redo benchmark to configure an explicit large retention policy or measure retained-history behavior intentionally.
+- Do not treat this file as successful benchmark data.

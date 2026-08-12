@@ -1,0 +1,11 @@
+Commands:
+- cargo test -p devil-telemetry --all-targets
+- cargo test -p devil-security phase8
+
+Result: passed
+
+Implemented coverage:
+- durable file-backed spool rejects raw/sensitive records
+- export batch validation requires allowlisted endpoint and consent categories
+- consent revocation purges workspace records from durable spool
+- hosted export and spool writes remain default-deny through security policy unless explicitly enabled

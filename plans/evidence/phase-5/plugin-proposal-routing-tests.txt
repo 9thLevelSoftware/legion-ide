@@ -1,0 +1,15 @@
+Commands:
+- cargo test -p devil-app --lib plugin_command_intent_routes_through_app_owned_plugin_runtime
+- cargo test -p devil-ui --all-targets
+
+Observed focused coverage:
+- plugin_command_intent_routes_through_app_owned_plugin_runtime
+- ui_plugin_contributions_are_projection_only_command_intents
+
+Routing assertions:
+- UI emits `InvokePluginCommand` projection intents only.
+- App maps the intent to `AppCommandRequest::InvokePluginCommand`.
+- App-owned `PluginRuntimeHost` dispatches protocol host-call envelopes.
+- No plugin command path grants UI/editor/workspace ownership or direct mutation authority.
+
+Status: PASS in focused runs before final workspace gates.

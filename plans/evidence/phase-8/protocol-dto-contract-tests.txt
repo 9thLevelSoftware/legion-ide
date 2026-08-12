@@ -1,0 +1,14 @@
+Command: cargo test -p devil-protocol --test dto_contracts phase8
+Result: passed
+
+Covered tests:
+- dto_contracts_phase8_remote_transport_handshake_fails_closed
+- dto_contracts_phase8_terminal_and_transport_audits_reject_raw_markers
+- dto_contracts_phase8_hosted_telemetry_requires_consent_and_metadata_only_records
+- dto_contracts_phase8_raw_source_retention_is_scoped_and_default_denied
+- dto_contracts_phase8_storage_migration_contracts_fail_closed
+
+Additional implemented contracts:
+- remote transport lifecycle, flow-control, replay-window, agent package descriptor validation
+- storage schema manifest, migration dry-run, backup/checksum, repair request, recovery/replay metadata
+- capability request explicit storage repair flag

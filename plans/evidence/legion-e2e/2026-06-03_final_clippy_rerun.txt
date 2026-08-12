@@ -1,0 +1,28 @@
+COMMAND: cargo fmt --all --check
+EXIT_CODE: 0
+
+COMMAND: cargo clippy --workspace --all-targets -- -D warnings
+    Checking legion-agent v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-agent)
+    Checking legion-plugin v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-plugin)
+    Checking legion-cli v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-cli)
+    Checking legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+    Checking legion-retention v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-retention)
+    Checking legion-ai-providers v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ai-providers)
+    Checking legion-telemetry v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-telemetry)
+    Checking legion-index v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-index)
+    Checking legion-app v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-app)
+    Checking legion-editor v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-editor)
+    Checking legion-project v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-project)
+    Checking legion-remote-transport v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote-transport)
+    Checking legion-storage v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-storage)
+    Checking legion-memory v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-memory)
+    Checking legion-tracker v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-tracker)
+    Checking legion-platform v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-platform)
+    Checking legion-security v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-security)
+    Checking legion-vscode-compat v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-vscode-compat)
+    Checking legion-protocol v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-protocol)
+    Checking legion-collaboration v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-collaboration)
+    Checking legion-ui v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-ui)
+    Checking legion-desktop v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.83s
+EXIT_CODE: 0

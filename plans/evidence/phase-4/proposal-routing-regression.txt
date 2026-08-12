@@ -1,0 +1,25 @@
+Phase 4 proposal routing regression evidence
+
+Command: cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only
+   Compiling devil-agent v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-agent)
+   Compiling devil-app v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.88s
+     Running tests\workspace_vfs_integration.rs (target\debug\deps\workspace_vfs_integration-b697310a07a63ca3.exe)
+
+running 1 test
+test workspace_vfs_integration_phase4_ai_run_is_context_inspectable_and_proposal_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+ExitCode: 0
+
+Command: cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests\workspace_vfs_integration.rs (target\debug\deps\workspace_vfs_integration-b697310a07a63ca3.exe)
+
+running 1 test
+test workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+ExitCode: 0

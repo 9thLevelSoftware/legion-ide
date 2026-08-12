@@ -1,0 +1,25 @@
+Phase 4 tracker ledger evidence
+
+Command: cargo test -p devil-tracker --all-targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src\lib.rs (target\debug\deps\devil_tracker-7016b28ec6f4419c.exe)
+
+running 3 tests
+test tests::tracker_ledger_roundtrips_run_and_proposal_metadata ... ok
+test tests::tracker_ledger_rejects_zero_event_sequence ... ok
+test tests::tracker_ledger_rejects_raw_prompt_markers ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0
+
+Command: cargo test -p devil-storage phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src\lib.rs (target\debug\deps\devil_storage-b481efe8c497e0f6.exe)
+
+running 1 test
+test tests::phase4_runtime_audit_and_replay_manifest_roundtrip_metadata_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+ExitCode: 0

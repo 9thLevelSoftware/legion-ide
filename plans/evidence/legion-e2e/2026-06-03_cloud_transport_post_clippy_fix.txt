@@ -1,0 +1,21 @@
+COMMAND: cargo test -p legion-remote --test cloud_lane_http_transport -- --nocapture
+   Compiling legion-remote v0.1.0 (/Users/christopherwilloughby/devil-ide/crates/legion-remote)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.15s
+     Running tests/cloud_lane_http_transport.rs (target/debug/deps/cloud_lane_http_transport-0ff61247e3285135)
+
+running 11 tests
+test http_transport_config_debug_redacts_auth_token ... ok
+test http_transport_cost_cap_rejects_before_network ... ok
+test http_transport_forbidden_upload_rejects_before_network ... ok
+test http_transport_disabled_policy_rejects_before_network ... ok
+test http_transport_classifies_4xx_as_http_response_error ... ok
+test http_transport_classifies_5xx_as_http_response_error ... ok
+test http_transport_stream_task_events ... ok
+test http_transport_fetch_task_proposal ... ok
+test http_transport_cancel_task ... ok
+test http_transport_submit_task_sends_headers_and_body ... ok
+test http_transport_fetch_task_evidence ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+EXIT_CODE: 0

@@ -128,20 +128,6 @@ impl Theme {
                 breadcrumb_accent: Color32::from_rgb(75, 156, 211),
                 fold_indicator: Color32::from_rgba_unmultiplied_const(150, 150, 150, 128),
             },
-            diagnostic: DiagnosticTokens {
-                error: Color32::from_rgb(255, 92, 122),
-                warning: Color32::from_rgb(255, 184, 107),
-                info: Color32::from_rgb(75, 140, 255),
-                hint: Color32::from_rgb(126, 129, 144),
-            },
-            search: SearchTokens {
-                match_highlight: Color32::from_rgba_unmultiplied_const(255, 235, 59, 80),
-                current_match: Color32::from_rgba_unmultiplied_const(255, 152, 0, 120),
-            },
-            chrome: ChromeTokens {
-                breadcrumb_accent: Color32::from_rgb(75, 156, 211),
-                fold_indicator: Color32::from_rgba_unmultiplied_const(150, 150, 150, 128),
-            },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
             typography: TypographyScale::standard(),
@@ -204,20 +190,6 @@ impl Theme {
                 function: Color32::from_rgb(31, 105, 158),
                 attribute: Color32::from_rgb(145, 83, 220),
                 error: Color32::from_rgb(190, 48, 38),
-            },
-            diagnostic: DiagnosticTokens {
-                error: Color32::from_rgb(212, 24, 61),
-                warning: Color32::from_rgb(180, 91, 18),
-                info: Color32::from_rgb(38, 100, 214),
-                hint: Color32::from_rgb(113, 113, 130),
-            },
-            search: SearchTokens {
-                match_highlight: Color32::from_rgba_unmultiplied_const(255, 235, 59, 100),
-                current_match: Color32::from_rgba_unmultiplied_const(255, 152, 0, 140),
-            },
-            chrome: ChromeTokens {
-                breadcrumb_accent: Color32::from_rgb(38, 100, 214),
-                fold_indicator: Color32::from_rgba_unmultiplied_const(113, 113, 130, 128),
             },
             diagnostic: DiagnosticTokens {
                 error: Color32::from_rgb(212, 24, 61),

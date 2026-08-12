@@ -1,0 +1,15 @@
+Phase 7 protocol DTO contract evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-protocol --test dto_contracts remote
+
+Observed result:
+- 4 remote-filtered DTO contract tests passed.
+
+Covered contracts:
+- Remote session activation remains fail-closed until trusted, enabled, principal-scoped, and active.
+- Remote transport envelopes serialize as metadata-only payloads and require schema version.
+- Remote write preconditions reject zero correlation IDs, nil causality IDs, and denied capabilities.
+- Remote audit records require metadata-only redaction and reject raw-source markers.

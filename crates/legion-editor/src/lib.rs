@@ -23,7 +23,6 @@ use legion_protocol::{
     ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
     ViewportSemanticTokenOverlay, WorkspaceId,
 };
-use regex::RegexBuilder;
 use legion_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
     TextSnapshotDescriptor, Utf16Position, Utf16Range,

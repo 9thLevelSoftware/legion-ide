@@ -1,0 +1,16 @@
+Command: cargo test -p devil-index --all-targets
+Date: 2026-05-24
+Result: passed; 28 tests passed, 0 failed, 0 ignored
+
+Syntax-cache coverage for the tree-sitter-ready parser boundary:
+- `syntax_cache_keys_by_content_hash_language_and_grammar_version_without_collision`
+- `privacy_scope_changes_separate_syntax_cache_and_replace_semantic_records`
+- `workspace_generation_changes_separate_syntax_cache_and_reject_stale_semantic_records`
+- `schema_and_model_version_changes_separate_cache_entries_and_semantic_keys`
+- `semantic_metadata_freshness_key_separates_schema_parser_grammar_language_and_descriptor`
+
+Accepted behavior:
+- Cache keys include content hash, language, grammar version, parser version, model version, schema, file identity, snapshot identity, workspace generation, privacy scope, and descriptor fingerprint.
+- Grammar-version invalidation removes matching parser outcomes.
+- Privacy-scope reduction and workspace-generation changes prevent stale or over-disclosing records from becoming query-authoritative.
+- The current production parser worker is the deterministic lexical fallback behind the `ParserWorker` abstraction; the cache contract is ready for a tree-sitter worker without widening authority or storing source bodies.

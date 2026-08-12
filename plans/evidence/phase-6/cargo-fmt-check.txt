@@ -1,0 +1,5 @@
+Command: `cargo fmt --all --check`
+Result: PASS
+
+Output:
+- No formatting diff reported after `cargo fmt --all`.

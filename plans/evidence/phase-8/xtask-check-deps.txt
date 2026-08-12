@@ -1,0 +1,5 @@
+Command: cargo run -p xtask -- check-deps
+Result: passed
+
+Output:
+dependency policy checks passed
