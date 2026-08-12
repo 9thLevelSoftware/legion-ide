@@ -7465,6 +7465,29 @@ fn terminal_command_block_start_payload(byte_count: usize, cwd: Option<&str>) ->
     }
 }
 
+/// Return whether terminal input must be forwarded byte-for-byte.
+///
+/// Interactive terminal controls are not shell commands: escape sequences and
+/// C0 controls (including Enter and Ctrl-C) must not receive the line-feed
+/// normalization used for plain command text.  A carriage return is already a
+/// complete terminal line terminator, so preserve it as well.
+fn terminal_input_payload_to_send(payload: &str) -> String {
+    if terminal_input_is_raw_control(payload) {
+        payload.to_string()
+    } else {
+        format!("{payload}\n")
+    }
+}
+
+fn terminal_input_is_raw_control(payload: &str) -> bool {
+    payload.ends_with('\n')
+        || payload.ends_with('\r')
+        || payload.starts_with('\x1b')
+        || payload
+            .chars()
+            .all(|character| character.is_ascii_control())
+}
+
 fn terminal_command_block_finish_payload(
     exit_code: i32,
     duration_ms: u64,
@@ -7747,11 +7770,7 @@ impl TerminalWorkflow {
         if let Err(error) = validate_terminal_input(&input) {
             return self.fail(session_id, event_context, error.message);
         }
-        let payload_to_send = if payload.ends_with('\n') {
-            payload.clone()
-        } else {
-            format!("{payload}\n")
-        };
+        let payload_to_send = terminal_input_payload_to_send(&payload);
         let runtime_input = TerminalInput {
             session_id,
             correlation_id: event_context.correlation_id,
@@ -12583,41 +12602,42 @@ fn tree_sitter_overlays_from_captures<'a>(
 ) -> Option<Vec<ViewportSemanticTokenOverlay>> {
     let mut overlays = Vec::new();
     for capture in captures {
-        let Some(visible_line) = line_slices
-            .iter()
-            .find(|line| line.line_number == capture.line_number)
-        else {
-            continue;
-        };
-        let start = capture.start_byte.max(visible_line.byte_range.start);
-        let end = capture.end_byte.min(visible_line.byte_range.end);
-        if start >= end {
-            continue;
-        }
-        let relative_start = start.saturating_sub(visible_line.byte_range.start) as usize;
-        let relative_end = end.saturating_sub(visible_line.byte_range.start) as usize;
-        if relative_end > visible_line.visible_text.len()
-            || visible_line
-                .visible_text
-                .get(relative_start..relative_end)
-                .is_none()
-        {
-            continue;
-        }
-        let Some(start_col) = byte_index_to_char_col(&visible_line.visible_text, relative_start)
-        else {
-            continue;
-        };
-        let Some(end_col) = byte_index_to_char_col(&visible_line.visible_text, relative_end) else {
-            continue;
-        };
-        if start_col < end_col {
-            overlays.push(ViewportSemanticTokenOverlay {
-                line_number: visible_line.line_number,
-                start_col,
-                end_col,
-                kind: capture.token_kind,
-            });
+        // A tree-sitter node can span multiple logical lines.  Project its
+        // absolute byte range independently onto every visible line rather
+        // than looking only at the node's starting line.
+        for visible_line in line_slices {
+            let start = capture.start_byte.max(visible_line.byte_range.start);
+            let end = capture.end_byte.min(visible_line.byte_range.end);
+            if start >= end {
+                continue;
+            }
+            let relative_start = start.saturating_sub(visible_line.byte_range.start) as usize;
+            let relative_end = end.saturating_sub(visible_line.byte_range.start) as usize;
+            if relative_end > visible_line.visible_text.len()
+                || visible_line
+                    .visible_text
+                    .get(relative_start..relative_end)
+                    .is_none()
+            {
+                continue;
+            }
+            let Some(start_col) =
+                byte_index_to_char_col(&visible_line.visible_text, relative_start)
+            else {
+                continue;
+            };
+            let Some(end_col) = byte_index_to_char_col(&visible_line.visible_text, relative_end)
+            else {
+                continue;
+            };
+            if start_col < end_col {
+                overlays.push(ViewportSemanticTokenOverlay {
+                    line_number: visible_line.line_number,
+                    start_col,
+                    end_col,
+                    kind: capture.token_kind,
+                });
+            }
         }
     }
 
@@ -34960,6 +34980,64 @@ mod tests {
         assert!(overlays.iter().any(|overlay| {
             overlay.line_number == 1 && overlay.kind == ViewportSemanticTokenKind::String
         }));
+    }
+
+    #[test]
+    fn tree_sitter_overlay_pipeline_splits_multiline_string_captures() {
+        let text = "message = \"\"\"first\nsecond\nthird\"\"\"\n";
+        let line_slices = logical_lines_with_offsets(text)
+            .into_iter()
+            .map(|(line_number, start_byte, line)| ViewportLineSlice {
+                line_number,
+                visible_text: line.to_string(),
+                byte_range: ByteRange {
+                    start: start_byte as u64,
+                    end: start_byte.saturating_add(line.len()) as u64,
+                },
+                utf16_range: legion_protocol::Utf16Range {
+                    start: legion_protocol::Utf16Position {
+                        line: line_number,
+                        character: 0,
+                    },
+                    end: legion_protocol::Utf16Position {
+                        line: line_number,
+                        character: line.encode_utf16().count() as u32,
+                    },
+                },
+                chunk_hash: FileFingerprint {
+                    algorithm: "test".to_string(),
+                    value: format!("line:{line_number}"),
+                },
+                truncation_state: legion_protocol::ViewportLineTruncationState::None,
+            })
+            .collect::<Vec<_>>();
+
+        let overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
+            "/workspace/src/multiline.py",
+            &line_slices,
+            Some(text),
+        )
+        .expect("Python full-text input should use tree-sitter overlays");
+
+        for line_number in 0..3 {
+            assert!(
+                overlays.iter().any(|overlay| {
+                    overlay.line_number == line_number
+                        && overlay.kind == ViewportSemanticTokenKind::String
+                        && overlay.start_col < overlay.end_col
+                }),
+                "expected a string overlay on logical line {line_number}, got {overlays:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_control_input_is_not_line_normalized() {
+        assert_eq!(terminal_input_payload_to_send("echo ready"), "echo ready\n");
+        assert_eq!(terminal_input_payload_to_send("\r"), "\r");
+        assert_eq!(terminal_input_payload_to_send("\x03"), "\x03");
+        assert_eq!(terminal_input_payload_to_send("\x1b[A"), "\x1b[A");
+        assert_eq!(terminal_input_payload_to_send("\t"), "\t");
     }
 
     #[test]

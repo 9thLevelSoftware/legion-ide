@@ -283,9 +283,29 @@ fn comma_boundary_before(line: &str, before: usize) -> usize {
 }
 
 fn comma_boundary_after(line: &str, after: usize) -> usize {
-    line[after..]
-        .find(',')
-        .map_or(line.len(), |index| after + index)
+    let mut search_from = after;
+    while let Some(offset) = line[search_from..].find(',') {
+        let index = search_from + offset;
+        let continuation = line[index + 1..].trim_start();
+        if is_appositive_continuation(continuation) {
+            // In `T1, which remains open`, the comma introduces a predicate
+            // about T1 rather than a new independent task claim.  Continue
+            // looking so a later comma can still delimit the full claim.
+            search_from = index + 1;
+            continue;
+        }
+        return index;
+    }
+    line.len()
+}
+
+fn is_appositive_continuation(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "which ", "that ", "who ", "whom ", "whose ", "where ", "when ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 /// Compare the ledger text against backlog statuses.
@@ -503,6 +523,15 @@ mod tests {
             &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
         );
         assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn appositive_comma_keeps_predicate_with_task_claim() {
+        let ledger = "P1.F1.T1, which remains open, despite the current plan.";
+        let violations = check_consistency(ledger, &statuses(&[("P1.F1.T1", "done")]));
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].task_id, "P1.F1.T1");
+        assert!(violations[0].message.contains("open or blocking"));
     }
 
     #[test]
