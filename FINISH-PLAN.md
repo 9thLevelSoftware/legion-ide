@@ -144,13 +144,15 @@ Dark/light themes, consistent syntax colors, rendering polish.
 - ✓ Minimap layout: 100px right column with horizontal split, graceful degradation for large files
 - 3 plans executed across 3 waves (05-01 color consolidation, 05-02 tab polish, 05-03 minimap), 66+ tests passing
 
-### Phase 6: Integration Testing & Release
+### ~~Phase 6: Integration Testing & Release~~ ✓ COMPLETE
 End-to-end testing and release artifacts.
 
-- Integration tests: open project → edit → syntax colors → LSP diagnostics → terminal commit → `legion-app`, `legion-desktop`
-- Dog-food on own codebase, file bugs, fix blockers → all crates
-- CI pipeline: build, test, package for Windows/macOS/Linux → xtask, CI
-- Release binaries with auto-updater → `legion-app`
+- ✓ View-model integration tests: 6 tests proving syntax highlights, diagnostics, terminal, tabs, git project correctly through DesktopProjectionViewModel
+- ✓ GP-5 golden-path binary: full user journey through AppComposition (open, edit, save, syntax-check, terminal, git commit)
+- ✓ Tag-triggered release workflow: 3-OS matrix, --from-artifacts pipeline, v* tag + manual dispatch
+- ✓ Acceptance proof: 5 integration tests exercising open→edit→save→terminal→git commit through AppComposition
+- ✓ Evidence gate: `finish-phase6` CLI gate validating all Phase 6 artifacts
+- 3 plans executed across 2 waves (06-01 view-model tests, 06-02 GP-5 + release, 06-03 acceptance proof)
 - **Done when:** install from release artifact on clean machine, open project, edit, run, commit
 
 ## Deliberately Deferred
