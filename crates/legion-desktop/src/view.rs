@@ -74,8 +74,8 @@ use legion_protocol::{
     PluginContributionProjection, PrivacyInspectorRedactionState, ProposalId,
     ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel,
     ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
-    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
@@ -2191,13 +2191,44 @@ fn render_editor_canvas(
         ui.add_space(6.0);
     }
     theme::code_frame().show(ui, |ui| {
+        let minimap_visible = model.settings.minimap_visible;
+        let minimap_width = if minimap_visible { 100.0_f32 } else { 0.0 };
+        let full_rect = ui.available_rect_before_wrap();
+
+        // Code area: left portion, up to the minimap boundary.
+        let code_rect = egui::Rect::from_min_max(
+            full_rect.min,
+            egui::pos2(full_rect.right() - minimap_width, full_rect.bottom()),
+        );
+        let mut code_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(code_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
         egui::ScrollArea::both()
             .id_salt("legion_desktop_code_canvas_scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(&mut code_ui, |ui| {
                 let mut painter = EguiCodeCanvasPainter;
                 painter.paint_lines(ui, snapshot, model, actions);
             });
+
+        // Minimap: right column.
+        if minimap_visible {
+            let minimap_rect = egui::Rect::from_min_max(
+                egui::pos2(full_rect.right() - minimap_width, full_rect.top()),
+                full_rect.max,
+            );
+            let mut minimap_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(minimap_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            render_minimap(&mut minimap_ui, snapshot, model, actions);
+        }
+
+        // Advance the parent layout past the area used by both children.
+        ui.allocate_rect(full_rect, egui::Sense::hover());
     });
     render_excerpt_surface(ui, snapshot, actions);
     if level == DesktopProductMode::Assist {
@@ -2212,6 +2243,133 @@ fn render_editor_canvas(
     }
     render_search_projection(ui, snapshot);
     render_close_dirty_prompt_controls(ui, snapshot, actions);
+}
+
+/// Render a scaled-down code minimap to the right of the code area.
+///
+/// For small files (where `small_buffer_preview` is available) each source line
+/// is drawn as a narrow colored bar representing its approximate text width.
+/// For large/degraded files the minimap shows an empty background with a muted
+/// placeholder.  A semi-transparent viewport indicator tracks the currently
+/// visible region.  Click or drag on the minimap scrolls the editor.
+fn render_minimap(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let tokens = theme::tokens();
+    let active = &snapshot.active_buffer_projection;
+    let viewport = active.viewport.as_ref();
+
+    // Determine total line count and per-line text lengths.
+    let (total_lines, line_lengths): (usize, Option<Vec<usize>>) =
+        if let Some(preview) = active.small_buffer_text() {
+            let lines: Vec<usize> = preview.lines().map(|l| l.len()).collect();
+            let count = lines.len().max(1);
+            (count, Some(lines))
+        } else {
+            // Large/degraded: estimate from last visible line.
+            let estimated = viewport
+                .map(|v| (v.visible_range.end.line as usize).saturating_add(50))
+                .unwrap_or(100);
+            (estimated, None)
+        };
+
+    let minimap_rect = ui.available_rect_before_wrap();
+    let panel_height = minimap_rect.height();
+    let panel_width = minimap_rect.width();
+    if panel_height < 4.0 || panel_width < 4.0 {
+        ui.allocate_rect(minimap_rect, egui::Sense::hover());
+        return;
+    }
+
+    // Background fill.
+    ui.painter()
+        .rect_filled(minimap_rect, 0.0, tokens.bg.code);
+
+    // Left-edge separator line.
+    ui.painter().line_segment(
+        [minimap_rect.left_top(), minimap_rect.left_bottom()],
+        egui::Stroke::new(1.0_f32, tokens.border.subtle),
+    );
+
+    // Pixels per source line, clamped to a readable range.
+    let px_per_line = (panel_height / total_lines as f32).clamp(0.5, 3.0);
+    let assumed_max_cols = 80.0_f32;
+
+    if let Some(lengths) = &line_lengths {
+        // Small file: render a colored bar per line.
+        let bar_color = theme::dim(tokens.text.muted, 76);
+        for (i, &len) in lengths.iter().enumerate() {
+            if len == 0 {
+                continue;
+            }
+            let y = minimap_rect.top() + i as f32 * px_per_line;
+            if y > minimap_rect.bottom() {
+                break;
+            }
+            let bar_w = (len as f32 / assumed_max_cols * (panel_width - 8.0))
+                .clamp(2.0, panel_width - 8.0);
+            let bar_rect = egui::Rect::from_min_size(
+                egui::pos2(minimap_rect.left() + 4.0, y),
+                egui::vec2(bar_w, (px_per_line - 0.5).max(0.5)),
+            );
+            ui.painter().rect_filled(bar_rect, 0.0, bar_color);
+        }
+    } else {
+        // Large/degraded file: centered placeholder.
+        ui.painter().text(
+            minimap_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "...",
+            egui::FontId::monospace(10.0),
+            tokens.text.disabled,
+        );
+    }
+
+    // Viewport indicator rectangle.
+    if let Some(vp) = viewport {
+        let top_line = vp.scroll.top_line as f32;
+        let visible_count = model.active_buffer_code_lines.len().max(1) as f32;
+
+        let ind_top = (minimap_rect.top() + top_line * px_per_line).max(minimap_rect.top());
+        let ind_bot =
+            (minimap_rect.top() + (top_line + visible_count) * px_per_line).min(minimap_rect.bottom());
+        let indicator = egui::Rect::from_min_max(
+            egui::pos2(minimap_rect.left() + 1.0, ind_top),
+            egui::pos2(minimap_rect.right() - 1.0, ind_bot),
+        );
+
+        let fill = theme::dim(tokens.bg.hover, 153);
+        ui.painter().rect_filled(indicator, 0.0, fill);
+        ui.painter().rect_stroke(
+            indicator,
+            0.0,
+            egui::Stroke::new(1.0_f32, tokens.border.strong),
+            egui::epaint::StrokeKind::Inside,
+        );
+    }
+
+    // Click / drag to scroll: compute target line from pointer position and
+    // center the viewport around it.
+    let response = ui.allocate_rect(minimap_rect, egui::Sense::click_and_drag());
+    if (response.clicked() || response.dragged()) && total_lines > 0 {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let click_y = pos.y - minimap_rect.top();
+            let clicked_line = (click_y / px_per_line) as u32;
+            let visible_count = model.active_buffer_code_lines.len() as u32;
+            let target_top = clicked_line.saturating_sub(visible_count / 2);
+
+            actions.push(DesktopAction::SetViewportScroll {
+                buffer_id: active.buffer_id,
+                scroll: ViewportScroll {
+                    top_line: target_top,
+                    left_column: viewport.map_or(0, |v| v.scroll.left_column),
+                },
+            });
+        }
+    }
 }
 
 /// Persistent drag state for tab reorder, stored in `egui::Context::data_mut`.
@@ -2536,13 +2694,6 @@ fn render_code_lines(
             if model.settings.code_folding_visible {
                 ui.label(theme::label("folding"));
                 ui.label(theme::code(format!("{} ranges", fold_ranges.len())));
-            }
-            if model.settings.minimap_visible {
-                ui.label(theme::label("minimap"));
-                ui.label(theme::muted(format!(
-                    "{} lines",
-                    model.active_buffer_code_lines.len()
-                )));
             }
             if model.settings.whitespace_guides_visible {
                 ui.label(theme::label("whitespace guides"));

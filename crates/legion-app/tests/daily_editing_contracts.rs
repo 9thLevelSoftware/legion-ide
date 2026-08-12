@@ -599,3 +599,50 @@ fn daily_editing_contracts_session_record_restores_memory_snapshot() {
         Some(memory_snapshot_json.as_str())
     );
 }
+
+#[test]
+fn minimap_toggle_persists_through_settings() {
+    let root = create_root();
+    let file = root.join("minimap_test.rs");
+    std::fs::write(&file, "fn main() {}\n").expect("seed file");
+
+    let mut app = trusted_app(&root);
+    app.open_file(file.to_string_lossy()).expect("open file");
+
+    // Default: minimap_visible is false.
+    let snapshot = app.shell_projection_snapshot("daily").expect("snapshot");
+    assert!(
+        !snapshot.settings_projection.editor.minimap_visible,
+        "minimap should be hidden by default"
+    );
+
+    // Enable minimap.
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::SetMinimapVisible { visible: true })
+        .expect("set minimap visible");
+    assert!(
+        matches!(outcome, AppCommandOutcome::SettingsUpdated(_)),
+        "expected SettingsUpdated outcome"
+    );
+
+    let snapshot = app.shell_projection_snapshot("daily").expect("snapshot after enable");
+    assert!(
+        snapshot.settings_projection.editor.minimap_visible,
+        "minimap should be visible after toggle on"
+    );
+
+    // Disable minimap.
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::SetMinimapVisible { visible: false })
+        .expect("set minimap hidden");
+    assert!(
+        matches!(outcome, AppCommandOutcome::SettingsUpdated(_)),
+        "expected SettingsUpdated outcome"
+    );
+
+    let snapshot = app.shell_projection_snapshot("daily").expect("snapshot after disable");
+    assert!(
+        !snapshot.settings_projection.editor.minimap_visible,
+        "minimap should be hidden after toggle off"
+    );
+}
