@@ -47,6 +47,9 @@ pub(crate) struct Theme {
     pub(crate) border: BorderTokens,
     pub(crate) text: TextTokens,
     pub(crate) accent: AccentTokens,
+    pub(crate) diagnostic: DiagnosticTokens,
+    pub(crate) search: SearchTokens,
+    pub(crate) chrome: ChromeTokens,
     pub(crate) spacing: SpacingScale,
     pub(crate) radius: RadiusScale,
     pub(crate) typography: TypographyScale,
@@ -93,6 +96,20 @@ impl Theme {
                 green: Color32::from_rgb(74, 222, 128),
                 red: Color32::from_rgb(255, 92, 122),
             },
+            diagnostic: DiagnosticTokens {
+                error: Color32::from_rgb(255, 92, 122),
+                warning: Color32::from_rgb(255, 184, 107),
+                info: Color32::from_rgb(75, 140, 255),
+                hint: Color32::from_rgb(126, 129, 144),
+            },
+            search: SearchTokens {
+                match_highlight: Color32::from_rgba_unmultiplied_const(255, 235, 59, 80),
+                current_match: Color32::from_rgba_unmultiplied_const(255, 152, 0, 120),
+            },
+            chrome: ChromeTokens {
+                breadcrumb_accent: Color32::from_rgb(75, 156, 211),
+                fold_indicator: Color32::from_rgba_unmultiplied_const(150, 150, 150, 128),
+            },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
             typography: TypographyScale::standard(),
@@ -138,6 +155,20 @@ impl Theme {
                 orange: Color32::from_rgb(180, 91, 18),
                 green: Color32::from_rgb(31, 128, 73),
                 red: Color32::from_rgb(212, 24, 61),
+            },
+            diagnostic: DiagnosticTokens {
+                error: Color32::from_rgb(212, 24, 61),
+                warning: Color32::from_rgb(180, 91, 18),
+                info: Color32::from_rgb(38, 100, 214),
+                hint: Color32::from_rgb(113, 113, 130),
+            },
+            search: SearchTokens {
+                match_highlight: Color32::from_rgba_unmultiplied_const(255, 235, 59, 100),
+                current_match: Color32::from_rgba_unmultiplied_const(255, 152, 0, 140),
+            },
+            chrome: ChromeTokens {
+                breadcrumb_accent: Color32::from_rgb(38, 100, 214),
+                fold_indicator: Color32::from_rgba_unmultiplied_const(113, 113, 130, 128),
             },
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
@@ -189,6 +220,26 @@ pub(crate) struct AccentTokens {
     pub(crate) orange: Color32,
     pub(crate) green: Color32,
     pub(crate) red: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiagnosticTokens {
+    pub(crate) error: Color32,
+    pub(crate) warning: Color32,
+    pub(crate) info: Color32,
+    pub(crate) hint: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SearchTokens {
+    pub(crate) match_highlight: Color32,
+    pub(crate) current_match: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChromeTokens {
+    pub(crate) breadcrumb_accent: Color32,
+    pub(crate) fold_indicator: Color32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,5 +631,25 @@ mod tests {
         assert_ne!(dark.accent.red, light.accent.red);
         assert_eq!(dark.spacing.md, light.spacing.md);
         assert_eq!(dark.radius.md, light.radius.md);
+    }
+
+    #[test]
+    fn dark_and_light_diagnostic_tokens_differ() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+
+        // Diagnostic tokens
+        assert_ne!(dark.diagnostic.error, light.diagnostic.error);
+        assert_ne!(dark.diagnostic.warning, light.diagnostic.warning);
+        assert_ne!(dark.diagnostic.info, light.diagnostic.info);
+        assert_ne!(dark.diagnostic.hint, light.diagnostic.hint);
+
+        // Search tokens
+        assert_ne!(dark.search.match_highlight, light.search.match_highlight);
+        assert_ne!(dark.search.current_match, light.search.current_match);
+
+        // Chrome tokens
+        assert_ne!(dark.chrome.breadcrumb_accent, light.chrome.breadcrumb_accent);
+        assert_ne!(dark.chrome.fold_indicator, light.chrome.fold_indicator);
     }
 }

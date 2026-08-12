@@ -2578,7 +2578,7 @@ fn render_code_lines(
                             [egui::pos2(start_x, y), egui::pos2(end_x, y)],
                             egui::Stroke::new(
                                 1.0_f32,
-                                egui::Color32::from_rgb(75, 156, 211),
+                                theme::tokens().chrome.breadcrumb_accent,
                             ),
                         );
                     }
@@ -2852,8 +2852,8 @@ fn paint_find_match_highlights(
         return;
     }
     let line_zero = line.number.saturating_sub(1);
-    let yellow = egui::Color32::from_rgba_premultiplied(255, 235, 59, 80);
-    let orange = egui::Color32::from_rgba_premultiplied(255, 152, 0, 120);
+    let yellow = theme::tokens().search.match_highlight;
+    let orange = theme::tokens().search.current_match;
 
     for (i, m) in find_bar.matches.iter().enumerate() {
         // Skip matches that don't overlap this line.
@@ -2923,10 +2923,10 @@ fn paint_diagnostic_underlines(
         let end_x = response.rect.left() + end_char as f32 * char_width;
         let y = response.rect.bottom() - 1.0;
         let color = match problem.severity {
-            ProtocolDiagnosticSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
-            ProtocolDiagnosticSeverity::Warning => egui::Color32::from_rgb(255, 165, 0),
-            ProtocolDiagnosticSeverity::Info => egui::Color32::from_rgb(0, 120, 215),
-            ProtocolDiagnosticSeverity::Hint => egui::Color32::from_rgb(150, 150, 150),
+            ProtocolDiagnosticSeverity::Error => theme::tokens().diagnostic.error,
+            ProtocolDiagnosticSeverity::Warning => theme::tokens().diagnostic.warning,
+            ProtocolDiagnosticSeverity::Info => theme::tokens().diagnostic.info,
+            ProtocolDiagnosticSeverity::Hint => theme::tokens().diagnostic.hint,
         };
         ui.painter().line_segment(
             [egui::pos2(start_x, y), egui::pos2(end_x, y)],
@@ -2987,10 +2987,10 @@ fn show_diagnostic_tooltip(
                 ui.separator();
             }
             let color = match problem.severity {
-                ProtocolDiagnosticSeverity::Error => egui::Color32::from_rgb(255, 80, 80),
-                ProtocolDiagnosticSeverity::Warning => egui::Color32::from_rgb(255, 165, 0),
-                ProtocolDiagnosticSeverity::Info => egui::Color32::from_rgb(0, 120, 215),
-                ProtocolDiagnosticSeverity::Hint => egui::Color32::from_rgb(150, 150, 150),
+                ProtocolDiagnosticSeverity::Error => theme::tokens().diagnostic.error,
+                ProtocolDiagnosticSeverity::Warning => theme::tokens().diagnostic.warning,
+                ProtocolDiagnosticSeverity::Info => theme::tokens().diagnostic.info,
+                ProtocolDiagnosticSeverity::Hint => theme::tokens().diagnostic.hint,
             };
             ui.colored_label(color, format!("{:?}", problem.severity));
             ui.label(&problem.message);
@@ -3031,7 +3031,7 @@ fn paint_inlay_hints(
             egui::Align2::LEFT_TOP,
             &label,
             egui::FontId::monospace(theme::tokens().typography.code as f32),
-            egui::Color32::from_rgba_premultiplied(150, 150, 150, 128),
+            theme::tokens().chrome.fold_indicator,
         );
     }
 }
