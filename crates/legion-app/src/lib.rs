@@ -80,7 +80,7 @@ use legion_observability::{
     ObservabilityError, SharedEventSink, agent_replay_manifest_recorded_event,
     collaboration_audit_recorded_event, event_metadata_record, phase4_runtime_audit_recorded_event,
     plugin_event_envelope, proposal_applied_event, proposal_approved_event, proposal_audit_record,
-    proposal_audit_recorded_event, proposal_created_event, proposal_failed_event,
+    proposal_audit_recorded_event, proposal_created_event_with_transition, proposal_failed_event,
     proposal_previewed_event, proposal_rejected_event, proposal_rolled_back_event,
     proposal_validated_event, remote_audit_recorded_event, save_denied_event,
     stale_proposal_rejected_event, terminal_audit_recorded_event, transaction_event,
@@ -13748,7 +13748,7 @@ impl SaveWorkflowService {
         response: &ProposalResponse,
     ) -> Result<Vec<EventEnvelope>, ObservabilityError> {
         Ok(match response {
-            ProposalResponse::Created(transition) => vec![proposal_created_event(
+            ProposalResponse::Created(transition) => vec![proposal_created_event_with_transition(
                 proposal,
                 transition,
                 proposal_coordinator.next_sequence(),
@@ -17623,12 +17623,30 @@ impl AppComposition {
         }
     }
 
-    /// Cancel the currently running delegated task loop by signalling the shared cancellation flag.
+    /// Cancel the currently active worker loop by signalling its shared cancellation flag.
     ///
-    /// This is a safety action and remains available even if a stale caller has
-    /// already projected a lower product mode. A Legion workflow registration
-    /// is a distinct authority owner and is never signalled by this action.
+    /// This broad safety action is used by kill-switch owners and remains available
+    /// even if a stale caller has already projected a lower product mode. It signals
+    /// either a delegated task or a Legion workflow registration.
     pub fn cancel_delegated_task(&self) -> Result<(), AppCompositionError> {
+        match &self.active_worker {
+            Some(ActiveWorkerRegistration {
+                cancellation_flag, ..
+            }) => {
+                cancellation_flag.cancel();
+                Ok(())
+            }
+            None => Err(AppCompositionError::AiRuntime(
+                "no delegated task running".to_string(),
+            )),
+        }
+    }
+
+    /// Cancel only a delegated-task worker, leaving Legion workflow workers untouched.
+    ///
+    /// UI actions that specifically mean "cancel delegated task" use this narrower
+    /// entry point; workflow kill switches use [`Self::cancel_delegated_task`].
+    pub fn cancel_delegated_task_only(&self) -> Result<(), AppCompositionError> {
         match &self.active_worker {
             Some(ActiveWorkerRegistration {
                 identity: ActiveWorkerIdentity::DelegatedTask { .. },
@@ -20507,7 +20525,7 @@ impl AppComposition {
                 }
             }
             AppCommandRequest::CancelDelegatedTask => {
-                self.cancel_delegated_task()?;
+                self.cancel_delegated_task_only()?;
                 Ok(AppCommandOutcome::Noop)
             }
             AppCommandRequest::ReviewDelegateProposalHunk {
@@ -22141,14 +22159,16 @@ impl AppComposition {
                     causality_id: proposal_output.causality_id,
                     diagnostics: Vec::new(),
                 };
-                let mut event =
-                    proposal_created_event(proposal, &transition, stored_event.sequence).map_err(
-                        |error| {
-                            AppCompositionError::AiRuntime(format!(
-                                "rebuild delegated proposal Created event failed: {error}"
-                            ))
-                        },
-                    )?;
+                let mut event = proposal_created_event_with_transition(
+                    proposal,
+                    &transition,
+                    stored_event.sequence,
+                )
+                .map_err(|error| {
+                    AppCompositionError::AiRuntime(format!(
+                        "rebuild delegated proposal Created event failed: {error}"
+                    ))
+                })?;
                 event.event_id = stored_event.event_id;
                 event.payload["registration_identity_hash"] =
                     serde_json::Value::String(batch_id.trim_start_matches("dpr3-").to_string());
@@ -25903,8 +25923,16 @@ impl AppComposition {
         // deltas; proposal registration runs on poll_product_ai_stream when the
         // worker finishes (Delegate-chat parity). Offline/fixture stays sync so
         // tests keep receiving proposal_id in the same call.
-        #[cfg(any(test, feature = "test-helpers"))]
-        let inject_assist_spawn_failure = std::mem::take(&mut self.injected_assist_spawn_failure);
+        let inject_assist_spawn_failure = {
+            #[cfg(any(test, feature = "test-helpers"))]
+            {
+                std::mem::take(&mut self.injected_assist_spawn_failure)
+            }
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            {
+                false
+            }
+        };
         #[cfg(feature = "ai")]
         let use_background_live =
             product_ai_will_attempt_live(self.preferred_ai_provider) || inject_assist_spawn_failure;
@@ -35534,7 +35562,7 @@ mod tests {
             causality_id,
             diagnostics: Vec::new(),
         };
-        let event = proposal_created_event(
+        let event = proposal_created_event_with_transition(
             &proposal,
             &transition,
             EventSequence(MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR),
@@ -35623,9 +35651,12 @@ mod tests {
             causality_id: CausalityId(uuid::Uuid::now_v7()),
             diagnostics: Vec::new(),
         };
-        let orphan_event =
-            proposal_created_event(&orphan_proposal, &orphan_transition, EventSequence(900))
-                .expect("orphan event");
+        let orphan_event = proposal_created_event_with_transition(
+            &orphan_proposal,
+            &orphan_transition,
+            EventSequence(900),
+        )
+        .expect("orphan event");
         app.storage
             .store_proposal_observation_batch(ProposalObservationBatch {
                 batch_id: "aaa-orphan".to_string(),
@@ -37084,7 +37115,7 @@ mod pkt_worker_tests {
     }
 
     #[test]
-    fn delegated_cancel_rejects_workflow_owner_without_signalling_it() {
+    fn delegated_cancel_only_rejects_workflow_owner_without_signalling_it() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
         let flag = SharedCancellationFlag::new();
@@ -37094,11 +37125,27 @@ mod pkt_worker_tests {
         );
 
         let error = app
-            .cancel_delegated_task()
+            .cancel_delegated_task_only()
             .expect_err("delegated cancellation must reject a workflow owner");
 
         assert!(error.to_string().contains("belongs to workflow"));
         assert!(!flag.is_cancelled());
+    }
+
+    #[test]
+    fn broad_worker_cancellation_signals_workflow_owner() {
+        let mut app = AppComposition::new();
+        app.set_product_mode(AppProductMode::Delegate);
+        let flag = SharedCancellationFlag::new();
+        app.inject_active_workflow_for_test(
+            LegionWorkflowSessionId("session:kill-switch".to_string()),
+            flag.clone(),
+        );
+
+        app.cancel_delegated_task()
+            .expect("broad worker cancellation must signal workflow owners");
+
+        assert!(flag.is_cancelled());
     }
 
     #[test]

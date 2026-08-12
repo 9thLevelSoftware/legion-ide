@@ -1428,18 +1428,8 @@ fn render_product_mode_switch(
     actions: &mut Vec<DesktopAction>,
 ) {
     let tokens = theme::tokens();
-    let button_width = |mode| {
-        if ultra_compact {
-            match mode {
-                DesktopProductMode::Manual => 58.0,
-                DesktopProductMode::Assist => 54.0,
-                DesktopProductMode::Delegate => 70.0,
-                DesktopProductMode::LegionWorkflows => 132.0,
-            }
-        } else {
-            116.0
-        }
-    };
+    let narrow = ultra_compact && ui.available_width() < 260.0;
+    let button_width = |mode| product_mode_button_width(mode, ultra_compact, narrow);
     let switch_width = product_mode_switch_specs()
         .iter()
         .map(|spec| button_width(spec.mode))
@@ -1447,54 +1437,102 @@ fn render_product_mode_switch(
         + ui.spacing().item_spacing.x * 3.0
         + 8.0;
     let leading_space = ((ui.available_width() - switch_width) * 0.5).max(0.0);
-    ui.horizontal(|ui| {
-        ui.add_space(leading_space);
-        egui::Frame::NONE
-            .fill(tokens.bg.input)
-            .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
-            .corner_radius(egui::CornerRadius::same(tokens.radius.md))
-            .inner_margin(egui::Margin::symmetric(4, 1))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for spec in product_mode_switch_specs() {
-                        let canonical = canonical_mode_entry(spec.mode);
-                        let active = spec.mode == active_level;
-                        let color = level_color(spec.mode);
-                        let response = ui
-                            .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
-                                ui.add_sized(
-                                    [button_width(spec.mode), 24.0],
-                                    egui::Button::new(theme::accent(canonical.label, color))
-                                        .selected(active)
-                                        .fill(if active {
-                                            theme::dim(color, 28)
-                                        } else {
-                                            theme::tokens().bg.input
-                                        }),
-                                )
-                            })
-                            .inner;
-                        ui.ctx().accesskit_node_builder(response.id, |node| {
-                            node.set_label(canonical.label);
-                            node.set_selected(active);
-                            if active {
-                                node.set_aria_current(egui::accesskit::AriaCurrent::True);
-                            } else {
-                                node.clear_aria_current();
+    egui::ScrollArea::horizontal()
+        .id_salt("legion_desktop_product_mode_scroll")
+        .show(ui, |ui| {
+            ui.add_space(leading_space);
+            egui::Frame::NONE
+                .fill(tokens.bg.input)
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(tokens.radius.md))
+                .inner_margin(egui::Margin::symmetric(4, 1))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for spec in product_mode_switch_specs() {
+                            let canonical = canonical_mode_entry(spec.mode);
+                            let active = spec.mode == active_level;
+                            let color = level_color(spec.mode);
+                            let label = product_mode_button_label(spec.mode, ultra_compact, narrow);
+                            let response = ui
+                                .push_id(("legion_desktop_product_mode", spec.ordinal), |ui| {
+                                    ui.add_sized(
+                                        [button_width(spec.mode), 24.0],
+                                        egui::Button::new(theme::accent(label, color))
+                                            .selected(active)
+                                            .fill(if active {
+                                                theme::dim(color, 28)
+                                            } else {
+                                                theme::tokens().bg.input
+                                            }),
+                                    )
+                                })
+                                .inner;
+                            ui.ctx().accesskit_node_builder(response.id, |node| {
+                                node.set_label(canonical.label);
+                                node.set_selected(active);
+                                if active {
+                                    node.set_aria_current(egui::accesskit::AriaCurrent::True);
+                                } else {
+                                    node.clear_aria_current();
+                                }
+                            });
+                            if response.clicked() {
+                                view.request_product_mode(
+                                    active_level.to_dock_mode(),
+                                    spec.mode.to_dock_mode(),
+                                    response.id,
+                                    actions,
+                                );
                             }
-                        });
-                        if response.clicked() {
-                            view.request_product_mode(
-                                active_level.to_dock_mode(),
-                                spec.mode.to_dock_mode(),
-                                response.id,
-                                actions,
-                            );
                         }
-                    }
+                    });
                 });
-            });
-    });
+        });
+}
+
+fn product_mode_button_label(
+    mode: DesktopProductMode,
+    ultra_compact: bool,
+    narrow: bool,
+) -> &'static str {
+    if !ultra_compact {
+        return canonical_mode_entry(mode).label;
+    }
+    if narrow {
+        match mode {
+            DesktopProductMode::Manual => "M",
+            DesktopProductMode::Assist => "A",
+            DesktopProductMode::Delegate => "D",
+            DesktopProductMode::LegionWorkflows => "W",
+        }
+    } else {
+        match mode {
+            DesktopProductMode::Manual => "Man",
+            DesktopProductMode::Assist => "Ast",
+            DesktopProductMode::Delegate => "Del",
+            DesktopProductMode::LegionWorkflows => "Work",
+        }
+    }
+}
+
+fn product_mode_button_width(mode: DesktopProductMode, ultra_compact: bool, narrow: bool) -> f32 {
+    if !ultra_compact {
+        return 116.0;
+    }
+    if narrow {
+        match mode {
+            DesktopProductMode::Manual
+            | DesktopProductMode::Assist
+            | DesktopProductMode::Delegate => 32.0,
+            DesktopProductMode::LegionWorkflows => 60.0,
+        }
+    } else {
+        match mode {
+            DesktopProductMode::Manual | DesktopProductMode::Assist => 44.0,
+            DesktopProductMode::Delegate => 48.0,
+            DesktopProductMode::LegionWorkflows => 64.0,
+        }
+    }
 }
 
 const MODE_CONFIRMATION_BODY: &str = "Execution remains proposal-mediated and limited to bounded permissions. This presentation confirmation grants no permissions; operation-level app gates remain authoritative.";

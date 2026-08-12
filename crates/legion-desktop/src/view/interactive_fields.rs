@@ -5,6 +5,8 @@
 //! `code_canvas_painter.rs`; this module is the approved home for terminal
 //! input, BYOK key entry, and similar adapter-local forms.
 
+use std::borrow::Cow;
+
 use crate::bridge::{DesktopAction, SensitiveString};
 use crate::theme;
 
@@ -132,17 +134,22 @@ pub(crate) fn render_delegate_task_draft(
     let mut draft = ui
         .ctx()
         .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
-    draft = bounded_delegate_task_draft(&draft);
-    let label = ui.label(theme::label("Task description"));
+    draft = bounded_delegate_task_draft(&draft).into_owned();
+    let label = ui
+        .push_id("legion-delegate-task-label", |ui| {
+            ui.label(theme::label("Task description"))
+        })
+        .inner;
     let response = ui.add(
         egui::TextEdit::multiline(&mut draft)
             .id_source("legion-delegate-task-draft")
+            .char_limit(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
             .desired_rows(3)
             .desired_width(ui.available_width())
             .hint_text("Describe a bounded task for Delegate"),
     );
     response.labelled_by(label.id);
-    draft = bounded_delegate_task_draft(&draft);
+    draft = bounded_delegate_task_draft(&draft).into_owned();
     let ready = canonical_scope_available && !draft.trim().is_empty();
     let submitted = ui
         .push_id("legion-delegate-task-submit", |ui| {
@@ -163,7 +170,7 @@ pub(crate) fn render_delegate_task_draft(
 ///
 /// This boundary is applied before retaining an adapter-local draft and again
 /// before the caller constructs a dispatch action.
-pub(crate) fn bounded_delegate_task_draft(value: &str) -> String {
+pub(crate) fn bounded_delegate_task_draft(value: &str) -> Cow<'_, str> {
     let char_end = value
         .char_indices()
         .nth(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
@@ -172,7 +179,11 @@ pub(crate) fn bounded_delegate_task_draft(value: &str) -> String {
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_string()
+    if end == value.len() {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(value[..end].to_string())
+    }
 }
 
 #[cfg(test)]

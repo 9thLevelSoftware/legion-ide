@@ -1256,8 +1256,8 @@ pub fn watcher_recovery_event(
     .build())
 }
 
-/// Build a proposal-created lifecycle event.
-pub fn proposal_created_event(
+/// Build a proposal-created lifecycle event from its transition record.
+pub fn proposal_created_event_with_transition(
     proposal: &WorkspaceProposal,
     transition: &ProposalLifecycleTransition,
     sequence: EventSequence,
@@ -1266,6 +1266,32 @@ pub fn proposal_created_event(
         return Err(ObservabilityError::MismatchedProposalTransition);
     }
     proposal_transition_event("proposal.created", proposal, transition, sequence, None)
+}
+
+/// Build a proposal-created lifecycle event using the original public API.
+///
+/// New callers should use [`proposal_created_event_with_transition`] so the
+/// event can preserve the transition timestamp and diagnostics. This wrapper
+/// remains available for one compatibility release while downstream callers
+/// migrate from a causality-only Created event.
+#[deprecated(note = "use proposal_created_event_with_transition to preserve transition metadata")]
+pub fn proposal_created_event(
+    proposal: &WorkspaceProposal,
+    causality_id: CausalityId,
+    sequence: EventSequence,
+) -> Result<EventEnvelope, ObservabilityError> {
+    proposal_lifecycle_event(
+        "proposal.created",
+        proposal,
+        ProposalLifecycleState::Created,
+        proposal.correlation_id,
+        causality_id,
+        sequence,
+        TimestampMillis::now(),
+        EventSeverity::Info,
+        None,
+        &[],
+    )
 }
 
 /// Build a proposal-validated lifecycle event.
@@ -2681,8 +2707,12 @@ mod tests {
     fn proposal_lifecycle_helpers_are_metadata_only_and_orderable() {
         let proposal = save_proposal();
         let created_transition = transition(ProposalLifecycleState::Created);
-        let created = proposal_created_event(&proposal, &created_transition, EventSequence(1))
-            .expect("valid ids");
+        let created = proposal_created_event_with_transition(
+            &proposal,
+            &created_transition,
+            EventSequence(1),
+        )
+        .expect("valid ids");
         let validated_transition = transition(ProposalLifecycleState::Validated);
         let validated =
             proposal_validated_event(&proposal, &validated_transition, EventSequence(2))
@@ -2725,14 +2755,28 @@ mod tests {
         let mut created = transition(ProposalLifecycleState::Created);
         created.timestamp = TimestampMillis(1_234_567_890);
 
-        let event =
-            proposal_created_event(&proposal, &created, EventSequence(1)).expect("created event");
+        let event = proposal_created_event_with_transition(&proposal, &created, EventSequence(1))
+            .expect("created event");
         let audit = proposal_audit_record(&proposal, &created).expect("created audit");
 
         assert_eq!(event.occurred_at, created.timestamp);
         assert_eq!(event.occurred_at, audit.timestamp);
         assert_eq!(event.retention, RetentionLabel::Audit);
         assert_eq!(event.severity, EventSeverity::Info);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn legacy_proposal_created_event_signature_remains_usable() {
+        let proposal = save_proposal();
+        let created = transition(ProposalLifecycleState::Created);
+
+        let event = proposal_created_event(&proposal, created.causality_id, EventSequence(1))
+            .expect("legacy Created event");
+
+        assert_eq!(event.event, "proposal.created");
+        assert_eq!(event.causality_id, created.causality_id);
+        assert_eq!(event.sequence, EventSequence(1));
     }
 
     #[test]
@@ -3274,7 +3318,8 @@ mod tests {
                 _ => unreachable!(),
             }
             assert_eq!(
-                proposal_created_event(&proposal, &created, EventSequence(1)).unwrap_err(),
+                proposal_created_event_with_transition(&proposal, &created, EventSequence(1))
+                    .unwrap_err(),
                 ObservabilityError::MismatchedProposalTransition,
                 "case={case}"
             );
@@ -3336,7 +3381,8 @@ mod tests {
         let mut invalid_created = transition(ProposalLifecycleState::Created);
         invalid_created.causality_id = CausalityId(Uuid::nil());
         assert_eq!(
-            proposal_created_event(&proposal, &invalid_created, EventSequence(1)).unwrap_err(),
+            proposal_created_event_with_transition(&proposal, &invalid_created, EventSequence(1))
+                .unwrap_err(),
             ObservabilityError::InvalidCausalityId
         );
         assert_eq!(

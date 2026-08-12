@@ -248,6 +248,7 @@ cargo test -p legion-desktop --test accessibility
 cargo test -p legion-desktop --test keyboard_nav
 cargo test -p legion-desktop --test projection_rendering
 cargo clippy -p legion-ui -p legion-desktop --all-targets -- -D warnings
+cargo fmt --all --check
 cargo run -p xtask -- check-deps
 cargo run -p xtask -- docs-hygiene
 cargo run -p xtask -- claim-audit
@@ -264,8 +265,7 @@ git status --short
 - Focused desktop verification passed: 53 library tests, 8 accessibility tests, 17 keyboard-navigation tests, and 57 projection-rendering tests.
 - Every remaining `legion-desktop` test target was also executed serially/per-target and passed. The single aggregate `cargo test -p legion-desktop --tests` command is deliberately not claimed green: an initial parallel attempt exhausted host memory and a later aggregate invocation stopped making progress after compilation.
 - Supporting workflow verification passed: 131 `legion-app` library tests, 24 delegated-task integration tests, 37 Legion Workflows integration tests, plus 70 storage unit tests, 1 debug-breakpoint test, and 4 plan-revision tests.
-- `check-deps`, `docs-hygiene`, `claim-audit`, `no-egui-textedit`, `verify-kanban-backlog`, and `verify-readiness-consistency` all passed; the latter two cross-checked 10 epics, 38 features, and 146 tasks.
+- `cargo fmt --all --check`, `check-deps`, `docs-hygiene`, `claim-audit`, `no-egui-textedit`, `verify-kanban-backlog`, and `verify-readiness-consistency` all passed at the final HEAD after the readiness-context fix and generated-artifact allowlist update; the latter two cross-checked 10 epics, 38 features, and 146 tasks.
 - `git diff --check 019aa9c..HEAD` passed and the worktree was clean before this documentation closeout.
-- Repository-wide `cargo fmt --all --check` remains red only for the two unrelated pre-existing baseline files `xtask/src/readiness_consistency.rs` and `xtask/tests/docs_hygiene.rs`. Package-scoped desktop formatting passed.
 
 If a package or aggregate suite cannot complete, preserve the exact command and observed state; never convert a timeout, resource failure, or stall into a passing claim.
