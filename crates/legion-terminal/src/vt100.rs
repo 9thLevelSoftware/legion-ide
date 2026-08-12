@@ -223,6 +223,10 @@ impl TerminalEmulator {
                     let excess = saved.grid.len() - rows;
                     let removed = saved.grid.drain(..excess).collect::<Vec<_>>();
                     saved.scrollback.extend(removed);
+                    let scrollback_limit = self.scrollback_limit;
+                    while saved.scrollback.len() > scrollback_limit {
+                        saved.scrollback.remove(0);
+                    }
                 }
                 std::cmp::Ordering::Equal => {}
             }
