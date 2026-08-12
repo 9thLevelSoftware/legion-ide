@@ -164,7 +164,11 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .map(|other| independent_claim_start(line, other.end, independent_start))
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
-        .max(clause_start(line, mention.start));
+        .max(clause_start(line, mention.start))
+        .max(comma_boundary_before(
+            line,
+            coordinated.map_or(mention.start, |(run_start, _)| run_start),
+        ));
     let end = siblings
         .iter()
         .filter(|other| other.start >= mention.end)
@@ -172,7 +176,11 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .map(|other| independent_claim_end(line, independent_end, other.start))
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
-        .min(clause_end(line, mention.end));
+        .min(clause_end(line, mention.end))
+        .min(comma_boundary_after(
+            line,
+            coordinated.map_or(mention.end, |(_, run_end)| run_end),
+        ));
 
     line[start..end].to_lowercase()
 }
@@ -261,6 +269,23 @@ fn clause_end(line: &str, after: usize) -> usize {
         .filter_map(|sep| line[after..].find(sep).map(|index| after + index))
         .min()
         .unwrap_or(line.len())
+}
+
+/// A comma also ends a claim, but only outside a coordinated run: in
+/// `T1 landed, T2 remains open` it separates two verdicts, while in
+/// `T1, T2 and T3 remain outstanding` it joins list items that share one.
+///
+/// Callers pass the run's bounds rather than the mention's when
+/// [`coordinated_list_bounds`] matched, so the commas inside a run are never
+/// treated as boundaries — only the ones enclosing it.
+fn comma_boundary_before(line: &str, before: usize) -> usize {
+    line[..before].rfind(',').map_or(0, |index| index + 1)
+}
+
+fn comma_boundary_after(line: &str, after: usize) -> usize {
+    line[after..]
+        .find(',')
+        .map_or(line.len(), |index| after + index)
 }
 
 /// Compare the ledger text against backlog statuses.
@@ -460,6 +485,19 @@ mod tests {
     #[test]
     fn comma_separated_independent_claims_do_not_share_predicates() {
         let ledger = "P1.F1.T1 landed, P1.F1.T2 remains open.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
+        );
+        assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn a_claim_does_not_reach_forward_past_a_comma() {
+        // The mirror of the case above: here the predicate trails the comma and
+        // belongs to the second task, so it must not be read back onto the
+        // first one even though no task id sits between them.
+        let ledger = "P1.F1.T1, remaining work sits with P1.F1.T2.";
         let violations = check_consistency(
             ledger,
             &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),

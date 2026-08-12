@@ -1,345 +1,483 @@
 # Legion IDE — Architecture Analysis
 
-> Generated 2026-08-07 · 943 source files · 29 crates · ~196k LOC Rust
+> Generated 2026-08-11 · 857 source files · 30 crates · ~203k LOC Rust
+> All 6 finish phases complete. Zero `todo!()`, zero `unimplemented!()`.
 
 ## 1. System Overview
 
 Legion IDE is a proprietary, Rust-native code editor with integrated AI-assisted
 development, multi-agent workflow orchestration, and defense-in-depth security.
-The codebase is a Cargo workspace of 29 crates plus an `xtask` automation suite,
-targeting Windows, macOS, and Linux.
+The codebase is a Cargo workspace of 30 crates (29 under `crates/` + `xtask`)
+targeting Windows, macOS, and Linux via egui 0.34.2.
 
 **Key design principles:**
 - **Projection-only UI** — the renderer never owns editor state; it reads
-  snapshots and emits intents.
+  `ShellProjectionSnapshot` and emits `CommandDispatchIntent` back.
 - **Proposal-mediated writes** — every file mutation flows through a
   proposal/risk-assessment pipeline before touching disk.
 - **Metadata-only egress** — AI provider traffic carries fingerprints and byte
   counts, never raw source text.
 - **Fail-closed security** — unknown capabilities are denied; sandboxes report
   honest enforcement gaps.
-- **Hexagonal ports** — 11 service-port traits in `legion-protocol` define
-  internal boundaries; implementations are injected, not imported.
+- **Port/adapter uniformity** — every domain boundary is a single-method
+  `fn handle(Request) -> ProtocolResult<Response>` trait.
+
+**Edition**: Rust 2024 · rust-version 1.92 · resolver v3
+
+**Binaries**: 3 main entry points (`legion-app`, `legion-cli`, `legion-desktop`)
+plus 5 golden-path verification binaries and 4 test fixtures/probes.
 
 ## 2. Crate Dependency Graph
 
+Clean DAG — no circular dependencies. 7 layers from leaf to top.
+
 ```
-                          legion-protocol  (29k LOC — shared types, DTOs, port traits)
-                                │
-        ┌───────────┬───────────┼───────────┬───────────┬────────────┐
-        ▼           ▼           ▼           ▼           ▼            ▼
-   legion-text  legion-platform legion-security legion-storage legion-observability
-     (rope)      (OS abstraction) (policy engine) (persistence)  (event sinks)
-        │              │           │            │           │
-        ▼              │           │            │           │
-   legion-editor       │           │            │           │
-     (buffers,         │           │            │           │
-      undo/redo)       │           │            │           │
-        │              │           │            │           │
-        ├──────────────┼───────────┼────────────┼───────────┘
-        ▼              ▼           ▼            ▼
-   legion-index    legion-lsp  legion-plugin  legion-terminal
-   (semantic idx)  (LSP runtime) (WASM host)  (PTY runtime)
-        │              │           │            │
-        ├──────────────┼───────────┼────────────┤
-        ▼              ▼           ▼            ▼
-                    legion-app  (50k LOC — composition root)
-                        │
-            ┌───────────┼───────────┐
-            ▼           ▼           ▼
-       legion-ai   legion-agent  legion-sandbox
-       (provider   (workflow     (OS isolation)
-        routing)    coordinator)
-            │           │
-            ▼           ▼
-       legion-ai-providers
-       (6 provider adapters + MCP)
-                        │
-                        ▼
-                   legion-desktop  (25k LOC — egui shell)
-                        │
-                   legion-ui  (projection snapshots)
+Layer 6  legion-desktop (11 deps)
+Layer 5  legion-app (21 deps — composition root)
+Layer 4  legion-agent, xtask
+Layer 3  legion-ai-providers, legion-cli, legion-memory, legion-plugin,
+         legion-project, legion-tracker
+Layer 2  legion-ai, legion-editor, legion-index, legion-storage,
+         legion-terminal
+Layer 1  legion-collaboration, legion-debug, legion-lsp, legion-observability,
+         legion-platform, legion-remote, legion-remote-transport,
+         legion-retention, legion-security, legion-telemetry, legion-text,
+         legion-ui, legion-vscode-compat
+Layer 0  legion-protocol (0 deps), legion-sandbox (0 deps)
 ```
 
-**Supporting crates:** `legion-collaboration` (operation log), `legion-remote` /
-`legion-remote-transport` (remote dev + mTLS transport), `legion-memory`
-(long-term context), `legion-tracker` (task/plan ledger), `legion-retention`
-(encrypted source vault), `legion-telemetry` (hosted spool), `legion-vscode-compat`
-(VSIX manifest normalization), `legion-debug` (DAP adapter), `legion-cli` (evidence
-checker).
+### High Fan-In (most depended upon)
+
+| Crate | Dependents |
+|-------|-----------|
+| legion-protocol | 28 (universal — every crate except legion-sandbox) |
+| legion-security | 7 |
+| legion-observability | 6 |
+| legion-platform | 6 |
+| legion-storage | 6 |
+| legion-ai | 4 |
+
+### High Fan-Out (most dependencies)
+
+| Crate | Internal deps |
+|-------|-------------|
+| legion-app | 21 (composition root) |
+| legion-desktop | 11 |
+| legion-agent | 6 |
+| legion-plugin | 5 |
+| legion-project | 5 |
+
+### Zero Fan-In (leaf crates — not depended on by other workspace crates)
+
+`legion-cli`, `legion-desktop`, `legion-remote-transport`, `legion-retention`,
+`legion-telemetry`, `legion-vscode-compat`, `xtask`
 
 ## 3. Layer Architecture
 
-### Layer 0 — Protocol (`legion-protocol`)
+### Layer 0 — Protocol (`legion-protocol`, 29k LOC)
 
-The foundation crate: ~620 structs, ~270 enums, 11 port traits, ~80 validators.
-Zero runtime behavior — pure types and validation functions. Every other crate
-imports it; it imports only `serde`, `uuid`, and `thiserror`.
+The vocabulary layer. 978+ public items defining every DTO, identifier, trait
+port, and lifecycle enum used across crate boundaries.
 
-**Port traits** define the hexagonal service boundaries: `WorkspacePort`,
-`EditorPort`, `ProposalPort`, `TerminalPort`, `LspPort`, `SemanticPort`,
-`CapabilityBrokerPort`, `EventSinkPort`, `StorageRepositoryPort`, `PluginPort`,
-`ProjectInfoPort`.
+- **Identifiers**: `ProjectId`, `WorkspaceId`, `BufferId`, `FileId`, `ProposalId`, `CorrelationId`
+- **Port traits** (single `handle(Req) -> ProtocolResult<Resp>` method each):
+  `WorkspacePort`, `EditorPort`, `ProposalPort`, `TerminalPort`, `LspPort`,
+  `SemanticPort`, `CapabilityBrokerPort`, `EventSinkPort`, `StorageRepositoryPort`,
+  `PluginPort`, `ProjectInfoPort`
+- **Projection DTOs**: `ViewportProjection`, `LanguageToolingProjection`,
+  `TerminalPanelProjection`, `LspServerHealthProjection`
+- **Workflow contracts**: `LegionWorkflowSession`, `LegionWorkflowState`,
+  `LegionWorkflowKillSwitch`, `LegionWorkflowMergeReadiness`
 
-**Core domain types:** `WorkspaceProposal` (13 payload variants), `ProposalLifecycleState`
-(12 states), `ViewportProjection` (the richest struct — buffers, cursors, selections,
-scroll, overlays, large-file status), `LegionToolKind` (7 tool types), `RiskRuleId`
-(7 deterministic rules), `ApprovalLevel` (Auto/Ask/RequireExplicit/Deny).
+### Layer 1 — Primitives (13 crates)
 
-### Layer 1 — Primitives
-
-| Crate | LOC | Purpose |
-|-------|-----|---------|
-| `legion-text` | 2.6k | Rope-backed `TextBuffer` (ropey), immutable `TextSnapshot`, `LineIndex` with UTF-8/UTF-16 conversion, chunk materialization (64 KiB SHA-256), binary detection |
-| `legion-platform` | 2.9k | OS abstraction: filesystem, process, watcher, PTY, environment, time; Windows ConPTY parity |
-| `legion-security` | 4.8k | `SecurityPolicy` + `DenyByDefaultBroker`: capability-prefix routing (`ai.`, `fs.`, `terminal.`, `plugin.`, `network.`, `remote.`, `cloud.`, `telemetry.`, `retention.*`), trust-gated decisions, `OrgPolicyBundle` (signed admin policy), `ProposalApplyGate`, `DeterministicRiskRuleEngine`, secret scanning |
-| `legion-storage` | 6.3k | Workspace metadata, trust persistence, OS keyring secrets (`BYOK`), durable checkpoint store for rollback, plan revision ledger |
-| `legion-observability` | 4.3k | Tracing, metrics, event log, performance counters; metadata-only redaction; rejects zero correlation/causality/sequence |
-
-### Layer 2 — Editor Infrastructure
+Each depends only on `legion-protocol`:
 
 | Crate | LOC | Purpose |
 |-------|-----|---------|
-| `legion-editor` | 4.1k | Multi-buffer engine: transactional edits, undo/redo (snapshot-restore), save lifecycle, snapshot leasing, viewport projection, LCS line diff |
-| `legion-index` | 7.0k | Semantic indexing engine: tree-sitter parsing, lexical symbol maps, fuzzy scoring, structural search/rewrite, deterministic parser-cache fallbacks |
-| `legion-lsp` | 4.6k | JSON-RPC framing, supervised LSP lifecycle, diagnostics/completion/hover/code-action projections |
-| `legion-plugin` | 1.4k | WASM plugin host (wasmtime): manifest validation, capability/quota metadata enforcement, fail-closed responses |
-| `legion-terminal` | 2.7k | PTY runtime: policy-gated launch (`TerminalLaunchPolicyContract`), command taxonomy classification, output redaction, ConPTY/grid/OSC parsing |
-| `legion-debug` | 2.3k | DAP client: adapter resolution, JSON framing, live debug sessions, evidence extraction |
-| `legion-project` | 9.0k | Workspace model: file tree, trust-aware VFS resolution, file watcher, tantivy-backed search |
+| legion-text | 2,574 | Rope-backed buffer, line index, UTF-16, chunked snapshots |
+| legion-security | 4,808 | DenyByDefaultBroker, 20+ capability namespaces, risk engine, secret scanner |
+| legion-observability | 4,267 | Event envelopes, redacting sinks, SHA-256, crash capture |
+| legion-platform | 2,907 | ConPTY/Unix PTY, atomic writes, process spawn with timeout |
+| legion-ui | 9,002 | Shell projection/intent layer: CommandDispatchIntent (~40+ variants), dock/panel system |
+| legion-lsp | 4,613 | LSP client: JSON-RPC framing, circuit breaker, hover/completion/definition/rename |
+| legion-terminal | 4,598 | VT100 emulator, cell grid, SGR 16/256/RGB, scrollback, keyboard translation |
+| legion-debug | 2,277 | DAP framing, live debug sessions, breakpoints, stepping |
+| legion-collaboration | 1,756 | OT engine, multi-participant convergence |
+| legion-remote | 2,747 | Remote workspace: filesystem ops, SSH/devcontainer |
+| legion-remote-transport | 1,990 | rustls mTLS, certificate pinning, flow control |
+| legion-retention | 2,944 | ChaCha20-Poly1305 vault, OS keyring keys, key rotation |
+| legion-vscode-compat | 987 | VS Code extension tier classification, Open VSX resolver |
+| legion-telemetry | 1,327 | Durable spool, atomic writes, HTTP export |
 
-### Layer 3 — AI & Agent
+### Layer 2 — Editor Infrastructure (5 crates)
 
-| Crate | LOC | Purpose |
-|-------|-----|---------|
-| `legion-ai` | 2.9k | Provider-agnostic orchestration: `ModelProvider` trait, `ProviderRouter` (policy-bound, metadata-only responses), `ContextManifestRecord` assembly, redaction, markdown streaming, tool-calling protocol |
-| `legion-ai-providers` | 5.9k | 6 provider adapters (deterministic-local, ollama, llama-cpp, openai, openai-compatible, anthropic) with activation tiers (LocalDefault → ByokConsentRequired → HostedDenied), MCP client (stdio + streamable-HTTP), Anthropic SSE streaming |
-| `legion-agent` | 6.6k | DAG-scheduled workflow engine: `WorkflowDag` from approved plans, `LegionWorkflowCoordinator` (worker lifecycle, dependency-cycle detection, conflict detection), `parallel_worker_lanes()` scheduler, synchronous tool-use loop with budget, evidence extraction (SHA-256 hashes), scope enforcement, worktree sandbox orchestration |
-| `legion-sandbox` | 2.0k | OS-level process isolation: macOS Seatbelt (SBPL), Linux Landlock v5 + bubblewrap, Windows job objects; honest enforcement reporting with caveat labels |
+| Crate | LOC | Purpose | Key Types |
+|-------|-----|---------|-----------|
+| legion-editor | 4,225 | Multi-buffer engine | `EditorEngine`, `TextEdit`, `TextPosition`, `SaveAcknowledgement` |
+| legion-index | 7,704 | Tree-sitter parsing, semantic index | `TreeSitterParser`, `SemanticIndex`, `LexicalIndexer` |
+| legion-ai | 2,876 | Provider routing, streaming | Tool-calling, secret redaction, manifest assembly |
+| legion-storage | 6,260 | 20+ record type CRUD | `InMemoryStorage`, `FileBackedStorage`, atomic writes |
+| legion-terminal | 4,598 | (also Layer 1) | VT100 state machine, cell grid, PTY lifecycle |
 
-### Layer 4 — Application Composition (`legion-app`, 50k LOC)
-
-The composition root that wires all layers together. `AppComposition` owns the
-workspace, editor engine, proposal pipeline, language tooling, terminal runtime,
-debug adapter, AI routing, and agent coordinator.
-
-**Key modules:**
-- `language/` — rust-analyzer lifecycle, download policy, document sync, edit
-  proposal routing, stderr redaction
-- `proposal.rs` — multi-file diff computation, partial acceptance, hunk
-  disposition, risk rule evaluation
-- `terminal_policy.rs` — scrollback limits, environment sanitization, deny
-  prefixes
-- `updater.rs` — auto-updater client (Ed25519 verification, staging, journal,
-  rollback)
-- `test_explorer.rs` — cargo test discovery, trust-gated execution
-- `diagnostics.rs` — crash report assembly, metadata-only export
-- `offline_ai.rs` — offline-mode AI stub (compiled when `ai` feature is off)
-
-### Layer 5 — Desktop Shell
+### Layer 3 — Agent & Integration (6 crates)
 
 | Crate | LOC | Purpose |
 |-------|-----|---------|
-| `legion-ui` | 8.8k | Projection-only shell: `Shell` + `ShellProjectionSnapshot` (~40 fields covering every UI panel), `CommandDispatchIntent` intents, `DockLayout` panel registry, `PaletteProjection`, `TestExplorerProjection`, workflow board/fleet card projections |
-| `legion-desktop` | 25k | egui/eframe renderer: `DesktopCommandBridge` (~120 `DesktopAction` variants → validated intents), `ProjectionView` rendering pipeline, token-based theme system (dark/light with 12 background slots, 8 accent colors, CJK fallback), view submodules for code canvas, assistant rail, ghost text, inline edit, plan editor, proposal review, fleet board, sandbox panel, terminal panel, worker panel |
+| legion-ai-providers | 5,947 | 6 adapters (Ollama, OpenAI, Anthropic, llama.cpp, etc.), SSE, MCP client |
+| legion-agent | 6,588 | DAG scheduler, delegated task loop, 7 tool executors |
+| legion-plugin | 1,388 | WASM runtime (Wasmtime), ABI validation, trust enforcement, quota tracking |
+| legion-project | 9,044 | Workspace actor: file save, conflict detection, git integration, Tantivy search |
+| legion-memory | 1,328 | Consent-gated retention, compaction, trace export |
+| legion-tracker | 521 | Agent run ledger, workflow tracking |
 
-### Supporting Crates
+### Layer 4 — Application Composition (`legion-app`, 51k LOC)
 
-| Crate | LOC | Purpose |
-|-------|-----|---------|
-| `legion-collaboration` | 1.8k | Deterministic operation log for collaborative editing: document bindings, version vectors, causal gap detection, presence projection |
-| `legion-remote` | 2.7k | Remote development runtime: workspace lifecycle, filesystem operations, cloud lane tasks, offline resume |
-| `legion-remote-transport` | 2.0k | mTLS transport carriers: certificate management, flow control, replay windows, connection health |
-| `legion-memory` | 1.3k | Opt-in long-term memory: embedding references, consent-gated retention, snapshot schema versioning |
-| `legion-tracker` | 0.5k | Metadata ledger: agent runs, workflow sessions, plan approvals, verification gates |
-| `legion-retention` | 2.9k | Encrypted raw-source vault: ChaCha20-Poly1305 at-rest encryption, key rotation, tombstone lifecycle, consent-gated access audit |
-| `legion-telemetry` | 1.3k | Hosted telemetry spool: consent-gated export batches, durable local spool |
-| `legion-vscode-compat` | 1.0k | VSIX manifest normalization to protocol DTOs; no Node.js execution |
-| `legion-cli` | 1.6k | Evidence checker CLI: phase gate validation, evidence TOML parsing |
+The composition root wiring all crates into a single product state machine.
+
+**`AppComposition`** — ~250 public methods organized by domain:
+- **Lifecycle**: `open_workspace`, `open_file`, `save_active_buffer`, `switch_tab`, `close_tab`, `reorder_tab`
+- **Editing**: `edit_active_buffer`, `set_buffer_cursor`, `set_buffer_selection`, `dispatch_ui_intent`
+- **LSP**: `issue_lsp_completion_request`, `issue_lsp_hover_request`, `issue_lsp_definition_request`, `ingest_lsp_*_response_for_buffer`
+- **Search/Git**: `run_search`, `run_structural_search`, `refresh_git_projection`
+- **AI/Workflow**: `start_delegated_task`, `execute_legion_workflow`, `start_ai_run`
+- **Projections**: `shell_projection_snapshot`, `active_buffer_projection`, `explorer_projection`
+
+### Layer 5 — Desktop Shell (`legion-desktop`, 26k LOC)
+
+Pure rendering adapter — zero product state.
+
+- **`DesktopEframeApp`** — implements `eframe::App`, the egui render loop
+- **`DesktopCommandBridge`** — translates raw input → `DesktopAction` → `CommandDispatchIntent`
+- **`DesktopProjectionViewModel`** — converts `ShellProjectionSnapshot` → egui-drawable view models
+- **View modules**: one file per panel (`fleet_board`, `terminal_panel`, `plan_editor`,
+  `proposal_review`, `sandbox_panel`, `risk_strip`, `code_canvas_painter`, `ghost_text`, etc.)
+- **Theme**: `DiagnosticTokens`, `SearchTokens`, `ChromeTokens` — semantic color tokens, dark/light
+- **Tab bar**: per-tab close buttons, drag-to-reorder with insertion indicator
+- **Code minimap**: scaled buffer overview, viewport indicator, click/drag-to-scroll
+
+### Supporting — CLI (`legion-cli`, 1,655 LOC)
+
+Diagnostic CLI: phase evidence gates (`finish-phase1` through `finish-phase6`),
+`doctor` (platform health check), `setup`, storage verification.
 
 ## 4. Key Data Flows
 
-### Save Flow
+### Editor Data Flow (read path)
 ```
-User edit → EditorEngine::apply_edit (transactional, snapshot for undo)
-  → AppComposition::save_active_buffer
-    → SaveWorkflowService
-      → WorkspaceActor::save_file_with_proposal
-        → ProposalPort (risk assessment, fingerprint preconditions)
-          → DeterministicRiskRuleEngine (7 rules → ApprovalLevel)
-            → SecurityPolicy::decide (capability gate)
-              → Disk write (atomic, fail-closed on non-atomic fallback)
+AppComposition.active_buffer_projection()
+  → EditorEngine.viewport_projection()
+    → TextBuffer rope snapshot
+    → TreeSitterParser.highlight_captures_from_text()
+    → LspPort: diagnostics, inlay hints
+  → ShellProjectionSnapshot (legion-ui)
+    → DesktopProjectionViewModel.from_snapshot() (legion-desktop)
+      → egui render
+```
+
+### Editor Data Flow (write path)
+```
+User input → DesktopCommandBridge → DesktopAction
+  → CommandDispatchIntent (legion-ui)
+    → AppComposition.dispatch_ui_intent()
+      → EditorEngine.apply_edit() / .undo() / .redo()
+      → WorkspaceActor: save with conflict detection
+      → ProposalPort: risk assessment pipeline
 ```
 
 ### AI Assist Flow
 ```
-User trigger → ProviderRouter::route
-  → CapabilityBrokerPort::decide (trust + consent + provider class)
-    → ContextManifestRecord assembly (privacy labels, egress tracking)
-      → redact_model_bound_output (secret scanning)
-        → ModelProvider::complete (metadata-only response fingerprint)
-          → Proposal creation (inline edit or delegated task)
+User prompt → CommandDispatchIntent::StartDelegatedTask
+  → AppComposition.start_delegated_task()
+    → DenyByDefaultBroker.decide("ai.*") capability check
+    → legion-ai: provider routing + manifest assembly
+    → legion-ai-providers: adapter dispatch (Ollama/OpenAI/Anthropic/etc.)
+    → legion-agent: DAG scheduler, tool executors
+    → ProposalPort: changes flow through proposal lifecycle
 ```
 
-### Delegated Task Flow
+### Terminal Data Flow
 ```
-Approved plan → WorkflowDag (dependency graph)
-  → LegionWorkflowCoordinator::next_ready_workers
-    → parallel_worker_lanes (scheduler)
-      → DelegatedTaskSandboxOrchestrator (worktree allocation)
-        → SandboxEnforcementReport (honest enforcement)
-          → Agent loop (synchronous tool-use, budgeted)
-            → Evidence extraction (SHA-256 hashed)
-              → Proposal recording (metadata-redacted)
+CommandDispatchIntent::TerminalLaunch
+  → AppComposition.dispatch_ui_intent()
+    → DenyByDefaultBroker.decide("terminal.*")
+    → PtyService.spawn() (ConPTY on Windows, openpty on Unix)
+    → OSC parse → credential redact → VT100 emulator
+    → Cell grid → TerminalPanelProjection → egui colored render
 ```
 
 ## 5. Security Architecture
 
-**Four-layer defense in depth:**
+**`DenyByDefaultBroker`** — central capability broker with `SecurityPolicy`:
 
-1. **Policy layer** (`legion-security`) — `DenyByDefaultBroker` evaluates every
-   `CapabilityRequest` against `SecurityPolicy`. Three-state workspace trust
-   (Trusted/Untrusted/Unknown). Untrusted workspaces are denied terminal, file
-   write, network, plugin, LSP, and AI operations. `OrgPolicyBundle` adds signed
-   admin-distributable policy with a `ProductMode` ceiling
-   (Manual < Assist < Delegates < Automate < LegionWorkflows).
+- **20+ capability namespaces**: `ai.`, `collaboration.`, `remote.`, `telemetry.`,
+  `retention.raw_source.`, `storage.migration.`, `cloud.`, `plugin.`, `fs.`,
+  `terminal.`, `lsp.`, `network.`
+- **~14 sub-policies**: `PathPolicy`, `CommandTaxonomy`, `TerminalPolicy`,
+  `LspLaunchPolicy`, `PluginCapabilityPolicy`, `NetworkPolicy`, `AiProviderPolicy`, etc.
+- **Trust-gated**: `TrustState::{Trusted, Untrusted, Unknown}` checked before detailed policy
+- **Org policy distribution**: `OrgPolicyBundle` with signed/versioned policies,
+  `ProductMode` ceiling (Manual < Assist < Delegates < Automate < LegionWorkflows)
+- **Path normalization**: UNC prefixes, drive letters, `..` traversal rejection,
+  case-folding only on Windows
+- **Secret scanning**: `scan_payload_for_sensitive_markers` — AWS keys, `ghp_`, `sk-`,
+  `xoxb-`, PEM headers, raw-prompt markers
 
-2. **Risk assessment** (`legion-protocol` + `legion-security`) —
-   `DeterministicRiskRuleEngine` evaluates 7 rule IDs: path-scope escape, file
-   count, deletion ratio, dependency/lockfile touch, migration proximity, secrets
-   proximity, binary changes. Graduated approval ladder with vacuous-truth guard.
+**Sandbox** (`legion-sandbox`):
+- OS-level sandbox: Linux (Landlock), macOS (sandbox-exec), Windows
+- Fail-closed enforcement with honest gap reporting
+- Hostile plugin fixtures: `capability_probe.wat`, `loop.wat`, `oom.wat`
 
-3. **Sandbox layer** (`legion-sandbox`) — OS-level process containment with
-   platform-specific backends and honest enforcement gap reporting.
-
-4. **Runtime enforcement** (`legion-terminal`, `legion-agent`) — command
-   taxonomy classification, output redaction (API keys, bearer tokens, GitHub/Slack
-   tokens), per-session timeout/size limits, scope enforcement for tool calls.
-
-**Secret scanning:** `scan_payload_for_sensitive_markers` detects PEM keys, API
-keys, bearer tokens, and provider-prefixed credentials in trace/diff/log payloads
-before retention or export.
+**Plugin isolation** (`legion-plugin`):
+- Wasmtime WASM runtime, ABI validation (`PHASE5_PLUGIN_ABI_VERSION: u16 = 1`)
+- Per-invocation host-call quota + cumulative output-byte quota
+- Capability membership + security broker check before every host call
+- Lifecycle states: Discovered → Rejected/Loaded → Activated → Running → Idle/Crashed
 
 ## 6. Test Coverage Map
 
-| Crate | Source Files | Test Files | Ratio |
-|-------|-------------|------------|-------|
-| `legion-app` | 21 | 44 | 2.1:1 |
-| `legion-desktop` | 35 | 55 | 1.6:1 |
-| `legion-agent` | 15 | 13 | 0.9:1 |
-| `legion-protocol` | 9 | 7 | 0.8:1 |
-| `legion-lsp` | 4 | 12 | 3.0:1 |
-| `legion-project` | 1 | 9 | 9.0:1 |
-| `legion-security` | 3 | 8 | 2.7:1 |
-| `legion-ai-providers` | 3 | 5 | 1.7:1 |
-| `legion-ai` | 7 | 6 | 0.9:1 |
-| `legion-terminal` | 5 | 6 | 1.2:1 |
-| `legion-editor` | 2 | 4 | 2.0:1 |
-| **Total** | **157** | **193** | **1.2:1** |
+**2,166 `#[test]` functions** across 29 crates (959 unit, 1,207 integration).
 
-**Golden-path smokes** (GP-1 through GP-4) exercise end-to-end product flows:
-fixture edit/LSP/git (GP-1), scope/sandbox/kill-switch with AI-assist routing
-(GP-2), delegate task loop with scope denial and evidence TOML (GP-3), automate
-multi-agent workflow evidence (GP-4).
+| Crate | Unit | Integration | Total |
+|-------|------|------------|-------|
+| legion-app | 128 | 363 | 491 |
+| legion-desktop | 44 | 292 | 336 |
+| legion-protocol | 30 | 129 | 159 |
+| legion-terminal | 101 | 21 | 122 |
+| legion-security | 69 | 30 | 99 |
+| legion-agent | 47 | 43 | 90 |
+| legion-lsp | 18 | 71 | 89 |
+| legion-index | 31 | 46 | 77 |
+| legion-project | 21 | 55 | 76 |
+| legion-editor | 31 | 39 | 70 |
+| legion-ai-providers | 42 | 25 | 67 |
+| legion-storage | 51 | 5 | 56 |
+| legion-observability | 40 | 8 | 48 |
+| legion-ui | 44 | 3 | 47 |
+| legion-ai | 26 | 20 | 46 |
+| legion-text | 39 | 5 | 44 |
+| (15 others) | 197 | 52 | 249 |
 
-**21 standing gates** run on every PR via `xtask`: dependency policy, docs
-hygiene, claim audit, no-egui-textedit, release pipeline, format, check, test,
-clippy, cargo-deny, rust-analyzer smoke, golden paths 1–4, perf harness, update
-drill, kanban backlog, readiness consistency.
+**Golden path binaries** (5): `golden_path_1.rs` through `golden_path_5.rs` in
+`crates/legion-app/src/bin/`, each exercising a full user journey through `AppComposition`.
+
+**Phase 6 acceptance tests** (5): `crates/legion-app/tests/phase6_acceptance.rs` —
+open→edit→save→syntax→terminal→git commit through `AppComposition`.
+
+**View-model integration tests** (6): `crates/legion-desktop/tests/user_journey_rendering.rs` —
+syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewModel`.
+
+### Test Fixtures
+- `fixtures/gp1-rust/` — standalone Rust project for golden path 1
+- `crates/legion-plugin/fixtures/hostile/` — WASM hostile-plugin probes (sandbox testing)
+- `evals/fixtures/` — AI eval datasets
+- `training/fixtures/` — AI training traces
 
 ## 7. CI/CD Pipeline
 
-| Workflow | Trigger | Matrix | Status |
-|----------|---------|--------|--------|
-| `legion-gates.yml` | push to main, PRs | ubuntu/windows/macos | Merge-blocking |
-| `legion-smoke.yml` | weekly + dispatch | ubuntu/windows/macos | Independent (non-blocking) |
-| `legion-bench.yml` | weekly | ubuntu | Recorded-mode synthetic scoring |
-| `legion-preview.yml` | manual | ubuntu/windows/macos | Unsigned beta preview builds |
+5 GitHub Actions workflows:
+
+| Workflow | Trigger | Jobs |
+|----------|---------|------|
+| `legion-gates.yml` | push/PR | 3-OS matrix: fmt, check, test, clippy + cargo-deny |
+| `legion-smoke.yml` | scheduled | 3-OS smoke tests + golden-path + update-drill |
+| `legion-bench.yml` | scheduled | Performance/benchmark recording |
+| `legion-preview.yml` | scheduled | Preview builds |
+| `legion-release.yml` | v* tags / manual | build-and-test → release (3-OS, `--from-artifacts`) |
+
+### xtask Commands
+`CheckDeps`, `DocsHygiene`, `ClaimAudit`, `NoEguiTextedit`, `ReleasePipeline`,
+`VerifyReleasePipeline`, `ReleaseManifest`, `PerfHarness`, `VerifyPerfHarness`,
+`LegionBench`, `VerifyLegionBench`, `VerifyKanbanBacklog`,
+`VerifyReadinessConsistency`, `RustAnalyzerSmoke`, `GoldenPath1`–`GoldenPath5`,
+`HostileEvals`, `VerifyHostileEvals`, `UpdateDrill`
 
 ## 8. Configuration & Environment
 
-- **Rust edition 2024**, MSRV 1.92, resolver v3
-- **Build profile:** `dev` uses `line-tables-only` debug info (100GB PDB
-  mitigation); `dev-full` profile available for variable-level debugging
-- **Feature flags:** `ai` (default on `legion-app`; `offline` disables hosted
-  provider calls), `test-helpers` (test seams on `AppComposition`)
-- **Workers config:** `config/workers.example.yaml`
-- **Release pipeline:** `xtask/release-pipeline.example.toml` → TOML descriptors +
-  `version_stamp.toml` + `release-manifest.v1.toml` (Ed25519 signed)
+| File | Purpose |
+|------|---------|
+| `Cargo.toml` | Workspace: 30 members, workspace-level dep pins |
+| `deny.toml` | cargo-deny license/advisory policy |
+| `ENGINEERING_AUDIT.yaml` | Engineering audit tracking |
+| `ENGINEERING_PLAN.yaml` | Engineering plan metadata |
+| `pyproject.toml` | Python tooling config (eval/training scripts) |
+
+**Build profiles**:
+- `[profile.dev]` — `debug = "line-tables-only"` (keeps target/ under control)
+- `[profile.dev-full]` — `debug = "full"` (opt-in for debugger stepping)
+
+**Feature flags** (legion-app):
+- `"ai"` — optional: legion-agent, legion-ai, legion-ai-providers, legion-sandbox
+- `"test-helpers"` — dev-only test utilities
+- `default-features = false` used by legion-desktop to selectively re-enable
 
 ## 9. Risk Hotspots
 
-| File | LOC | Risk |
-|------|-----|------|
-| `legion-app/src/lib.rs` | ~1,839+ | Composition root with 30-crate fan-in; high coupling surface |
-| `legion-protocol/src/lib.rs` | ~27k | Monolithic types file; every crate breaks when this changes |
-| `legion-desktop/src/view.rs` | 8,547 | Largest single view file; rendering bottleneck |
-| `legion-desktop/src/workflow.rs` | 5,035 | Desktop runtime orchestration; complex state machine |
-| `legion-ai-providers/src/lib.rs` | 5,721 | 6 provider adapters in one file; network boundary code |
-| `legion-desktop/src/bridge.rs` | 3,105 | ~120 action variants; validation surface |
-| `legion-app/tests/workspace_vfs_integration.rs` | 5,408 | Largest test file; long test cycles |
+### By File Size (complexity concentration)
+
+| File | Lines | Risk |
+|------|-------|------|
+| `legion-app/src/lib.rs` | 34,045 | Monolithic composition root — any refactor ripples widely |
+| `legion-protocol/src/lib.rs` | 27,396 | Universal hub (28 dependents) — breaking changes are workspace-wide |
+| `legion-desktop/src/view.rs` | 9,644 | All panel rendering in one file |
+| `legion-project/src/lib.rs` | 9,044 | Workspace actor with git + search + file save |
+| `legion-ui/src/ui.rs` | 8,289 | Shell struct + CommandDispatchIntent enum (~40+ variants) |
+
+### Unsafe Code (9 files)
+
+| File | Purpose |
+|------|---------|
+| `legion-platform/src/lib.rs` | ConPTY FFI, process spawn |
+| `legion-sandbox/src/spawn.rs` | OS sandbox enforcement |
+| `legion-sandbox/src/spawn_stdio.rs` | Sandboxed stdio |
+| `legion-storage/src/lib.rs` | MoveFileExW atomic rename (Windows) |
+| `legion-protocol/src/lib.rs` | Inline SHA-256 |
+| `legion-desktop/src/workflow.rs` | eframe lifecycle |
+| `legion-desktop/src/session.rs` | Session persistence |
+| `legion-app/src/terminal_policy.rs` | Terminal policy |
+| `legion-telemetry/src/lib.rs` | Atomic spool writes |
+
+### Architectural Risks
+
+1. **legion-app monolith** — 51k LOC in one crate, 34k in lib.rs. High coupling
+   risk. AppComposition has ~250 methods — any new feature widens the surface.
+
+2. **legion-protocol universal coupling** — 28/29 crates depend on it. A breaking
+   change forces workspace-wide rebuilds and potential cascading fixes.
+
+3. **Zero fan-in crates** — `legion-remote-transport`, `legion-retention`,
+   `legion-telemetry`, `legion-vscode-compat` are not consumed by any other workspace
+   crate. Verify they're wired via binaries/feature flags or are staged for future use.
+
+4. **InMemoryStorage as primary backend** — `FileBackedStorage` exists but
+   `InMemoryStorage` is the default. Open tabs, recent files, preferences are lost
+   on restart unless explicitly persisted (session persistence was added in Phase 4).
+
+5. **Pre-existing build issue** — `cargo check -p legion-app --no-default-features`
+   fails due to unresolved `legion_sandbox` and `ProductChatCompletion` references
+   when the "ai" feature is disabled.
 
 ## 10. Languages & Frameworks
 
-- **Primary:** Rust (374 files, ~196k LOC)
-- **UI framework:** egui/eframe 0.34
-- **Text engine:** ropey (rope data structure)
-- **Parsing:** tree-sitter 0.26 (Rust grammar)
-- **Search:** tantivy 0.26 (full-text), globset (glob matching)
-- **Plugin runtime:** wasmtime 46
-- **Crypto:** ChaCha20-Poly1305 (retention vault), Ed25519 (updater/release signing)
-- **TLS:** rustls 0.23 (remote transport)
-- **Keyring:** OS-native via keyring 3
-- **Testing:** Python pytest (evals/training, local-only), Rust native tests
-- **CI:** GitHub Actions (3-OS matrix)
+| Component | Technology |
+|-----------|-----------|
+| Language | Rust 2024 edition, rust-version 1.92 |
+| GUI framework | egui 0.34.2 / eframe 0.34.2 |
+| Text buffer | Custom rope (legion-text) |
+| Parsing | tree-sitter 0.26.9 — 10 grammars (Rust, Python, TypeScript, Go, C, JSON, TOML, Markdown, Bash, JavaScript) |
+| Full-text search | Tantivy 0.26.1 |
+| WASM runtime | Wasmtime 46.0.2 |
+| TLS | rustls 0.23 (ring backend) |
+| Async runtime | Tokio 1 (rt-multi-thread) |
+| Secrets | OS keyring (keyring 3) |
+| Encryption | ChaCha20-Poly1305 (legion-retention) |
+| Signing | ed25519-dalek 2 |
+| HTTP | reqwest 0.13 (rustls, blocking+json) |
+| Serialization | serde + serde_json |
+| CLI | clap 4.5 |
+| OS interop | windows 0.62, nix 0.31, landlock 0.4 |
+
+### Supported Syntax Languages (13 language IDs, 25+ extensions)
+Rust, Python, TypeScript, JavaScript, Go, C, JSON, TOML, Markdown, Bash —
+dispatched via `language_for_path()` in legion-index.
 
 ## 11. Module Ownership & Domain Boundaries
 
-| Domain | Owner Crate(s) | Boundary |
-|--------|---------------|----------|
-| Text editing | `legion-text`, `legion-editor` | `EditorPort` trait |
-| Workspace & files | `legion-project`, `legion-storage` | `WorkspacePort`, `StorageRepositoryPort` |
-| Proposals & risk | `legion-app/proposal`, `legion-security` | `ProposalPort`, `CapabilityBrokerPort` |
-| Language tooling | `legion-lsp`, `legion-index` | `LspPort`, `SemanticPort` |
-| AI integration | `legion-ai`, `legion-ai-providers` | `ModelProvider` trait, `ProviderRouter` |
-| Agent workflows | `legion-agent` | `LegionWorkflowCoordinator` |
-| Terminal | `legion-terminal` | `TerminalPort` |
-| Plugin system | `legion-plugin` | `PluginPort` |
-| Debugging | `legion-debug` | DAP framing layer |
-| UI rendering | `legion-ui`, `legion-desktop` | `ShellProjectionSnapshot` (read-only) |
-| Security | `legion-security`, `legion-sandbox` | `DenyByDefaultBroker`, `SandboxEnforcementReport` |
-| Collaboration | `legion-collaboration` | Operation log runtime |
-| Remote dev | `legion-remote`, `legion-remote-transport` | mTLS transport carriers |
+| Domain | Owner Crate(s) | Boundary Trait |
+|--------|---------------|----------------|
+| Text/Buffer | legion-text, legion-editor | `EditorPort` |
+| Workspace/Files | legion-project | `WorkspacePort` |
+| Code Intelligence | legion-index, legion-lsp | `SemanticPort`, `LspPort` |
+| Security/Capabilities | legion-security | `CapabilityBrokerPort` |
+| Storage/Persistence | legion-storage | `StorageRepositoryPort` |
+| AI/Providers | legion-ai, legion-ai-providers | (internal to legion-app) |
+| Agent Orchestration | legion-agent, legion-tracker | (internal to legion-app) |
+| Terminal | legion-terminal, legion-platform | `TerminalPort` |
+| Plugins | legion-plugin | `PluginPort` |
+| UI/Shell | legion-ui | `CommandDispatchIntent` enum |
+| Rendering | legion-desktop | (no port — consumes projections) |
+| Proposals | legion-protocol | `ProposalPort` |
+| Collaboration | legion-collaboration | (internal) |
+| Remote Dev | legion-remote, legion-remote-transport | (internal) |
+| Diagnostics | legion-observability | `EventSinkPort` |
+| Debug | legion-debug | (internal) |
+| Retention/Vault | legion-retention | (internal) |
+| Telemetry | legion-telemetry | (internal) |
 
-## 12. Setup & Build
+## 12. Conventions
+
+### Error Handling
+- **Library crates**: `thiserror::Error` enums with typed variants — never `anyhow`
+- **Binary entry points**: `anyhow::Result` only in `fn main()`
+- **Local aliases**: `type StorageResult<T> = Result<T, StorageError>`
+- **Fail-closed idiom**: denials are explicit enum returns, not `Err` paths
+
+### Naming
+- `*Projection` — UI read-model (display-safe, pre-formatted)
+- `*Record` — persisted data
+- `*Descriptor` — declarative request payload
+- `*Port` — trait boundary between crates
+- `Legion*` prefix — cross-cutting workflow concepts
+
+### Code Quality
+- `#![warn(missing_docs)]` on every crate — all public items documented
+- `RedactionHint` fields on protocol/storage/UI DTOs — display-safety is first-class
+- Atomic writes everywhere — temp file → fsync → platform-specific rename
+- `validate → durable write → memory` ordering invariant in storage
+
+### Platform Abstraction
+- Trait-per-concern: `FileSystemService`, `ProcessService`, `PtyService`, `WatcherService`
+- Zero-sized `Native*` implementations (`Default + Clone + Copy`)
+- Windows-specific paths via `#[cfg(windows)]` (ConPTY, MoveFileExW)
+
+## 13. Setup & Build
 
 ```bash
-# Prerequisites: Rust 1.92+, platform GUI libs (see legion-gates.yml for Linux packages)
+# Prerequisites
+rustup default 1.92   # or newer
+# Windows: Visual Studio Build Tools with C++ workload
 
 # Build
-cargo build --workspace
+cargo build                          # debug build, all crates
+cargo build -p legion-desktop        # desktop shell only
+cargo build --profile dev-full -p X  # full debuginfo for crate X
 
-# Test (all crates, all targets)
-cargo test --workspace --all-targets
+# Test
+cargo test                           # all tests
+cargo test -p legion-app             # app crate only
+cargo test -p legion-desktop --test user_journey_rendering  # view-model tests
 
-# Run standing gates
-cargo run -p xtask -- check-deps
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check
+# Lint
+cargo fmt --check
+cargo clippy --workspace
 
-# Run golden-path smokes
-cargo run -p xtask -- golden-path-1
-cargo run -p xtask -- golden-path-2
-cargo run -p xtask -- golden-path-3
-cargo run -p xtask -- golden-path-4
+# xtask
+cargo xtask golden-path-1            # GP-1 verification
+cargo xtask check-deps               # dependency audit
+cargo xtask docs-hygiene             # doc coverage check
+cargo xtask release-pipeline         # release build
 
-# Run the CLI shell (proof-of-concept)
-cargo run -p legion-app -- <path>
-
-# Run the desktop app
-cargo run -p legion-desktop
-
-# Full debug info for a specific crate
-cargo build --profile dev-full -p <crate>
+# Evidence gates
+cargo run -p legion-cli -- evidence check --phase finish-phase1
+cargo run -p legion-cli -- evidence check --phase finish-phase6
+cargo run -p legion-cli -- doctor    # platform health check
 ```
+
+## 14. Completion Status
+
+All 6 finish phases are complete as of 2026-08-11:
+
+| Phase | Name | Status |
+|-------|------|--------|
+| 1 | Syntax Highlighting | Complete — 10 grammars, 13 languages, 25+ extensions |
+| 2 | Terminal Emulation | Complete — VT100/xterm, CSI/SGR/DEC, cell grid, keyboard |
+| 3 | Live LSP Integration | Complete — diagnostics, completion, hover, go-to-def, inlay hints |
+| 4 | Navigation & UI Essentials | Complete — file tree, find/replace, keybindings, settings, session persistence |
+| 5 | Theme System & Visual Polish | Complete — dark/light tokens, tab polish, code minimap |
+| 6 | Integration Testing & Release | Complete — view-model tests, GP-5, release workflow, acceptance proof |
+
+### Deliberately Deferred
+- Remote development server (client code is production-grade)
+- Plugin marketplace / VS Code extension Node.js host
+- Collaboration transport server
+- Hosted telemetry backend

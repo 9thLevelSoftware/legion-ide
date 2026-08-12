@@ -1,0 +1,33 @@
+{
+  "status": "blocked",
+  "summary": "The recorded verification passed only legion validate; the build was fake, changed no files, and the acceptance oracle remains unevaluated.",
+  "reviewVerdicts": {
+    "specification": "pass",
+    "integration": "fail",
+    "evidence": "fail"
+  },
+  "findings": [
+    {
+      "id": "oracle-unevaluated",
+      "title": "Acceptance oracle was not evaluated",
+      "body": "verification-report.json has passed=true for legion validate but lists the oracle in unevaluatedOracleRefs with no oracle attribution. Acceptance cannot be established.",
+      "severity": "blocking"
+    },
+    {
+      "id": "fake-build-no-changes",
+      "title": "No implementation evidence",
+      "body": "executor-result.json and the redacted log report only a fake build. diff-observation.json records zero changed files and zero changed lines, so syntax highlighting implementation and integration are unproven.",
+      "severity": "blocking"
+    },
+    {
+      "id": "review-command-blocked",
+      "title": "Legion review command was blocked",
+      "body": "legion review --json exited with EPERM while opening the review context pack, so no completed workflow review status was produced.",
+      "severity": "blocking"
+    }
+  ],
+  "filesChanged": [],
+  "commandsRun": [
+    "legion review --json"
+  ]
+}

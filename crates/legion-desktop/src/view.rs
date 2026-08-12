@@ -69,11 +69,13 @@ use legion_protocol::{
     BufferId, CANONICAL_PRODUCT_MODES, CanonicalPath, CanonicalProductMode,
     ContextManifestEgressStatus, ContextManifestInclusionState,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
-    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId, LegionToolKind,
-    LineWrappingPolicy, PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    PrivacyInspectorRedactionState, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
-    ProposalRejectionReason, ProposalRiskLabel, ProtocolTextRange, TextCoordinate,
-    ViewportLineTruncationState, ViewportProjectionMode, ViewportSemanticTokenKind,
+    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId,
+    LanguageInlayHintProjection, LanguageLocationProjection, LanguageProblemProjection,
+    LegionToolKind, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, PrivacyInspectorRedactionState, ProposalCancellationReason,
+    ProposalId, ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel,
+    ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate, ViewportLineTruncationState,
+    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
@@ -94,7 +96,7 @@ const LEGION_WORDMARK: &str = "Legion";
 /// Minimum actual editor allocation retained below an expanded center workbench.
 const MIN_USABLE_EDITOR_HEIGHT: f32 = 180.0;
 /// Space retained for tabs, breadcrumbs, and editor-frame margins above the code canvas.
-const EDITOR_CHROME_HEIGHT_RESERVE: f32 = 74.0;
+const EDITOR_CHROME_HEIGHT_RESERVE: f32 = 76.0;
 /// Maximum viewport height for expanded center-workbench content.
 const MAX_ADVANCED_WORKBENCH_HEIGHT: f32 = 220.0;
 /// Maximum Unicode scalar values retained in an adapter-local Delegate draft.
@@ -1241,6 +1243,7 @@ impl ProjectionView {
         render_toast_overlay(ui.ctx(), &model, &mut actions);
         render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
         render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
+        render_find_bar(ui.ctx(), snapshot, &mut actions);
         if let Some(origin) = self.mode_confirmation_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
@@ -1492,27 +1495,13 @@ fn render_product_mode_switch(
 
 fn product_mode_button_label(
     mode: DesktopProductMode,
-    ultra_compact: bool,
-    narrow: bool,
+    _ultra_compact: bool,
+    _narrow: bool,
 ) -> &'static str {
-    if !ultra_compact {
-        return canonical_mode_entry(mode).label;
-    }
-    if narrow {
-        match mode {
-            DesktopProductMode::Manual => "M",
-            DesktopProductMode::Assist => "A",
-            DesktopProductMode::Delegate => "D",
-            DesktopProductMode::LegionWorkflows => "W",
-        }
-    } else {
-        match mode {
-            DesktopProductMode::Manual => "Man",
-            DesktopProductMode::Assist => "Ast",
-            DesktopProductMode::Delegate => "Del",
-            DesktopProductMode::LegionWorkflows => "Work",
-        }
-    }
+    // Keep the visible label canonical at every density. The switch can
+    // scroll horizontally in compact layouts, while full labels keep the
+    // visual and accessibility representations consistent.
+    canonical_mode_entry(mode).label
 }
 
 fn product_mode_button_width(mode: DesktopProductMode, ultra_compact: bool, narrow: bool) -> f32 {
@@ -2173,6 +2162,436 @@ fn render_hover_tooltip(
         });
 }
 
+/// Map a string key label from `default_keymap()` to the corresponding `egui::Key`.
+///
+/// Only maps keys actually used in the default keymap.  Returns `None` for
+/// unrecognised labels so the dispatch loop simply skips them.
+fn key_label_to_egui(label: &str) -> Option<egui::Key> {
+    match label {
+        "S" => Some(egui::Key::S),
+        "F" => Some(egui::Key::F),
+        "H" => Some(egui::Key::H),
+        "G" => Some(egui::Key::G),
+        "P" => Some(egui::Key::P),
+        "Z" => Some(egui::Key::Z),
+        "W" => Some(egui::Key::W),
+        "Tab" => Some(egui::Key::Tab),
+        "F3" => Some(egui::Key::F3),
+        "F5" => Some(egui::Key::F5),
+        "F9" => Some(egui::Key::F9),
+        "F10" => Some(egui::Key::F10),
+        "F11" => Some(egui::Key::F11),
+        "F12" => Some(egui::Key::F12),
+        "Escape" => Some(egui::Key::Escape),
+        _ => None,
+    }
+}
+
+/// Map a keybinding action label to a `DesktopAction`, if applicable.
+///
+/// Context-dependent actions like GoToDefinition are resolved from the current
+/// projection here so the default keymap remains the single source of truth.
+fn action_label_to_desktop_action(
+    label: &str,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<DesktopAction> {
+    match label {
+        "SaveActive" => Some(DesktopAction::SaveActive),
+        "SaveAll" => Some(DesktopAction::SaveAll),
+        // Preserve the existing Ctrl/Cmd+F search-palette behavior while
+        // routing it through the published keymap entry. The in-editor find
+        // bar remains available through its explicit UI action.
+        "ToggleFindBar" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
+        "FindNext" => Some(DesktopAction::FindNext),
+        "FindPrevious" => Some(DesktopAction::FindPrevious),
+        "Undo" => Some(DesktopAction::Undo),
+        "Redo" => Some(DesktopAction::Redo),
+        "GoToDefinition" => Some(DesktopAction::GoToDefinition {
+            position: projected_cursor(snapshot),
+        }),
+        "GoToLine" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "Go to line".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "OpenPalette" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "OpenCommandPalette" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "CloseTab" => active_buffer_for_keybinding(snapshot)
+            .map(|buffer_id| DesktopAction::CloseTab { buffer_id }),
+        "NextTab" => adjacent_tab_for_keybinding(snapshot, 1)
+            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "PrevTab" => adjacent_tab_for_keybinding(snapshot, -1)
+            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "DebugStart" => {
+            if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
+                Some(DesktopAction::DebugStep {
+                    session_id,
+                    kind: legion_ui::DebugStepKindProjection::Continue,
+                })
+            } else if let Some(configuration_id) = snapshot
+                .debug_projection
+                .configurations
+                .first()
+                .map(|config| config.configuration_id.clone())
+            {
+                Some(DesktopAction::LaunchDebugSession { configuration_id })
+            } else {
+                Some(DesktopAction::RefreshExplorer)
+            }
+        }
+        "DebugStop" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|_| DesktopAction::StopDebugSession),
+        "ToggleBreakpoint" => {
+            active_buffer_for_keybinding(snapshot).map(|_| DesktopAction::ToggleDebugBreakpoint {
+                line: projected_cursor(snapshot).line,
+                condition: None,
+                hit_condition: None,
+                log_message: None,
+            })
+        }
+        "DebugStepOver" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Over,
+            }),
+        "DebugStepInto" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Into,
+            }),
+        "DebugStepOut" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Out,
+            }),
+        _ => None,
+    }
+}
+
+/// Central keyboard dispatch from `default_keymap()`.
+///
+/// Reads the keymap bindings and checks each combo against egui's current
+/// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
+/// hardcoded key checks so the keymap takes precedence for non-context-dependent
+/// actions.
+pub(crate) fn dispatch_keybindings(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let bindings = legion_ui::ui::default_keymap();
+    ctx.input(|input| {
+        for binding in &bindings {
+            let Some(key) = key_label_to_egui(&binding.combo.key) else {
+                continue;
+            };
+            if !input.key_pressed(key) {
+                continue;
+            }
+            // The keymap's `ctrl` flag represents the platform command
+            // modifier. `egui::Modifiers::command` maps to Ctrl on Windows/
+            // Linux and Cmd on macOS, while `ctrl` is only the physical Ctrl
+            // key and would make the default map fail for Cmd-based input.
+            if binding.combo.ctrl != input.modifiers.command {
+                continue;
+            }
+            if binding.combo.shift != input.modifiers.shift {
+                continue;
+            }
+            if binding.combo.alt != input.modifiers.alt {
+                continue;
+            }
+            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot) {
+                actions.push(action);
+            }
+        }
+    });
+}
+
+fn active_buffer_for_keybinding(snapshot: &ShellProjectionSnapshot) -> Option<BufferId> {
+    snapshot
+        .daily_editing_projection
+        .tabs
+        .active_buffer_id
+        .or(snapshot.active_buffer_projection.buffer_id)
+}
+
+fn adjacent_tab_for_keybinding(
+    snapshot: &ShellProjectionSnapshot,
+    direction: isize,
+) -> Option<BufferId> {
+    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+    if tabs.is_empty() {
+        return active_buffer_for_keybinding(snapshot);
+    }
+    let active = active_buffer_for_keybinding(snapshot)?;
+    let active_index = tabs
+        .iter()
+        .position(|tab| tab.buffer_id == active)
+        .or_else(|| tabs.iter().position(|tab| tab.active))
+        .unwrap_or(0);
+    let next = (active_index as isize + direction).rem_euclid(tabs.len() as isize) as usize;
+    Some(tabs[next].buffer_id)
+}
+
+/// Adapter-local find bar text state stored in egui transient data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FindBarTextState {
+    query: String,
+    replace: String,
+    was_visible: bool,
+}
+
+/// Render the in-editor find/replace bar overlay.
+///
+/// Anchored to the top-right of the editor area via `egui::Area`.  Only visible
+/// when the snapshot's `find_bar_projection.visible` is true.  Emits find/replace
+/// `DesktopAction` variants for query changes, navigation, and replace operations.
+///
+/// Text edit state is stored in egui transient data (not in `DesktopProjectionViewState`)
+/// so the function works with an immutable `state` reference.
+fn render_find_bar(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let find_bar = &snapshot.find_bar_projection;
+    let state_id = egui::Id::new("legion_find_bar_text_state");
+
+    if !find_bar.visible {
+        // Clear was_visible when the bar is hidden.
+        ctx.data_mut(|d| {
+            if let Some(mut s) = d.get_temp::<FindBarTextState>(state_id) {
+                s.was_visible = false;
+                d.insert_temp(state_id, s);
+            }
+        });
+        return;
+    }
+
+    // Load or initialize the local text state.
+    let mut text_state: FindBarTextState =
+        ctx.data_mut(|d| d.get_temp(state_id).unwrap_or_default());
+    let just_opened = !text_state.was_visible;
+    if just_opened {
+        text_state.query = find_bar.query.clone();
+        text_state.replace = find_bar.replace_text.clone();
+    }
+    text_state.was_visible = true;
+
+    let tokens = theme::tokens();
+    let find_bar_id = egui::Id::new("legion_find_bar");
+
+    // Keyboard handling consumed before the popup frame.
+    let mut enter_pressed = false;
+    let mut shift_enter_pressed = false;
+    let mut escape_pressed = false;
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            escape_pressed = true;
+        }
+        if i.key_pressed(egui::Key::Enter) && i.modifiers.shift {
+            shift_enter_pressed = true;
+        } else if i.key_pressed(egui::Key::Enter) {
+            enter_pressed = true;
+        }
+    });
+
+    if escape_pressed {
+        actions.push(DesktopAction::CloseFindBar);
+        ctx.data_mut(|d| d.insert_temp(state_id, text_state));
+        return;
+    }
+    if shift_enter_pressed {
+        actions.push(DesktopAction::FindPrevious);
+    } else if enter_pressed {
+        actions.push(DesktopAction::FindNext);
+    }
+
+    egui::Area::new(find_bar_id)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 8.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    // Find row.
+                    ui.horizontal(|ui| {
+                        let query_response = ui.add(interactive_fields::find_bar_text_edit(
+                            &mut text_state.query,
+                            "Find...",
+                            egui::Id::new("legion_find_query_input"),
+                        ));
+                        if just_opened {
+                            query_response.request_focus();
+                        }
+                        if query_response.changed() {
+                            actions.push(DesktopAction::SetFindQuery {
+                                query: text_state.query.clone(),
+                            });
+                        }
+
+                        // Match counter.
+                        if find_bar.match_count > 0 {
+                            ui.label(theme::muted(format!(
+                                "{} of {}",
+                                find_bar.current_match_index + 1,
+                                find_bar.match_count
+                            )));
+                        } else if !find_bar.query.is_empty() {
+                            ui.label(theme::muted("No results"));
+                        }
+
+                        // Navigation buttons.
+                        if ui
+                            .small_button("\u{25B2}")
+                            .on_hover_text("Previous (Shift+Enter)")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::FindPrevious);
+                        }
+                        if ui
+                            .small_button("\u{25BC}")
+                            .on_hover_text("Next (Enter)")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::FindNext);
+                        }
+
+                        // Option toggles.
+                        let case_label = if find_bar.case_sensitive {
+                            theme::body_strong("Aa")
+                        } else {
+                            theme::muted("Aa")
+                        };
+                        if ui
+                            .small_button(case_label)
+                            .on_hover_text("Case sensitive")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::SetFindCaseSensitive {
+                                enabled: !find_bar.case_sensitive,
+                            });
+                        }
+                        let word_label = if find_bar.whole_word {
+                            theme::body_strong("W")
+                        } else {
+                            theme::muted("W")
+                        };
+                        if ui
+                            .small_button(word_label)
+                            .on_hover_text("Whole word")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::SetFindWholeWord {
+                                enabled: !find_bar.whole_word,
+                            });
+                        }
+                        let regex_label = if find_bar.use_regex {
+                            theme::body_strong(".*")
+                        } else {
+                            theme::muted(".*")
+                        };
+                        if ui
+                            .small_button(regex_label)
+                            .on_hover_text("Regex")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::SetFindRegex {
+                                enabled: !find_bar.use_regex,
+                            });
+                        }
+
+                        // Toggle replace visibility.
+                        if ui
+                            .small_button(if find_bar.replace_visible {
+                                "\u{25B4}"
+                            } else {
+                                "\u{25BE}"
+                            })
+                            .on_hover_text("Toggle replace")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::ToggleFindReplace);
+                        }
+
+                        // Close button.
+                        if ui
+                            .small_button("\u{2715}")
+                            .on_hover_text("Close (Esc)")
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::CloseFindBar);
+                        }
+                    });
+
+                    // Replace row (only when visible).
+                    if find_bar.replace_visible {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let replace_response = ui.add(interactive_fields::find_bar_text_edit(
+                                &mut text_state.replace,
+                                "Replace...",
+                                egui::Id::new("legion_find_replace_input"),
+                            ));
+                            if replace_response.changed() {
+                                actions.push(DesktopAction::SetFindReplaceText {
+                                    text: text_state.replace.clone(),
+                                });
+                            }
+
+                            if ui
+                                .small_button("Replace")
+                                .on_hover_text("Replace current match")
+                                .clicked()
+                            {
+                                actions.push(DesktopAction::ReplaceOne);
+                            }
+                            if ui
+                                .small_button("All")
+                                .on_hover_text("Replace all matches")
+                                .clicked()
+                            {
+                                actions.push(DesktopAction::ReplaceAll);
+                            }
+                        });
+                    }
+                });
+        });
+
+    // Persist the text state back to egui transient data.
+    ctx.data_mut(|d| d.insert_temp(state_id, text_state));
+}
+
 fn toast_accent_color(severity: StatusSeverity) -> egui::Color32 {
     match severity {
         StatusSeverity::Info => theme::tokens().accent.blue,
@@ -2352,13 +2771,44 @@ fn render_editor_canvas(
     }
     let editor_rect = theme::code_frame()
         .show(ui, |ui| {
+            let minimap_visible = model.settings.minimap_visible;
+            let minimap_width = if minimap_visible { MINIMAP_WIDTH } else { 0.0 };
+            let full_rect = ui.available_rect_before_wrap();
+
+            // Code area: left portion, up to the minimap boundary.
+            let code_rect = egui::Rect::from_min_max(
+                full_rect.min,
+                egui::pos2(full_rect.right() - minimap_width, full_rect.bottom()),
+            );
+            let mut code_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(code_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
             egui::ScrollArea::both()
                 .id_salt("legion_desktop_code_canvas_scroll")
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(&mut code_ui, |ui| {
                     let mut painter = EguiCodeCanvasPainter;
                     painter.paint_lines(ui, snapshot, model, actions);
                 });
+
+            // Minimap: right column.
+            if minimap_visible {
+                let minimap_rect = egui::Rect::from_min_max(
+                    egui::pos2(full_rect.right() - minimap_width, full_rect.top()),
+                    full_rect.max,
+                );
+                let mut minimap_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(minimap_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                render_minimap(&mut minimap_ui, snapshot, model, actions);
+            }
+
+            // Advance the parent layout past the area used by both children.
+            ui.allocate_rect(full_rect, egui::Sense::hover());
         })
         .response
         .rect;
@@ -2368,117 +2818,356 @@ fn render_editor_canvas(
     editor_rect
 }
 
+const MINIMAP_WIDTH: f32 = 100.0;
+const MINIMAP_ASSUMED_MAX_COLS: f32 = 80.0;
+
+/// Render a scaled-down code minimap to the right of the code area.
+///
+/// For small files (where `small_buffer_preview` is available) each source line
+/// is drawn as a narrow colored bar representing its approximate text width.
+/// For large/degraded files the minimap shows an empty background with a muted
+/// placeholder.  A semi-transparent viewport indicator tracks the currently
+/// visible region.  Click or drag on the minimap scrolls the editor.
+fn render_minimap(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let tokens = theme::tokens();
+    let active = &snapshot.active_buffer_projection;
+    let viewport = active.viewport.as_ref();
+
+    // Determine total line count and per-line text lengths.
+    let (total_lines, line_lengths): (usize, Option<Vec<usize>>) =
+        if let Some(preview) = active.small_buffer_text() {
+            let lines: Vec<usize> = preview.lines().map(|l| l.len()).collect();
+            let count = lines.len().max(1);
+            (count, Some(lines))
+        } else {
+            // Large/degraded: estimate from last visible line.
+            let estimated = viewport
+                .map(|v| (v.visible_range.end.line as usize).saturating_add(50))
+                .unwrap_or(100);
+            (estimated, None)
+        };
+
+    let minimap_rect = ui.available_rect_before_wrap();
+    let panel_height = minimap_rect.height();
+    let panel_width = minimap_rect.width();
+    if panel_height < 4.0 || panel_width < 4.0 {
+        ui.allocate_rect(minimap_rect, egui::Sense::hover());
+        return;
+    }
+
+    // Background fill.
+    ui.painter().rect_filled(minimap_rect, 0.0, tokens.bg.code);
+
+    // Left-edge separator line.
+    ui.painter().line_segment(
+        [minimap_rect.left_top(), minimap_rect.left_bottom()],
+        egui::Stroke::new(1.0_f32, tokens.border.subtle),
+    );
+
+    // Keep the document-to-panel scale exact for navigation. Visual bars use
+    // a minimum height separately; clamping this value would make the bottom
+    // portion of large documents unreachable from the minimap.
+    let px_per_line = panel_height / total_lines as f32;
+    let bar_height = (px_per_line - 0.5).max(0.5);
+
+    if let Some(lengths) = &line_lengths {
+        // Small file: render a colored bar per line.
+        let bar_color = theme::dim(tokens.text.muted, 76);
+        for (i, &len) in lengths.iter().enumerate() {
+            if len == 0 {
+                continue;
+            }
+            let y = minimap_rect.top() + i as f32 * px_per_line;
+            if y >= minimap_rect.bottom() {
+                break;
+            }
+            let bar_w = (len as f32 / MINIMAP_ASSUMED_MAX_COLS * (panel_width - 8.0))
+                .clamp(2.0, panel_width - 8.0);
+            let bar_rect = egui::Rect::from_min_size(
+                egui::pos2(minimap_rect.left() + 4.0, y),
+                egui::vec2(bar_w, bar_height),
+            );
+            ui.painter().rect_filled(bar_rect, 0.0, bar_color);
+        }
+    } else {
+        // Large/degraded file: centered placeholder.
+        ui.painter().text(
+            minimap_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "...",
+            egui::FontId::monospace(10.0),
+            tokens.text.disabled,
+        );
+    }
+
+    // Viewport indicator rectangle.
+    if let Some(vp) = viewport {
+        let top_line = vp.scroll.top_line as f32;
+        let visible_count = model.active_buffer_code_lines.len().max(1) as f32;
+
+        let ind_top = (minimap_rect.top() + top_line * px_per_line).max(minimap_rect.top());
+        let ind_bot = (minimap_rect.top() + (top_line + visible_count) * px_per_line)
+            .min(minimap_rect.bottom());
+        let indicator = egui::Rect::from_min_max(
+            egui::pos2(minimap_rect.left() + 1.0, ind_top),
+            egui::pos2(minimap_rect.right() - 1.0, ind_bot),
+        );
+
+        let fill = theme::dim(tokens.bg.hover, 153);
+        ui.painter().rect_filled(indicator, 0.0, fill);
+        ui.painter().rect_stroke(
+            indicator,
+            0.0,
+            egui::Stroke::new(1.0_f32, tokens.border.strong),
+            egui::epaint::StrokeKind::Inside,
+        );
+    }
+
+    // Click / drag to scroll: compute target line from pointer position and
+    // center the viewport around it.
+    let response = ui.allocate_rect(minimap_rect, egui::Sense::click_and_drag());
+    if (response.clicked() || response.dragged())
+        && total_lines > 0
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let click_y = pos.y - minimap_rect.top();
+        let clicked_line =
+            ((click_y / px_per_line).floor() as usize).min(total_lines.saturating_sub(1)) as u32;
+        let visible_count = model.active_buffer_code_lines.len() as u32;
+        let target_top = clicked_line.saturating_sub(visible_count / 2);
+
+        actions.push(DesktopAction::SetViewportScroll {
+            buffer_id: active.buffer_id,
+            scroll: ViewportScroll {
+                top_line: target_top,
+                left_column: viewport.map_or(0, |v| v.scroll.left_column),
+            },
+        });
+    }
+}
+
+const TAB_DIRTY_GLYPH: &str = "\u{2022}";
+const TAB_CLOSE_GLYPH: &str = "\u{00d7}";
+
+/// Persistent drag state for tab reorder, stored in `egui::Context::data_mut`.
+#[derive(Clone, Default)]
+struct TabDragState {
+    /// Buffer id of the tab currently being dragged.
+    dragging: Option<BufferId>,
+    /// Original index of the dragged tab (at drag start).
+    source_index: usize,
+    /// Index of the tab currently under the pointer during a drag.
+    drop_target: Option<usize>,
+}
+
 fn render_tab_strip(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
+    let drag_state_id = egui::Id::new("tab_strip_drag_state");
+
     theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
-        ui.set_height(30.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            let tabs = &snapshot.daily_editing_projection.tabs.tabs;
-            if tabs.is_empty() {
+        ui.set_height(34.0);
+        let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+        if tabs.is_empty() {
+            ui.horizontal(|ui| {
                 ui.label(theme::muted("<no open tabs>"));
-            }
-            for tab in tabs {
-                let color = if tab.active {
-                    theme::tokens().text.primary
-                } else {
-                    theme::tokens().text.muted
-                };
-                let tab_frame = egui::Frame::NONE
-                    .fill(if tab.active {
-                        theme::tokens().bg.code
-                    } else {
-                        theme::tokens().bg.panel
-                    })
-                    .stroke(egui::Stroke::new(1.0_f32, theme::tokens().border.subtle))
-                    .inner_margin(egui::Margin::symmetric(7, 1))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let response = ui.add(
-                                egui::Button::new(theme::accent(&tab.title, color))
-                                    .selected(tab.active)
-                                    .frame(false)
+            });
+            return;
+        }
+
+        // Wrap tabs in a horizontal scroll area.  Drag-to-scroll is disabled so
+        // that pointer drag is reserved for tab reorder; users scroll with the
+        // mouse wheel.
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .scroll_source(egui::scroll_area::ScrollSource {
+                scroll_bar: true,
+                drag: false,
+                mouse_wheel: true,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Load current drag state and reset per-frame target.
+                    let mut drag: TabDragState = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp(drag_state_id).unwrap_or_default());
+                    drag.drop_target = None;
+
+                    for (tab_index, tab) in tabs.iter().enumerate() {
+                        // --- build tab label ---
+                        let color = if tab.active {
+                            theme::tokens().text.primary
+                        } else {
+                            theme::tokens().text.muted
+                        };
+                        let tab_fill = if tab.active {
+                            theme::tokens().bg.code
+                        } else {
+                            theme::tokens().bg.panel
+                        };
+                        let tab_stroke = egui::Stroke::new(
+                            1.0_f32,
+                            if tab.active {
+                                theme::tokens().border.default
+                            } else {
+                                theme::tokens().bg.panel
+                            },
+                        );
+
+                        // Render tab button with click_and_drag sense.
+                        let tab_response = ui.add(
+                            egui::Button::new(theme::accent(tab.title.clone(), color))
+                                .fill(tab_fill)
+                                .stroke(tab_stroke)
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+                        ui.ctx().accesskit_node_builder(tab_response.id, |node| {
+                            node.set_role(egui::accesskit::Role::Tab);
+                            node.set_label(tab.title.as_str());
+                            node.set_selected(tab.active);
+                            if tab.active {
+                                node.set_aria_current(egui::accesskit::AriaCurrent::True);
+                            } else {
+                                node.clear_aria_current();
+                            }
+                        });
+
+                        let tab_hovered = tab_response.hovered();
+
+                        // --- close button / dirty indicator ---
+                        // Show close button when tab is hovered or active.
+                        // For dirty tabs: show bullet when not hovered, x when hovered.
+                        let show_close = true;
+                        let mut close_clicked = false;
+
+                        if show_close || tab.dirty {
+                            let close_glyph = if tab.dirty && !tab_hovered {
+                                TAB_DIRTY_GLYPH
+                            } else {
+                                TAB_CLOSE_GLYPH
+                            };
+                            let close_color = if tab_hovered {
+                                theme::tokens().text.primary
+                            } else {
+                                theme::tokens().text.muted
+                            };
+                            // Place the close/dirty indicator right after the tab label
+                            // as a small clickable label.
+                            let close_response = ui.add(
+                                egui::Button::new(theme::accent(close_glyph, close_color))
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::NONE)
+                                    .corner_radius(egui::CornerRadius::same(3))
                                     .min_size(egui::vec2(24.0, 24.0)),
                             );
-                            ui.ctx().accesskit_node_builder(response.id, |node| {
-                                node.set_role(egui::accesskit::Role::Tab);
-                                node.set_label(tab.title.as_str());
-                                node.set_selected(tab.active);
-                                if tab.active {
-                                    node.set_aria_current(egui::accesskit::AriaCurrent::True);
-                                } else {
-                                    node.clear_aria_current();
-                                }
-                            });
-                            if tab.dirty {
-                                ui.label(theme::accent("●", theme::tokens().accent.amber));
-                            }
-                            let close = ui.add_sized(
-                                [24.0, 24.0],
-                                egui::Button::new(theme::muted("×")).frame(false),
-                            );
-                            ui.ctx().accesskit_node_builder(close.id, |node| {
+                            ui.ctx().accesskit_node_builder(close_response.id, |node| {
                                 node.set_label(format!("Close {}", tab.title));
                             });
-                            (response, close.clicked())
-                        })
-                        .inner
-                    });
-                let (response, close_clicked) = tab_frame.inner;
-                if response.clicked() {
-                    actions.push(DesktopAction::SwitchTab {
-                        buffer_id: tab.buffer_id,
-                    });
-                }
-                if close_clicked {
-                    actions.push(DesktopAction::CloseTab {
-                        buffer_id: tab.buffer_id,
-                    });
-                }
-                if tab.active {
-                    ui.painter().line_segment(
-                        [
-                            egui::pos2(
-                                tab_frame.response.rect.left(),
-                                tab_frame.response.rect.bottom(),
-                            ),
-                            egui::pos2(
-                                tab_frame.response.rect.right(),
-                                tab_frame.response.rect.bottom(),
-                            ),
-                        ],
-                        egui::Stroke::new(2.0_f32, theme::tokens().accent.amber),
-                    );
-                }
-                response.context_menu(|ui| {
-                    if ui.button("Close").clicked() {
-                        actions.push(DesktopAction::CloseTab {
-                            buffer_id: tab.buffer_id,
+                            if close_response.clicked() {
+                                close_clicked = true;
+                                actions.push(DesktopAction::CloseTab {
+                                    buffer_id: tab.buffer_id,
+                                });
+                            }
+                        }
+
+                        // Add a small gap between tabs.
+                        ui.add_space(2.0);
+
+                        // --- drag-to-reorder ---
+                        if !close_clicked {
+                            if tab_response.drag_started() {
+                                drag.dragging = Some(tab.buffer_id);
+                                drag.source_index = tab_index;
+                            }
+
+                            // While dragging, check if the cursor is over this
+                            // tab to determine the drop target.  Uses
+                            // `contains_pointer()` instead of `hovered()` because
+                            // egui suppresses `hovered` on non-source widgets
+                            // during a drag.
+                            if let Some(dragging_id) = drag.dragging
+                                && dragging_id != tab.buffer_id
+                                && tab_response.contains_pointer()
+                            {
+                                drag.drop_target = Some(tab_index);
+                                let rect = tab_response.rect;
+                                let indicator_x = rect.left();
+                                let painter = ui.painter();
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(indicator_x, rect.top()),
+                                        egui::pos2(indicator_x, rect.bottom()),
+                                    ],
+                                    egui::Stroke::new(2.0_f32, theme::tokens().accent.blue),
+                                );
+                            }
+                        }
+
+                        // --- left-click to switch tab ---
+                        if !close_clicked && tab_response.clicked() {
+                            actions.push(DesktopAction::SwitchTab {
+                                buffer_id: tab.buffer_id,
+                            });
+                        }
+
+                        // --- context menu ---
+                        tab_response.context_menu(|ui| {
+                            if ui.button("Close").clicked() {
+                                actions.push(DesktopAction::CloseTab {
+                                    buffer_id: tab.buffer_id,
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Close Others").clicked() {
+                                for other in
+                                    tabs.iter().filter(|other| other.buffer_id != tab.buffer_id)
+                                {
+                                    actions.push(DesktopAction::CloseTab {
+                                        buffer_id: other.buffer_id,
+                                    });
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Close All").clicked() {
+                                for other in tabs {
+                                    actions.push(DesktopAction::CloseTab {
+                                        buffer_id: other.buffer_id,
+                                    });
+                                }
+                                ui.close();
+                            }
                         });
-                        ui.close();
                     }
-                    if ui.button("Close Others").clicked() {
-                        for other in tabs.iter().filter(|other| other.buffer_id != tab.buffer_id) {
-                            actions.push(DesktopAction::CloseTab {
-                                buffer_id: other.buffer_id,
+
+                    // Handle pointer release: fire ReorderTab if dropped on
+                    // a valid target, then clear drag state.
+                    if ui.input(|i| i.pointer.any_released()) {
+                        if let Some(dragging_id) = drag.dragging.take()
+                            && let Some(target) = drag.drop_target.take()
+                            && target != drag.source_index
+                        {
+                            actions.push(DesktopAction::ReorderTab {
+                                buffer_id: dragging_id,
+                                new_index: target,
                             });
                         }
-                        ui.close();
+                        drag.drop_target = None;
                     }
-                    if ui.button("Close All").clicked() {
-                        for other in tabs {
-                            actions.push(DesktopAction::CloseTab {
-                                buffer_id: other.buffer_id,
-                            });
-                        }
-                        ui.close();
-                    }
+
+                    // Persist drag state.
+                    ui.ctx().data_mut(|d| d.insert_temp(drag_state_id, drag));
                 });
-            }
-        });
+            });
     });
 }
 
@@ -2583,13 +3272,6 @@ fn render_code_lines(
                 ui.label(theme::label("folding"));
                 ui.label(theme::code(format!("{} ranges", fold_ranges.len())));
             }
-            if model.settings.minimap_visible {
-                ui.label(theme::label("minimap"));
-                ui.label(theme::muted(format!(
-                    "{} lines",
-                    model.active_buffer_code_lines.len()
-                )));
-            }
             if model.settings.whitespace_guides_visible {
                 ui.label(theme::label("whitespace guides"));
             }
@@ -2681,6 +3363,10 @@ fn render_code_lines(
                                 range,
                             });
                         }
+                    } else if response.clicked() && ui.input(|i| i.modifiers.ctrl) {
+                        actions.push(DesktopAction::GoToDefinition {
+                            position: coordinate,
+                        });
                     } else if response.clicked() {
                         actions.push(DesktopAction::SetCursor {
                             buffer_id: Some(buffer_id),
@@ -2713,6 +3399,79 @@ fn render_code_lines(
                     paint_code_selections(ui, line, &response, &viewport.selections, char_width);
                 }
                 paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                paint_find_match_highlights(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.find_bar_projection,
+                    char_width,
+                );
+                paint_diagnostic_underlines(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.language_tooling_projection.problems,
+                    char_width,
+                );
+                show_diagnostic_tooltip(
+                    ui,
+                    &response,
+                    line,
+                    &snapshot.language_tooling_projection.problems,
+                    char_width,
+                );
+                paint_inlay_hints(
+                    ui,
+                    line,
+                    &response,
+                    &snapshot.language_tooling_projection.inlay_hints,
+                    char_width,
+                );
+                // Ctrl+hover: underline word as a go-to-definition affordance.
+                if response.hovered()
+                    && ui.input(|i| i.modifiers.ctrl)
+                    && let Some(hover_pos) = response.hover_pos()
+                {
+                    let hover_coord = editor_coordinate_for_line_x(
+                        line,
+                        hover_pos.x,
+                        response.rect.left(),
+                        char_width,
+                    );
+                    if let Some(range) = word_range_for_coordinate(line, hover_coord) {
+                        let start_x =
+                            response.rect.left() + range.start.character as f32 * char_width;
+                        let end_x = response.rect.left() + range.end.character as f32 * char_width;
+                        let y = response.rect.bottom() - 1.0;
+                        ui.painter().line_segment(
+                            [egui::pos2(start_x, y), egui::pos2(end_x, y)],
+                            egui::Stroke::new(1.0_f32, theme::tokens().chrome.breadcrumb_accent),
+                        );
+                    }
+                }
+                // Hover request: dispatch RequestHover when the hover position changes.
+                if response.hovered()
+                    && !ui.input(|i| i.modifiers.ctrl)
+                    && let Some(hover_pos) = response.hover_pos()
+                {
+                    let hover_coord = editor_coordinate_for_line_x(
+                        line,
+                        hover_pos.x,
+                        response.rect.left(),
+                        char_width,
+                    );
+                    let hover_pos_id = egui::Id::new("lsp_last_hover_pos");
+                    let last_pos: Option<(u32, u32)> =
+                        ui.ctx().data_mut(|d| d.get_temp(hover_pos_id));
+                    let current_pos = (hover_coord.line, hover_coord.character);
+                    if last_pos != Some(current_pos) {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(hover_pos_id, current_pos));
+                        actions.push(DesktopAction::RequestHover {
+                            position: hover_coord,
+                        });
+                    }
+                }
                 if let Some(ime_composition) = ime_composition.as_ref() {
                     paint_ime_composition(
                         ui,
@@ -2735,6 +3494,33 @@ fn render_code_lines(
                 }
             });
         }
+
+        // Definition navigation: when definitions are available, navigate
+        // immediately for a single result or show a picker popup for multiple.
+        // Keep the handled location id in egui's temporary frame state because
+        // the projection remains populated after the action is dispatched.
+        let definitions = &snapshot.language_tooling_projection.definitions;
+        let definition_handled_id = egui::Id::new("lsp_last_definition_location");
+        if definitions.is_empty() {
+            ui.ctx()
+                .data_mut(|data| data.remove::<String>(definition_handled_id));
+        } else if definitions.len() == 1 {
+            let location_id = definitions[0].location_id.clone();
+            let should_navigate = ui.ctx().data_mut(|data| {
+                let already_handled = data.get_temp::<String>(definition_handled_id);
+                let changed = already_handled.as_deref() != Some(location_id.as_str());
+                if changed {
+                    data.insert_temp(definition_handled_id, location_id);
+                }
+                changed
+            });
+            if should_navigate {
+                actions.push(DesktopAction::NavigateToDefinition { index: 0 });
+            }
+        } else {
+            render_definition_picker(ui, definitions, actions);
+        }
+
         return;
     }
     let show_line_numbers = model.settings.line_numbers_visible;
@@ -3010,6 +3796,260 @@ fn paint_code_cursor(
         ],
         egui::Stroke::new(1.0_f32, theme::tokens().code_canvas.cursor),
     );
+}
+
+/// Paint semi-transparent highlight rectangles for find matches on a code line.
+///
+/// All matches are painted in yellow; the current match is painted in orange.
+fn paint_find_match_highlights(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    find_bar: &legion_ui::ui::FindBarProjection,
+    char_width: f32,
+) {
+    if !find_bar.visible || find_bar.matches.is_empty() {
+        return;
+    }
+    let line_zero = line.number.saturating_sub(1);
+    let yellow = theme::tokens().search.match_highlight;
+    let orange = theme::tokens().search.current_match;
+
+    for (i, m) in find_bar.matches.iter().enumerate() {
+        // Skip matches that don't overlap this line.
+        if m.start.line > line_zero || m.end.line < line_zero {
+            continue;
+        }
+        let start_char = if m.start.line == line_zero {
+            m.start.character
+        } else {
+            0
+        };
+        let end_char = if m.end.line == line_zero {
+            m.end.character
+        } else {
+            line.text.chars().count() as u32
+        };
+        if start_char >= end_char {
+            continue;
+        }
+        let start_x = response.rect.left() + start_char as f32 * char_width;
+        let end_x = response.rect.left() + end_char as f32 * char_width;
+        let color = if i == find_bar.current_match_index {
+            orange
+        } else {
+            yellow
+        };
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(start_x, response.rect.top()),
+                egui::pos2(end_x, response.rect.bottom()),
+            ),
+            egui::CornerRadius::ZERO,
+            color,
+        );
+    }
+}
+
+fn paint_diagnostic_underlines(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    problems: &[LanguageProblemProjection],
+    char_width: f32,
+) {
+    let line_zero = line.number.saturating_sub(1);
+    for problem in problems {
+        let Some(range) = problem.range.as_ref() else {
+            continue;
+        };
+        if range.start.line > line_zero || range.end.line < line_zero {
+            continue;
+        }
+        let start_char = if range.start.line == line_zero {
+            range.start.character
+        } else {
+            0
+        };
+        let end_char = if range.end.line == line_zero {
+            range.end.character
+        } else {
+            line.text.chars().count() as u32
+        };
+        if start_char >= end_char {
+            continue;
+        }
+        let start_x = response.rect.left() + start_char as f32 * char_width;
+        let end_x = response.rect.left() + end_char as f32 * char_width;
+        let y = response.rect.bottom() - 1.0;
+        let color = match problem.severity {
+            ProtocolDiagnosticSeverity::Error => theme::tokens().diagnostic.error,
+            ProtocolDiagnosticSeverity::Warning => theme::tokens().diagnostic.warning,
+            ProtocolDiagnosticSeverity::Info => theme::tokens().diagnostic.info,
+            ProtocolDiagnosticSeverity::Hint => theme::tokens().diagnostic.hint,
+        };
+        ui.painter().line_segment(
+            [egui::pos2(start_x, y), egui::pos2(end_x, y)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+    }
+}
+
+fn show_diagnostic_tooltip(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    line: &DesktopCodeLineViewModel,
+    problems: &[LanguageProblemProjection],
+    char_width: f32,
+) {
+    if !response.hovered() {
+        return;
+    }
+    let Some(hover_pos) = response.hover_pos() else {
+        return;
+    };
+    let hover_col = ((hover_pos.x - response.rect.left()) / char_width).max(0.0) as u32;
+    let line_zero = line.number.saturating_sub(1);
+    let matching: Vec<&LanguageProblemProjection> = problems
+        .iter()
+        .filter(|p| {
+            let Some(range) = p.range.as_ref() else {
+                return false;
+            };
+            if range.start.line > line_zero || range.end.line < line_zero {
+                return false;
+            }
+            let start_char = if range.start.line == line_zero {
+                range.start.character
+            } else {
+                0
+            };
+            let end_char = if range.end.line == line_zero {
+                range.end.character
+            } else {
+                line.text.chars().count() as u32
+            };
+            hover_col >= start_char && hover_col < end_char
+        })
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+    egui::Tooltip::always_open(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        ui.id().with("diag_tooltip"),
+        egui::PopupAnchor::Pointer,
+    )
+    .show(|ui: &mut egui::Ui| {
+        for (i, problem) in matching.iter().enumerate() {
+            if i > 0 {
+                ui.separator();
+            }
+            let color = match problem.severity {
+                ProtocolDiagnosticSeverity::Error => theme::tokens().diagnostic.error,
+                ProtocolDiagnosticSeverity::Warning => theme::tokens().diagnostic.warning,
+                ProtocolDiagnosticSeverity::Info => theme::tokens().diagnostic.info,
+                ProtocolDiagnosticSeverity::Hint => theme::tokens().diagnostic.hint,
+            };
+            ui.colored_label(color, format!("{:?}", problem.severity));
+            ui.label(&problem.message);
+            if let Some(source) = &problem.source_label {
+                ui.label(theme::muted(source));
+            }
+            if let Some(code) = &problem.code_label {
+                ui.label(theme::muted(code));
+            }
+        }
+    });
+}
+
+/// Render inlay hints as semi-transparent ghost text at their positions.
+fn paint_inlay_hints(
+    ui: &egui::Ui,
+    line: &DesktopCodeLineViewModel,
+    response: &egui::Response,
+    inlay_hints: &[LanguageInlayHintProjection],
+    char_width: f32,
+) {
+    let line_zero = line.number.saturating_sub(1);
+    for hint in inlay_hints {
+        if hint.position.line != line_zero {
+            continue;
+        }
+        let mut x = response.rect.left() + hint.position.character as f32 * char_width;
+        if hint.padding_left {
+            x += char_width * 0.5;
+        }
+        let label = if hint.kind_label.contains("type") {
+            format!(": {}", hint.label)
+        } else {
+            hint.label.clone()
+        };
+        ui.painter().text(
+            egui::pos2(x, response.rect.top()),
+            egui::Align2::LEFT_TOP,
+            &label,
+            egui::FontId::monospace(theme::tokens().typography.code as f32),
+            theme::tokens().chrome.fold_indicator,
+        );
+    }
+}
+
+/// Show a picker popup when multiple definition locations are available.
+fn render_definition_picker(
+    ui: &mut egui::Ui,
+    definitions: &[LanguageLocationProjection],
+    actions: &mut Vec<DesktopAction>,
+) {
+    let tokens = theme::tokens();
+    egui::Area::new("legion_desktop_definition_picker".into())
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(320.0, -100.0))
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(500.0);
+            egui::Frame::new()
+                .fill(tokens.bg.panel)
+                .stroke(egui::Stroke::new(1.0_f32, tokens.border.default))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(theme::body_strong("Go to Definition"));
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .id_salt("definition_picker_scroll")
+                        .show(ui, |ui| {
+                            for (i, def) in definitions.iter().enumerate() {
+                                let path_label = def
+                                    .path
+                                    .as_ref()
+                                    .map(|p| p.0.as_str())
+                                    .unwrap_or("<unknown>");
+                                let row = egui::Frame::new()
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(theme::body(&def.label));
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(theme::code_muted(trim_middle(
+                                                        path_label, 60,
+                                                    )));
+                                                },
+                                            );
+                                        });
+                                    })
+                                    .response;
+                                if row.clicked() {
+                                    actions.push(DesktopAction::NavigateToDefinition { index: i });
+                                }
+                            }
+                        });
+                });
+        });
 }
 
 fn paint_ime_composition(
@@ -4769,7 +5809,11 @@ fn render_terminal_stream(
             ui.add_space(theme::tokens().spacing.sm as f32);
             // Tier 1 A8: interactive input line — sends TerminalInput on Enter.
             if terminal.active_session_id.is_some() {
-                interactive_fields::render_terminal_input_line(ui, actions);
+                interactive_fields::render_terminal_input_line(
+                    ui,
+                    actions,
+                    terminal.application_cursor_keys.unwrap_or(false),
+                );
                 ui.horizontal(|ui| {
                     if soft_button(ui, "Poll").clicked() {
                         actions.push(DesktopAction::TerminalOutputPoll);
@@ -4791,35 +5835,59 @@ fn render_terminal_stream(
                 }
                 return;
             }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .max_height(280.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("terminal-output-grid")
-                        .num_columns(4)
-                        .striped(true)
-                        .spacing([theme::tokens().spacing.sm as f32, 2.0])
-                        .show(ui, |ui| {
-                            for row in render_model.grid.rows.iter() {
-                                ui.label(theme::code_muted(row.sequence_label.clone()));
-                                ui.label(theme::code_muted(row.stream_label.clone()));
-                                ui.horizontal_wrapped(|ui| {
-                                    render_terminal_payload(ui, &row.payload);
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    for badge in &row.badges {
-                                        ui.label(theme::code_muted(badge.clone()));
-                                    }
-                                    if soft_button(ui, "Copy").clicked()
-                                        && let Some(payload) = render_model.copy_row(row.sequence)
-                                    {
-                                        ui.ctx().copy_text(payload);
-                                    }
-                                });
-                                ui.end_row();
-                            }
-                        });
-                });
+
+            // Cell grid path: when the VT100 emulator has produced a cell grid,
+            // render with per-cell colors. Otherwise fall back to text rows.
+            if let Some(cell_grid) = &render_model.grid.cell_grid {
+                let cell_scrollback = render_model.grid.cell_scrollback.as_deref().unwrap_or(&[]);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        if !cell_scrollback.is_empty() {
+                            render_terminal_cell_grid(ui, cell_scrollback, None, None, Some(false));
+                            ui.separator();
+                        }
+                        render_terminal_cell_grid(
+                            ui,
+                            cell_grid,
+                            render_model.grid.cursor_row,
+                            render_model.grid.cursor_col,
+                            render_model.grid.cursor_visible,
+                        );
+                    });
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("terminal-output-grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing([theme::tokens().spacing.sm as f32, 2.0])
+                            .show(ui, |ui| {
+                                for row in render_model.grid.rows.iter() {
+                                    ui.label(theme::code_muted(row.sequence_label.clone()));
+                                    ui.label(theme::code_muted(row.stream_label.clone()));
+                                    ui.horizontal_wrapped(|ui| {
+                                        render_terminal_payload(ui, &row.payload);
+                                    });
+                                    ui.horizontal_wrapped(|ui| {
+                                        for badge in &row.badges {
+                                            ui.label(theme::code_muted(badge.clone()));
+                                        }
+                                        if ui.small_button("Copy").clicked()
+                                            && let Some(payload) =
+                                                render_model.copy_row(row.sequence)
+                                        {
+                                            ui.ctx().copy_text(payload);
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
         });
     });
 }
@@ -4911,6 +5979,148 @@ fn render_terminal_payload(ui: &mut egui::Ui, payload: &str) {
             }
         }
     });
+}
+
+/// Standard 16-color ANSI palette (indices 0-15).
+const ANSI_16_COLORS: [(u8, u8, u8); 16] = [
+    (0, 0, 0),       // 0: Black
+    (205, 0, 0),     // 1: Red
+    (0, 205, 0),     // 2: Green
+    (205, 205, 0),   // 3: Yellow
+    (0, 0, 238),     // 4: Blue
+    (205, 0, 205),   // 5: Magenta
+    (0, 205, 205),   // 6: Cyan
+    (229, 229, 229), // 7: White
+    (128, 128, 128), // 8: Bright Black
+    (255, 0, 0),     // 9: Bright Red
+    (0, 255, 0),     // 10: Bright Green
+    (255, 255, 0),   // 11: Bright Yellow
+    (92, 92, 255),   // 12: Bright Blue
+    (255, 0, 255),   // 13: Bright Magenta
+    (0, 255, 255),   // 14: Bright Cyan
+    (255, 255, 255), // 15: Bright White
+];
+
+/// Resolve a protocol `TerminalColor` to an egui `Color32`.
+fn resolve_terminal_color(
+    color: &legion_protocol::TerminalColor,
+    is_foreground: bool,
+) -> egui::Color32 {
+    match color {
+        legion_protocol::TerminalColor::Default => {
+            if is_foreground {
+                theme::tokens().text.secondary
+            } else {
+                egui::Color32::TRANSPARENT
+            }
+        }
+        legion_protocol::TerminalColor::Indexed(n) => {
+            let n = *n;
+            if n < 16 {
+                let (r, g, b) = ANSI_16_COLORS[n as usize];
+                egui::Color32::from_rgb(r, g, b)
+            } else if n < 232 {
+                // 6x6x6 color cube: indices 16-231
+                let idx = n - 16;
+                let r_idx = idx / 36;
+                let g_idx = (idx % 36) / 6;
+                let b_idx = idx % 6;
+                let r = if r_idx == 0 { 0 } else { 55 + 40 * r_idx };
+                let g = if g_idx == 0 { 0 } else { 55 + 40 * g_idx };
+                let b = if b_idx == 0 { 0 } else { 55 + 40 * b_idx };
+                egui::Color32::from_rgb(r, g, b)
+            } else {
+                // Grayscale: indices 232-255
+                let gray = 8 + 10 * (n - 232);
+                egui::Color32::from_rgb(gray, gray, gray)
+            }
+        }
+        legion_protocol::TerminalColor::Rgb(r, g, b) => egui::Color32::from_rgb(*r, *g, *b),
+    }
+}
+
+/// Render a VT100 cell grid with per-cell colors using egui LayoutJob.
+///
+/// Falls back to existing text-row rendering when no cell grid is available.
+fn render_terminal_cell_grid(
+    ui: &mut egui::Ui,
+    cell_grid: &[legion_protocol::TerminalCellRow],
+    cursor_row: Option<usize>,
+    cursor_col: Option<usize>,
+    cursor_visible: Option<bool>,
+) {
+    let font_size = theme::tokens().typography.code as f32;
+    let show_cursor = cursor_visible.unwrap_or(true);
+    let cursor_pos = if show_cursor {
+        cursor_row.zip(cursor_col)
+    } else {
+        None
+    };
+
+    for (row_idx, cell_row) in cell_grid.iter().enumerate() {
+        let mut job = egui::text::LayoutJob::default();
+        for (col_idx, cell) in cell_row.cells.iter().enumerate() {
+            let is_cursor = cursor_pos == Some((row_idx, col_idx));
+            let mut fg = resolve_terminal_color(&cell.attrs.fg, true);
+            let mut bg = resolve_terminal_color(&cell.attrs.bg, false);
+            if cell.attrs.inverse {
+                std::mem::swap(&mut fg, &mut bg);
+                if bg == egui::Color32::TRANSPARENT {
+                    bg = theme::tokens().text.secondary;
+                }
+            }
+
+            let mut text_format = egui::TextFormat {
+                font_id: egui::FontId::monospace(font_size),
+                color: fg,
+                background: bg,
+                ..Default::default()
+            };
+            if cell.attrs.bold {
+                text_format.font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+            }
+            if cell.attrs.italic {
+                text_format.italics = true;
+            }
+            if cell.attrs.underline {
+                text_format.underline = egui::Stroke::new(1.0_f32, fg);
+            }
+            if cell.attrs.strikethrough {
+                text_format.strikethrough = egui::Stroke::new(1.0_f32, fg);
+            }
+            if cell.attrs.hidden {
+                text_format.color = egui::Color32::TRANSPARENT;
+            }
+            if is_cursor {
+                let cursor_bg = if fg == egui::Color32::TRANSPARENT {
+                    theme::tokens().text.primary
+                } else {
+                    fg
+                };
+                let cursor_fg = if bg == egui::Color32::TRANSPARENT {
+                    theme::tokens().bg.code
+                } else {
+                    bg
+                };
+                text_format.background = cursor_bg;
+                text_format.color = cursor_fg;
+            }
+
+            if cell.continuation && !is_cursor {
+                continue;
+            }
+            let text = if cell.attrs.hidden || cell.continuation {
+                " ".to_string()
+            } else if cell.combining.is_empty() {
+                cell.ch.to_string()
+            } else {
+                format!("{}{}", cell.ch, cell.combining)
+            };
+            job.append(&text, 0.0, text_format);
+        }
+
+        ui.label(job);
+    }
 }
 
 #[cfg(test)]

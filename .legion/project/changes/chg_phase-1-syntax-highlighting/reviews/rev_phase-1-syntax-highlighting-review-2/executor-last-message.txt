@@ -1,0 +1,53 @@
+{
+  "status": "failed",
+  "summary": "The recorded run used a fake build, produced no implementation diff, and did not evaluate the acceptance oracle.",
+  "reviewVerdicts": {
+    "specification": "fail",
+    "integration": "fail",
+    "evidence": "fail"
+  },
+  "findings": [
+    {
+      "id": "missing-implementation-diff",
+      "title": "No syntax-highlighting implementation was recorded",
+      "body": "executor-result.json reports filesChanged as empty, and diff-observation.json reports zero changed lines and no new files. The task objective therefore has no implementation evidence.",
+      "severity": "blocking"
+    },
+    {
+      "id": "oracle-not-evaluated",
+      "title": "Acceptance oracle remains unevaluated",
+      "body": "verification-report.json has an empty oracleAttribution, no surface checks, and lists orc_phase-1-syntax-highlighting under unevaluatedOracleRefs. The evidence item for oracle verification is also verdict unknown.",
+      "severity": "blocking"
+    },
+    {
+      "id": "insufficient-feature-verification",
+      "title": "Validation does not prove the feature",
+      "body": "The only recorded verification command is legion validate, while the executor ran legion-executor fake build. This does not verify grammar registration, highlight-span propagation, or desktop rendering integration.",
+      "severity": "blocking"
+    }
+  ],
+  "filesChanged": [],
+  "commandsRun": [
+    {
+      "command": "Get-ChildItem",
+      "args": [
+        ".legion/project/changes/chg_phase-1-syntax-highlighting/runs/run_phase-1-syntax-highlighting-attempt-2"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": "Get-Content",
+      "args": [
+        "context-pack.md",
+        "change.yaml",
+        "oracle/orc_phase-1-syntax-highlighting.yaml",
+        "task-run.json",
+        "executor-result.json",
+        "executor-redacted.log",
+        "verification-report.json",
+        "diff-observation.json"
+      ],
+      "exitCode": 0
+    }
+  ]
+}

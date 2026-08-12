@@ -2455,18 +2455,18 @@ impl TreeSitterParser {
         self.highlight_captures_from_text(&document.language_id, source)
     }
 
-    /// Runs the bundled Rust highlight query from transient text without fabricating file identity.
+    /// Runs the appropriate bundled highlight query from transient text without fabricating file identity.
     pub fn highlight_captures_from_text(
         &self,
         language_id: &LanguageId,
         source: &str,
     ) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
-        // The bundled highlight query is Rust-specific. Plugin-registered grammars
-        // have no loaded-grammar worker yet, so they must not be highlighted as Rust.
-        if !tree_sitter_language_is_bundled_rust(language_id) {
+        // Only bundled grammars have highlight queries. Plugin-registered grammars
+        // have no loaded-grammar worker yet, so they return empty captures.
+        if !tree_sitter_language_is_bundled(language_id) {
             return Ok(Vec::new());
         }
-        tree_sitter_highlight_captures(source)
+        tree_sitter_highlight_captures_for(language_id, source)
     }
 
     /// Returns a Rust outline projection derived from tree-sitter definition tags.
@@ -2642,22 +2642,60 @@ pub fn tree_sitter_capture_kind(capture_name: &str) -> ViewportSemanticTokenKind
 
 /// Returns whether the bundled tree-sitter runtime or a registered plugin artifact supports a language identifier.
 pub fn tree_sitter_supports_language(language_id: &LanguageId) -> bool {
-    tree_sitter_language_is_bundled_rust(language_id)
+    tree_sitter_language_is_bundled(language_id)
         || plugin_tree_sitter_grammar_is_registered(language_id)
 }
 
+/// Returns whether a language identifier maps to any built-in bundled grammar.
+fn tree_sitter_language_is_bundled(language_id: &LanguageId) -> bool {
+    matches!(
+        language_id.0.as_str(),
+        "rust"
+            | "rs"
+            | "python"
+            | "typescript"
+            | "tsx"
+            | "jsx"
+            | "javascript"
+            | "go"
+            | "c"
+            | "json"
+            | "toml"
+            | "markdown"
+            | "bash"
+    )
+}
+
 /// Returns whether a language identifier maps to the bundled Rust grammar, which is the only
-/// grammar with a real loaded tree-sitter worker in this crate.
+/// grammar with a real loaded tree-sitter worker in this crate (structural parsing, code chunks).
 fn tree_sitter_language_is_bundled_rust(language_id: &LanguageId) -> bool {
     matches!(language_id.0.as_str(), "rust" | "rs")
 }
 
+/// Maps a file path to a `LanguageId` based on its extension. Returns `None` for unsupported extensions.
+pub fn language_for_path(path: &str) -> Option<LanguageId> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    let lang = match ext.to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "jsx",
+        "go" => "go",
+        "c" | "h" => "c",
+        "json" => "json",
+        "toml" => "toml",
+        "md" | "markdown" => "markdown",
+        "sh" | "bash" | "zsh" => "bash",
+        _ => return None,
+    };
+    Some(LanguageId(lang.to_string()))
+}
+
 /// Returns whether the bundled tree-sitter runtime supports a source path.
 pub fn tree_sitter_supports_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+    language_for_path(path).is_some()
 }
 
 #[allow(dead_code)]
@@ -2745,6 +2783,346 @@ fn rust_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
     }
 }
 
+fn python_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_python::LANGUAGE.into())
+}
+
+fn python_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            python_tree_sitter_language(),
+            tree_sitter_python::HIGHLIGHTS_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Python highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn javascript_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_javascript::LANGUAGE.into())
+}
+
+fn javascript_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            javascript_tree_sitter_language(),
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter JavaScript highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn jsx_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    // JSX is parsed by the JavaScript grammar which supports JSX syntax natively.
+    // Combine the base JavaScript query with JSX-specific patterns.
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        let combined = format!(
+            "{}\n{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+        );
+        tree_sitter::Query::new(javascript_tree_sitter_language(), &combined)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter JSX highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn typescript_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+}
+
+fn tsx_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_typescript::LANGUAGE_TSX.into())
+}
+
+fn typescript_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    // TypeScript's HIGHLIGHTS_QUERY only covers TS-specific additions (type annotations).
+    // Combine with JavaScript's base query for full keyword/function/etc. coverage.
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        let combined = format!(
+            "{}\n{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY
+        );
+        tree_sitter::Query::new(typescript_tree_sitter_language(), &combined)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter TypeScript highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn tsx_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    // TSX inherits from both JavaScript and TypeScript queries, plus JSX-specific patterns.
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        let combined = format!(
+            "{}\n{}\n{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY
+        );
+        tree_sitter::Query::new(tsx_tree_sitter_language(), &combined)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter TSX highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn go_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_go::LANGUAGE.into())
+}
+
+fn go_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(go_tree_sitter_language(), tree_sitter_go::HIGHLIGHTS_QUERY)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Go highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn c_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_c::LANGUAGE.into())
+}
+
+fn c_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(c_tree_sitter_language(), tree_sitter_c::HIGHLIGHT_QUERY)
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter C highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn json_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_json::LANGUAGE.into())
+}
+
+fn json_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            json_tree_sitter_language(),
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter JSON highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn toml_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_toml_ng::LANGUAGE.into())
+}
+
+fn toml_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            toml_tree_sitter_language(),
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter TOML highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn bash_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_bash::LANGUAGE.into())
+}
+
+fn bash_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            bash_tree_sitter_language(),
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Bash highlight query failed: {message}"),
+        }),
+    }
+}
+
+fn markdown_tree_sitter_language() -> &'static tree_sitter::Language {
+    static LANGUAGE: OnceLock<tree_sitter::Language> = OnceLock::new();
+    LANGUAGE.get_or_init(|| tree_sitter_md::LANGUAGE.into())
+}
+
+fn markdown_highlight_query() -> IndexResult<&'static tree_sitter::Query> {
+    static QUERY: OnceLock<Result<tree_sitter::Query, String>> = OnceLock::new();
+    match QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            markdown_tree_sitter_language(),
+            tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        )
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(query) => Ok(query),
+        Err(message) => Err(IndexError::InvalidConfig {
+            message: format!("tree-sitter Markdown highlight query failed: {message}"),
+        }),
+    }
+}
+
+/// Returns the tree-sitter `Language` for a given `LanguageId`, or `None` if not bundled.
+fn tree_sitter_language_for(lang_id: &LanguageId) -> Option<&'static tree_sitter::Language> {
+    match lang_id.0.as_str() {
+        "rust" | "rs" => Some(rust_tree_sitter_language()),
+        "python" => Some(python_tree_sitter_language()),
+        "javascript" => Some(javascript_tree_sitter_language()),
+        "jsx" => Some(javascript_tree_sitter_language()),
+        "typescript" => Some(typescript_tree_sitter_language()),
+        "tsx" => Some(tsx_tree_sitter_language()),
+        "go" => Some(go_tree_sitter_language()),
+        "c" => Some(c_tree_sitter_language()),
+        "json" => Some(json_tree_sitter_language()),
+        "toml" => Some(toml_tree_sitter_language()),
+        "bash" => Some(bash_tree_sitter_language()),
+        "markdown" => Some(markdown_tree_sitter_language()),
+        _ => None,
+    }
+}
+
+/// Returns the compiled highlight query for a given `LanguageId`, or `None` if not bundled.
+fn tree_sitter_highlight_query_for(
+    lang_id: &LanguageId,
+) -> Option<IndexResult<&'static tree_sitter::Query>> {
+    match lang_id.0.as_str() {
+        "rust" | "rs" => Some(rust_highlight_query()),
+        "python" => Some(python_highlight_query()),
+        "javascript" => Some(javascript_highlight_query()),
+        "jsx" => Some(jsx_highlight_query()),
+        "typescript" => Some(typescript_highlight_query()),
+        "tsx" => Some(tsx_highlight_query()),
+        "go" => Some(go_highlight_query()),
+        "c" => Some(c_highlight_query()),
+        "json" => Some(json_highlight_query()),
+        "toml" => Some(toml_highlight_query()),
+        "bash" => Some(bash_highlight_query()),
+        "markdown" => Some(markdown_highlight_query()),
+        _ => None,
+    }
+}
+
+/// Runs the appropriate bundled highlight query for the given language and returns captures.
+fn tree_sitter_highlight_captures_for(
+    lang_id: &LanguageId,
+    source: &str,
+) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
+    let language = tree_sitter_language_for(lang_id).ok_or_else(|| IndexError::InvalidConfig {
+        message: format!(
+            "no bundled tree-sitter grammar for language '{}'",
+            lang_id.0
+        ),
+    })?;
+    let query =
+        tree_sitter_highlight_query_for(lang_id).ok_or_else(|| IndexError::InvalidConfig {
+            message: format!(
+                "no bundled tree-sitter highlight query for language '{}'",
+                lang_id.0
+            ),
+        })??;
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(language)
+        .map_err(|err| IndexError::InvalidConfig {
+            message: format!("tree-sitter {} language load failed: {err}", lang_id.0),
+        })?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| IndexError::InvalidConfig {
+            message: format!("tree-sitter {} parser returned no tree", lang_id.0),
+        })?;
+
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut captures = cursor.captures(query, tree.root_node(), source.as_bytes());
+    let capture_names = query.capture_names();
+    let mut results = Vec::new();
+
+    captures.advance();
+    while let Some((query_match, capture_index)) = captures.get() {
+        let capture = query_match.captures[*capture_index];
+        let capture_name = capture_names
+            .get(capture.index as usize)
+            .copied()
+            .unwrap_or("unknown")
+            .to_string();
+        let start = capture.node.start_position();
+        let end = capture.node.end_position();
+        results.push(TreeSitterHighlightCapture {
+            token_kind: tree_sitter_capture_kind(&capture_name),
+            capture_name,
+            line_number: start.row as u32,
+            start_byte_col: start.column as u32,
+            end_byte_col: end.column as u32,
+            start_byte: capture.node.start_byte() as u64,
+            end_byte: capture.node.end_byte() as u64,
+        });
+        captures.advance();
+    }
+
+    results.sort_by(|left, right| {
+        left.line_number
+            .cmp(&right.line_number)
+            .then_with(|| left.start_byte_col.cmp(&right.start_byte_col))
+            .then_with(|| left.end_byte_col.cmp(&right.end_byte_col))
+            .then_with(|| left.capture_name.cmp(&right.capture_name))
+    });
+    Ok(results)
+}
+
 fn parse_tree_sitter_rust(source: &str) -> IndexResult<tree_sitter::Tree> {
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -2759,6 +3137,7 @@ fn parse_tree_sitter_rust(source: &str) -> IndexResult<tree_sitter::Tree> {
         })
 }
 
+#[allow(dead_code)] // Superseded by tree_sitter_highlight_captures_for(); retained for structural parsing reference.
 fn tree_sitter_highlight_captures(source: &str) -> IndexResult<Vec<TreeSitterHighlightCapture>> {
     let tree = parse_tree_sitter_rust(source)?;
     let query = rust_highlight_query()?;
@@ -6703,4 +7082,302 @@ fn deterministic_preview_uuid(symbol: &SymbolFileMapRecord, new_name: &str) -> u
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod tree_sitter_multi_language_tests {
+    use super::*;
+
+    // ── Task 3a: Path mapping tests ──────────────────────────────────
+
+    #[test]
+    fn language_for_path_maps_all_extensions() {
+        assert_eq!(language_for_path("foo.rs").unwrap().0, "rust");
+        assert_eq!(language_for_path("foo.py").unwrap().0, "python");
+        assert_eq!(language_for_path("foo.pyi").unwrap().0, "python");
+        assert_eq!(language_for_path("foo.ts").unwrap().0, "typescript");
+        assert_eq!(language_for_path("foo.tsx").unwrap().0, "tsx");
+        assert_eq!(language_for_path("foo.js").unwrap().0, "javascript");
+        assert_eq!(language_for_path("foo.mjs").unwrap().0, "javascript");
+        assert_eq!(language_for_path("foo.cjs").unwrap().0, "javascript");
+        assert_eq!(language_for_path("foo.jsx").unwrap().0, "jsx");
+        assert_eq!(language_for_path("foo.go").unwrap().0, "go");
+        assert_eq!(language_for_path("foo.c").unwrap().0, "c");
+        assert_eq!(language_for_path("foo.h").unwrap().0, "c");
+        assert_eq!(language_for_path("foo.json").unwrap().0, "json");
+        assert_eq!(language_for_path("foo.toml").unwrap().0, "toml");
+        assert_eq!(language_for_path("foo.md").unwrap().0, "markdown");
+        assert_eq!(language_for_path("foo.markdown").unwrap().0, "markdown");
+        assert_eq!(language_for_path("foo.sh").unwrap().0, "bash");
+        assert_eq!(language_for_path("foo.bash").unwrap().0, "bash");
+        assert_eq!(language_for_path("foo.zsh").unwrap().0, "bash");
+        assert!(language_for_path("foo.xyz").is_none());
+        assert!(language_for_path("noext").is_none());
+    }
+
+    #[test]
+    fn tree_sitter_supports_path_delegates_to_language_for_path() {
+        assert!(tree_sitter_supports_path("main.rs"));
+        assert!(tree_sitter_supports_path("app.py"));
+        assert!(tree_sitter_supports_path("index.ts"));
+        assert!(tree_sitter_supports_path("component.tsx"));
+        assert!(tree_sitter_supports_path("main.go"));
+        assert!(tree_sitter_supports_path("hello.c"));
+        assert!(tree_sitter_supports_path("data.json"));
+        assert!(tree_sitter_supports_path("config.toml"));
+        assert!(tree_sitter_supports_path("README.md"));
+        assert!(tree_sitter_supports_path("script.sh"));
+        assert!(!tree_sitter_supports_path("file.xyz"));
+    }
+
+    // ── Task 3b: Highlight capture tests per language ────────────────
+
+    fn captures_for(lang: &str, source: &str) -> Vec<TreeSitterHighlightCapture> {
+        let parser = TreeSitterParser::new();
+        parser
+            .highlight_captures_from_text(&LanguageId(lang.to_string()), source)
+            .expect("highlight query should succeed")
+    }
+
+    fn has_kind(captures: &[TreeSitterHighlightCapture], kind: ViewportSemanticTokenKind) -> bool {
+        captures.iter().any(|c| c.token_kind == kind)
+    }
+
+    #[test]
+    fn highlight_captures_rust_regression() {
+        let captures = captures_for("rust", "fn main() { let x = 42; }");
+        assert!(!captures.is_empty(), "Rust should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "Rust: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "Rust: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_python() {
+        let captures = captures_for("python", "def hello(): pass");
+        assert!(!captures.is_empty(), "Python should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "Python: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "Python: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_typescript() {
+        let captures = captures_for("typescript", "function hello(): string { }");
+        assert!(!captures.is_empty(), "TypeScript should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "TypeScript: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "TypeScript: expected Function capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Type),
+            "TypeScript: expected Type capture for type annotation"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_tsx() {
+        let captures = captures_for("tsx", "function App() { return <div />; }");
+        assert!(!captures.is_empty(), "TSX should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "TSX: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "TSX: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_javascript() {
+        let captures = captures_for("javascript", "function hello() { return 42; }");
+        assert!(!captures.is_empty(), "JavaScript should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "JavaScript: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "JavaScript: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_jsx() {
+        let captures = captures_for("jsx", "function App() { return <div />; }");
+        assert!(!captures.is_empty(), "JSX should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "JSX: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "JSX: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_go() {
+        let captures = captures_for("go", "func main() { }");
+        assert!(!captures.is_empty(), "Go should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Keyword),
+            "Go: expected Keyword capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "Go: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_c() {
+        let captures = captures_for("c", "int main() { return 0; }");
+        assert!(!captures.is_empty(), "C should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Type),
+            "C: expected Type capture"
+        );
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::Function),
+            "C: expected Function capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_json() {
+        let captures = captures_for("json", r#"{"key": "value"}"#);
+        assert!(!captures.is_empty(), "JSON should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::String),
+            "JSON: expected String capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_toml() {
+        let captures = captures_for("toml", "[section]\nkey = \"value\"");
+        assert!(!captures.is_empty(), "TOML should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::String),
+            "TOML: expected String capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_bash() {
+        let captures = captures_for("bash", "#!/bin/bash\necho \"hello\"");
+        assert!(!captures.is_empty(), "Bash should produce captures");
+        assert!(
+            has_kind(&captures, ViewportSemanticTokenKind::String),
+            "Bash: expected String capture"
+        );
+    }
+
+    #[test]
+    fn highlight_captures_markdown() {
+        let captures = captures_for("markdown", "# Heading\n\n**bold**");
+        // Markdown block-only grammar may produce fewer captures; just check non-panic.
+        // The grammar compiles and runs without errors.
+        let _result = captures; // Successful parse is the primary assertion.
+    }
+
+    #[test]
+    fn highlight_captures_unsupported_returns_empty() {
+        let captures = captures_for("esperanto", "saluton mondo");
+        assert!(
+            captures.is_empty(),
+            "Unsupported language should return empty captures"
+        );
+    }
+
+    // ── Task 3c: Capture normalization tests ─────────────────────────
+
+    #[test]
+    fn capture_kind_normalizes_dotted_names() {
+        assert_eq!(
+            tree_sitter_capture_kind("keyword.control"),
+            ViewportSemanticTokenKind::Keyword
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("keyword.return"),
+            ViewportSemanticTokenKind::Keyword
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("type.builtin"),
+            ViewportSemanticTokenKind::Type
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("string.special"),
+            ViewportSemanticTokenKind::String
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("function.method"),
+            ViewportSemanticTokenKind::Function
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("comment.line"),
+            ViewportSemanticTokenKind::Comment
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("number.float"),
+            ViewportSemanticTokenKind::Number
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("punctuation.bracket"),
+            ViewportSemanticTokenKind::Punct
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("attribute.decorator"),
+            ViewportSemanticTokenKind::Attribute
+        );
+        assert_eq!(
+            tree_sitter_capture_kind("unknown_capture"),
+            ViewportSemanticTokenKind::Ident
+        );
+    }
+
+    #[test]
+    fn bundled_language_check_covers_all_languages() {
+        let supported = [
+            "rust",
+            "rs",
+            "python",
+            "typescript",
+            "tsx",
+            "jsx",
+            "javascript",
+            "go",
+            "c",
+            "json",
+            "toml",
+            "markdown",
+            "bash",
+        ];
+        for lang in &supported {
+            assert!(
+                tree_sitter_language_is_bundled(&LanguageId(lang.to_string())),
+                "Expected '{}' to be bundled",
+                lang
+            );
+        }
+        assert!(!tree_sitter_language_is_bundled(&LanguageId(
+            "haskell".to_string()
+        )));
+    }
 }

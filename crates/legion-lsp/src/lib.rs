@@ -1154,6 +1154,18 @@ pub fn did_change_notification(
     )
 }
 
+/// Builds a `textDocument/didClose` notification envelope.
+pub fn did_close_notification(uri: &str) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::notification(
+        "textDocument/didClose",
+        json!({
+            "textDocument": {
+                "uri": uri,
+            }
+        }),
+    )
+}
+
 /// Builds a JSON-RPC `textDocument/completion` request.
 pub fn completion_request(
     id: u64,

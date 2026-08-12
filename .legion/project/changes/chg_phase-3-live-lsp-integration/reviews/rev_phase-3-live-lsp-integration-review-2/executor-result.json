@@ -1,0 +1,1 @@
+{"commandsRun":[{"args":["fake","review"],"command":"legion-executor","exitCode":0}],"filesChanged":[],"findings":[],"ok":true,"reviewVerdicts":{"evidence":"pass","integration":"pass","specification":"pass"},"status":"succeeded","summary":"Fake review passed for ctr_phase-3-live-lsp-integration."}

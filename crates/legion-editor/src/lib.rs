@@ -27,6 +27,7 @@ use legion_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
     TextSnapshotDescriptor, Utf16Position, Utf16Range,
 };
+use regex::RegexBuilder;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -2684,6 +2685,112 @@ impl EditorSession {
     /// Emit a save request DTO instead of writing directly to disk.
     pub fn request_save(&mut self) -> Result<SaveRequestDto, EditorError> {
         self.engine.request_save(self.active_buffer_id, None)
+    }
+}
+
+// ── Buffer search state (Phase 4 – Navigation & UI Essentials) ──
+
+/// Standalone buffer search state for find/replace.
+///
+/// Owned by the app layer, not by `EditorEngine`.  The engine supplies
+/// buffer text via `EditorEngine::text()`; this struct runs regex-based
+/// matching and tracks navigation state.
+#[derive(Debug, Clone, Default)]
+pub struct BufferSearchState {
+    /// Current query string.
+    pub query: String,
+    /// Current replacement text.
+    pub replace_text: String,
+    /// Whether matching is case-sensitive.
+    pub case_sensitive: bool,
+    /// Whether matching restricts to whole words.
+    pub whole_word: bool,
+    /// Whether the query is interpreted as a regex pattern.
+    pub use_regex: bool,
+    /// Whether the find bar is visible.
+    pub find_bar_visible: bool,
+    /// Whether the replace input is visible.
+    pub replace_visible: bool,
+    /// Match results as `(start_line, start_col, end_line, end_col)` tuples.
+    pub matches: Vec<(u32, u32, u32, u32)>,
+    /// Zero-based index of the currently highlighted match.
+    pub current_match_index: usize,
+}
+
+impl BufferSearchState {
+    /// Run the current query against `text` and populate `self.matches`.
+    ///
+    /// Literal searches with whole-word enabled are wrapped in word
+    /// boundaries. Regex searches are matched exactly as authored so the
+    /// pattern remains responsible for its own boundaries, anchors, and
+    /// groups. An empty query or invalid regex produces zero matches without
+    /// panicking.
+    pub fn find_matches(&mut self, text: &str) -> usize {
+        self.matches.clear();
+        self.current_match_index = 0;
+        if self.query.is_empty() {
+            return 0;
+        }
+
+        let pattern = if self.use_regex {
+            self.query.clone()
+        } else {
+            regex::escape(&self.query)
+        };
+        let pattern = if self.whole_word && !self.use_regex {
+            format!(r"\b{}\b", pattern)
+        } else {
+            pattern
+        };
+
+        let regex = match RegexBuilder::new(&pattern)
+            .case_insensitive(!self.case_sensitive)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+
+        let offset_to_line_col = |offset: usize| -> (u32, u32) {
+            let line = line_starts.partition_point(|&start| start <= offset) - 1;
+            let col = offset - line_starts[line];
+            (line as u32, col as u32)
+        };
+
+        for m in regex.find_iter(text) {
+            let (start_line, start_char) = offset_to_line_col(m.start());
+            let (end_line, end_char) = offset_to_line_col(m.end());
+            self.matches
+                .push((start_line, start_char, end_line, end_char));
+        }
+        self.matches.len()
+    }
+
+    /// Navigate to the next match, wrapping around at the end.
+    pub fn next_match(&mut self) {
+        if !self.matches.is_empty() {
+            self.current_match_index = (self.current_match_index + 1) % self.matches.len();
+        }
+    }
+
+    /// Navigate to the previous match, wrapping around at the beginning.
+    pub fn prev_match(&mut self) {
+        if !self.matches.is_empty() {
+            if self.current_match_index == 0 {
+                self.current_match_index = self.matches.len() - 1;
+            } else {
+                self.current_match_index -= 1;
+            }
+        }
+    }
+
+    /// Return the currently highlighted match, if any.
+    pub fn current_match(&self) -> Option<(u32, u32, u32, u32)> {
+        self.matches.get(self.current_match_index).copied()
     }
 }
 

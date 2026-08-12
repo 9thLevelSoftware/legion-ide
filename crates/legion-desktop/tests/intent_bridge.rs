@@ -353,6 +353,19 @@ fn intent_bridge_routes_daily_editing_actions() {
     );
     assert_eq!(
         bridge.translate(
+            DesktopAction::ReorderTab {
+                buffer_id: BufferId(10),
+                new_index: 0,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ReorderTab {
+            buffer_id: BufferId(10),
+            new_index: 0,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
             DesktopAction::SetCursor {
                 buffer_id: None,
                 cursor,
@@ -1060,6 +1073,66 @@ fn intent_bridge_routes_navigate_to_problem_action() {
             },
         }),
         "NavigateToProblem must emit OpenPathAtPosition with line and character=0"
+    );
+}
+
+#[test]
+fn intent_bridge_routes_find_replace_actions() {
+    assert_eq!(
+        translate(DesktopAction::ToggleFindBar),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ToggleFindBar)
+    );
+    assert_eq!(
+        translate(DesktopAction::CloseFindBar),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CloseFindBar)
+    );
+    assert_eq!(
+        translate(DesktopAction::SetFindQuery {
+            query: "test".into()
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindQuery {
+            query: "test".into()
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::FindNext),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::FindNext)
+    );
+    assert_eq!(
+        translate(DesktopAction::FindPrevious),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::FindPrevious)
+    );
+    assert_eq!(
+        translate(DesktopAction::ToggleFindReplace),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ToggleFindReplace)
+    );
+    assert_eq!(
+        translate(DesktopAction::SetFindReplaceText {
+            text: "replacement".into()
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindReplaceText {
+            text: "replacement".into()
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::ReplaceOne),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ReplaceOne)
+    );
+    assert_eq!(
+        translate(DesktopAction::ReplaceAll),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ReplaceAll)
+    );
+    assert_eq!(
+        translate(DesktopAction::SetFindCaseSensitive { enabled: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindCaseSensitive { enabled: true })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetFindWholeWord { enabled: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindWholeWord { enabled: true })
+    );
+    assert_eq!(
+        translate(DesktopAction::SetFindRegex { enabled: true }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindRegex { enabled: true })
     );
 }
 

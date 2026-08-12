@@ -68,7 +68,7 @@ use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
     StructuralSearchQuery, TreeSitterHighlightCapture, TreeSitterParser,
-    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple,
+    build_structural_rewrite_preview_payload, fuzzy::fuzzy_score_tuple, language_for_path,
     register_plugin_tree_sitter_grammars, run_structural_search as index_run_structural_search,
     tree_sitter_supports_path,
 };
@@ -7888,6 +7888,7 @@ impl TerminalWorkflow {
                     let shell_projection = outcome.shell_projection.clone();
                     self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
+                self.populate_cell_grid(outcome.emulator_snapshot.as_ref());
                 self.projection.generated_at = TimestampMillis::now();
                 self.record_audit(
                     session_id,
@@ -8086,6 +8087,46 @@ impl TerminalWorkflow {
                 }
                 Err(error) => self.fail(session_id, event_context, error.to_string()),
             }
+        }
+    }
+
+    fn populate_cell_grid(&mut self, snapshot: Option<&legion_terminal::EmulatorSnapshot>) {
+        use legion_protocol::{TerminalCell, TerminalCellAttrs, TerminalCellRow, TerminalColor};
+        if let Some(snapshot) = snapshot {
+            let convert_color = |c: &legion_terminal::vt100::Color| match c {
+                legion_terminal::vt100::Color::Default => TerminalColor::Default,
+                legion_terminal::vt100::Color::Indexed(n) => TerminalColor::Indexed(*n),
+                legion_terminal::vt100::Color::Rgb(r, g, b) => TerminalColor::Rgb(*r, *g, *b),
+            };
+            let convert_row = |row: &[legion_terminal::vt100::Cell]| TerminalCellRow {
+                cells: row
+                    .iter()
+                    .map(|cell| TerminalCell {
+                        ch: cell.ch,
+                        attrs: TerminalCellAttrs {
+                            fg: convert_color(&cell.attrs.fg),
+                            bg: convert_color(&cell.attrs.bg),
+                            bold: cell.attrs.bold,
+                            dim: cell.attrs.dim,
+                            italic: cell.attrs.italic,
+                            underline: cell.attrs.underline,
+                            strikethrough: cell.attrs.strikethrough,
+                            inverse: cell.attrs.inverse,
+                            hidden: cell.attrs.hidden,
+                        },
+                        continuation: cell.continuation,
+                        combining: cell.combining.clone(),
+                    })
+                    .collect(),
+            };
+            self.projection.cell_grid =
+                Some(snapshot.grid.iter().map(|r| convert_row(r)).collect());
+            self.projection.cell_scrollback =
+                Some(snapshot.scrollback.iter().map(|r| convert_row(r)).collect());
+            self.projection.cursor_row = Some(snapshot.cursor_row);
+            self.projection.cursor_col = Some(snapshot.cursor_col);
+            self.projection.cursor_visible = Some(snapshot.cursor_visible);
+            self.projection.application_cursor_keys = Some(snapshot.application_cursor_keys);
         }
     }
 
@@ -10649,6 +10690,13 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a tab to a new position.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save every open buffer through app-owned save workflows.
     SaveAll,
     /// Set the primary cursor for a buffer.
@@ -11444,6 +11492,7 @@ impl CommandExecutionService {
             | AppCommandRequest::SetProductMode { .. }
             | AppCommandRequest::SwitchTab { .. }
             | AppCommandRequest::CloseTab { .. }
+            | AppCommandRequest::ReorderTab { .. }
             | AppCommandRequest::SaveAll
             | AppCommandRequest::SetCursor { .. }
             | AppCommandRequest::SetSelection { .. }
@@ -11670,6 +11719,13 @@ impl CommandDispatcher {
             CommandDispatchIntent::CloseTab { buffer_id } => {
                 Ok(AppCommandRequest::CloseTab { buffer_id })
             }
+            CommandDispatchIntent::ReorderTab {
+                buffer_id,
+                new_index,
+            } => Ok(AppCommandRequest::ReorderTab {
+                buffer_id,
+                new_index,
+            }),
             CommandDispatchIntent::SaveAll => Ok(AppCommandRequest::SaveAll),
             CommandDispatchIntent::SetCursor { buffer_id, cursor } => {
                 Ok(AppCommandRequest::SetCursor { buffer_id, cursor })
@@ -12187,6 +12243,20 @@ impl CommandDispatcher {
             | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
                 Ok(AppCommandRequest::Noop)
             }
+            // Find/replace intents are handled by AppComposition::dispatch_ui_intent
+            // before reaching this router; these arms satisfy exhaustiveness.
+            CommandDispatchIntent::ToggleFindBar
+            | CommandDispatchIntent::CloseFindBar
+            | CommandDispatchIntent::SetFindQuery { .. }
+            | CommandDispatchIntent::FindNext
+            | CommandDispatchIntent::FindPrevious
+            | CommandDispatchIntent::ToggleFindReplace
+            | CommandDispatchIntent::SetFindReplaceText { .. }
+            | CommandDispatchIntent::ReplaceOne
+            | CommandDispatchIntent::ReplaceAll
+            | CommandDispatchIntent::SetFindCaseSensitive { .. }
+            | CommandDispatchIntent::SetFindWholeWord { .. }
+            | CommandDispatchIntent::SetFindRegex { .. } => Ok(AppCommandRequest::Noop),
         }
     }
 
@@ -12488,8 +12558,9 @@ fn tree_sitter_semantic_token_overlays_for_visible_lines(
     }
 
     // Parse outside the cache lock so rendering threads never block each other on tree-sitter work.
+    let lang_id = language_for_path(path)?;
     let mut captures = TreeSitterParser::new()
-        .highlight_captures_from_text(&LanguageId("rust".to_string()), full_text)
+        .highlight_captures_from_text(&lang_id, full_text)
         .ok()?;
     if captures.is_empty() {
         return None;
@@ -16569,6 +16640,8 @@ pub struct AppComposition {
     /// Defaults to in-memory only; swap to file-backed via
     /// [`Self::enable_checkpoint_persistence`].
     checkpoint_store: CheckpointStore,
+    /// In-editor find/replace state, owned by app composition for projection building.
+    buffer_search_state: legion_editor::BufferSearchState,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -16874,6 +16947,7 @@ impl AppComposition {
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
             checkpoint_store: CheckpointStore::new(),
+            buffer_search_state: legion_editor::BufferSearchState::default(),
         }
     }
 
@@ -19691,6 +19765,179 @@ impl AppComposition {
             return self.dispatch_proposal_ui_intent(intent, event_context);
         }
 
+        // Find/replace intents mutate buffer_search_state directly and return early.
+        match &intent {
+            CommandDispatchIntent::ToggleFindBar => {
+                let was_visible = self.buffer_search_state.find_bar_visible;
+                self.buffer_search_state.find_bar_visible = !was_visible;
+                if !was_visible
+                    && !self.buffer_search_state.query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::CloseFindBar => {
+                self.buffer_search_state.find_bar_visible = false;
+                self.buffer_search_state.matches.clear();
+                self.buffer_search_state.current_match_index = 0;
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindQuery { query } => {
+                self.buffer_search_state.query = query.clone();
+                if !query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                } else {
+                    self.buffer_search_state.matches.clear();
+                    self.buffer_search_state.current_match_index = 0;
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::FindNext => {
+                self.buffer_search_state.next_match();
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.reveal_current_find_match(buffer_id)?;
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::FindPrevious => {
+                self.buffer_search_state.prev_match();
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.reveal_current_find_match(buffer_id)?;
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ToggleFindReplace => {
+                self.buffer_search_state.replace_visible =
+                    !self.buffer_search_state.replace_visible;
+                self.buffer_search_state.find_bar_visible = true;
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindReplaceText { text } => {
+                self.buffer_search_state.replace_text = text.clone();
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ReplaceOne => {
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.refresh_buffer_search_matches(buffer_id);
+                    if let Some(current) = self.buffer_search_state.current_match() {
+                        let range = ProtocolTextRange {
+                            start: TextCoordinate {
+                                line: current.0,
+                                character: current.1,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                            end: TextCoordinate {
+                                line: current.2,
+                                character: current.3,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                        };
+                        let replacement = self.buffer_search_state.replace_text.clone();
+                        let edit =
+                            TextEdit::new(CommandDispatcher::editor_range(range), replacement);
+                        if self
+                            .apply_edit_to_buffer_with_correlation(
+                                buffer_id,
+                                edit,
+                                event_context.correlation_id,
+                            )
+                            .is_ok()
+                        {
+                            self.refresh_buffer_search_matches(buffer_id);
+                        }
+                    }
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::ReplaceAll => {
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.refresh_buffer_search_matches(buffer_id);
+                    let replacement = self.buffer_search_state.replace_text.clone();
+                    let edits: Vec<TextEdit> = self
+                        .buffer_search_state
+                        .matches
+                        .iter()
+                        .copied()
+                        .map(|(sl, sc, el, ec)| {
+                            let range = ProtocolTextRange {
+                                start: TextCoordinate {
+                                    line: sl,
+                                    character: sc,
+                                    byte_offset: None,
+                                    utf16_offset: None,
+                                },
+                                end: TextCoordinate {
+                                    line: el,
+                                    character: ec,
+                                    byte_offset: None,
+                                    utf16_offset: None,
+                                },
+                            };
+                            TextEdit::new(
+                                CommandDispatcher::editor_range(range),
+                                replacement.clone(),
+                            )
+                        })
+                        .collect();
+                    if !edits.is_empty() {
+                        let _ = self.editor.apply_edits(
+                            buffer_id,
+                            edits,
+                            TransactionSource::User,
+                            None,
+                            Some(event_context.correlation_id),
+                        );
+                    }
+                    self.refresh_buffer_search_matches(buffer_id);
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindCaseSensitive { enabled } => {
+                self.buffer_search_state.case_sensitive = *enabled;
+                if !self.buffer_search_state.query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindWholeWord { enabled } => {
+                self.buffer_search_state.whole_word = *enabled;
+                if !self.buffer_search_state.query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            CommandDispatchIntent::SetFindRegex { enabled } => {
+                self.buffer_search_state.use_regex = *enabled;
+                if !self.buffer_search_state.query.is_empty()
+                    && let Some(buffer_id) = self.active_documents.active_buffer_id
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
+                return Ok(AppCommandOutcome::Noop);
+            }
+            _ => {}
+        }
+
         let request = CommandDispatcher::route_intent(
             intent,
             AppCommandRouteContext::from_active(&self.active_documents),
@@ -19769,10 +20016,24 @@ impl AppComposition {
             }
             AppCommandRequest::SwitchTab { buffer_id } => {
                 self.switch_tab(buffer_id)?;
+                if self.buffer_search_state.find_bar_visible
+                    && !self.buffer_search_state.query.is_empty()
+                    && let Ok(text) = self.editor.text(buffer_id)
+                {
+                    let text = text.to_string();
+                    self.buffer_search_state.find_matches(&text);
+                }
                 Ok(AppCommandOutcome::TabSwitched(buffer_id))
             }
             AppCommandRequest::CloseTab { buffer_id } => {
                 Ok(AppCommandOutcome::TabClose(self.close_tab(buffer_id)?))
+            }
+            AppCommandRequest::ReorderTab {
+                buffer_id,
+                new_index,
+            } => {
+                self.reorder_tab(buffer_id, new_index);
+                Ok(AppCommandOutcome::TabSwitched(buffer_id))
             }
             AppCommandRequest::SaveAll => Ok(AppCommandOutcome::SaveAll(self.save_all()?)),
             AppCommandRequest::SetCursor { buffer_id, cursor } => {
@@ -26716,6 +26977,18 @@ impl AppComposition {
         self.active_documents.switch_to_buffer(buffer_id)
     }
 
+    /// Reorder a tab to a new position in the open tabs list.
+    pub fn reorder_tab(&mut self, buffer_id: BufferId, new_index: usize) {
+        let tabs = &mut self.active_documents.open_tabs;
+        if let Some(current_index) = tabs.iter().position(|id| *id == buffer_id) {
+            let clamped = new_index.min(tabs.len().saturating_sub(1));
+            if current_index != clamped {
+                let id = tabs.remove(current_index);
+                tabs.insert(clamped, id);
+            }
+        }
+    }
+
     /// Close a tab when clean; dirty tabs produce a prompt projection and remain open.
     pub fn close_tab(
         &mut self,
@@ -30573,6 +30846,36 @@ impl AppComposition {
                 p
             },
             terminal_panel_projection: self.terminal_workflow.projection(),
+            find_bar_projection: legion_ui::ui::FindBarProjection {
+                visible: self.buffer_search_state.find_bar_visible,
+                query: self.buffer_search_state.query.clone(),
+                replace_text: self.buffer_search_state.replace_text.clone(),
+                replace_visible: self.buffer_search_state.replace_visible,
+                case_sensitive: self.buffer_search_state.case_sensitive,
+                whole_word: self.buffer_search_state.whole_word,
+                use_regex: self.buffer_search_state.use_regex,
+                match_count: self.buffer_search_state.matches.len(),
+                current_match_index: self.buffer_search_state.current_match_index,
+                matches: self
+                    .buffer_search_state
+                    .matches
+                    .iter()
+                    .map(|&(sl, sc, el, ec)| legion_ui::ui::FindMatchProjection {
+                        start: TextCoordinate {
+                            line: sl,
+                            character: sc,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                        end: TextCoordinate {
+                            line: el,
+                            character: ec,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                    })
+                    .collect(),
+            },
         })
     }
 
@@ -34156,6 +34459,45 @@ impl AppComposition {
             disposition: ProposalPartialFailureDisposition::FailedBeforeMutation,
             diagnostics: vec![diagnostic],
         }
+    }
+
+    fn refresh_buffer_search_matches(&mut self, buffer_id: BufferId) {
+        let previous_index = self.buffer_search_state.current_match_index;
+        if let Ok(text) = self.editor.text(buffer_id) {
+            let text = text.to_string();
+            let match_count = self.buffer_search_state.find_matches(&text);
+            if match_count > 0 {
+                self.buffer_search_state.current_match_index =
+                    previous_index.min(match_count.saturating_sub(1));
+            }
+        }
+    }
+
+    fn reveal_current_find_match(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<(), AppCompositionError> {
+        let Some((line, character, _, _)) = self.buffer_search_state.current_match() else {
+            return Ok(());
+        };
+        self.set_buffer_cursor(
+            buffer_id,
+            TextCoordinate {
+                line,
+                character,
+                byte_offset: None,
+                utf16_offset: None,
+            },
+        )?;
+        let current_scroll = self.active_documents.viewport_scroll_for(buffer_id);
+        self.set_viewport_scroll(
+            buffer_id,
+            ViewportScroll {
+                top_line: line,
+                left_column: current_scroll.left_column,
+            },
+        )?;
+        Ok(())
     }
 
     fn apply_edit_to_buffer_with_correlation(

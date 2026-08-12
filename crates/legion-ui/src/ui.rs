@@ -1335,6 +1335,172 @@ impl Default for SearchProjection {
     }
 }
 
+// ── Find-bar projections (Phase 4 – Navigation & UI Essentials) ──
+
+/// One projected find-bar match range in protocol text coordinates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindMatchProjection {
+    /// Start coordinate of the match.
+    pub start: TextCoordinate,
+    /// End coordinate of the match.
+    pub end: TextCoordinate,
+}
+
+/// Projection-only find-bar surface for the active buffer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FindBarProjection {
+    /// Whether the find bar is visible.
+    pub visible: bool,
+    /// Current query string.
+    pub query: String,
+    /// Replacement text.
+    pub replace_text: String,
+    /// Whether the replace input is visible.
+    pub replace_visible: bool,
+    /// Whether case-sensitive matching is active.
+    pub case_sensitive: bool,
+    /// Whether whole-word matching is active.
+    pub whole_word: bool,
+    /// Whether regex mode is active.
+    pub use_regex: bool,
+    /// Total match count.
+    pub match_count: usize,
+    /// Zero-based index of the currently highlighted match.
+    pub current_match_index: usize,
+    /// Projected match ranges for the active buffer.
+    pub matches: Vec<FindMatchProjection>,
+}
+
+// ── Keybinding types (Phase 4 – Navigation & UI Essentials) ──
+
+/// A string-based key combination for keybinding dispatch.
+///
+/// Uses string-based key representation so that `legion-ui` does not depend
+/// on any renderer crate.  Conversion to renderer-specific key codes happens
+/// in `legion-desktop`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyCombo {
+    /// Key label (e.g. `"S"`, `"F3"`, `"Tab"`).
+    pub key: String,
+    /// Whether the Ctrl modifier is required.
+    pub ctrl: bool,
+    /// Whether the Shift modifier is required.
+    pub shift: bool,
+    /// Whether the Alt modifier is required.
+    pub alt: bool,
+}
+
+impl KeyCombo {
+    /// Construct a key combination.
+    pub fn new(key: impl Into<String>, ctrl: bool, shift: bool, alt: bool) -> Self {
+        Self {
+            key: key.into(),
+            ctrl,
+            shift,
+            alt,
+        }
+    }
+}
+
+/// A single keybinding entry mapping a key combination to a command label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindingEntry {
+    /// Key combination.
+    pub combo: KeyCombo,
+    /// Action label matching a `CommandDispatchIntent` variant or app command.
+    pub action_label: String,
+}
+
+/// Return the default keymap entries.
+pub fn default_keymap() -> Vec<KeybindingEntry> {
+    vec![
+        KeybindingEntry {
+            combo: KeyCombo::new("S", true, false, false),
+            action_label: "SaveActive".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("S", true, true, false),
+            action_label: "SaveAll".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F", true, false, false),
+            action_label: "ToggleFindBar".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("H", true, false, false),
+            action_label: "ToggleFindReplace".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F3", false, false, false),
+            action_label: "FindNext".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F3", false, true, false),
+            action_label: "FindPrevious".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("G", true, false, false),
+            action_label: "GoToLine".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("P", true, false, false),
+            action_label: "OpenPalette".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("P", true, true, false),
+            action_label: "OpenCommandPalette".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("Z", true, false, false),
+            action_label: "Undo".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("Z", true, true, false),
+            action_label: "Redo".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("W", true, false, false),
+            action_label: "CloseTab".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("Tab", true, false, false),
+            action_label: "NextTab".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("Tab", true, true, false),
+            action_label: "PrevTab".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F12", false, false, false),
+            action_label: "GoToDefinition".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F5", false, false, false),
+            action_label: "DebugStart".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F5", false, true, false),
+            action_label: "DebugStop".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F9", false, false, false),
+            action_label: "ToggleBreakpoint".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F10", false, false, false),
+            action_label: "DebugStepOver".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F11", false, false, false),
+            action_label: "DebugStepInto".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F11", false, true, false),
+            action_label: "DebugStepOut".into(),
+        },
+    ]
+}
+
 /// One metavariable capture projected by structural search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuralSearchCaptureProjection {
@@ -2553,6 +2719,13 @@ pub enum CommandDispatchIntent {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a tab to a new position through app authority.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save all open buffers through app-owned save workflows.
     SaveAll,
     /// Set primary cursor through editor authority.
@@ -3263,6 +3436,47 @@ pub enum CommandDispatchIntent {
     /// Routes through the same start path as `LspStartSession` after clearing
     /// any prior Refused/Failed/BackingOff state.
     LspRestartSession,
+
+    // ── Find/Replace intents (Phase 4 – Navigation & UI Essentials) ──
+    /// Toggle the in-editor find bar visibility.
+    ToggleFindBar,
+    /// Close the in-editor find bar.
+    CloseFindBar,
+    /// Set the find bar query string.
+    SetFindQuery {
+        /// Query text entered by the user.
+        query: String,
+    },
+    /// Navigate to the next find match.
+    FindNext,
+    /// Navigate to the previous find match.
+    FindPrevious,
+    /// Toggle the replace input within the find bar.
+    ToggleFindReplace,
+    /// Set the find-bar replacement text.
+    SetFindReplaceText {
+        /// Replacement text entered by the user.
+        text: String,
+    },
+    /// Replace the current match with the replacement text.
+    ReplaceOne,
+    /// Replace all matches with the replacement text.
+    ReplaceAll,
+    /// Toggle case-sensitive matching.
+    SetFindCaseSensitive {
+        /// Whether case-sensitive matching is enabled.
+        enabled: bool,
+    },
+    /// Toggle whole-word matching.
+    SetFindWholeWord {
+        /// Whether whole-word matching is enabled.
+        enabled: bool,
+    },
+    /// Toggle regex-based matching.
+    SetFindRegex {
+        /// Whether regex mode is enabled.
+        enabled: bool,
+    },
 }
 
 /// Maximum visible foreground toast notifications.
@@ -3504,6 +3718,8 @@ pub struct ShellProjectionSnapshot {
     pub excerpt_surface_projection: ExcerptSurfaceProjection,
     /// Static search projection.
     pub search_projection: SearchProjection,
+    /// In-editor find-bar projection.
+    pub find_bar_projection: FindBarProjection,
     /// Structural search projection supplied by the application layer.
     pub structural_search_projection: StructuralSearchProjection,
     /// Git status, syntactic diff, blame, graph, and conflict projection supplied by app layer.
@@ -3609,6 +3825,8 @@ pub struct Shell {
     pub excerpt_surface_projection: ExcerptSurfaceProjection,
     /// Static search projection.
     pub search_projection: SearchProjection,
+    /// In-editor find-bar projection.
+    pub find_bar_projection: FindBarProjection,
     /// Static structural search projection.
     pub structural_search_projection: StructuralSearchProjection,
     /// Static git projection.
@@ -3661,6 +3879,7 @@ impl Shell {
             daily_editing_projection: snapshot.daily_editing_projection,
             excerpt_surface_projection: snapshot.excerpt_surface_projection,
             search_projection: snapshot.search_projection,
+            find_bar_projection: snapshot.find_bar_projection,
             structural_search_projection: snapshot.structural_search_projection,
             git_projection: snapshot.git_projection,
             debug_projection: snapshot.debug_projection,
@@ -3709,6 +3928,7 @@ impl Shell {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -3755,6 +3975,7 @@ impl Shell {
             daily_editing_projection: self.daily_editing_projection.clone(),
             excerpt_surface_projection: self.excerpt_surface_projection.clone(),
             search_projection: self.search_projection.clone(),
+            find_bar_projection: self.find_bar_projection.clone(),
             structural_search_projection: self.structural_search_projection.clone(),
             git_projection: self.git_projection.clone(),
             debug_projection: self.debug_projection.clone(),
@@ -3799,6 +4020,7 @@ impl Shell {
         self.daily_editing_projection = snapshot.daily_editing_projection;
         self.excerpt_surface_projection = snapshot.excerpt_surface_projection;
         self.search_projection = snapshot.search_projection;
+        self.find_bar_projection = snapshot.find_bar_projection;
         self.structural_search_projection = snapshot.structural_search_projection;
         self.git_projection = snapshot.git_projection;
         self.debug_projection = snapshot.debug_projection;
@@ -6508,6 +6730,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -6627,6 +6850,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -6805,6 +7029,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -6883,6 +7108,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -6955,6 +7181,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7198,6 +7425,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7295,6 +7523,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7427,6 +7656,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7521,6 +7751,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7679,6 +7910,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),
@@ -7785,6 +8017,7 @@ mod tests {
             daily_editing_projection: DailyEditingProjection::empty(),
             excerpt_surface_projection: ExcerptSurfaceProjection::empty(),
             search_projection: SearchProjection::idle(),
+            find_bar_projection: FindBarProjection::default(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             debug_projection: DebugProjection::empty(),

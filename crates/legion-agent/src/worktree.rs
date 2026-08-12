@@ -258,7 +258,11 @@ impl DelegatedTaskSandboxOrchestrator {
         validate_sandbox_permission(permission, "cleanup")?;
         if self.sandbox_path.exists() {
             if self.is_worktree {
-                let output = Command::new("git")
+                let mut command = Command::new("git");
+                if let Some(source_root) = &self.source_root {
+                    command.arg("-C").arg(source_root);
+                }
+                let output = command
                     .arg("worktree")
                     .arg("remove")
                     .arg("--force")

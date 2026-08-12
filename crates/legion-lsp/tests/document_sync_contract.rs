@@ -1,7 +1,7 @@
 use legion_lsp::{
     LspDiagnosticProjectionContext, LspTextDocumentChange, LspTextDocumentIdentity,
-    did_change_notification, did_open_notification, lsp_unavailable_problem_projection,
-    project_publish_diagnostics,
+    did_change_notification, did_close_notification, did_open_notification,
+    lsp_unavailable_problem_projection, project_publish_diagnostics,
 };
 use legion_protocol::{
     BufferVersion, FileFingerprint, FileId, LanguageId, ProtocolDiagnosticSeverity, RedactionHint,
@@ -162,4 +162,17 @@ fn unavailable_lsp_projection_preserves_fallback_semantic_path() {
             .contains(&RedactionHint::MetadataOnly)
     );
     assert!(!fallback.message.contains("src/main.rs"));
+}
+
+#[test]
+fn did_close_notification_produces_valid_json_rpc() {
+    let uri = "file:///workspace/src/main.rs";
+    let did_close = did_close_notification(uri);
+
+    assert_eq!(did_close.method.as_deref(), Some("textDocument/didClose"));
+    assert_eq!(did_close.id, None);
+    assert_eq!(
+        did_close.params.as_ref().unwrap()["textDocument"]["uri"],
+        uri
+    );
 }

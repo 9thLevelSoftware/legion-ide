@@ -16653,6 +16653,74 @@ pub struct TerminalPolicyProjection {
     pub schema_version: u16,
 }
 
+/// Terminal color for projection-only cell grid rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TerminalColor {
+    /// Terminal default color (foreground or background).
+    #[default]
+    Default,
+    /// Indexed color (0-255).
+    Indexed(u8),
+    /// 24-bit true color.
+    Rgb(u8, u8, u8),
+}
+
+/// Per-cell display attributes for terminal cell grid rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TerminalCellAttrs {
+    /// Foreground color.
+    pub fg: TerminalColor,
+    /// Background color.
+    pub bg: TerminalColor,
+    /// Bold (increased intensity).
+    pub bold: bool,
+    /// Dim (decreased intensity).
+    pub dim: bool,
+    /// Italic style.
+    pub italic: bool,
+    /// Underline style.
+    pub underline: bool,
+    /// Strikethrough style.
+    pub strikethrough: bool,
+    /// Inverse (swap foreground/background).
+    pub inverse: bool,
+    /// Hidden/concealed text (SGR 8), rendered as blank cells.
+    pub hidden: bool,
+}
+
+/// A single terminal cell for projection-only rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCell {
+    /// The character displayed in this cell.
+    pub ch: char,
+    /// Display attributes for this cell.
+    pub attrs: TerminalCellAttrs,
+    /// Whether this cell continues a wide character from the preceding cell.
+    #[serde(default)]
+    pub continuation: bool,
+    /// Combining marks attached to the base character in this cell.
+    #[serde(default)]
+    pub combining: String,
+}
+
+impl Default for TerminalCell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            attrs: TerminalCellAttrs::default(),
+            continuation: false,
+            combining: String::new(),
+        }
+    }
+}
+
+/// A row of terminal cells for projection-only rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCellRow {
+    /// Cells in this row.
+    pub cells: Vec<TerminalCell>,
+}
+
 /// Bounded redacted terminal output row for projection-only UI surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalOutputRowProjection {
@@ -16727,6 +16795,18 @@ pub struct TerminalPanelProjection {
     pub last_error: Option<String>,
     /// Bounded metadata-only denial reason.
     pub last_denial: Option<String>,
+    /// VT100 cell grid: rows of attributed cells from the emulator, when available.
+    pub cell_grid: Option<Vec<TerminalCellRow>>,
+    /// VT100 scrollback: rows of attributed cells scrolled off the top, when available.
+    pub cell_scrollback: Option<Vec<TerminalCellRow>>,
+    /// Cursor row in the cell grid, when available.
+    pub cursor_row: Option<usize>,
+    /// Cursor column in the cell grid, when available.
+    pub cursor_col: Option<usize>,
+    /// Whether the cursor is visible in the cell grid.
+    pub cursor_visible: Option<bool>,
+    /// Whether terminal application-cursor-key mode is enabled (DECCKM).
+    pub application_cursor_keys: Option<bool>,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Redaction hints for the whole projection.
@@ -16764,6 +16844,12 @@ impl TerminalPanelProjection {
             },
             last_error: None,
             last_denial: None,
+            cell_grid: None,
+            cell_scrollback: None,
+            cursor_row: None,
+            cursor_col: None,
+            cursor_visible: None,
+            application_cursor_keys: None,
             generated_at: TimestampMillis(0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,

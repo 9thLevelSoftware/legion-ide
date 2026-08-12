@@ -79,6 +79,13 @@ pub enum DesktopAction {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Reorder a projected tab to a new position.
+    ReorderTab {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Zero-based target index in the tab list.
+        new_index: usize,
+    },
     /// Save the buffer currently represented by a dirty-close prompt.
     SaveDirtyClose {
         /// Prompt buffer identifier.
@@ -911,6 +918,45 @@ pub enum DesktopAction {
         /// Instruction identifier of the inline edit session to dismiss.
         instruction_id: String,
     },
+    /// Toggle the in-editor find bar visibility.
+    ToggleFindBar,
+    /// Close the in-editor find bar.
+    CloseFindBar,
+    /// Set the find bar query string.
+    SetFindQuery {
+        /// Query text entered by the user.
+        query: String,
+    },
+    /// Navigate to the next find match.
+    FindNext,
+    /// Navigate to the previous find match.
+    FindPrevious,
+    /// Toggle the replace input within the find bar.
+    ToggleFindReplace,
+    /// Set the find-bar replacement text.
+    SetFindReplaceText {
+        /// Replacement text entered by the user.
+        text: String,
+    },
+    /// Replace the current match with the replacement text.
+    ReplaceOne,
+    /// Replace all matches with the replacement text.
+    ReplaceAll,
+    /// Toggle case-sensitive matching.
+    SetFindCaseSensitive {
+        /// Whether case-sensitive matching is enabled.
+        enabled: bool,
+    },
+    /// Toggle whole-word matching.
+    SetFindWholeWord {
+        /// Whether whole-word matching is enabled.
+        enabled: bool,
+    },
+    /// Toggle regex-based matching.
+    SetFindRegex {
+        /// Whether regex mode is enabled.
+        enabled: bool,
+    },
 }
 
 /// App-owned request that is not a direct UI command intent.
@@ -1332,6 +1378,15 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::CloseTab { buffer_id }
                 })
             }
+            DesktopAction::ReorderTab {
+                buffer_id,
+                new_index,
+            } => self.with_known_tab(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::ReorderTab {
+                    buffer_id,
+                    new_index,
+                }
+            }),
             DesktopAction::SaveDirtyClose { buffer_id } => {
                 self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
                     DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })
@@ -2240,6 +2295,41 @@ impl DesktopCommandBridge {
             | DesktopAction::RejectInlineEditHunk { .. }
             | DesktopAction::ApplyInlineEdit { .. }
             | DesktopAction::DismissInlineEdit { .. } => DesktopBridgeOutput::Noop,
+            // Find/replace intents map 1:1 to CommandDispatchIntent counterparts.
+            DesktopAction::ToggleFindBar => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ToggleFindBar)
+            }
+            DesktopAction::CloseFindBar => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CloseFindBar)
+            }
+            DesktopAction::SetFindQuery { query } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindQuery { query })
+            }
+            DesktopAction::FindNext => DesktopBridgeOutput::Intent(CommandDispatchIntent::FindNext),
+            DesktopAction::FindPrevious => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::FindPrevious)
+            }
+            DesktopAction::ToggleFindReplace => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ToggleFindReplace)
+            }
+            DesktopAction::SetFindReplaceText { text } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindReplaceText { text })
+            }
+            DesktopAction::ReplaceOne => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ReplaceOne)
+            }
+            DesktopAction::ReplaceAll => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ReplaceAll)
+            }
+            DesktopAction::SetFindCaseSensitive { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindCaseSensitive { enabled })
+            }
+            DesktopAction::SetFindWholeWord { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindWholeWord { enabled })
+            }
+            DesktopAction::SetFindRegex { enabled } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::SetFindRegex { enabled })
+            }
         }
     }
 
