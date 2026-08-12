@@ -1106,9 +1106,6 @@ impl ProjectionView {
         let geometry =
             ShellGeometry::for_available_size(ui.available_width(), ui.available_height());
 
-        // Central keyboard dispatch runs before hardcoded key checks.
-        dispatch_keybindings(ui.ctx(), &mut actions);
-
         let top = egui::Panel::top("legion_desktop_top")
             .exact_size(geometry.top_bar_height)
             .frame(theme::toolbar_frame())
@@ -2192,18 +2189,106 @@ fn key_label_to_egui(label: &str) -> Option<egui::Key> {
 
 /// Map a keybinding action label to a `DesktopAction`, if applicable.
 ///
-/// Context-dependent actions like GoToDefinition (already handled by inline key
-/// checks in the code canvas) are excluded here.
-fn action_label_to_desktop_action(label: &str) -> Option<DesktopAction> {
+/// Context-dependent actions like GoToDefinition are resolved from the current
+/// projection here so the default keymap remains the single source of truth.
+fn action_label_to_desktop_action(
+    label: &str,
+    snapshot: &ShellProjectionSnapshot,
+) -> Option<DesktopAction> {
     match label {
         "SaveActive" => Some(DesktopAction::SaveActive),
         "SaveAll" => Some(DesktopAction::SaveAll),
-        "ToggleFindBar" => Some(DesktopAction::ToggleFindBar),
+        // Preserve the existing Ctrl/Cmd+F search-palette behavior while
+        // routing it through the published keymap entry. The in-editor find
+        // bar remains available through its explicit UI action.
+        "ToggleFindBar" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
         "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
         "FindNext" => Some(DesktopAction::FindNext),
         "FindPrevious" => Some(DesktopAction::FindPrevious),
         "Undo" => Some(DesktopAction::Undo),
         "Redo" => Some(DesktopAction::Redo),
+        "GoToDefinition" => Some(DesktopAction::GoToDefinition {
+            position: projected_cursor(snapshot),
+        }),
+        "GoToLine" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "Go to line".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "OpenPalette" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "OpenCommandPalette" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: String::new(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "CloseTab" => active_buffer_for_keybinding(snapshot)
+            .map(|buffer_id| DesktopAction::CloseTab { buffer_id }),
+        "NextTab" => adjacent_tab_for_keybinding(snapshot, 1)
+            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "PrevTab" => adjacent_tab_for_keybinding(snapshot, -1)
+            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "DebugStart" => {
+            if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
+                Some(DesktopAction::DebugStep {
+                    session_id,
+                    kind: legion_ui::DebugStepKindProjection::Continue,
+                })
+            } else if let Some(configuration_id) = snapshot
+                .debug_projection
+                .configurations
+                .first()
+                .map(|config| config.configuration_id.clone())
+            {
+                Some(DesktopAction::LaunchDebugSession { configuration_id })
+            } else {
+                Some(DesktopAction::RefreshExplorer)
+            }
+        }
+        "DebugStop" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|_| DesktopAction::StopDebugSession),
+        "ToggleBreakpoint" => {
+            active_buffer_for_keybinding(snapshot).map(|_| DesktopAction::ToggleDebugBreakpoint {
+                line: projected_cursor(snapshot).line,
+                condition: None,
+                hit_condition: None,
+                log_message: None,
+            })
+        }
+        "DebugStepOver" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Over,
+            }),
+        "DebugStepInto" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Into,
+            }),
+        "DebugStepOut" => snapshot
+            .debug_projection
+            .active_session_id
+            .clone()
+            .map(|session_id| DesktopAction::DebugStep {
+                session_id,
+                kind: legion_ui::DebugStepKindProjection::Out,
+            }),
         _ => None,
     }
 }
@@ -2214,7 +2299,11 @@ fn action_label_to_desktop_action(label: &str) -> Option<DesktopAction> {
 /// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
 /// hardcoded key checks so the keymap takes precedence for non-context-dependent
 /// actions.
-fn dispatch_keybindings(ctx: &egui::Context, actions: &mut Vec<DesktopAction>) {
+pub(crate) fn dispatch_keybindings(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
     let bindings = legion_ui::ui::default_keymap();
     ctx.input(|input| {
         for binding in &bindings {
@@ -2224,7 +2313,11 @@ fn dispatch_keybindings(ctx: &egui::Context, actions: &mut Vec<DesktopAction>) {
             if !input.key_pressed(key) {
                 continue;
             }
-            if binding.combo.ctrl != input.modifiers.ctrl {
+            // The keymap's `ctrl` flag represents the platform command
+            // modifier. `egui::Modifiers::command` maps to Ctrl on Windows/
+            // Linux and Cmd on macOS, while `ctrl` is only the physical Ctrl
+            // key and would make the default map fail for Cmd-based input.
+            if binding.combo.ctrl != input.modifiers.command {
                 continue;
             }
             if binding.combo.shift != input.modifiers.shift {
@@ -2233,11 +2326,37 @@ fn dispatch_keybindings(ctx: &egui::Context, actions: &mut Vec<DesktopAction>) {
             if binding.combo.alt != input.modifiers.alt {
                 continue;
             }
-            if let Some(action) = action_label_to_desktop_action(&binding.action_label) {
+            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot) {
                 actions.push(action);
             }
         }
     });
+}
+
+fn active_buffer_for_keybinding(snapshot: &ShellProjectionSnapshot) -> Option<BufferId> {
+    snapshot
+        .daily_editing_projection
+        .tabs
+        .active_buffer_id
+        .or(snapshot.active_buffer_projection.buffer_id)
+}
+
+fn adjacent_tab_for_keybinding(
+    snapshot: &ShellProjectionSnapshot,
+    direction: isize,
+) -> Option<BufferId> {
+    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
+    if tabs.is_empty() {
+        return active_buffer_for_keybinding(snapshot);
+    }
+    let active = active_buffer_for_keybinding(snapshot)?;
+    let active_index = tabs
+        .iter()
+        .position(|tab| tab.buffer_id == active)
+        .or_else(|| tabs.iter().position(|tab| tab.active))
+        .unwrap_or(0);
+    let next = (active_index as isize + direction).rem_euclid(tabs.len() as isize) as usize;
+    Some(tabs[next].buffer_id)
 }
 
 /// Adapter-local find bar text state stored in egui transient data.
@@ -2750,8 +2869,11 @@ fn render_minimap(
         egui::Stroke::new(1.0_f32, tokens.border.subtle),
     );
 
-    // Pixels per source line, clamped to a readable range.
-    let px_per_line = (panel_height / total_lines as f32).clamp(0.5, 3.0);
+    // Keep the document-to-panel scale exact for navigation. Visual bars use
+    // a minimum height separately; clamping this value would make the bottom
+    // portion of large documents unreachable from the minimap.
+    let px_per_line = panel_height / total_lines as f32;
+    let bar_height = (px_per_line - 0.5).max(0.5);
 
     if let Some(lengths) = &line_lengths {
         // Small file: render a colored bar per line.
@@ -2761,14 +2883,14 @@ fn render_minimap(
                 continue;
             }
             let y = minimap_rect.top() + i as f32 * px_per_line;
-            if y > minimap_rect.bottom() {
+            if y >= minimap_rect.bottom() {
                 break;
             }
             let bar_w = (len as f32 / MINIMAP_ASSUMED_MAX_COLS * (panel_width - 8.0))
                 .clamp(2.0, panel_width - 8.0);
             let bar_rect = egui::Rect::from_min_size(
                 egui::pos2(minimap_rect.left() + 4.0, y),
-                egui::vec2(bar_w, (px_per_line - 0.5).max(0.5)),
+                egui::vec2(bar_w, bar_height),
             );
             ui.painter().rect_filled(bar_rect, 0.0, bar_color);
         }
@@ -2814,7 +2936,8 @@ fn render_minimap(
         && let Some(pos) = response.interact_pointer_pos()
     {
         let click_y = pos.y - minimap_rect.top();
-        let clicked_line = (click_y / px_per_line) as u32;
+        let clicked_line =
+            ((click_y / px_per_line).floor() as usize).min(total_lines.saturating_sub(1)) as u32;
         let visible_count = model.active_buffer_code_lines.len() as u32;
         let target_top = clicked_line.saturating_sub(visible_count / 2);
 
@@ -3369,13 +3492,6 @@ fn render_code_lines(
                     ui.add_space(8.0);
                     ui.label(theme::code_muted(trim_middle(&label, 72)));
                 }
-            });
-        }
-
-        // F12 go-to-definition: dispatch using current cursor position.
-        if ui.input(|i| i.key_pressed(egui::Key::F12)) {
-            actions.push(DesktopAction::GoToDefinition {
-                position: current_cursor,
             });
         }
 
@@ -5693,7 +5809,11 @@ fn render_terminal_stream(
             ui.add_space(theme::tokens().spacing.sm as f32);
             // Tier 1 A8: interactive input line — sends TerminalInput on Enter.
             if terminal.active_session_id.is_some() {
-                interactive_fields::render_terminal_input_line(ui, actions);
+                interactive_fields::render_terminal_input_line(
+                    ui,
+                    actions,
+                    terminal.application_cursor_keys.unwrap_or(false),
+                );
                 ui.horizontal(|ui| {
                     if soft_button(ui, "Poll").clicked() {
                         actions.push(DesktopAction::TerminalOutputPoll);
@@ -5934,25 +6054,12 @@ fn render_terminal_cell_grid(
 
     for (row_idx, cell_row) in cell_grid.iter().enumerate() {
         let mut job = egui::text::LayoutJob::default();
-        let cells = &cell_row.cells;
-        let mut i = 0;
-        while i < cells.len() {
-            // Find a run of consecutive cells with the same attributes.
-            let attrs = &cells[i].attrs;
-            let run_start = i;
-            while i < cells.len() && cells[i].attrs == *attrs {
-                i += 1;
-            }
-
-            // Collect the text for this run.
-            let run_text: String = cells[run_start..i].iter().map(|c| c.ch).collect();
-
-            // Resolve colors, applying inverse if set.
-            let mut fg = resolve_terminal_color(&attrs.fg, true);
-            let mut bg = resolve_terminal_color(&attrs.bg, false);
-            if attrs.inverse {
+        for (col_idx, cell) in cell_row.cells.iter().enumerate() {
+            let is_cursor = cursor_pos == Some((row_idx, col_idx));
+            let mut fg = resolve_terminal_color(&cell.attrs.fg, true);
+            let mut bg = resolve_terminal_color(&cell.attrs.bg, false);
+            if cell.attrs.inverse {
                 std::mem::swap(&mut fg, &mut bg);
-                // Ensure inverted default bg becomes visible.
                 if bg == egui::Color32::TRANSPARENT {
                     bg = theme::tokens().text.secondary;
                 }
@@ -5964,32 +6071,38 @@ fn render_terminal_cell_grid(
                 background: bg,
                 ..Default::default()
             };
-            if attrs.bold {
+            if cell.attrs.bold {
                 text_format.font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
             }
-            if attrs.italic {
+            if cell.attrs.italic {
                 text_format.italics = true;
             }
-            if attrs.underline {
+            if cell.attrs.underline {
                 text_format.underline = egui::Stroke::new(1.0_f32, fg);
             }
-            if attrs.strikethrough {
+            if cell.attrs.strikethrough {
                 text_format.strikethrough = egui::Stroke::new(1.0_f32, fg);
             }
+            if cell.attrs.hidden {
+                text_format.color = egui::Color32::TRANSPARENT;
+            }
+            if is_cursor {
+                let cursor_bg = if fg == egui::Color32::TRANSPARENT {
+                    theme::tokens().text.primary
+                } else {
+                    fg
+                };
+                let cursor_fg = if bg == egui::Color32::TRANSPARENT {
+                    theme::tokens().bg.code
+                } else {
+                    bg
+                };
+                text_format.background = cursor_bg;
+                text_format.color = cursor_fg;
+            }
 
-            job.append(&run_text, 0.0, text_format);
-        }
-
-        // Render cursor as an inverted cell at the cursor position.
-        if let Some((cr, cc)) = cursor_pos
-            && cr == row_idx
-        {
-            // The cursor character is already part of the run above. We mark
-            // the cursor position by appending a zero-width highlight marker.
-            // For simplicity, we use the inverted-colors approach: the cursor
-            // cell is visually indicated by the egui text selection highlight.
-            let _ = cc; // Cursor column noted; full block-cursor painting
-            // requires custom painting which is deferred.
+            let ch = if cell.attrs.hidden { ' ' } else { cell.ch };
+            job.append(&ch.to_string(), 0.0, text_format);
         }
 
         ui.label(job);

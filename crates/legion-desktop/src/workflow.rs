@@ -3590,37 +3590,14 @@ impl DesktopEframeApp {
                 actions.push(DesktopAction::CompletePaletteSelection);
             }
         } else {
-            if command && input.key_pressed(egui::Key::S) {
-                if input.modifiers.shift {
-                    actions.push(DesktopAction::SaveAll);
-                } else {
-                    actions.push(DesktopAction::SaveActive);
-                }
-            }
+            // Route every published default keymap entry through one central
+            // dispatcher before context-specific editor input handling.
+            crate::view::dispatch_keybindings(ui.ctx(), &snapshot, &mut actions);
+
             if command && input.key_pressed(egui::Key::Q) {
                 actions.push(DesktopAction::Quit);
             }
-            if command
-                && input.key_pressed(egui::Key::W)
-                && let Some(buffer_id) = active_buffer_for_input(&snapshot)
-            {
-                actions.push(DesktopAction::CloseTab { buffer_id });
-            }
-            if command
-                && input.key_pressed(egui::Key::Tab)
-                && let Some(buffer_id) =
-                    adjacent_tab_id(&snapshot, if input.modifiers.shift { -1 } else { 1 })
-            {
-                actions.push(DesktopAction::SwitchTab { buffer_id });
-            }
             if command && input.key_pressed(egui::Key::O) {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::File,
-                    query: String::new(),
-                    scope: SearchScopeProjection::ActiveFile,
-                });
-            }
-            if command && input.key_pressed(egui::Key::P) {
                 actions.push(DesktopAction::OpenPalette {
                     mode: PaletteMode::File,
                     query: String::new(),
@@ -3637,86 +3614,12 @@ impl DesktopEframeApp {
                         SearchScopeProjection::ActiveFile
                     },
                 });
-            } else if command && input.key_pressed(egui::Key::F) {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::Search,
-                    query: "/".to_string(),
-                    scope: if input.modifiers.shift {
-                        SearchScopeProjection::Workspace
-                    } else {
-                        SearchScopeProjection::ActiveFile
-                    },
-                });
             }
             if command && input.modifiers.alt && input.key_pressed(egui::Key::M) {
                 // Return to deterministic Manual mode from any assisted mode.
                 actions.push(DesktopAction::SetProductMode {
                     mode: DockMode::Manual,
                 });
-            }
-            // B14/B17: IDE-style debug keys. F5: Continue (session) → Launch first
-            // config (idle + configs) → Refresh Explorer (idle, no configs).
-            if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
-                use legion_ui::DebugStepKindProjection;
-                if input.key_pressed(egui::Key::F5) {
-                    if input.modifiers.shift {
-                        actions.push(DesktopAction::StopDebugSession);
-                    } else {
-                        actions.push(DesktopAction::DebugStep {
-                            session_id: session_id.clone(),
-                            kind: DebugStepKindProjection::Continue,
-                        });
-                    }
-                }
-                if input.key_pressed(egui::Key::F10) {
-                    actions.push(DesktopAction::DebugStep {
-                        session_id: session_id.clone(),
-                        kind: DebugStepKindProjection::Over,
-                    });
-                }
-                if input.key_pressed(egui::Key::F11) {
-                    if input.modifiers.shift {
-                        actions.push(DesktopAction::DebugStep {
-                            session_id: session_id.clone(),
-                            kind: DebugStepKindProjection::Out,
-                        });
-                    } else {
-                        actions.push(DesktopAction::DebugStep {
-                            session_id: session_id.clone(),
-                            kind: DebugStepKindProjection::Into,
-                        });
-                    }
-                }
-            } else if input.key_pressed(egui::Key::F5) {
-                if let Some(configuration_id) = snapshot
-                    .debug_projection
-                    .configurations
-                    .first()
-                    .map(|c| c.configuration_id.clone())
-                {
-                    actions.push(DesktopAction::LaunchDebugSession { configuration_id });
-                } else {
-                    actions.push(DesktopAction::RefreshExplorer);
-                }
-            }
-            // B15: F9 toggles a breakpoint on the projected primary cursor line.
-            if input.key_pressed(egui::Key::F9)
-                && snapshot.active_buffer_projection.buffer_id.is_some()
-            {
-                let line = projected_cursor(&snapshot).line;
-                actions.push(DesktopAction::ToggleDebugBreakpoint {
-                    line,
-                    condition: None,
-                    hit_condition: None,
-                    log_message: None,
-                });
-            }
-            if command && input.key_pressed(egui::Key::Z) {
-                if input.modifiers.shift {
-                    actions.push(DesktopAction::Redo);
-                } else {
-                    actions.push(DesktopAction::Undo);
-                }
             }
 
             // T4: Problems-panel keyboard navigation.
@@ -4114,23 +4017,6 @@ fn active_buffer_for_input(snapshot: &ShellProjectionSnapshot) -> Option<BufferI
         .tabs
         .active_buffer_id
         .or(snapshot.active_buffer_projection.buffer_id)
-}
-
-fn adjacent_tab_id(snapshot: &ShellProjectionSnapshot, direction: isize) -> Option<BufferId> {
-    let tabs = &snapshot.daily_editing_projection.tabs.tabs;
-    if tabs.is_empty() {
-        return active_buffer_for_input(snapshot);
-    }
-
-    let active = active_buffer_for_input(snapshot)?;
-    let active_index = tabs
-        .iter()
-        .position(|tab| tab.buffer_id == active)
-        .or_else(|| tabs.iter().position(|tab| tab.active))
-        .unwrap_or(0);
-    let len = tabs.len() as isize;
-    let next = (active_index as isize + direction).rem_euclid(len) as usize;
-    Some(tabs[next].buffer_id)
 }
 
 fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {

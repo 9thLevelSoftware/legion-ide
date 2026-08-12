@@ -381,6 +381,7 @@ fn terminal_session_content_appears_in_terminal_rows() {
         cursor_row: None,
         cursor_col: None,
         cursor_visible: None,
+        application_cursor_keys: None,
         generated_at: TimestampMillis(100),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,

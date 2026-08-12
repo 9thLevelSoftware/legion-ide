@@ -7888,7 +7888,7 @@ impl TerminalWorkflow {
                     let shell_projection = outcome.shell_projection.clone();
                     self.push_terminal_output(outcome.output, false, Some(&shell_projection));
                 }
-                self.populate_cell_grid(session_id);
+                self.populate_cell_grid(outcome.emulator_snapshot.as_ref());
                 self.projection.generated_at = TimestampMillis::now();
                 self.record_audit(
                     session_id,
@@ -8090,9 +8090,9 @@ impl TerminalWorkflow {
         }
     }
 
-    fn populate_cell_grid(&mut self, session_id: TerminalSessionId) {
+    fn populate_cell_grid(&mut self, snapshot: Option<&legion_terminal::EmulatorSnapshot>) {
         use legion_protocol::{TerminalCell, TerminalCellAttrs, TerminalCellRow, TerminalColor};
-        if let Some(snapshot) = self.runtime.emulator_snapshot(session_id) {
+        if let Some(snapshot) = snapshot {
             let convert_color = |c: &legion_terminal::vt100::Color| match c {
                 legion_terminal::vt100::Color::Default => TerminalColor::Default,
                 legion_terminal::vt100::Color::Indexed(n) => TerminalColor::Indexed(*n),
@@ -8112,6 +8112,7 @@ impl TerminalWorkflow {
                             underline: cell.attrs.underline,
                             strikethrough: cell.attrs.strikethrough,
                             inverse: cell.attrs.inverse,
+                            hidden: cell.attrs.hidden,
                         },
                     })
                     .collect(),
@@ -8123,6 +8124,7 @@ impl TerminalWorkflow {
             self.projection.cursor_row = Some(snapshot.cursor_row);
             self.projection.cursor_col = Some(snapshot.cursor_col);
             self.projection.cursor_visible = Some(snapshot.cursor_visible);
+            self.projection.application_cursor_keys = Some(snapshot.application_cursor_keys);
         }
     }
 
@@ -19790,10 +19792,16 @@ impl AppComposition {
             }
             CommandDispatchIntent::FindNext => {
                 self.buffer_search_state.next_match();
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.reveal_current_find_match(buffer_id)?;
+                }
                 return Ok(AppCommandOutcome::Noop);
             }
             CommandDispatchIntent::FindPrevious => {
                 self.buffer_search_state.prev_match();
+                if let Some(buffer_id) = self.active_documents.active_buffer_id {
+                    self.reveal_current_find_match(buffer_id)?;
+                }
                 return Ok(AppCommandOutcome::Noop);
             }
             CommandDispatchIntent::ToggleFindReplace => {
@@ -34453,6 +34461,33 @@ impl AppComposition {
                     previous_index.min(match_count.saturating_sub(1));
             }
         }
+    }
+
+    fn reveal_current_find_match(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<(), AppCompositionError> {
+        let Some((line, character, _, _)) = self.buffer_search_state.current_match() else {
+            return Ok(());
+        };
+        self.set_buffer_cursor(
+            buffer_id,
+            TextCoordinate {
+                line,
+                character,
+                byte_offset: None,
+                utf16_offset: None,
+            },
+        )?;
+        let current_scroll = self.active_documents.viewport_scroll_for(buffer_id);
+        self.set_viewport_scroll(
+            buffer_id,
+            ViewportScroll {
+                top_line: line,
+                left_column: current_scroll.left_column,
+            },
+        )?;
+        Ok(())
     }
 
     fn apply_edit_to_buffer_with_correlation(

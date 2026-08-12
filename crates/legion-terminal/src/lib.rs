@@ -404,7 +404,7 @@ pub struct TerminalRuntimeOutputPollRequest {
 /// Projection-only snapshot of the VT100 emulator cell grid.
 ///
 /// All data is already credential-redacted and safe for renderer consumption.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmulatorSnapshot {
     /// Current screen grid (rows x cols of cells).
     pub grid: Vec<Vec<crate::vt100::Cell>>,
@@ -416,6 +416,8 @@ pub struct EmulatorSnapshot {
     pub cursor_col: usize,
     /// Whether the cursor is visible.
     pub cursor_visible: bool,
+    /// Whether application-cursor-key mode is enabled (DECCKM).
+    pub application_cursor_keys: bool,
 }
 
 /// Terminal output poll outcome.
@@ -427,6 +429,9 @@ pub struct TerminalRuntimeOutputPollOutcome {
     pub output: TerminalOutputChunk,
     /// OSC 7/133 shell metadata parsed from this poll chunk.
     pub shell_projection: crate::osc::TerminalShellProjection,
+    /// Final emulator snapshot for this poll, captured before an exited
+    /// session is removed from the runtime registry.
+    pub emulator_snapshot: Option<EmulatorSnapshot>,
 }
 
 /// Terminal fixture configuration.
@@ -888,6 +893,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                 output,
                 audit,
                 shell_projection: crate::osc::TerminalShellProjection::default(),
+                emulator_snapshot: None,
             });
         }
         let effective_limit = ctx.output_byte_limit.min(self.config.max_output_bytes);
@@ -906,6 +912,9 @@ impl<P: PtyService> TerminalRuntime<P> {
         // fed before session removal so the cell grid is up to date for the
         // final poll of an exiting session.
         self.feed_emulator(request.session_id, &redacted);
+        // Capture the post-feed grid before removing an exited session. The app
+        // layer projects this snapshot after the poll returns.
+        let emulator_snapshot = self.emulator_snapshot(request.session_id);
         if read.exited && !read.truncated {
             self.remove_session(request.session_id)?;
         }
@@ -949,6 +958,7 @@ impl<P: PtyService> TerminalRuntime<P> {
             },
             audit,
             shell_projection,
+            emulator_snapshot,
         };
         Ok(output)
     }
@@ -1192,6 +1202,7 @@ impl<P: PtyService> TerminalRuntime<P> {
                     cursor_row,
                     cursor_col,
                     cursor_visible: session.emulator.cursor_visible(),
+                    application_cursor_keys: session.emulator.application_cursor_keys(),
                 }
             })
         })
@@ -2015,6 +2026,10 @@ mod tests {
             .expect("poll output");
         assert_eq!(output.audit.state, TerminalRuntimeState::Exited);
         assert!(output.output.redacted_payload.contains("done"));
+        let snapshot = output
+            .emulator_snapshot
+            .expect("final poll preserves emulator snapshot");
+        assert!(snapshot.grid.iter().flatten().any(|cell| cell.ch == 'd'));
         assert!(matches!(
             runtime.resize(TerminalResize {
                 session_id,

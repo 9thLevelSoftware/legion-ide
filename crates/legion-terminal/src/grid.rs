@@ -35,6 +35,8 @@ pub struct TerminalGrid {
     pub cursor_col: Option<usize>,
     /// Whether the cursor is visible.
     pub cursor_visible: Option<bool>,
+    /// Whether terminal application-cursor-key mode is enabled.
+    pub application_cursor_keys: Option<bool>,
 }
 
 /// Renderer-friendly terminal output row.
@@ -72,6 +74,7 @@ impl TerminalGrid {
             cursor_row: projection.cursor_row,
             cursor_col: projection.cursor_col,
             cursor_visible: projection.cursor_visible,
+            application_cursor_keys: projection.application_cursor_keys,
         }
     }
 

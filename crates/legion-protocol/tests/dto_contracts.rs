@@ -9295,6 +9295,7 @@ fn language_terminal_projection_roundtrips_terminal_surface() {
         cursor_row: None,
         cursor_col: None,
         cursor_visible: None,
+        application_cursor_keys: None,
         generated_at: TimestampMillis(1800),
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,

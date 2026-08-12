@@ -16684,6 +16684,8 @@ pub struct TerminalCellAttrs {
     pub strikethrough: bool,
     /// Inverse (swap foreground/background).
     pub inverse: bool,
+    /// Hidden/concealed text (SGR 8), rendered as blank cells.
+    pub hidden: bool,
 }
 
 /// A single terminal cell for projection-only rendering.
@@ -16795,6 +16797,8 @@ pub struct TerminalPanelProjection {
     pub cursor_col: Option<usize>,
     /// Whether the cursor is visible in the cell grid.
     pub cursor_visible: Option<bool>,
+    /// Whether terminal application-cursor-key mode is enabled (DECCKM).
+    pub application_cursor_keys: Option<bool>,
     /// Projection generation timestamp.
     pub generated_at: TimestampMillis,
     /// Redaction hints for the whole projection.
@@ -16837,6 +16841,7 @@ impl TerminalPanelProjection {
             cursor_row: None,
             cursor_col: None,
             cursor_visible: None,
+            application_cursor_keys: None,
             generated_at: TimestampMillis(0),
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,

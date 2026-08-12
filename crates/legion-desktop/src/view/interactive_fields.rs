@@ -193,7 +193,11 @@ pub(crate) fn translate_key_to_escape(
 ///
 /// Intercepts special keys (arrows, function keys, Ctrl combinations) and
 /// translates them to terminal escape sequences. Regular text is sent as-is.
-pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
+pub(crate) fn render_terminal_input_line(
+    ui: &mut egui::Ui,
+    actions: &mut Vec<DesktopAction>,
+    application_cursor_keys: bool,
+) {
     let draft_id = egui::Id::new("legion-terminal-input-draft");
     let mut draft = ui
         .ctx()
@@ -215,7 +219,8 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
                         modifiers,
                         ..
                     } = event
-                        && let Some(escape_bytes) = translate_key_to_escape(key, modifiers, false)
+                        && let Some(escape_bytes) =
+                            translate_key_to_escape(key, modifiers, application_cursor_keys)
                     {
                         // Enter: send the draft content with \r (not \n)
                         if *key == egui::Key::Enter {
@@ -251,6 +256,23 @@ pub(crate) fn render_terminal_input_line(ui: &mut egui::Ui, actions: &mut Vec<De
             data.insert_temp(draft_id, draft);
         });
     });
+}
+
+#[cfg(test)]
+mod terminal_key_tests {
+    use super::translate_key_to_escape;
+
+    #[test]
+    fn application_cursor_mode_uses_application_arrow_sequences() {
+        assert_eq!(
+            translate_key_to_escape(&egui::Key::ArrowUp, &egui::Modifiers::NONE, true),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            translate_key_to_escape(&egui::Key::ArrowRight, &egui::Modifiers::NONE, false),
+            Some(b"\x1b[C".to_vec())
+        );
+    }
 }
 
 /// Build a single-line text editor for search and replace overlays.

@@ -258,3 +258,28 @@ fn tab_switch_refreshes_find_matches() {
         "first file has two 'alpha' matches after tab switch"
     );
 }
+
+#[test]
+fn find_navigation_reveals_selected_match() {
+    let (_root, mut app) = setup_with_content("needle\nfirst\nsecond\nneedle\n");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindBar)
+        .expect("toggle find bar");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindQuery {
+        query: "needle".into(),
+    })
+    .expect("set query");
+    app.dispatch_ui_intent(CommandDispatchIntent::FindNext)
+        .expect("find next");
+
+    let snapshot = app
+        .shell_projection_snapshot("find-replace")
+        .expect("snapshot");
+    assert_eq!(snapshot.find_bar_projection.current_match_index, 1);
+    let viewport = snapshot
+        .active_buffer_projection
+        .viewport
+        .expect("active viewport");
+    assert_eq!(viewport.cursor.line, 3);
+    assert_eq!(viewport.scroll.top_line, 3);
+}
