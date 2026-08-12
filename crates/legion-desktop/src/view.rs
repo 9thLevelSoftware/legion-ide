@@ -2198,14 +2198,7 @@ fn action_label_to_desktop_action(
     match label {
         "SaveActive" => Some(DesktopAction::SaveActive),
         "SaveAll" => Some(DesktopAction::SaveAll),
-        // Preserve the existing Ctrl/Cmd+F search-palette behavior while
-        // routing it through the published keymap entry. The in-editor find
-        // bar remains available through its explicit UI action.
-        "ToggleFindBar" => Some(DesktopAction::OpenPalette {
-            mode: PaletteMode::Search,
-            query: "/".to_string(),
-            scope: SearchScopeProjection::ActiveFile,
-        }),
+        "ToggleFindBar" => Some(DesktopAction::ToggleFindBar),
         "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
         "FindNext" => Some(DesktopAction::FindNext),
         "FindPrevious" => Some(DesktopAction::FindPrevious),
@@ -3815,6 +3808,13 @@ fn paint_code_cursor(
 /// Paint semi-transparent highlight rectangles for find matches on a code line.
 ///
 /// All matches are painted in yellow; the current match is painted in orange.
+fn byte_column_to_display_column(line: &str, byte_column: u32) -> u32 {
+    let byte_column = (byte_column as usize).min(line.len());
+    line.get(..byte_column)
+        .map(|prefix| prefix.chars().count() as u32)
+        .unwrap_or_else(|| line.chars().count() as u32)
+}
+
 fn paint_find_match_highlights(
     ui: &egui::Ui,
     line: &DesktopCodeLineViewModel,
@@ -3835,12 +3835,12 @@ fn paint_find_match_highlights(
             continue;
         }
         let start_char = if m.start.line == line_zero {
-            m.start.character
+            byte_column_to_display_column(&line.text, m.start.character)
         } else {
             0
         };
         let end_char = if m.end.line == line_zero {
-            m.end.character
+            byte_column_to_display_column(&line.text, m.end.character)
         } else {
             line.text.chars().count() as u32
         };
@@ -10173,7 +10173,7 @@ mod tests {
         DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass, RedactionHint,
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
-    use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection};
+    use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, Shell};
 
     #[test]
     fn tab_drop_target_accounts_for_source_removal() {
@@ -10185,6 +10185,29 @@ mod tests {
         assert_eq!(adjusted_tab_drop_target(1, 3), 2);
         assert_eq!(adjusted_tab_drop_target(2, 0), 0);
         assert_eq!(adjusted_tab_drop_target(1, 1), 1);
+    }
+
+    #[test]
+    fn tab_drop_target_can_insert_after_the_last_tab() {
+        // A right-half drop on C in [A, B, C] is the pre-removal slot 3;
+        // after removing B, the app inserts it at index 2.
+        assert_eq!(adjusted_tab_drop_target(1, 3), 2);
+    }
+
+    #[test]
+    fn find_match_byte_columns_convert_to_display_columns() {
+        assert_eq!(byte_column_to_display_column("éfoo", 0), 0);
+        assert_eq!(byte_column_to_display_column("éfoo", 2), 1);
+        assert_eq!(byte_column_to_display_column("éfoo", 5), 4);
+    }
+
+    #[test]
+    fn find_bar_keybinding_routes_to_in_editor_find_action() {
+        let snapshot = Shell::empty("Keybinding test").projection_snapshot();
+        assert!(matches!(
+            action_label_to_desktop_action("ToggleFindBar", &snapshot),
+            Some(DesktopAction::ToggleFindBar)
+        ));
     }
 
     #[test]

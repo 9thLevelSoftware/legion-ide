@@ -479,6 +479,21 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)
     }
 
+    /// Sends `textDocument/didClose` for a buffer.
+    pub fn did_close(&mut self, uri: &str) -> Result<(), LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+            }
+        });
+        self.session
+            .send_notification("textDocument/didClose", params)
+            .map_err(LanguageSessionError::Handshake)
+    }
+
     /// Non-blocking drain of raw `publishDiagnostics` notification params.
     ///
     /// Delegates to [`LspStdioSession::try_drain_diagnostic_params`].  Safe to

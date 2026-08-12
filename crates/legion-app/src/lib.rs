@@ -27033,7 +27033,16 @@ impl AppComposition {
             });
         }
 
+        let lsp_uri = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .map(|metadata| canonical_path_to_uri(&metadata.identity.canonical_path.0));
         self.editor.close_buffer(buffer_id)?;
+        if let Some(uri) = lsp_uri {
+            // Keep the language server's open-document set in sync with the
+            // editor.  This is best-effort and non-blocking, like didChange.
+            let _ = self.lsp_session.send_did_close(uri);
+        }
         self.active_documents.remove_open_tab(buffer_id);
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
