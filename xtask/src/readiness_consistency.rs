@@ -155,11 +155,13 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .unwrap_or(line.len());
 
     let coordinated = coordinated_list_bounds(line, mention, siblings);
+    let independent_start = coordinated.map_or(mention.start, |(run_start, _)| run_start);
+    let independent_end = coordinated.map_or(mention.end, |(_, run_end)| run_end);
     let start = siblings
         .iter()
         .filter(|other| other.end <= mention.start)
         .filter(|other| coordinated.is_none_or(|(run_start, _)| other.start < run_start))
-        .map(|other| independent_claim_start(line, other.end, mention.start))
+        .map(|other| independent_claim_start(line, other.end, independent_start))
         .max()
         .map_or(window_start, |boundary| boundary.max(window_start))
         .max(clause_start(line, mention.start));
@@ -167,7 +169,7 @@ fn context_around(line: &str, mention: &Mention, siblings: &[&Mention]) -> Strin
         .iter()
         .filter(|other| other.start >= mention.end)
         .filter(|other| coordinated.is_none_or(|(_, run_end)| other.end > run_end))
-        .map(|other| independent_claim_end(line, mention.end, other.start))
+        .map(|other| independent_claim_end(line, independent_end, other.start))
         .min()
         .map_or(window_end, |boundary| boundary.min(window_end))
         .min(clause_end(line, mention.end));
@@ -463,6 +465,48 @@ mod tests {
             &statuses(&[("P1.F1.T1", "done"), ("P1.F1.T2", "todo")]),
         );
         assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    #[test]
+    fn mixed_leading_coordinated_list_keeps_shared_leading_predicate() {
+        let ledger = "P9.F9.T9 landed, delivered P1.F1.T1, P1.F1.T2 and P1.F1.T3.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[
+                ("P9.F9.T9", "done"),
+                ("P1.F1.T1", "todo"),
+                ("P1.F1.T2", "todo"),
+                ("P1.F1.T3", "todo"),
+            ]),
+        );
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P1.F1.T1", "P1.F1.T2", "P1.F1.T3"]
+        );
+    }
+
+    #[test]
+    fn mixed_trailing_coordinated_list_keeps_shared_trailing_predicate() {
+        let ledger = "P1.F1.T1, P1.F1.T2 and P1.F1.T3 remain outstanding, P2.F2.T1 landed.";
+        let violations = check_consistency(
+            ledger,
+            &statuses(&[
+                ("P1.F1.T1", "done"),
+                ("P1.F1.T2", "done"),
+                ("P1.F1.T3", "done"),
+                ("P2.F2.T1", "done"),
+            ]),
+        );
+        assert_eq!(
+            violations
+                .iter()
+                .map(|violation| violation.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["P1.F1.T1", "P1.F1.T2", "P1.F1.T3"]
+        );
     }
 
     #[test]

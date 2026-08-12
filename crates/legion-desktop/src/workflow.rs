@@ -564,6 +564,13 @@ pub struct DesktopRuntime {
     explorer_expansion: BTreeSet<String>,
     dismissed_toast_ids: BTreeSet<u64>,
     panel_state: SessionPanelState,
+    /// Bottom-panel selection kept separate from the currently active side panel.
+    ///
+    /// A restored session may have a side panel such as Search active while the
+    /// bottom panel remains on its default tab. Keeping this state separately
+    /// prevents the first projection frame from rewriting the restored side
+    /// panel selection.
+    selected_bottom_panel: BottomPanelTab,
     dock_layouts: Vec<DockLayout>,
     session_state_path: Option<PathBuf>,
     diagnostics_export_path: Option<PathBuf>,
@@ -612,7 +619,17 @@ impl DesktopRuntime {
         // Workspace-local durability under `.legion/`: palette usage, checkpoints,
         // and proposal audit blobs. The renderer edge only requests enablement;
         // storage paths stay owned by app composition (Tier 1 A10).
-        app.enable_workspace_state_persistence(&config.workspace_root)?;
+        let persistence_warning = app
+            .enable_workspace_state_persistence(&config.workspace_root)
+            .err()
+            .map(|error| {
+                status_message(
+                    StatusSeverity::Warning,
+                    format!(
+                        "Workspace state persistence unavailable; continuing in memory: {error}"
+                    ),
+                )
+            });
 
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
@@ -649,6 +666,12 @@ impl DesktopRuntime {
             app.open_file(initial_file)?;
         }
 
+        if let Some(warning) = persistence_warning {
+            status_details.push(warning);
+        }
+
+        let selected_bottom_panel = bottom_panel_tab_from_session(&panel_state);
+
         let mut snapshot = app.shell_projection_snapshot(WINDOW_TITLE)?;
         snapshot.status_messages.push(status.clone());
         snapshot
@@ -665,6 +688,7 @@ impl DesktopRuntime {
             explorer_expansion,
             dismissed_toast_ids: BTreeSet::new(),
             panel_state,
+            selected_bottom_panel,
             dock_layouts,
             session_state_path: config.session_state,
             diagnostics_export_path: config.diagnostics_export,
@@ -1443,6 +1467,7 @@ impl DesktopRuntime {
     /// Replace adapter-local panel state for future session captures.
     pub fn set_panel_state(&mut self, panel_state: SessionPanelState) {
         self.panel_state = panel_state;
+        self.selected_bottom_panel = bottom_panel_tab_from_session(&self.panel_state);
     }
 
     /// Replace adapter-local dock layouts for future session captures.
@@ -1538,7 +1563,7 @@ impl DesktopRuntime {
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
-            selected_bottom_panel: bottom_panel_tab_from_session(&self.panel_state),
+            selected_bottom_panel: self.selected_bottom_panel,
             canonical_workspace_root: Some(CanonicalPath(
                 self.workspace_root.to_string_lossy().into_owned(),
             )),
@@ -1584,6 +1609,10 @@ impl DesktopRuntime {
     }
 
     fn persist_bottom_panel_selection(&mut self, selected: BottomPanelTab) {
+        if self.selected_bottom_panel == selected {
+            return;
+        }
+        self.selected_bottom_panel = selected;
         let active_panel = panel_id_for_bottom_tab(selected);
         if self.panel_state.active_panel.as_ref() != Some(&active_panel) {
             self.panel_state.active_panel = Some(active_panel);
@@ -4768,6 +4797,32 @@ mod tests {
         assert_eq!(
             runtime.panel_state().active_panel.as_deref(),
             Some(PanelId::AgentLogs.as_str())
+        );
+    }
+
+    #[test]
+    fn first_projection_frame_preserves_restored_side_panel_selection() {
+        let workspace = TempWorkspace::new();
+        let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            None,
+        ))
+        .expect("runtime opens");
+        runtime.set_panel_state(SessionPanelState {
+            bottom_visible: false,
+            side_visible: true,
+            active_panel: Some("search".to_string()),
+            bottom_height_px: None,
+            side_width_px: None,
+        });
+
+        let state = runtime.projection_view_state();
+        runtime.persist_bottom_panel_selection(state.selected_bottom_panel);
+
+        assert_eq!(
+            runtime.panel_state().active_panel.as_deref(),
+            Some("search"),
+            "the first projection frame must not replace a restored side panel"
         );
     }
 

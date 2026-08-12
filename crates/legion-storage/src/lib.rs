@@ -2237,8 +2237,8 @@ impl InMemoryStorageRepositoryPort {
             return Ok(existing);
         }
         let delivered = ProposalObservationOutboxRecord {
+            batch: existing.batch.clone(),
             delivery_state: ProposalObservationDeliveryState::Delivered,
-            ..existing
         };
         if self
             .fail_next_proposal_observation_delivery_persist
@@ -2252,6 +2252,23 @@ impl InMemoryStorageRepositoryPort {
         drop(storage);
         self.persist_proposal_observation_outbox(&delivered)?;
         let mut storage = self.storage.lock().map_err(Self::poisoned_error)?;
+        let current = storage
+            .protocol_proposal_observation_outbox
+            .get(batch_id)
+            .cloned()
+            .ok_or_else(|| ProtocolError {
+                code: "proposal_observation_batch_missing".to_string(),
+                message: format!(
+                    "proposal observation batch {batch_id} disappeared while marking it delivered"
+                ),
+            })?;
+        let current_matches = current.delivery_state == existing.delivery_state
+            && Self::proposal_observation_batches_equal(&current.batch, &existing.batch)?;
+        if !current_matches {
+            drop(storage);
+            self.persist_proposal_observation_outbox(&current)?;
+            return Ok(current);
+        }
         storage
             .protocol_proposal_observation_outbox
             .insert(batch_id.to_string(), delivered.clone());
