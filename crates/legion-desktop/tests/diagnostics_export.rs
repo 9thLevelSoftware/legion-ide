@@ -149,7 +149,7 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
     assert!(updated.contains("terminal_status: Running"));
     assert!(updated.contains("terminal_denial: none"));
     assert!(updated.contains("unsupported_surfaces:"));
-    assert!(updated.contains("Autonomous apply: unsupported"));
+    assert!(updated.contains("Legion Workflows apply: unsupported"));
     assert!(!updated.contains("SECRET_DIRTY_BODY"));
     assert!(!updated.contains("SECRET_PHASE7_QUERY"));
     assert!(!updated.contains("SECRET_PHASE7_TERMINAL_PAYLOAD"));

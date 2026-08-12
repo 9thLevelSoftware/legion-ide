@@ -1,0 +1,27 @@
+Commands:
+- `cargo test -p devil-editor --test performance_suite -- --list`
+- `cargo test -p devil-editor --test performance_suite ci_collaboration_ -- --nocapture`
+- `cargo test --workspace --all-targets`
+Result: PASS / LISTED
+
+Performance-suite list output:
+- ci_large_file_degraded_open_and_viewport_are_bounded
+- ci_mixed_fake_consumers_do_not_block_user_edits
+- ci_snapshot_retention_budget_is_enforced
+- ci_typical_edit_latency_on_budget_sized_file
+- ci_undo_redo_burst_small_deterministic_sample
+- ci_collaboration_edit_overhead_p95_p99_vs_user_baseline
+- ci_collaboration_snapshot_consumer_overhead_p95_p99
+- large_file_100mb_degraded_mode_measurement
+- snapshot_retention_and_release
+- undo_redo_latency_under_edit_burst
+
+Collaboration performance output:
+- `ci_collaboration_snapshot_consumer_overhead_p95_p99`: baseline p95 100ns, baseline p99 100ns, consumer p95 100ns, consumer p99 100ns, overhead p95 0ns, overhead p99 0ns.
+- `ci_collaboration_edit_overhead_p95_p99_vs_user_baseline`: baseline p95 17.6846ms, baseline p99 17.9565ms, collaboration p95 17.6671ms, collaboration p99 17.8396ms, overhead p95 0ns, overhead p99 0ns.
+- Acceptance thresholds: p95 overhead <= 2ms and p99 overhead <= 5ms. Result: PASS.
+
+Workspace test output summary:
+- Editor performance suite CI tests passed: 7 passed, 0 failed, 3 ignored by explicit performance-suite markers.
+- Collaboration runtime/app paths are synchronous, deterministic, in-process, and do not await network, durable storage, or remote acknowledgement in the measured edit path.
+- Editor mixed fake consumer test remains green, preserving non-blocking snapshot consumer behavior.

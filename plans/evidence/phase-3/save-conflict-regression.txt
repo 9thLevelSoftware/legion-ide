@@ -1,0 +1,11 @@
+Command: cargo test -p devil-app --test workspace_vfs_integration workspace_vfs_integration_external_overwrite_between_open_and_save_yields_conflict
+Date: 2026-05-24
+Result: passed
+
+Observed summary:
+- 1 passed, 0 failed, 53 filtered out.
+
+Accepted behavior:
+- External overwrite between open and save still yields a rejected proposal/save outcome.
+- Dirty editor text is preserved.
+- Disk content is not clobbered by stale semantic, LSP, or proposal activity.

@@ -1,0 +1,13 @@
+Command: cargo test -p devil-ai-providers --all-targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src\lib.rs (target\debug\deps\devil_ai_providers-9554876f092b173c.exe)
+
+running 4 tests
+test tests::cloud_provider_stub_remains_disabled_for_phase4 ... ok
+test tests::deterministic_local_provider_keeps_embedding_vectors_deferred ... ok
+test tests::deterministic_local_provider_completes_without_cloud_credentials ... ok
+test tests::stub_registry_exposes_only_stubbed_and_deterministic_local_adapters ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0

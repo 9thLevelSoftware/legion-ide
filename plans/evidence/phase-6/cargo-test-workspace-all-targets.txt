@@ -1,0 +1,13 @@
+Command: `cargo test --workspace --all-targets`
+Result: PASS
+
+Output summary:
+- Workspace test suite passed.
+- `devil-collaboration`: 6 passed.
+- `devil-app`: 21 unit tests passed; integration: 57 workspace VFS tests passed.
+- `devil-editor`: 16 unit tests, 7 atomicity/retention tests, and 7 CI performance tests passed; 3 long-running performance tests remain ignored by design.
+- `devil-protocol` DTO contracts: 66 passed.
+- `devil-security`: 23 library tests plus 4 path-policy tests passed.
+- `devil-storage`: 19 passed.
+- `devil-observability`: 13 passed.
+- `devil-ui`: 12 passed.

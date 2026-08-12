@@ -5,7 +5,7 @@ use legion_desktop::{
         DesktopCommandBridge,
     },
     health::DesktopOperationalHealthSnapshot,
-    view::{DesktopProjectionViewModel, agent_comm, fleet_board, fleet_card},
+    view::{DesktopProjectionViewModel, ProjectionView, agent_comm, fleet_board, fleet_card},
 };
 use legion_protocol::{
     CapabilityId, CausalityId, CorrelationId, DelegatedTaskRuntimeActivationState,
@@ -18,7 +18,7 @@ use legion_protocol::{
     LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState,
     LegionWorkflowSessionId, LegionWorkflowState, McpPrimitiveKind, McpRegistrySnapshot,
     McpServerDescriptor, McpServerId, McpToolDescriptor, McpToolName, McpTransportKind,
-    PermissionBudgetActionClass, PrincipalId, ProposalAffectedTarget,
+    PermissionBudgetActionClass, PrincipalId, ProposalAffectedTarget, ProposalCancellationReason,
     ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
     ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
     ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
@@ -169,7 +169,7 @@ fn legion_projection(state: LegionWorkflowMergeReadinessState) -> LegionWorkflow
                 "verification:unit".to_string(),
                 "signoff:reviewer".to_string(),
                 "conflict:shared".to_string(),
-                "Autonomous merge unsupported until approval".to_string(),
+                "Legion Workflows merge unsupported until approval".to_string(),
             ],
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
@@ -315,6 +315,117 @@ fn legion_snapshot(state: LegionWorkflowMergeReadinessState) -> legion_ui::Shell
     snapshot
 }
 
+fn workflow_raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
+fn render_workflow_frame(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+) -> (Vec<DesktopAction>, egui::FullOutput) {
+    let mut actions = None;
+    let full = ctx.run_ui(workflow_raw_input(Vec::new()), |ui| {
+        actions = Some(view.render(ui, snapshot).actions);
+    });
+    (actions.expect("workflow frame should render"), full)
+}
+
+fn workflow_button_bounds(output: &egui::FullOutput, label: &str) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("workflow button `{label}` should be allocated"))
+}
+
+fn click_workflow_button(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+) -> Vec<DesktopAction> {
+    let bounds = workflow_button_bounds(primed, label);
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    );
+    let press = workflow_raw_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]);
+    let _ = ctx.run_ui(press, |ui| {
+        let _ = view.render(ui, snapshot);
+    });
+    let release = workflow_raw_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]);
+    let mut actions = None;
+    let _ = ctx.run_ui(release, |ui| {
+        actions = Some(view.render(ui, snapshot).actions);
+    });
+    actions.expect("workflow click frame should render")
+}
+
+#[test]
+fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_kill() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    for label in ["Approve", "Review", "Reject", "Cancel proposal", "Kill"] {
+        let _ = workflow_button_bounds(&full, label);
+    }
+    let cancelled = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Cancel proposal");
+    assert_eq!(
+        cancelled,
+        vec![DesktopAction::CancelProposal {
+            proposal_id: ProposalId(901),
+            reason: ProposalCancellationReason::UserCancelled,
+        }]
+    );
+
+    let (_next, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+    let killed = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Kill");
+    assert_eq!(
+        killed,
+        vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
+            session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+            reason_label: "user requested hard stop".to_string(),
+        }]
+    );
+}
+
 #[test]
 fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     let model = DesktopProjectionViewModel::from_snapshot(&legion_snapshot(
@@ -324,7 +435,7 @@ fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     assert!(model.legion_workflow_rows.iter().any(|row| {
         row.contains("legion workflow command center")
             && row.contains("sessions=1")
-            && row.contains("Autonomous merge unsupported until approval")
+            && row.contains("unattended merge unsupported until approval")
     }));
     assert!(model.legion_workflow_rows.iter().any(|row| {
         row.contains("workers=4")
@@ -336,7 +447,7 @@ fn legion_workflow_command_center_rows_show_sessions_gates_and_merge_state() {
     }));
     assert!(model.product_mode_rows.iter().any(|row| {
         row.contains("Legion Workflow")
-            && row.contains("Autonomous merge unsupported until approval")
+            && row.contains("unattended merge unsupported until approval")
     }));
 }
 
@@ -437,7 +548,7 @@ fn legion_workflow_kill_switch_acknowledgement_surfaces_in_decision_feed() {
             session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
             worker_id: None,
             kind: LegionWorkflowDecisionKind::KillSwitchTriggered,
-            summary_label: "Automate kill switch triggered".to_string(),
+            summary_label: "Legion Workflows kill switch triggered".to_string(),
             rationale_labels: vec!["operator_ack".to_string()],
             risk_label: ProposalRiskLabel::High,
             mcp_server_id: None,
@@ -455,7 +566,8 @@ fn legion_workflow_kill_switch_acknowledgement_surfaces_in_decision_feed() {
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
 
     assert!(model.legion_workflow_rows.iter().any(|row| {
-        row.contains("KillSwitchTriggered") && row.contains("Automate kill switch triggered")
+        row.contains("KillSwitchTriggered")
+            && row.contains("Legion Workflows kill switch triggered")
     }));
 }
 
@@ -603,7 +715,7 @@ fn legion_workflow_health_keeps_autonomous_merge_unsupported() {
     assert!(
         health
             .unsupported_surfaces
-            .contains(&"Autonomous merge: unsupported until approval".to_string())
+            .contains(&"Legion Workflows merge: unsupported until approval".to_string())
     );
 }
 

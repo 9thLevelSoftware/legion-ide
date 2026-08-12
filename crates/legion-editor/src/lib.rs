@@ -23,11 +23,11 @@ use legion_protocol::{
     ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode,
     ViewportSemanticTokenOverlay, WorkspaceId,
 };
-use regex::RegexBuilder;
 use legion_text::{
     DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES, RetentionPinReason, TextBuffer, TextError,
     TextSnapshotDescriptor, Utf16Position, Utf16Range,
 };
+use regex::RegexBuilder;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -2695,7 +2695,7 @@ impl EditorSession {
 /// Owned by the app layer, not by `EditorEngine`.  The engine supplies
 /// buffer text via `EditorEngine::text()`; this struct runs regex-based
 /// matching and tracks navigation state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BufferSearchState {
     /// Current query string.
     pub query: String,
@@ -2717,27 +2717,14 @@ pub struct BufferSearchState {
     pub current_match_index: usize,
 }
 
-impl Default for BufferSearchState {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            replace_text: String::new(),
-            case_sensitive: false,
-            whole_word: false,
-            use_regex: false,
-            find_bar_visible: false,
-            replace_visible: false,
-            matches: Vec::new(),
-            current_match_index: 0,
-        }
-    }
-}
-
 impl BufferSearchState {
     /// Run the current query against `text` and populate `self.matches`.
     ///
-    /// Returns the match count.  An empty query or invalid regex produces
-    /// zero matches without panicking.
+    /// Literal searches with whole-word enabled are wrapped in word
+    /// boundaries. Regex searches are matched exactly as authored so the
+    /// pattern remains responsible for its own boundaries, anchors, and
+    /// groups. An empty query or invalid regex produces zero matches without
+    /// panicking.
     pub fn find_matches(&mut self, text: &str) -> usize {
         self.matches.clear();
         self.current_match_index = 0;
@@ -2750,7 +2737,7 @@ impl BufferSearchState {
         } else {
             regex::escape(&self.query)
         };
-        let pattern = if self.whole_word {
+        let pattern = if self.whole_word && !self.use_regex {
             format!(r"\b{}\b", pattern)
         } else {
             pattern
@@ -2777,7 +2764,8 @@ impl BufferSearchState {
         for m in regex.find_iter(text) {
             let (start_line, start_char) = offset_to_line_col(m.start());
             let (end_line, end_char) = offset_to_line_col(m.end());
-            self.matches.push((start_line, start_char, end_line, end_char));
+            self.matches
+                .push((start_line, start_char, end_line, end_char));
         }
         self.matches.len()
     }

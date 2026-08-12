@@ -52,7 +52,6 @@ pub fn run_golden_path_1(workspace_root: &Path, opts: &GoldenPath1Options) -> i3
         "4".to_string(),
         "-p".to_string(),
         "legion-app".to_string(),
-        "--no-default-features".to_string(),
         "--bin".to_string(),
         "golden_path_1".to_string(),
         "--".to_string(),

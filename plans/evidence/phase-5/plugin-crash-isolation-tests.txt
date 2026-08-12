@@ -1,0 +1,13 @@
+Command: cargo test -p devil-plugin --all-targets
+
+Observed focused coverage:
+- plugin_runtime_host_call_quota_fails_closed
+- plugin_sandbox_denies_invalid_core_ids_before_host_dispatch
+- plugin_runtime_port_dispatches_protocol_envelopes_only
+
+Crash/isolation posture:
+- Runtime failures convert to typed `ProtocolError` or `PluginHostCallResponse::Denied` responses.
+- Invalid host calls do not panic or mutate app/editor/workspace state.
+- Plugin runtime APIs expose protocol DTOs only.
+
+Status: PASS in focused run before final workspace gates.

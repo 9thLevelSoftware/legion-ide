@@ -2,8 +2,10 @@ use legion_editor::BufferSearchState;
 
 #[test]
 fn find_literal_matches() {
-    let mut state = BufferSearchState::default();
-    state.query = "hello".into();
+    let mut state = BufferSearchState {
+        query: "hello".into(),
+        ..Default::default()
+    };
     let count = state.find_matches("hello world hello");
     assert_eq!(count, 2);
     assert_eq!(state.matches[0], (0, 0, 0, 5));
@@ -12,17 +14,21 @@ fn find_literal_matches() {
 
 #[test]
 fn find_case_insensitive_default() {
-    let mut state = BufferSearchState::default();
-    state.query = "Hello".into();
+    let mut state = BufferSearchState {
+        query: "Hello".into(),
+        ..Default::default()
+    };
     let count = state.find_matches("hello HELLO Hello");
     assert_eq!(count, 3);
 }
 
 #[test]
 fn find_case_sensitive() {
-    let mut state = BufferSearchState::default();
-    state.query = "Hello".into();
-    state.case_sensitive = true;
+    let mut state = BufferSearchState {
+        query: "Hello".into(),
+        case_sensitive: true,
+        ..Default::default()
+    };
     let count = state.find_matches("hello HELLO Hello");
     assert_eq!(count, 1);
     assert_eq!(state.matches[0], (0, 12, 0, 17));
@@ -30,27 +36,48 @@ fn find_case_sensitive() {
 
 #[test]
 fn find_whole_word() {
-    let mut state = BufferSearchState::default();
-    state.query = "he".into();
-    state.whole_word = true;
+    let mut state = BufferSearchState {
+        query: "he".into(),
+        whole_word: true,
+        ..Default::default()
+    };
     let count = state.find_matches("he hello she he");
     assert_eq!(count, 2);
 }
 
 #[test]
 fn find_regex_mode() {
-    let mut state = BufferSearchState::default();
-    state.query = r"\d+".into();
-    state.use_regex = true;
+    let mut state = BufferSearchState {
+        query: r"\d+".into(),
+        use_regex: true,
+        ..Default::default()
+    };
     let count = state.find_matches("abc 123 def 456");
     assert_eq!(count, 2);
 }
 
 #[test]
+fn regex_mode_owns_word_boundaries() {
+    let mut state = BufferSearchState {
+        query: r"foo\W".into(),
+        use_regex: true,
+        whole_word: true,
+        ..Default::default()
+    };
+
+    let count = state.find_matches("foo-");
+
+    assert_eq!(count, 1);
+    assert_eq!(state.matches[0], (0, 0, 0, 4));
+}
+
+#[test]
 fn find_invalid_regex_returns_zero() {
-    let mut state = BufferSearchState::default();
-    state.query = r"[invalid".into();
-    state.use_regex = true;
+    let mut state = BufferSearchState {
+        query: r"[invalid".into(),
+        use_regex: true,
+        ..Default::default()
+    };
     let count = state.find_matches("some text");
     assert_eq!(count, 0);
 }
@@ -64,8 +91,10 @@ fn find_empty_query_returns_zero() {
 
 #[test]
 fn find_multiline() {
-    let mut state = BufferSearchState::default();
-    state.query = "fn".into();
+    let mut state = BufferSearchState {
+        query: "fn".into(),
+        ..Default::default()
+    };
     let count = state.find_matches("fn main() {\n    fn helper() {\n    }\n}");
     assert_eq!(count, 2);
     assert_eq!(state.matches[0], (0, 0, 0, 2));
@@ -74,8 +103,10 @@ fn find_multiline() {
 
 #[test]
 fn next_prev_match_wraps() {
-    let mut state = BufferSearchState::default();
-    state.query = "x".into();
+    let mut state = BufferSearchState {
+        query: "x".into(),
+        ..Default::default()
+    };
     state.find_matches("x x x");
     assert_eq!(state.current_match_index, 0);
     state.next_match();
@@ -90,8 +121,10 @@ fn next_prev_match_wraps() {
 
 #[test]
 fn no_matches_navigation_is_safe() {
-    let mut state = BufferSearchState::default();
-    state.query = "nonexistent".into();
+    let mut state = BufferSearchState {
+        query: "nonexistent".into(),
+        ..Default::default()
+    };
     state.find_matches("some text");
     assert_eq!(state.matches.len(), 0);
     state.next_match();

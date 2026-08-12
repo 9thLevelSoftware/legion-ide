@@ -1,0 +1,8 @@
+Command: cargo test --workspace --all-targets
+Result: passed
+
+Implemented replay/recovery drill coverage:
+- remote transport checkpoint-bound resume tokens and manifest validation
+- storage migration backup/recovery with checksum verification
+- metadata-only storage replay contracts remain covered by protocol/storage tests
+- raw-source vault descriptor recovery after reopen

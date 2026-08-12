@@ -1,0 +1,12 @@
+Commands:
+- cargo run -p xtask -- check-deps
+- cargo test --workspace --all-targets
+
+Result: passed
+
+Operational health surfaces implemented in this slice:
+- remote transport health summaries and audit summaries
+- terminal degraded runtime audit metadata
+- durable telemetry spool stats
+- raw-source vault descriptor/tombstone metadata
+- storage migration dry-run, backup, and recovery outcome metadata

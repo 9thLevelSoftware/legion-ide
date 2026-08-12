@@ -1182,10 +1182,7 @@ impl<P: PtyService> TerminalRuntime<P> {
     ///
     /// The grid is projection-only (already redacted) and must not be used as
     /// security policy authority.
-    pub fn emulator_snapshot(
-        &self,
-        session_id: TerminalSessionId,
-    ) -> Option<EmulatorSnapshot> {
+    pub fn emulator_snapshot(&self, session_id: TerminalSessionId) -> Option<EmulatorSnapshot> {
         self.sessions.lock().ok().and_then(|sessions| {
             sessions.get(&session_id).map(|session| {
                 let (cursor_row, cursor_col) = session.emulator.cursor_position();

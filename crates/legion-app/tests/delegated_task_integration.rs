@@ -1,6 +1,21 @@
 use std::{fs, path::PathBuf};
 
+#[cfg(feature = "ai")]
+use std::{
+    sync::{Arc, Condvar, Mutex, mpsc},
+    time::{Duration, Instant},
+};
+
 use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+#[cfg(feature = "ai")]
+use legion_ai::{
+    ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest, EmbeddingResponse,
+    ModelProvider, ProviderCapabilities, ProviderError, ProviderId,
+    tool_calls::{
+        ToolCallingProvider, ToolCompletionRequest, ToolCompletionResponse,
+        ToolCompletionStopReason, ToolTurnBlock,
+    },
+};
 #[cfg(feature = "ai")]
 use legion_app::AppDelegatedToolHost;
 use legion_app::{
@@ -133,6 +148,551 @@ fn temp_workspace(label: &str) -> TempWorkspace {
     ));
     fs::create_dir(&root).expect("temp workspace should be created");
     TempWorkspace { root }
+}
+
+#[cfg(feature = "ai")]
+struct BlockingDelegatedProvider {
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[cfg(feature = "ai")]
+struct CompletionSignallingProvider {
+    finished: Mutex<Option<mpsc::Sender<()>>>,
+    panic_on_complete: bool,
+}
+
+#[cfg(feature = "ai")]
+impl Drop for CompletionSignallingProvider {
+    fn drop(&mut self) {
+        if let Some(finished) = self.finished.lock().expect("finished lock").take() {
+            let _ = finished.send(());
+        }
+    }
+}
+
+#[cfg(feature = "ai")]
+impl ModelProvider for CompletionSignallingProvider {
+    fn provider_id(&self) -> ProviderId {
+        "provider:completion-signalling".to_string()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+#[cfg(feature = "ai")]
+impl ToolCallingProvider for CompletionSignallingProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        assert!(!self.panic_on_complete, "provider panic fixture");
+        Ok(ToolCompletionResponse {
+            provider: self.provider_id(),
+            model: request.model,
+            blocks: vec![ToolTurnBlock::Text("completed before cancel".to_string())],
+            stop_reason: ToolCompletionStopReason::EndTurn,
+        })
+    }
+}
+
+#[cfg(feature = "ai")]
+impl ModelProvider for BlockingDelegatedProvider {
+    fn provider_id(&self) -> ProviderId {
+        "provider:blocking-delegated".to_string()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            completion: false,
+            embedding: false,
+            batch: false,
+            inline_prediction: false,
+            tool_use: true,
+        }
+    }
+
+    fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "complete"))
+    }
+
+    fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+        Err(ProviderError::unsupported(request.provider, "embed"))
+    }
+}
+
+#[cfg(feature = "ai")]
+impl ToolCallingProvider for BlockingDelegatedProvider {
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+            let _ = entered.send(());
+        }
+        let (released, wake) = &*self.release;
+        let mut released = released.lock().expect("release lock");
+        while !*released {
+            released = wake.wait(released).expect("release wait");
+        }
+        Ok(ToolCompletionResponse {
+            provider: self.provider_id(),
+            model: request.model,
+            blocks: vec![ToolTurnBlock::Text("cancel checkpoint".to_string())],
+            stop_reason: ToolCompletionStopReason::EndTurn,
+        })
+    }
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_submit_stays_responsive_and_manual_waits_for_cancel_ack() {
+    let workspace_root = temp_workspace("background-cancel");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-background-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let provider = BlockingDelegatedProvider {
+        entered: Mutex::new(Some(entered_tx)),
+        release: release.clone(),
+    };
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(workspace_root.to_string_lossy().into_owned()),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![LegionToolKind::Read],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    };
+
+    let submitted_at = Instant::now();
+    app.start_delegated_task_background(
+        "wait until cancelled".to_string(),
+        scope,
+        Box::new(provider),
+    )
+    .expect("background submit");
+    assert!(
+        submitted_at.elapsed() < Duration::from_secs(1),
+        "submission must return without waiting for the provider"
+    );
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must enter provider call");
+
+    app.cancel_delegated_task()
+        .expect("cancel remains available while provider call is blocked");
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Delegate,
+        "Manual must not be projected before delegated cancellation is acknowledged"
+    );
+
+    let (released, wake) = &*release;
+    *released.lock().expect("release lock") = true;
+    wake.notify_all();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let outcome = loop {
+        if let Some(outcome) = app
+            .poll_delegated_task()
+            .expect("poll delegated completion")
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "delegated task did not finish");
+        std::thread::yield_now();
+    };
+    assert!(
+        matches!(outcome, AppDelegatedTaskOutcome::Completed { .. }),
+        "a provider completion already produced before the cancellation boundary remains authoritative"
+    );
+
+    app.set_product_mode(AppProductMode::Manual);
+    assert_eq!(app.product_mode(), AppProductMode::Manual);
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_rejects_sync_overlap_and_defers_assist_downgrade() {
+    let workspace_root = temp_workspace("background-owner");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-owner-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    app.start_delegated_task_background(
+        "hold the delegated worker".to_string(),
+        test_scope(&workspace_root),
+        Box::new(BlockingDelegatedProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            release: release.clone(),
+        }),
+    )
+    .expect("background submit");
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must enter provider call");
+
+    let sync_provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not start")
+        .build("overlap-rejected");
+    let overlap = app.start_delegated_task(
+        "overlapping sync task".to_string(),
+        test_scope(&workspace_root),
+        &sync_provider,
+    );
+    assert!(
+        overlap
+            .expect_err("sync overlap must be rejected")
+            .to_string()
+            .contains("already running")
+    );
+
+    app.set_product_mode(AppProductMode::Assist);
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Delegate,
+        "Assist cannot be projected while a Delegate worker still owns WorkerRuntime"
+    );
+
+    let (released, wake) = &*release;
+    *released.lock().expect("release lock") = true;
+    wake.notify_all();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if app
+            .poll_delegated_task()
+            .expect("poll delegated completion")
+            .is_some()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "delegated task did not finish");
+        std::thread::yield_now();
+    }
+    app.set_product_mode(AppProductMode::Assist);
+    assert_eq!(app.product_mode(), AppProductMode::Assist);
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_cancel_after_worker_completion_preserves_completed_outcome() {
+    let workspace_root = temp_workspace("background-completed-before-cancel");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-completion-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (finished_tx, finished_rx) = mpsc::channel();
+    app.start_delegated_task_background(
+        "finish before cancellation".to_string(),
+        test_scope(&workspace_root),
+        Box::new(CompletionSignallingProvider {
+            finished: Mutex::new(Some(finished_tx)),
+            panic_on_complete: false,
+        }),
+    )
+    .expect("background submit");
+    finished_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("worker must finish before cancellation");
+
+    app.cancel_delegated_task()
+        .expect("completion is still pending app-thread merge");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let outcome = loop {
+        if let Some(outcome) = app
+            .poll_delegated_task()
+            .expect("poll delegated completion")
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "delegated task did not finish");
+        std::thread::yield_now();
+    };
+
+    assert!(
+        matches!(outcome, AppDelegatedTaskOutcome::Completed { .. }),
+        "the worker-recorded Completed result is authoritative; got {outcome:?}"
+    );
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_worker_panic_reports_failure_and_cleans_sandbox() {
+    let workspace_root = temp_workspace("background-panic-cleanup");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-panic-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (finished_tx, finished_rx) = mpsc::channel();
+    app.start_delegated_task_background(
+        "panic inside provider".to_string(),
+        test_scope(&workspace_root),
+        Box::new(CompletionSignallingProvider {
+            finished: Mutex::new(Some(finished_tx)),
+            panic_on_complete: true,
+        }),
+    )
+    .expect("background submit");
+    finished_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("panicking provider must unwind");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let error = loop {
+        match app.poll_delegated_task() {
+            Err(error) => break error,
+            Ok(None) => {}
+            Ok(Some(outcome)) => panic!("panic cannot produce task outcome: {outcome:?}"),
+        }
+        assert!(Instant::now() < deadline, "delegated panic was not joined");
+        std::thread::yield_now();
+    };
+    assert!(error.to_string().contains("panicked"));
+
+    let sandbox_root = workspace_root.join("target").join("delegated-tasks");
+    let remaining_directories = fs::read_dir(&sandbox_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .collect::<Vec<_>>();
+    assert!(
+        remaining_directories.is_empty(),
+        "panic cleanup must remove sandbox directories: {remaining_directories:?}"
+    );
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn dropping_app_cancels_worker_without_blocking_and_reaper_joins_cleanup() {
+    let workspace_root = temp_workspace("background-drop-cleanup");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-drop-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    app.start_delegated_task_background(
+        "wait while app drops".to_string(),
+        test_scope(&workspace_root),
+        Box::new(BlockingDelegatedProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            release: release.clone(),
+        }),
+    )
+    .expect("background submit");
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must enter provider call");
+    let owner_id = app
+        .in_flight_delegated_owner_id_for_test()
+        .expect("background worker owner id");
+
+    let dropped_at = Instant::now();
+    drop(app);
+    assert!(
+        dropped_at.elapsed() < Duration::from_secs(1),
+        "Drop must hand joining to the reaper rather than block on provider transport"
+    );
+    let handoff_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (handed_off, reaped) =
+            AppComposition::delegated_worker_supervisor_state_for_test(owner_id);
+        if handed_off {
+            assert!(!reaped, "blocked worker cannot be reaped before release");
+            break;
+        }
+        assert!(
+            Instant::now() < handoff_deadline,
+            "app drop did not transfer the delegated handle to the global supervisor"
+        );
+        std::thread::yield_now();
+    }
+
+    let (released, wake) = &*release;
+    *released.lock().expect("release lock") = true;
+    wake.notify_all();
+    let sandbox_root = workspace_root.join("target").join("delegated-tasks");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let remaining_directories = fs::read_dir(&sandbox_root)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        if remaining_directories == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "drop reaper did not join worker cleanup"
+        );
+        std::thread::yield_now();
+    }
+    let reap_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (_, reaped) = AppComposition::delegated_worker_supervisor_state_for_test(owner_id);
+        if reaped {
+            break;
+        }
+        assert!(
+            Instant::now() < reap_deadline,
+            "global supervisor did not join the delegated worker"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_submit_rejects_scope_from_another_workspace() {
+    let workspace_root = temp_workspace("canonical-root");
+    let other_root = temp_workspace("mismatched-root");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-root-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Repo,
+        workspace_root: CanonicalPath(other_root.to_string_lossy().into_owned()),
+        target_path: None,
+        risk_tolerance: DelegatedTaskRiskTolerance::Balanced,
+        allowed_tools: vec![LegionToolKind::Read],
+        forbidden_paths: vec![],
+        schema_version: 1,
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("mismatched-root");
+
+    let result = app.start_delegated_task_background(
+        "must remain in canonical workspace".to_string(),
+        scope,
+        Box::new(provider),
+    );
+
+    assert!(
+        result.is_err(),
+        "mismatched workspace root must fail closed"
+    );
+    assert_eq!(
+        app.shell_projection_snapshot("Legion")
+            .expect("projection")
+            .delegated_task_projection
+            .runtime_activation,
+        DelegatedTaskRuntimeActivationState::NotEncoded,
+    );
+}
+
+#[cfg(feature = "ai")]
+#[test]
+fn delegated_background_spawn_failure_rolls_back_worker_and_activation() {
+    let workspace_root = temp_workspace("spawn-failure-rollback");
+    fs::write(workspace_root.join("main.txt"), "before\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &workspace_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-spawn-failure-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.inject_delegated_spawn_failure_for_test();
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("spawn-failure");
+
+    let error = app
+        .start_delegated_task_background(
+            "must fail before worker execution".to_string(),
+            test_scope(&workspace_root),
+            Box::new(provider),
+        )
+        .expect_err("injected worker spawn must be reported as an error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to spawn delegated task worker")
+    );
+    assert!(
+        app.cancel_delegated_task()
+            .expect_err("spawn failure must clear worker ownership")
+            .to_string()
+            .contains("no delegated task running")
+    );
+    assert_eq!(
+        app.shell_projection_snapshot("Legion")
+            .expect("projection")
+            .delegated_task_projection
+            .runtime_activation,
+        DelegatedTaskRuntimeActivationState::NotEncoded,
+    );
 }
 
 #[test]
@@ -813,6 +1373,118 @@ fn start_delegated_task_rejects_forbidden_path_read() {
         }
         other => panic!("expected Blocked (scope denial is non-retryable), got {other:?}"),
     }
+}
+
+#[cfg(all(feature = "ai", windows))]
+#[test]
+fn windows_scope_alias_and_case_are_normalized_before_forbidden_path_checks() {
+    use legion_protocol::DelegatedTaskLoopStepKind;
+
+    let root = temp_workspace("windows-scope-alias");
+    fs::write(root.join("secrets.txt"), "top secret data\n").expect("write fixture");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("windows-scope-alias-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+
+    let upper_root = root.to_string_lossy().to_uppercase();
+    let aliased_root = format!(r"\\?\{upper_root}");
+    let scope = DelegatedTaskScope {
+        workspace_root: CanonicalPath(aliased_root.clone()),
+        forbidden_paths: vec![CanonicalPath(format!(r"{aliased_root}\SECRETS.TXT"))],
+        ..test_scope(&root)
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "tool-forbidden-windows-alias",
+            "read",
+            serde_json::json!({ "path": "SECRETS.TXT" }),
+        )
+        .end_turn("must remain forbidden")
+        .build("test-scripted-windows-alias");
+
+    let outcome = app
+        .start_delegated_task("Try aliased forbidden path".to_string(), scope, &provider)
+        .expect("scope alias should validate and execute fail-closed");
+    let AppDelegatedTaskOutcome::Blocked { audit_steps, .. } = outcome else {
+        panic!("forbidden path must block, got {outcome:?}");
+    };
+    assert!(audit_steps.iter().any(|step| {
+        step.kind == DelegatedTaskLoopStepKind::ToolCallRejected
+            && step
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("forbidden"))
+    }));
+}
+
+#[test]
+fn delegated_scope_rejects_dot_traversal_in_nonexistent_target_suffix() {
+    let root = temp_workspace("scope-dot-target");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("scope-dot-target-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        target_kind: DelegatedTaskScopeTargetKind::Module,
+        target_path: Some(CanonicalPath(
+            root.join("missing")
+                .join("..")
+                .join("outside")
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        ..test_scope(&root)
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("scope-dot-target-provider");
+
+    let error = app
+        .start_delegated_task("reject traversal".to_string(), scope, &provider)
+        .expect_err("parent traversal must be rejected before prefix resolution");
+
+    assert!(error.to_string().contains("parent traversal"));
+}
+
+#[test]
+fn delegated_scope_rejects_dot_traversal_in_forbidden_path_alias() {
+    let root = temp_workspace("scope-dot-forbidden");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("scope-dot-forbidden-test".to_string()),
+    )
+    .expect("open workspace");
+    app.set_product_mode(AppProductMode::Delegate);
+    let scope = DelegatedTaskScope {
+        forbidden_paths: vec![CanonicalPath(
+            root.join("nonexistent")
+                .join("..")
+                .join("secrets.txt")
+                .to_string_lossy()
+                .into_owned(),
+        )],
+        ..test_scope(&root)
+    };
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("must not run")
+        .build("scope-dot-forbidden-provider");
+
+    let error = app
+        .start_delegated_task("reject forbidden alias".to_string(), scope, &provider)
+        .expect_err("forbidden path alias must be rejected before prefix resolution");
+
+    assert!(error.to_string().contains("parent traversal"));
 }
 
 /// End-to-end integration test for the proposal surface path:

@@ -1,0 +1,7 @@
+Command: cargo test -p devil-protocol --test dto_contracts
+
+Observed focused coverage:
+- dto_contracts_plugin_manifest_requires_abi_trust_capabilities_and_quota_metadata
+- dto_contracts_plugin_host_call_and_storage_schemas_are_versioned_and_metadata_only
+
+Status: PASS in focused run before final workspace gates.

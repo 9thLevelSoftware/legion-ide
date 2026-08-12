@@ -1,9 +1,14 @@
 use std::collections::BTreeSet;
 
+use legion_desktop::bridge::DesktopAction;
+use legion_desktop::view::ShellGeometry;
 use legion_desktop::view::{
+    BottomPanelTab, DELEGATE_TASK_DRAFT_MAX_BYTES, DELEGATE_TASK_DRAFT_MAX_CHARS,
     DesktopCodeHighlightSpan, DesktopCodeLineViewModel, DesktopProjectionViewModel,
-    DesktopProjectionViewState, drag_anchor_for_line_pointer, drag_selection_range,
-    editor_coordinate_from_pointer, line_range_for_code_line, word_range_for_coordinate,
+    DesktopProjectionViewState, ProjectionView, ProjectionViewOutput,
+    desktop_default_delegated_scope, desktop_delegated_task_action, drag_anchor_for_line_pointer,
+    drag_selection_range, editor_coordinate_from_pointer, line_range_for_code_line,
+    word_range_for_coordinate,
 };
 use legion_protocol::LanguageCodeLensProjection;
 use legion_protocol::{
@@ -19,8 +24,8 @@ use legion_protocol::{
     ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
     ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
     ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
-    SystemGraphNode, SystemGraphProjection, TextCoordinate, TimestampMillis, Utf16Position,
-    Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
+    SystemGraphNode, SystemGraphProjection, TerminalSessionId, TextCoordinate, TimestampMillis,
+    Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
     ViewportDimensions, ViewportFoldRange, ViewportLineSlice, ViewportLineTruncationState,
     ViewportProjection, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
     ViewportSemanticTokenOverlay, WorkspaceId,
@@ -645,19 +650,19 @@ fn projection_rendering_populates_required_phase2_surfaces() {
         model
             .top_bar_rows
             .iter()
-            .any(|row| row.contains("command bar: Foundation Mode"))
+            .any(|row| row.contains("top bar identity: Legion workspace=Foundation Mode"))
     );
     assert!(
         model
             .top_bar_rows
             .iter()
-            .any(|row| row.contains("registry=1"))
+            .any(|row| row.contains("active=Delegate"))
     );
     assert!(
         model
             .left_sidebar_rows
             .iter()
-            .any(|row| row.contains("project sidebar"))
+            .any(|row| row.contains("explorer chrome"))
     );
     assert!(
         model
@@ -799,9 +804,8 @@ fn projection_rendering_surfaces_assist_inline_prediction_rows() {
     }));
     assert!(model.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Assist")
-            && row.contains("id=sugg")
-            && row.contains("label=AI Suggestions")
-            && row.contains("count=1")
+            && row.contains("id=agent-log")
+            && row.contains("label=AGENT LOG")
     }));
 }
 
@@ -812,7 +816,7 @@ fn projection_rendering_models_read_only_product_mode_shell() {
         populated
             .product_mode_rows
             .iter()
-            .any(|row| row.contains("active=Delegates app-owned projection"))
+            .any(|row| row.contains("active=Delegate app-owned projection"))
     );
     assert!(populated.product_mode_rows.iter().any(|row| {
         row.contains("approval-gated") && row.contains("direct workspace apply unsupported")
@@ -858,26 +862,26 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     assert!(manual.mode_confirmation_rows.iter().any(|row| {
         row.contains("target=Delegate")
             && row.contains("required=true")
-            && row.contains("require_approval=true")
-            && row.contains("allow_tests=true")
-            && row.contains("allow_terminal=false")
-            && row.contains("allow_dependency_install=false")
-            && row.contains("protected=[.env,secrets/,*.pem]")
+            && row.contains("proposal_mediated=true")
+            && row.contains("bounded_permissions=true")
+            && row.contains("grants_permissions=false")
+            && row.contains("security_boundary=false")
     }));
     assert!(manual.mode_confirmation_rows.iter().any(|row| {
-        row.contains("target=Automate")
+        row.contains("target=Legion Workflows")
             && row.contains("required=true")
-            && row.contains("allow_dependency_install=true")
+            && row.contains("proposal_mediated=true")
+            && row.contains("grants_permissions=false")
     }));
     assert!(!manual.command_palette_overlay.open);
     assert!(manual.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Manual")
             && row.contains("id=term")
-            && row.contains("label=Terminal")
+            && row.contains("label=TERMINAL")
             && row.contains("active=true")
     }));
     assert!(manual.bottom_tab_rows.iter().any(|row| {
-        row.contains("mode=Manual") && row.contains("id=test") && row.contains("label=Tests")
+        row.contains("mode=Manual") && row.contains("id=problems") && row.contains("label=PROBLEMS")
     }));
 
     let mut assisted = Shell::empty("Assist").projection_snapshot();
@@ -889,24 +893,165 @@ fn projection_rendering_models_wireframe_chrome_contract() {
     }));
     assert!(assisted_model.bottom_tab_rows.iter().any(|row| {
         row.contains("mode=Assist")
-            && row.contains("id=sugg")
-            && row.contains("label=AI Suggestions")
-            && row.contains("count=1")
+            && row.contains("id=agent-log")
+            && row.contains("label=AGENT LOG")
     }));
 
     let delegated = DesktopProjectionViewModel::from_snapshot(&populated_snapshot());
     assert!(delegated.autonomy_scale_rows.iter().any(|row| {
         row.contains("label=Delegate")
             && row.contains("active=true")
-            && row.contains("confirm=required")
+            && row.contains("confirm=none")
     }));
     assert!(!delegated.command_palette_overlay.open);
     assert!(delegated.bottom_tab_rows.iter().any(|row| {
-        row.contains("mode=Delegates")
-            && row.contains("id=test")
-            && row.contains("label=Test Runner")
+        row.contains("mode=Delegate")
+            && row.contains("id=term")
+            && row.contains("label=TERMINAL")
             && row.contains("active=true")
     }));
+}
+
+#[test]
+fn projection_rendering_models_prototype_workbench_composition() {
+    let mut snapshot = populated_snapshot();
+    snapshot
+        .context_manifest_projection
+        .manifest
+        .workspace_trust_state = Some(legion_protocol::WorkspaceTrustState::Trusted);
+    snapshot.language_tooling_projection.status = legion_protocol::LanguageToolingStatusKind::Ready;
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert_eq!(
+        model.top_bar_rows,
+        vec![
+            "top bar identity: Legion workspace=Foundation Mode".to_string(),
+            "top bar modes: Manual | Assist | Delegate | Legion Workflows active=Delegate"
+                .to_string(),
+            "top bar command: label=Command presence=1".to_string(),
+        ],
+        "the first-screen header should expose only identity, mode, and command/presence regions"
+    );
+    assert_eq!(
+        model.left_sidebar_rows,
+        vec![
+            "explorer chrome: title=EXPLORER · Foundation Mode nodes=2 selected_file=2".to_string()
+        ],
+        "the first-screen sidebar should be the projected explorer, without fleet or context-pack summaries"
+    );
+    assert_eq!(model.center_surface, "editor");
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=term") && row.contains("label=TERMINAL") && row.contains("active=true")
+    }));
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=problems") && row.contains("label=PROBLEMS") && row.contains("count=0")
+    }));
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=agent-log") && row.contains("label=AGENT LOG") })
+    );
+    assert_eq!(model.status_bar.trust.as_deref(), Some("Trusted"));
+    assert_eq!(
+        model.status_bar.lsp, None,
+        "general language readiness must not be relabeled as live LSP state"
+    );
+
+    snapshot.language_tooling_projection.lsp_session_status =
+        Some(legion_protocol::LspSessionStatusProjection {
+            lifecycle: legion_protocol::LspSessionLifecycleKind::Live,
+            restart_count: 0,
+            max_auto_restarts: 3,
+            backoff_remaining_ms: None,
+            failure_reason: None,
+            schema_version: 1,
+        });
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert_eq!(model.status_bar.lsp.as_deref(), Some("Live"));
+}
+
+#[test]
+fn projection_rendering_never_projects_live_agent_log_in_manual() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+
+    assert!(model.bottom_tab_rows.iter().any(|row| {
+        row.contains("id=term") && row.contains("label=TERMINAL") && row.contains("active=true")
+    }));
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .any(|row| row.contains("id=problems") && row.contains("label=PROBLEMS"))
+    );
+    assert!(
+        model
+            .bottom_tab_rows
+            .iter()
+            .all(|row| !row.contains("AGENT LOG")),
+        "Manual must not expose a live-agent console surface"
+    );
+}
+
+#[test]
+fn projection_rendering_suppresses_projected_presence_from_manual_chrome() {
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        model
+            .top_bar_rows
+            .iter()
+            .any(|row| row == "top bar command: label=Command presence=0"),
+        "Manual chrome must not expose collaboration-presence claims"
+    );
+}
+
+#[test]
+fn projection_rendering_uses_the_canonical_four_mode_switch() {
+    let model =
+        DesktopProjectionViewModel::from_snapshot(&Shell::empty("Manual").projection_snapshot());
+    let expected = [
+        ("n=1", "key=M", "label=Manual"),
+        ("n=2", "key=A", "label=Assist"),
+        ("n=3", "key=D", "label=Delegate"),
+        ("n=4", "key=W", "label=Legion Workflows"),
+    ];
+
+    assert_eq!(model.autonomy_scale_rows.len(), expected.len());
+    for (row, (ordinal, shortcut, label)) in model.autonomy_scale_rows.iter().zip(expected) {
+        assert!(row.contains(ordinal), "missing {ordinal} in {row}");
+        assert!(row.contains(shortcut), "missing {shortcut} in {row}");
+        assert!(row.contains(label), "missing {label} in {row}");
+    }
+    assert!(
+        model
+            .product_mode_rows
+            .iter()
+            .any(|row| row == "product modes: Manual | Assist | Delegate | Legion Workflows")
+    );
+}
+
+#[test]
+fn projection_rendering_uses_stable_responsive_shell_geometry() {
+    let desktop = ShellGeometry::for_available_size(1440.0, 900.0);
+    assert_eq!(desktop.top_bar_height, 42.0);
+    assert_eq!(desktop.activity_rail_width, 46.0);
+    assert_eq!(desktop.explorer_width, 248.0);
+    assert_eq!(desktop.left_width, 294.0);
+    assert_eq!(desktop.right_width, 325.0);
+    assert_eq!(desktop.bottom_height, 192.0);
+    assert_eq!(desktop.status_bar_height, 24.0);
+    assert!(!desktop.compact);
+
+    let compact = ShellGeometry::for_available_size(960.0, 720.0);
+    assert!(compact.compact);
+    assert_eq!(compact.left_width, 250.0);
+    assert_eq!(compact.right_width, 325.0);
+    assert!(compact.editor_width(960.0) >= 360.0);
 }
 
 #[test]
@@ -1582,6 +1727,1637 @@ fn projection_rendering_marks_expanded_and_collapsed_explorer_rows() {
             .explorer_state_rows
             .iter()
             .any(|row| row.contains("* -   lib.rs"))
+    );
+}
+
+fn desktop_raw_input_at(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
+fn render_projection_frame(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    render_projection_frame_at(ctx, view, snapshot, egui::vec2(1_440.0, 900.0))
+}
+
+fn render_projection_frame_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let mut projection_output = None;
+    let full_output = ctx.run_ui(desktop_raw_input_at(size, Vec::new()), |ui| {
+        projection_output = Some(view.render(ui, snapshot));
+    });
+    (
+        projection_output.expect("projection view should render"),
+        full_output,
+    )
+}
+
+fn render_projection_frame_with_state(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let mut projection_output = None;
+    let full_output = ctx.run_ui(
+        desktop_raw_input_at(egui::vec2(1_440.0, 900.0), Vec::new()),
+        |ui| {
+            projection_output = Some(view.render_with_state(ui, snapshot, state));
+        },
+    );
+    (
+        projection_output.expect("projection view with state should render"),
+        full_output,
+    )
+}
+
+fn accesskit_bounds(
+    output: &egui::FullOutput,
+    label: &str,
+    clickable: bool,
+) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            ((node.label() == Some(label) || node.value() == Some(label))
+                && (!clickable || node.supports_action(egui::accesskit::Action::Click)))
+            .then(|| node.bounds())
+            .flatten()
+        })
+        .unwrap_or_else(|| panic!("accessible control `{label}` should be allocated"))
+}
+
+fn accesskit_button_bounds_in_x_range(
+    output: &egui::FullOutput,
+    label: &str,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            let bounds = node.bounds()?;
+            let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+            (node.label() == Some(label)
+                && node.supports_action(egui::accesskit::Action::Click)
+                && x_range.contains(&center_x))
+            .then_some(bounds)
+        })
+        .unwrap_or_else(|| panic!("central accessible control `{label}` should be allocated"))
+}
+
+fn accesskit_button_bounds_in_y_range(
+    output: &egui::FullOutput,
+    label: &str,
+    y_range: std::ops::RangeInclusive<f32>,
+) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            let bounds = node.bounds()?;
+            let center_y = ((bounds.y0 + bounds.y1) * 0.5) as f32;
+            (node.label() == Some(label)
+                && node.supports_action(egui::accesskit::Action::Click)
+                && y_range.contains(&center_y))
+            .then_some(bounds)
+        })
+        .unwrap_or_else(|| panic!("top-bar control `{label}` should be allocated"))
+}
+
+fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+        })
+}
+
+fn accesskit_has_clickable_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click)
+            })
+        })
+}
+
+fn accesskit_has_role(output: &egui::FullOutput, role: egui::accesskit::Role) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| update.nodes.iter().any(|(_id, node)| node.role() == role))
+}
+
+fn accesskit_has_role_in_x_range(
+    output: &egui::FullOutput,
+    role: egui::accesskit::Role,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+                node.role() == role && x_range.contains(&center_x)
+            })
+        })
+}
+
+fn accesskit_label_is_disabled(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.label() == Some(label) && node.is_disabled())
+        })
+}
+
+fn accesskit_contains_text_in_x_range(
+    output: &egui::FullOutput,
+    text: &str,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
+                x_range.contains(&center_x)
+                    && (node.label().is_some_and(|label| label.contains(text))
+                        || node.value().is_some_and(|value| value.contains(text)))
+            })
+        })
+}
+
+fn click_accessible_control(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    click_accessible_control_at(
+        ctx,
+        view,
+        snapshot,
+        primed,
+        label,
+        egui::vec2(1_440.0, 900.0),
+    )
+}
+
+fn click_accessible_control_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    primed: &egui::FullOutput,
+    label: &str,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let bounds = accesskit_bounds(primed, label, true);
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    );
+    click_projection_at(ctx, view, snapshot, pos, size)
+}
+
+fn click_projection_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    pos: egui::Pos2,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let press = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let _ = ctx.run_ui(press, |ui| {
+        let _ = view.render(ui, snapshot);
+    });
+
+    let release = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let mut projection_output = None;
+    let full_output = ctx.run_ui(release, |ui| {
+        projection_output = Some(view.render(ui, snapshot));
+    });
+    (
+        projection_output.expect("clicked projection frame should render"),
+        full_output,
+    )
+}
+
+fn click_accessible_control_with_state(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    primed: &egui::FullOutput,
+    label: &str,
+) -> (ProjectionViewOutput, egui::FullOutput) {
+    let bounds = accesskit_bounds(primed, label, true);
+    let pos = egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    );
+    let size = egui::vec2(1_440.0, 900.0);
+    let press = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let _ = ctx.run_ui(press, |ui| {
+        let _ = view.render_with_state(ui, snapshot, state);
+    });
+
+    let release = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let mut output = None;
+    let full = ctx.run_ui(release, |ui| {
+        output = Some(view.render_with_state(ui, snapshot, state));
+    });
+    (
+        output.expect("stateful clicked projection frame should render"),
+        full,
+    )
+}
+
+fn scroll_right_rail_to_bottom(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    let pointer = egui::pos2(size.x - 24.0, size.y * 0.5);
+    let mut full = None;
+    for _ in 0..4 {
+        let input = desktop_raw_input_at(
+            size,
+            vec![
+                egui::Event::PointerMoved(pointer),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -600.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        full = Some(ctx.run_ui(input, |ui| {
+            let _ = view.render(ui, snapshot);
+        }));
+    }
+    full.expect("right rail should render while scrolling")
+}
+
+fn seed_delegate_task_draft(ctx: &egui::Context, draft: &str) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("legion-delegate-task-draft-value"),
+            draft.to_string(),
+        );
+    });
+}
+
+#[test]
+fn projection_rendering_manual_rail_is_ai_disengaged_and_enable_assist_is_mode_only() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "AI engine disengaged"));
+    assert!(accesskit_has_label(
+        &full,
+        "Product AI dispatch is disabled in Manual"
+    ));
+    assert!(accesskit_has_label(
+        &full,
+        "Terminal and local tools may still perform user-requested I/O under runtime policy."
+    ));
+    assert!(!accesskit_has_label(
+        &full,
+        "Zero egress · local-only editing intelligence"
+    ));
+    assert!(!accesskit_has_label(&full, "Delegation Console"));
+    assert!(!accesskit_has_label(&full, "Legion Workflow Control"));
+    assert!(!accesskit_has_label(&full, "Agent Comm Stream"));
+    assert!(!accesskit_has_label(&full, "Current File"));
+
+    let (clicked, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Enable Assist");
+    assert_eq!(
+        clicked.actions,
+        vec![DesktopAction::SetProductMode {
+            mode: DockMode::Assist
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_manual_rail_suppresses_generic_onboarding_even_when_requested() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let right_rail = 1_115.0..=1_440.0;
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "AI engine disengaged",
+        right_rail.clone()
+    ));
+    for forbidden in [
+        "provider setup",
+        "Agent Comm Stream",
+        "present",
+        "First-run onboarding",
+        "Delegate",
+        "Legion Workflows",
+    ] {
+        assert!(
+            !accesskit_contains_text_in_x_range(&full, forbidden, right_rail.clone()),
+            "Manual right rail must suppress `{forbidden}` even when onboarding is requested"
+        );
+    }
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "Enable Assist",
+        right_rail
+    ));
+}
+
+#[test]
+fn projection_rendering_routes_every_mode_pair_through_the_named_confirmation_policy() {
+    let cases = [
+        (DockMode::Manual, DockMode::Manual, None, false),
+        (
+            DockMode::Manual,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (DockMode::Manual, DockMode::Delegate, None, true),
+        (DockMode::Manual, DockMode::Automate, None, true),
+        (
+            DockMode::Assist,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (DockMode::Assist, DockMode::Assist, None, false),
+        (DockMode::Assist, DockMode::Delegate, None, true),
+        (DockMode::Assist, DockMode::Automate, None, true),
+        (
+            DockMode::Delegate,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (
+            DockMode::Delegate,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (DockMode::Delegate, DockMode::Delegate, None, false),
+        (DockMode::Delegate, DockMode::Automate, None, true),
+        (
+            DockMode::Automate,
+            DockMode::Manual,
+            Some(DockMode::Manual),
+            false,
+        ),
+        (
+            DockMode::Automate,
+            DockMode::Assist,
+            Some(DockMode::Assist),
+            false,
+        ),
+        (
+            DockMode::Automate,
+            DockMode::Delegate,
+            Some(DockMode::Delegate),
+            false,
+        ),
+        (DockMode::Automate, DockMode::Automate, None, false),
+    ];
+
+    for (from, target, expected_action, expected_dialog) in cases {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let mut snapshot = Shell::empty("Mode policy").projection_snapshot();
+        snapshot.product_mode = from;
+
+        let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        let target_label = target.label();
+        let (clicked, clicked_full) =
+            click_accessible_control(&ctx, &mut view, &snapshot, &full, target_label);
+
+        let expected_actions = expected_action
+            .map(|mode| vec![DesktopAction::SetProductMode { mode }])
+            .unwrap_or_default();
+        assert_eq!(
+            clicked.actions, expected_actions,
+            "unexpected renderer action for {from:?} -> {target:?}"
+        );
+        assert_eq!(
+            accesskit_has_role(&clicked_full, egui::accesskit::Role::Dialog),
+            expected_dialog,
+            "unexpected confirmation presentation for {from:?} -> {target:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_cancel_confirm_and_snapshot_normalization_preserve_app_authority() {
+    let mut snapshot = Shell::empty("Mode confirmation").projection_snapshot();
+    snapshot.product_mode = DockMode::Manual;
+
+    let cancel_ctx = egui::Context::default();
+    cancel_ctx.enable_accesskit();
+    let mut cancel_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    let (opened, modal_full) =
+        click_accessible_control(&cancel_ctx, &mut cancel_view, &snapshot, &full, "Delegate");
+    assert!(opened.actions.is_empty());
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
+    ));
+    let (settled, modal_full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    assert!(settled.actions.is_empty());
+    let (cancelled, _cancelled_full) = click_accessible_control(
+        &cancel_ctx,
+        &mut cancel_view,
+        &snapshot,
+        &modal_full,
+        "Cancel",
+    );
+    assert!(cancelled.actions.is_empty());
+    let (_next, cancelled_full) = render_projection_frame(&cancel_ctx, &mut cancel_view, &snapshot);
+    assert!(!accesskit_has_role(
+        &cancelled_full,
+        egui::accesskit::Role::Dialog
+    ));
+
+    let confirm_ctx = egui::Context::default();
+    confirm_ctx.enable_accesskit();
+    let mut confirm_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&confirm_ctx, &mut confirm_view, &snapshot);
+    let (_opened, _modal_full) = click_accessible_control(
+        &confirm_ctx,
+        &mut confirm_view,
+        &snapshot,
+        &full,
+        "Delegate",
+    );
+    let (_settled, modal_full) =
+        render_projection_frame(&confirm_ctx, &mut confirm_view, &snapshot);
+    let (confirmed, _) = click_accessible_control(
+        &confirm_ctx,
+        &mut confirm_view,
+        &snapshot,
+        &modal_full,
+        "Confirm",
+    );
+    assert_eq!(
+        confirmed.actions,
+        vec![DesktopAction::SetProductMode {
+            mode: DockMode::Delegate
+        }],
+        "confirmation alone should emit exactly one existing product-mode action"
+    );
+
+    let stale_ctx = egui::Context::default();
+    stale_ctx.enable_accesskit();
+    let mut stale_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    let (_opened, _modal_full) = click_accessible_control(
+        &stale_ctx,
+        &mut stale_view,
+        &snapshot,
+        &full,
+        "Legion Workflows",
+    );
+    let (_settled, modal_full) = render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
+    ));
+    snapshot.product_mode = DockMode::Assist;
+    let (normalized, normalized_full) =
+        render_projection_frame(&stale_ctx, &mut stale_view, &snapshot);
+    assert!(normalized.actions.is_empty());
+    assert!(
+        !accesskit_has_role(&normalized_full, egui::accesskit::Role::Dialog),
+        "a changed app snapshot must invalidate renderer-local pending presentation"
+    );
+}
+
+#[test]
+fn projection_rendering_onboarding_escalation_uses_the_shared_confirmation_policy() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Onboarding mode policy").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let (_initial, _full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let (_settled, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let delegate_id = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("onboarding should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            let bounds = node.bounds()?;
+            (node.label() == Some("Delegate")
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click)
+                && bounds.x0 >= 1_115.0)
+                .then_some(*id)
+        })
+        .expect("onboarding Delegate should be an accessible action");
+    let input = desktop_raw_input_at(
+        egui::vec2(1_440.0, 900.0),
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: delegate_id,
+                data: None,
+            },
+        )],
+    );
+    let mut clicked = None;
+    let modal_full = ctx.run_ui(input, |ui| {
+        clicked = Some(view.render_with_state(ui, &snapshot, &state));
+    });
+    let clicked = clicked.expect("clicked onboarding projection should render");
+
+    assert!(
+        clicked.actions.is_empty(),
+        "onboarding must not bypass the shared escalation policy"
+    );
+    assert!(accesskit_has_role(
+        &modal_full,
+        egui::accesskit::Role::Dialog
+    ));
+}
+
+#[test]
+fn projection_rendering_assist_active_prediction_routes_accept_and_dismiss() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = assist_inline_prediction_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(accesskit_has_label(&full, ".await"));
+    assert!(!accesskit_has_label(&full, "Predict"));
+    let (accepted, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Accept");
+    assert_eq!(
+        accepted.actions,
+        vec![DesktopAction::AcceptCurrentAssistInlinePrediction]
+    );
+
+    let (_next, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (dismissed, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Dismiss");
+    assert_eq!(
+        dismissed.actions,
+        vec![DesktopAction::DismissCurrentAssistInlinePrediction]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_idle_and_in_flight_controls_route_existing_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = assist_inline_prediction_snapshot();
+    snapshot
+        .assist_inline_prediction_projection
+        .active_prediction = None;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (predicted, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Predict");
+    assert!(matches!(
+        predicted.actions.as_slice(),
+        [DesktopAction::RequestAssistInlinePrediction { .. }]
+    ));
+
+    snapshot
+        .assist_inline_prediction_projection
+        .request_in_flight = true;
+    let (_next, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Cancel"));
+    assert!(!accesskit_has_label(&full, "Predict"));
+    assert!(!accesskit_has_clickable_label(&full, "Predict"));
+    let (cancelled, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Cancel");
+    assert_eq!(
+        cancelled.actions,
+        vec![DesktopAction::CancelAssistInlinePrediction]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_richer_surfaces_are_read_only_and_never_emit_generation_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.assisted_ai_projection.preview_ready_count = 1;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_advanced, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Advanced rail surfaces");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for label in ["Suggested Fixes", "Explain This Function", "Generate Test"] {
+        assert!(accesskit_has_label(&full, label));
+        assert!(
+            !accesskit_has_clickable_label(&full, label),
+            "Assist richer action `{label}` must remain read-only"
+        );
+    }
+
+    let (_workbench, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for label in ["/explain", "/fix", "/test", "/doc"] {
+        assert!(accesskit_has_label(&full, label));
+        assert!(
+            !accesskit_has_clickable_label(&full, label),
+            "Assist slash surface `{label}` must not dispatch proposal/explain actions"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_assist_lists_only_projected_next_edit_rows() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = assist_inline_prediction_snapshot();
+    let mut next_edit = snapshot
+        .assist_inline_prediction_projection
+        .active_prediction
+        .clone()
+        .expect("active fixture prediction");
+    next_edit.prediction_id = "assist:prediction:next-edit".to_string();
+    next_edit.ghost_text_label = "Update proposal.rs:74".to_string();
+    snapshot.assist_inline_prediction_projection.rows = vec![next_edit];
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Next-edit predictions"));
+    assert!(accesskit_has_label(&full, "Update proposal.rs:74"));
+    assert!(!accesskit_has_label(&full, "Add Autonomous arm"));
+}
+
+#[test]
+fn projection_rendering_assist_empty_predictions_do_not_invent_suggestion_rows() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Empty Assist").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(
+        &full,
+        "No projected next-edit predictions"
+    ));
+    for invented in [
+        "Refactor validation into helper",
+        "Add null-check for selected value",
+        "Generate unit test",
+    ] {
+        assert!(!accesskit_has_label(&full, invented));
+    }
+}
+
+#[test]
+fn projection_rendering_blank_delegate_draft_is_semantically_disabled() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Idle Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+
+    seed_delegate_task_draft(&ctx, "   ");
+    let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+}
+
+#[test]
+fn projection_rendering_delegate_runtime_proposal_and_evidence_each_activate_real_console() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+
+    let mut runtime_only = Shell::empty("Runtime Delegate").projection_snapshot();
+    runtime_only.product_mode = DockMode::Delegate;
+    runtime_only.delegated_task_projection.runtime_activation =
+        legion_protocol::DelegatedTaskRuntimeActivationState::Verifying;
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &runtime_only);
+    assert!(accesskit_has_label(&full, "Phase"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+    let (cancelled, _) =
+        click_accessible_control(&ctx, &mut view, &runtime_only, &full, "Cancel task");
+    assert_eq!(cancelled.actions, vec![DesktopAction::CancelDelegatedTask]);
+
+    let mut proposal_only = populated_snapshot();
+    proposal_only.product_mode = DockMode::Delegate;
+    proposal_only.delegated_task_projection.plan_count = 0;
+    proposal_only.artifact_ledger_projection.rows.clear();
+    proposal_only.verification_run_projection.rows.clear();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &proposal_only);
+    assert!(accesskit_has_label(&full, "Proposal review"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+
+    let mut evidence_only = populated_snapshot();
+    evidence_only.product_mode = DockMode::Delegate;
+    evidence_only.delegated_task_projection.plan_count = 0;
+    evidence_only.proposal_ledger_projection.rows.clear();
+    evidence_only
+        .proposal_ledger_projection
+        .selected_proposal_id = None;
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &evidence_only);
+    assert!(accesskit_has_label(&full, "Task graph and evidence"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+}
+
+#[test]
+fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Draft Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(CanonicalPath("D:/workspace".to_string())),
+        ..DesktopProjectionViewState::default()
+    };
+    let expected_scope = desktop_default_delegated_scope(&state)
+        .expect("projected workspace root should produce a Delegate scope");
+    assert_eq!(
+        expected_scope.workspace_root,
+        CanonicalPath("D:/workspace".to_string())
+    );
+
+    seed_delegate_task_draft(&ctx, "Fix the delegated task rail");
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    assert!(accesskit_has_label(&full, "Task description"));
+    let (_persisted, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    let cta = accesskit_bounds(&full, "Delegate task", true);
+    assert!(cta.y1 - cta.y0 >= 24.0);
+    let delegated = desktop_delegated_task_action(&state, " Fix the delegated task rail ")
+        .expect("non-empty draft should create one delegated task action");
+    assert_eq!(
+        delegated,
+        DesktopAction::StartDelegatedTask {
+            task_description: "Fix the delegated task rail".to_string(),
+            scope: expected_scope,
+        }
+    );
+    assert!(
+        !matches!(delegated, DesktopAction::StartAiProposal { .. }),
+        "Delegate CTA mapping must never use the proposal-only action"
+    );
+    assert_eq!(desktop_delegated_task_action(&state, "   "), None);
+}
+
+#[test]
+fn projection_rendering_delegate_draft_fails_closed_without_projected_workspace_root() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Unscoped Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    let state = DesktopProjectionViewState::default();
+
+    assert_eq!(desktop_default_delegated_scope(&state), None);
+    assert_eq!(
+        desktop_delegated_task_action(&state, "Do not dispatch without a root"),
+        None
+    );
+    seed_delegate_task_draft(&ctx, "Do not dispatch without a root");
+    let (_frame, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(accesskit_has_label(
+        &full,
+        "Delegate is unavailable until the runtime projects a canonical workspace root."
+    ));
+}
+
+#[test]
+fn projection_rendering_delegate_draft_is_bounded_before_dispatch_on_utf8_boundaries() {
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(CanonicalPath("D:/workspace".to_string())),
+        ..DesktopProjectionViewState::default()
+    };
+    let oversized = "🦀".repeat(DELEGATE_TASK_DRAFT_MAX_CHARS + 100);
+    let action = desktop_delegated_task_action(&state, &oversized)
+        .expect("a non-empty bounded draft should dispatch");
+    let DesktopAction::StartDelegatedTask {
+        task_description, ..
+    } = action
+    else {
+        panic!("Delegate draft must route to StartDelegatedTask");
+    };
+    assert_eq!(
+        task_description.chars().count(),
+        DELEGATE_TASK_DRAFT_MAX_CHARS
+    );
+    assert!(task_description.len() <= DELEGATE_TASK_DRAFT_MAX_BYTES);
+    assert!(task_description.is_char_boundary(task_description.len()));
+}
+
+#[test]
+fn projection_rendering_delegate_scope_uses_projected_workspace_root_not_nested_manifest() {
+    let temp = tempfile::tempdir().expect("temporary workspace should be created");
+    let nested = temp.path().join("crates").join("nested");
+    std::fs::create_dir_all(&nested).expect("nested crate directory should be created");
+    std::fs::write(
+        nested.join("Cargo.toml"),
+        "[package]\nname='nested'\nversion='0.1.0'\n",
+    )
+    .expect("nested manifest should be written");
+    let workspace_root = CanonicalPath(temp.path().to_string_lossy().into_owned());
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(workspace_root.clone()),
+        ..DesktopProjectionViewState::default()
+    };
+
+    assert_eq!(
+        desktop_default_delegated_scope(&state)
+            .expect("projected workspace root should produce a scope")
+            .workspace_root,
+        workspace_root,
+        "Delegate scope must come from the runtime projection and never probe for the nearest Cargo.toml"
+    );
+}
+
+#[test]
+fn projection_rendering_visible_actions_meet_minimum_target_height() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Action targets").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    let predict = accesskit_bounds(&full, "Predict", true);
+    assert!(predict.y1 - predict.y0 >= 24.0);
+    for label in [
+        "Auto (local-first)",
+        "Ollama",
+        "Anthropic",
+        "Fixture",
+        "Save Anthropic key",
+        "Clear Anthropic key",
+    ] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.y1 - bounds.y0 >= 24.0,
+            "{label} must retain a >=24px target; bounds={bounds:?}"
+        );
+    }
+
+    snapshot.product_mode = DockMode::Manual;
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    let full = scroll_right_rail_to_bottom(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    for label in ["Defaults", "Light", "All statuses"] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.y1 - bounds.y0 >= 24.0,
+            "{label} must retain a >=24px target in the compact viewport; bounds={bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_compact_activity_labels_keep_full_accessible_names() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Activity rail").projection_snapshot();
+
+    let (_initial, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
+    for label in ["Files", "Search", "Symbols"] {
+        let bounds = accesskit_button_bounds_in_x_range(&full, label, 0.0..=46.0);
+        assert!(bounds.x1 - bounds.x0 <= 38.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+    }
+
+    let search = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
+    let (searched, _) = click_projection_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        egui::pos2(
+            ((search.x0 + search.x1) * 0.5) as f32,
+            ((search.y0 + search.y1) * 0.5) as f32,
+        ),
+        egui::vec2(960.0, 720.0),
+    );
+    assert_eq!(
+        searched.actions,
+        vec![DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_settings_selectors_emit_real_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Settings actions").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (theme, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Light");
+    assert_eq!(
+        theme.actions,
+        vec![DesktopAction::SetThemePreference {
+            preference: ThemePreferenceProjection::Light,
+        }]
+    );
+
+    let (_next, _full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let full = scroll_right_rail_to_bottom(&ctx, &mut view, &snapshot, egui::vec2(1_440.0, 900.0));
+    let (toasts, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "All statuses");
+    assert_eq!(
+        toasts.actions,
+        vec![DesktopAction::SetToastVerbosity {
+            verbosity: ToastVerbosityProjection::All,
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Advanced rail surfaces");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Human Feedback"));
+    assert!(!accesskit_has_clickable_label(&full, "Send"));
+}
+
+#[test]
+fn projection_rendering_shell_panels_preserve_physical_prototype_edges() {
+    let assert_edge = |label: &str, actual: f32, expected: f32| {
+        assert!(
+            (actual - expected).abs() <= 2.0,
+            "{label}: panel edge {actual} must align with {expected} within the 2px separator stroke"
+        );
+    };
+    for size in [egui::vec2(960.0, 720.0), egui::vec2(1_440.0, 900.0)] {
+        let ctx = egui::Context::default();
+        let mut view = ProjectionView::new();
+        let snapshot = Shell::empty("Panel geometry").projection_snapshot();
+
+        let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        let rects = view
+            .last_shell_panel_rects()
+            .expect("the composed shell must record panel rectangles");
+
+        assert_edge("top left", rects.top.left(), 0.0);
+        assert_edge("top right", rects.top.right(), size.x);
+        assert_edge("status left", rects.status.left(), 0.0);
+        assert_edge("status right", rects.status.right(), size.x);
+        assert_edge("left top", rects.left.top(), rects.top.bottom());
+        assert_edge("left bottom", rects.left.bottom(), rects.status.top());
+        assert_edge("right top", rects.right.top(), rects.top.bottom());
+        assert_edge("right bottom", rects.right.bottom(), rects.status.top());
+        assert_edge("bottom left", rects.bottom.left(), rects.left.right());
+        assert_edge("bottom right", rects.bottom.right(), rects.right.left());
+        assert_edge("bottom bottom", rects.bottom.bottom(), rects.status.top());
+        assert_edge("center left", rects.center.left(), rects.left.right());
+        assert_edge("center right", rects.center.right(), rects.right.left());
+        assert_edge("center bottom", rects.center.bottom(), rects.bottom.top());
+        assert_edge(
+            "console height",
+            rects.bottom.height(),
+            ShellGeometry::for_available_size(size.x, size.y).bottom_height,
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_mode_content_does_not_change_default_right_rail_width() {
+    let ctx = egui::Context::default();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(u128::MAX));
+    snapshot.active_buffer_projection.file_path = Some(CanonicalPath(
+        r"D:\legion-ide\.worktrees\ui-prototype-polish\crates\legion-desktop\src\view.rs"
+            .to_string(),
+    ));
+    let size = egui::vec2(1_440.0, 900.0);
+    let expected = ShellGeometry::for_available_size(size.x, size.y).right_width;
+    let mut observed = Vec::new();
+
+    for mode in [
+        DockMode::Manual,
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+    ] {
+        snapshot.product_mode = mode;
+        for _ in 0..3 {
+            let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        }
+        let rects = view
+            .last_shell_panel_rects()
+            .expect("the composed shell must record panel rectangles");
+        let editor = view
+            .last_editor_rect()
+            .expect("the real editor surface should record its allocation");
+        observed.push((mode, rects.right.width(), editor.width()));
+    }
+
+    for (mode, right_width, _editor_width) in &observed {
+        assert!(
+            (right_width - expected).abs() <= 2.0,
+            "{mode:?} content must not expand the default {expected}px right rail; observed={observed:?}"
+        );
+    }
+    let first_editor_width = observed[0].2;
+    for (mode, _right_width, editor_width) in &observed[1..] {
+        assert!(
+            (editor_width - first_editor_width).abs() <= 2.0,
+            "{mode:?} content must not shrink the editor relative to Manual; observed={observed:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_context_pills_wrap_as_atomic_readable_items() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(u128::MAX));
+    snapshot.active_buffer_projection.file_path = Some(CanonicalPath(
+        r"D:\legion-ide\.worktrees\ui-prototype-polish\crates\legion-desktop\src\view.rs"
+            .to_string(),
+    ));
+
+    let (_frame, full) =
+        render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(1_440.0, 900.0));
+    let manifest = accesskit_bounds(&full, "manifest: 1 items", false);
+    assert!(
+        manifest.x1 - manifest.x0 >= 80.0 && manifest.y1 - manifest.y0 <= 30.0,
+        "the manifest context pill must remain a horizontal atomic item; bounds={manifest:?}"
+    );
+    let manifest_node = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| (node.label() == Some("manifest: 1 items")).then_some(node))
+        .expect("the manifest context pill should expose one semantic node");
+    assert_eq!(manifest_node.role(), egui::accesskit::Role::Label);
+    assert!(!manifest_node.supports_action(egui::accesskit::Action::Click));
+    assert!(!manifest_node.supports_action(egui::accesskit::Action::Focus));
+}
+
+#[test]
+fn projection_rendering_desktop_top_bar_uses_three_non_overlapping_regions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Legion IDE").projection_snapshot();
+
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let manual = accesskit_button_bounds_in_y_range(&full, "Manual", 0.0..=44.0);
+    let workflows = accesskit_button_bounds_in_y_range(&full, "Legion Workflows", 0.0..=44.0);
+    let command = accesskit_button_bounds_in_y_range(&full, "Command", 0.0..=44.0);
+    let workspace = accesskit_bounds(&full, "Legion IDE", false);
+    let switch_center = ((manual.x0 + workflows.x1) * 0.5) as f32;
+
+    assert!(
+        (switch_center - 720.0).abs() <= 24.0,
+        "desktop mode switch must be centered around x=720; actual center={switch_center}, manual={manual:?}, workflows={workflows:?}, command={command:?}, workspace={workspace:?}"
+    );
+    assert!(
+        command.x0 >= 1_160.0,
+        "Command must be right-aligned within the 280px edge region; bounds={command:?}"
+    );
+    assert!(workspace.x1 <= manual.x0);
+    assert!(workflows.x1 <= command.x0);
+    assert!(accesskit_has_label(&full, "·"));
+}
+
+#[test]
+fn projection_rendering_compact_right_rail_exposes_vertical_scroll_reachability() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let state = DesktopProjectionViewState {
+        first_run_onboarding_visible: true,
+        ..DesktopProjectionViewState::default()
+    };
+
+    let mut projection_output = None;
+    let full = ctx.run_ui(
+        desktop_raw_input_at(egui::vec2(960.0, 720.0), Vec::new()),
+        |ui| {
+            projection_output = Some(view.render_with_state(ui, &snapshot, &state));
+        },
+    );
+    assert!(projection_output.is_some());
+    assert!(
+        accesskit_has_role_in_x_range(&full, egui::accesskit::Role::ScrollBar, 680.0..=960.0,),
+        "overflowing compact right-rail content must expose a vertical scrollbar"
+    );
+}
+
+#[test]
+fn projection_rendering_empty_workflows_do_not_invent_running_or_budget_state() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Empty workflow").projection_snapshot();
+    snapshot.product_mode = DockMode::Automate;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Legion Workflows"));
+    assert!(accesskit_has_label(&full, "No workflow sessions projected"));
+    assert!(!accesskit_has_label(&full, "Running"));
+    assert!(!accesskit_has_label(&full, "96k / 250k"));
+}
+
+#[test]
+fn projection_rendering_editor_tabs_expose_tab_state_and_named_close_buttons() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("editor tabs should expose AccessKit");
+    for (label, selected) in [("Cargo.toml", true), ("lib.rs", false)] {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label) && node.role() == egui::accesskit::Role::Tab)
+                    .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("editor tab `{label}` should expose Role::Tab"));
+        assert_eq!(node.is_selected(), Some(selected));
+        assert_eq!(
+            node.aria_current(),
+            selected.then_some(egui::accesskit::AriaCurrent::True)
+        );
+        assert!(node.supports_action(egui::accesskit::Action::Click));
+    }
+    for label in ["Close Cargo.toml", "Close lib.rs"] {
+        let close = update
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(label)
+                    && node.role() == egui::accesskit::Role::Button
+                    && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(node)
+            })
+            .unwrap_or_else(|| panic!("named tab close control `{label}` should be exposed"));
+        let bounds = close
+            .bounds()
+            .expect("tab close control should have bounds");
+        assert!(bounds.x1 - bounds.x0 >= 24.0);
+        assert!(bounds.y1 - bounds.y0 >= 24.0);
+    }
+}
+
+#[test]
+fn projection_rendering_manual_empty_terminal_never_falls_back_to_agent_diagnostics() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Manual terminal").projection_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "No terminal activity"));
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("manual terminal should expose AccessKit");
+    for forbidden in ["workflow activity:", "agent stream:"] {
+        assert!(
+            update.nodes.iter().all(|(_id, node)| {
+                !node.label().is_some_and(|label| label.contains(forbidden))
+            }),
+            "Manual terminal fallback must not render `{forbidden}` diagnostics"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_active_terminal_controls_meet_shared_minimum_target() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Active terminal").projection_snapshot();
+    snapshot.terminal_panel_projection.active_session_id = Some(TerminalSessionId(7));
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for label in ["Send", "Poll", "Kill", "Close"] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.x1 - bounds.x0 >= 24.0 && bounds.y1 - bounds.y0 >= 24.0,
+            "terminal action `{label}` must use the shared >=24px target; bounds={bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_bottom_tabs_are_state_authoritative_and_manual_hiding_is_non_destructive() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    let mut state = DesktopProjectionViewState::default();
+
+    let (initial, mut full) =
+        render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    assert_eq!(initial.selected_bottom_panel, BottomPanelTab::Terminal);
+    let terminal = accesskit_bounds(&full, "TERMINAL", true);
+    assert!(terminal.y1 - terminal.y0 >= 24.0);
+    assert!(accesskit_has_label(&full, "Terminal / Runtime"));
+
+    let (problems_click_frame, next) = click_accessible_control_with_state(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &state,
+        &full,
+        "PROBLEMS (0)",
+    );
+    full = next;
+    assert_eq!(
+        problems_click_frame.selected_bottom_panel,
+        BottomPanelTab::Problems
+    );
+    state.selected_bottom_panel = problems_click_frame.selected_bottom_panel;
+    assert!(accesskit_has_label(&full, "Problems"));
+    assert!(!accesskit_has_label(&full, "Terminal / Runtime"));
+    assert!(
+        problems_click_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=problems") && row.contains("active=true") })
+    );
+    assert!(
+        problems_click_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=false") })
+    );
+
+    snapshot.product_mode = DockMode::Assist;
+    let (assist, next) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    full = next;
+    assert_eq!(
+        assist.selected_bottom_panel,
+        BottomPanelTab::Problems,
+        "valid bottom-panel selection should survive mode changes"
+    );
+
+    let (agent_click_frame, next) =
+        click_accessible_control_with_state(&ctx, &mut view, &snapshot, &state, &full, "AGENT LOG");
+    full = next;
+    assert_eq!(
+        agent_click_frame.selected_bottom_panel,
+        BottomPanelTab::AgentLog
+    );
+    state.selected_bottom_panel = agent_click_frame.selected_bottom_panel;
+    assert!(accesskit_has_label(&full, "Agent Comm Stream"));
+    assert!(
+        agent_click_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=agent-log") && row.contains("active=true") })
+    );
+    assert!(
+        agent_click_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=false") })
+    );
+
+    snapshot.product_mode = DockMode::Manual;
+    let (manual_frame, full) =
+        render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    assert_eq!(
+        manual_frame.selected_bottom_panel,
+        BottomPanelTab::AgentLog,
+        "Manual may hide Agent Log but must never destroy the persisted selection"
+    );
+    assert!(!accesskit_has_label(&full, "AGENT LOG"));
+    assert!(!accesskit_has_label(&full, "Agent Comm Stream"));
+    assert!(accesskit_has_label(&full, "Terminal / Runtime"));
+    assert!(
+        manual_frame
+            .bottom_tab_rows
+            .iter()
+            .any(|row| { row.contains("id=term") && row.contains("active=true") })
+    );
+    assert!(
+        manual_frame
+            .bottom_tab_rows
+            .iter()
+            .all(|row| !row.contains("id=agent-log"))
+    );
+
+    snapshot.product_mode = DockMode::Assist;
+    let (restored, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+    assert_eq!(restored.selected_bottom_panel, BottomPanelTab::AgentLog);
+    assert!(accesskit_has_label(&full, "Agent Comm Stream"));
+}
+
+#[test]
+fn projection_rendering_expanded_workbenches_leave_a_usable_visible_editor() {
+    for size in [egui::vec2(960.0, 720.0), egui::vec2(1_440.0, 900.0)] {
+        for (mode, disclosure, action) in [
+            (DockMode::Assist, "Assist workbench", "Predict"),
+            (DockMode::Delegate, "Delegate workbench", "Approve"),
+            (
+                DockMode::Automate,
+                "Legion Workflows workbench",
+                "Force Review",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let mut view = ProjectionView::new();
+            let mut snapshot = populated_snapshot();
+            snapshot.product_mode = mode;
+
+            let (_closed, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+            let (_opened, _) =
+                click_accessible_control_at(&ctx, &mut view, &snapshot, &full, disclosure, size);
+            let mut full = render_projection_frame_at(&ctx, &mut view, &snapshot, size).1;
+            for _ in 0..8 {
+                full = render_projection_frame_at(&ctx, &mut view, &snapshot, size).1;
+            }
+            let editor_rect = view
+                .last_editor_rect()
+                .expect("the real editor surface should record its allocation");
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let visible_editor = editor_rect.intersect(screen);
+            assert!(
+                visible_editor.height() >= 180.0,
+                "{mode:?} at {size:?} must leave at least 180px of the editor visible; actual editor={editor_rect:?}, visible={visible_editor:?}"
+            );
+            assert!(
+                visible_editor.width() >= 360.0,
+                "{mode:?} at {size:?} must leave at least 360px of the editor visible; actual editor={editor_rect:?}, visible={visible_editor:?}"
+            );
+
+            let action_bounds = accesskit_button_bounds_in_x_range(
+                &full,
+                action,
+                editor_rect.left()..=editor_rect.right(),
+            );
+            let action_pos = egui::pos2(
+                ((action_bounds.x0 + action_bounds.x1) * 0.5) as f32,
+                ((action_bounds.y0 + action_bounds.y1) * 0.5) as f32,
+            );
+            let (action_output, _) =
+                click_projection_at(&ctx, &mut view, &snapshot, action_pos, size);
+            assert_eq!(
+                action_output.actions.len(),
+                1,
+                "{mode:?} action should remain clickable inside the bounded workbench"
+            );
+        }
+    }
+}
+
+#[test]
+fn projection_rendering_advanced_disclosure_precedes_editor_and_routes_mode_actions() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let header = accesskit_bounds(&full, "Assist workbench", true);
+    let editor = accesskit_bounds(&full, "[workspace]", false);
+    assert!(
+        header.y1 <= editor.y0,
+        "collapsed advanced disclosure must be allocated before the editor scroll surface"
+    );
+
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
+    let (_open_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (assist_action, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Predict");
+    assert!(matches!(
+        assist_action.actions.as_slice(),
+        [DesktopAction::RequestAssistInlinePrediction { .. }]
+    ));
+
+    snapshot.product_mode = DockMode::Delegate;
+    let (_delegate, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (delegate_action, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Approve");
+    assert_eq!(
+        delegate_action.actions,
+        vec![DesktopAction::ApproveProposal {
+            proposal_id: ProposalId(7)
+        }]
+    );
+
+    snapshot.product_mode = DockMode::Automate;
+    let (_workflows, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(
+        !accesskit_has_label(&full, "Force Review"),
+        "mode-salted disclosure state must not leak open from another mode"
+    );
+    let (_opened, _) = click_accessible_control(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &full,
+        "Legion Workflows workbench",
+    );
+    let mut full = render_projection_frame(&ctx, &mut view, &snapshot).1;
+    for _ in 0..8 {
+        full = render_projection_frame(&ctx, &mut view, &snapshot).1;
+    }
+    let (workflow_action, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Force Review");
+    assert_eq!(
+        workflow_action.actions,
+        vec![DesktopAction::PreviewProposal {
+            proposal_id: ProposalId(7)
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_workbench_toolbox_routes_git_test_and_debug_outside_manual() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Workbench tools");
+    let (_open_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    let (git, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Refresh Git");
+    assert_eq!(git.actions, vec![DesktopAction::RefreshGit]);
+
+    let (_refresh, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (tests, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Refresh tests");
+    assert_eq!(tests.actions, vec![DesktopAction::RefreshTestExplorer]);
+
+    let (_refresh, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (debug, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Refresh configs");
+    assert_eq!(
+        debug.actions,
+        vec![DesktopAction::RefreshDebugConfigurations]
     );
 }
 

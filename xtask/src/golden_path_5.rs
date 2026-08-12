@@ -9,7 +9,8 @@
 //!
 //! GP-5 is the acceptance smoke test for the IDE's core user journey:
 //! open workspace, open file, edit+save, syntax-check, terminal echo,
-//! git commit.  Like GP-1, the binary uses `--no-default-features` (no AI).
+//! git commit.  GP-5 uses the default `legion-app` feature set because its
+//! acceptance path exercises the complete application composition.
 
 use std::{path::Path, process};
 
@@ -56,7 +57,6 @@ pub fn run_golden_path_5(workspace_root: &Path, opts: &GoldenPath5Options) -> i3
         "4".to_string(),
         "-p".to_string(),
         "legion-app".to_string(),
-        "--no-default-features".to_string(),
         "--bin".to_string(),
         "golden_path_5".to_string(),
         "--".to_string(),
@@ -64,6 +64,8 @@ pub fn run_golden_path_5(workspace_root: &Path, opts: &GoldenPath5Options) -> i3
         fixture_dir.to_string_lossy().into_owned(),
         "--out-dir".to_string(),
         opts.out_dir.clone(),
+        "--workspace-root".to_string(),
+        workspace_root.to_string_lossy().into_owned(),
     ];
 
     if let Some(ref ev_dir) = opts.record_evidence {

@@ -1,0 +1,24 @@
+Command: cargo test -p devil-index --all-targets
+Date: 2026-05-24
+Result: passed; 28 tests passed, 0 failed, 0 ignored
+
+Normalized graph coverage:
+- `lexical_indexer_extracts_symbol_maps_graph_records_and_invalidation_keys`
+- `semantic_queries_are_bounded_and_return_pure_dto_results`
+- `lease_chunk_indexing_records_hashes_ranges_and_not_source_bodies`
+- `semantic_metadata_record_for_large_descriptor_persists_only_hashes_ranges_and_metadata`
+
+Accepted graph record kinds:
+- `Symbol`
+- `Reference`
+- `Import`
+- `Export`
+- `CallEdge`
+- `TypeRelation`
+- `TestLink`
+- `DiagnosticLink`
+- `OwnershipMetadata`
+
+Accepted behavior:
+- Graph records carry stable record ids, workspace/file identity, source and target endpoints, invalidation keys, provenance, freshness, privacy scope, and schema version.
+- Metadata conversion omits source bodies and stores hashes/ranges/descriptors instead.

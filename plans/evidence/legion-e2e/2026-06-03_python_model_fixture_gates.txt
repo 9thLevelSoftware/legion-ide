@@ -1,0 +1,213 @@
+COMMAND: Phase 8 Python/model dry-run and fixture-smoke gates
+Legion Phase 8 model acquisition roster
+output_dir=models
+dry_run=true
+would_download model_id=Qwen/Qwen2.5-Coder-1.5B-Instruct role=docs-summarizer
+would_download model_id=Qwen/Qwen2.5-Coder-3B-Instruct role=rust-compiler-fixer
+would_download model_id=Qwen/Qwen2.5-Coder-7B-Instruct role=reviewer
+would_download model_id=Qwen/Qwen2.5-Coder-14B-Instruct role=heavy-reviewer
+would_download model_id=bigcode/starcoder2-3b role=test-writer-baseline
+would_download model_id=deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct role=remote-escalation-baseline
+network=disabled
+{
+  "config": "config/workers.example.yaml",
+  "dry_run": true,
+  "worker_count": 3,
+  "workers": [
+    {
+      "command": [
+        "llama-server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8011",
+        "-m",
+        "models/qwen25-coder-1.5b.gguf"
+      ],
+      "endpoint": "http://127.0.0.1:8011/v1",
+      "id": "qwen25-coder-1_5b",
+      "kind": "llama_cpp",
+      "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    },
+    {
+      "command": [
+        "llama-server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8013",
+        "-m",
+        "models/qwen25-coder-3b.gguf"
+      ],
+      "endpoint": "http://127.0.0.1:8013/v1",
+      "id": "qwen25-coder-3b",
+      "kind": "llama_cpp",
+      "model": "Qwen/Qwen2.5-Coder-3B-Instruct"
+    },
+    {
+      "command": [
+        "ollama",
+        "serve"
+      ],
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "id": "ollama-local",
+      "kind": "ollama",
+      "model": "operator-configured"
+    }
+  ]
+}
+{
+  "dry_run": true,
+  "eval_count": 5,
+  "evals": [
+    {
+      "id": "schema-compliance",
+      "metric": "valid_worker_result_json",
+      "requires_network": false
+    },
+    {
+      "id": "patch-apply",
+      "metric": "proposal_patch_applies",
+      "requires_network": false
+    },
+    {
+      "id": "compile-test-pass",
+      "metric": "verification_command_success",
+      "requires_network": false
+    },
+    {
+      "id": "regression-rate",
+      "metric": "baseline_behavior_preserved",
+      "requires_network": false
+    },
+    {
+      "id": "latency-cost-refusal",
+      "metric": "bounded_latency_cost_and_refusal_rate",
+      "requires_network": false
+    }
+  ],
+  "metadata_only_default": true,
+  "proposal_only_required": true,
+  "suite": "phase8-specialists"
+}
+{
+  "dataset": "evals/fixtures/minimal.jsonl",
+  "eval_count": 3,
+  "max_examples": null,
+  "mode": "offline-fixture",
+  "results": [
+    {
+      "cost_usd": null,
+      "example_id": "ex-001",
+      "latency_ms": null,
+      "model": "fixture",
+      "proposal_patch_applies": true,
+      "refusal": false,
+      "regression": false,
+      "schema_compliance": true,
+      "verification_pass": true
+    },
+    {
+      "cost_usd": null,
+      "example_id": "ex-002",
+      "latency_ms": null,
+      "model": "fixture",
+      "proposal_patch_applies": false,
+      "refusal": true,
+      "regression": false,
+      "schema_compliance": true,
+      "verification_pass": false
+    },
+    {
+      "cost_usd": null,
+      "example_id": "ex-003",
+      "latency_ms": null,
+      "model": "fixture",
+      "proposal_patch_applies": true,
+      "refusal": false,
+      "regression": false,
+      "schema_compliance": true,
+      "verification_pass": true
+    }
+  ],
+  "suite": "phase8-specialists",
+  "summary": {
+    "cost_usd_placeholder": true,
+    "latency_ms_placeholder": true,
+    "patch_apply_rate": 0.6666666666666666,
+    "refusal_rate": 0.3333333333333333,
+    "regression_rate": 0.0,
+    "schema_compliance_rate": 1.0,
+    "verification_pass_rate": 0.6666666666666666
+  }
+}
+{
+  "base_model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "consent_required": true,
+  "dataset": "datasets/legion-traces.jsonl",
+  "dry_run": true,
+  "method": "qlora",
+  "model_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "output_dir": "training/out/docs-summarizer",
+  "raw_trace_default": "disabled",
+  "redaction_required": true,
+  "specialist": "docs-summarizer"
+}
+{
+  "base_model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "dataset": "training/fixtures/minimal_traces.jsonl",
+  "device": "cpu",
+  "example_count": 3,
+  "heavy_deps": false,
+  "learning_rate": 0.0002,
+  "lora_rank": 16,
+  "manifest_path": "/tmp/legion-train-smoke/manifest.json",
+  "max_steps": 0,
+  "mode": "fixture-smoke",
+  "sequence_length": 2048
+}
+{
+  "dry_run": true,
+  "input": "training/out/docs-summarizer",
+  "output": "models/docs-summarizer.Q4_K_M.gguf",
+  "quantization": "Q4_K_M",
+  "tool": "llama.cpp convert + quantize"
+}
+{
+  "commands": [
+    [
+      "python3",
+      "convert_hf_to_gguf.py",
+      "--outfile",
+      "/tmp/legion-model.gguf",
+      "/tmp/legion-train-smoke"
+    ],
+    [
+      "llama-quantize",
+      "/tmp/legion-model.gguf",
+      "/tmp/legion-model.Q4_K_M.gguf",
+      "Q4_K_M"
+    ]
+  ],
+  "llama_cpp_convert_script": null,
+  "metadata_output": "/tmp/legion-gguf.json",
+  "mode": "fixture-smoke",
+  "model_dir": "/tmp/legion-train-smoke",
+  "output": "/tmp/legion-model.gguf",
+  "quantization": "Q4_K_M",
+  "quantize_command": null
+}
+Listing 'training'...
+Compiling 'training/__init__.py'...
+Compiling 'training/convert_to_gguf.py'...
+Listing 'training/fixtures'...
+Compiling 'training/qlora_train.py'...
+Listing 'evals'...
+Compiling 'evals/__init__.py'...
+Listing 'evals/fixtures'...
+Compiling 'evals/run_eval.py'...
+Listing 'scripts/models'...
+Compiling 'scripts/models/__init__.py'...
+Compiling 'scripts/models/local_worker_launcher.py'...
+Compiling 'scripts/models/model_manifest.py'...
+EXIT_CODE: 0

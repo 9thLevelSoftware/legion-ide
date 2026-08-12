@@ -12,9 +12,11 @@ use std::{
 
 use legion_desktop::{
     bridge::DesktopAction,
+    view::DesktopProjectionViewModel,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_ui::DockMode;
+use legion_protocol::{ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll};
+use legion_ui::{DockLayout, DockMode, PanelId, Shell};
 
 /// Build a five-target batch proposal suitable for seeding proposal_reviews in
 /// the desktop runtime's delegated-task projection.
@@ -154,6 +156,135 @@ fn open_runtime(root: &Path) -> DesktopRuntime {
         .expect("desktop runtime should open workspace")
 }
 
+fn full_frame_pointer_input(events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
+fn accessible_button_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+    let bounds = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("full headless frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            let bounds = node.bounds()?;
+            let center_y = (bounds.y0 + bounds.y1) * 0.5;
+            (node.label() == Some(label)
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click)
+                && center_y <= 42.0)
+                .then_some(bounds)
+        })
+        .unwrap_or_else(|| panic!("rendered mode button `{label}` should be clickable"));
+    egui::pos2(
+        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+    )
+}
+
+fn accessible_top_button_id(output: &egui::FullOutput, label: &str) -> egui::accesskit::NodeId {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("full headless frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            let bounds = node.bounds()?;
+            let center_y = (bounds.y0 + bounds.y1) * 0.5;
+            (node.label() == Some(label)
+                && node.role() == egui::accesskit::Role::Button
+                && node.supports_action(egui::accesskit::Action::Click)
+                && center_y <= 42.0)
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("rendered mode button `{label}` should have a stable node id"))
+}
+
+fn full_frame_key_input(key: egui::Key) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..egui::RawInput::default()
+    }
+}
+
+fn accesskit_focus_input(target_node: egui::accesskit::NodeId) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events: vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Focus,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node,
+                data: None,
+            },
+        )],
+        ..egui::RawInput::default()
+    }
+}
+
+fn accesskit_has_dialog(output: &egui::FullOutput) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.role() == egui::accesskit::Role::Dialog)
+        })
+}
+
+fn click_rendered_mode(app: &mut DesktopEframeApp, primed: &egui::FullOutput, label: &str) {
+    let pos = accessible_button_center(primed, label);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]));
+
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ]));
+}
+
 #[test]
 fn product_mode_switch_accepts_keyboard_activation() {
     let workspace = TempWorkspace::new();
@@ -193,6 +324,287 @@ fn product_mode_switch_accepts_keyboard_activation() {
         app.runtime_snapshot().product_mode,
         DockMode::Manual,
         "keyboard activation should select the Manual product mode"
+    );
+}
+
+#[test]
+fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoration() {
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let delegate_id = accessible_top_button_id(&primed, "Delegate");
+    let _focused = app.run_headless_full_frame(accesskit_focus_input(delegate_id));
+
+    let opened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    assert!(accesskit_has_dialog(&opened));
+    let confirm_id = opened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("dialog should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| (node.label() == Some("Confirm")).then_some(*id))
+        .expect("dialog should expose its initially focused Confirm action");
+    assert_eq!(
+        opened
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("dialog should expose AccessKit")
+            .focus,
+        confirm_id,
+        "opening the modal should place keyboard focus on Confirm exactly once"
+    );
+
+    let _escaped = app.run_headless_full_frame(full_frame_key_input(egui::Key::Escape));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let escaped = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&escaped));
+    assert_eq!(
+        escaped
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("restored frame should expose AccessKit")
+            .focus,
+        delegate_id,
+        "Escape should restore focus to the originating mode button"
+    );
+
+    let reopened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert!(accesskit_has_dialog(&reopened));
+    let cancel_id = reopened
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("dialog should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some("Cancel") && node.role() == egui::accesskit::Role::Button)
+                .then_some(*id)
+        })
+        .expect("dialog should expose its Cancel action");
+    let tabbed = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        tabbed
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("tabbed dialog should expose AccessKit")
+            .focus,
+        cancel_id,
+        "Tab should advance from Confirm to Cancel without trapping focus"
+    );
+    let _cancelled = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+    let restored = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!accesskit_has_dialog(&restored));
+    assert_eq!(
+        restored
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("cancelled frame should expose AccessKit")
+            .focus,
+        delegate_id,
+        "keyboard Cancel should restore focus to the originating mode button"
+    );
+
+    let reopened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert!(accesskit_has_dialog(&reopened));
+    let _confirmed = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    assert_eq!(
+        app.runtime_snapshot().product_mode,
+        DockMode::Delegate,
+        "keyboard Confirm should dispatch exactly the existing mode action"
+    );
+}
+
+#[test]
+fn product_mode_navigation_keeps_the_real_editor_as_the_center_surface() {
+    let mut snapshot = Shell::empty("Stable editor").projection_snapshot();
+
+    for mode in [
+        DockMode::Manual,
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+    ] {
+        snapshot.product_mode = mode;
+        let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+        assert_eq!(
+            model.center_surface, "editor",
+            "mode {mode:?} must preserve the projected editor surface and its stable egui ids"
+        );
+    }
+}
+
+#[test]
+fn product_mode_changes_preserve_projected_editor_and_panel_state() {
+    let workspace = TempWorkspace::new();
+    fs::write(
+        workspace.path().join("persistent.rs"),
+        (0..80)
+            .map(|line| format!("let value_{line} = {line};\n"))
+            .collect::<String>(),
+    )
+    .expect("fixture should be written");
+    let mut runtime = open_runtime(workspace.path());
+    runtime
+        .handle_action(DesktopAction::OpenPathText("persistent.rs".to_string()))
+        .expect("fixture should open");
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("opened fixture should have a buffer");
+    let selection = ProtocolTextRange {
+        start: TextCoordinate {
+            line: 12,
+            character: 4,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+        end: TextCoordinate {
+            line: 12,
+            character: 11,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    };
+    runtime
+        .handle_action(DesktopAction::SetSelection {
+            buffer_id: Some(buffer_id),
+            range: selection,
+        })
+        .expect("selection should update");
+    runtime
+        .handle_action(DesktopAction::SetViewportScroll {
+            buffer_id: Some(buffer_id),
+            scroll: ViewportScroll {
+                top_line: 10,
+                left_column: 2,
+            },
+        })
+        .expect("scroll should update");
+    runtime
+        .handle_action(DesktopAction::SetEditorFontSize { font_size_pt: 17 })
+        .expect("distinctive editor font size should update");
+    runtime.set_panel_state(SessionPanelState {
+        bottom_visible: true,
+        side_visible: true,
+        active_panel: Some(PanelId::Diagnostics.as_str().to_string()),
+        bottom_height_px: Some(236),
+        side_width_px: Some(312),
+    });
+    let mut dock_layouts = vec![
+        DockLayout::standard(DockMode::Manual),
+        DockLayout::standard(DockMode::Assist),
+        DockLayout::standard(DockMode::Delegate),
+        DockLayout::standard(DockMode::Automate),
+    ];
+    dock_layouts[1].left.splitter_fraction = 0.37;
+    dock_layouts[1].left.collapsed = true;
+    runtime.set_dock_layouts(dock_layouts.clone());
+    let mut app = DesktopEframeApp::new(runtime);
+    let ctx = app.headless_egui_context();
+    let explorer_panel_id = egui::Id::new("legion_desktop_explorer");
+    ctx.data_mut(|data| {
+        data.insert_persisted(
+            explorer_panel_id,
+            egui::PanelState {
+                rect: egui::Rect::from_min_size(egui::pos2(0.0, 42.0), egui::vec2(286.0, 640.0)),
+            },
+        );
+    });
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let panel_before = egui::PanelState::load(&ctx, explorer_panel_id)
+        .expect("explorer panel memory should be persisted")
+        .size()
+        .x;
+    assert_eq!(
+        panel_before, 286.0,
+        "fixture panel width must be non-default"
+    );
+    assert!(
+        app.last_editor_rect_for_test().is_some(),
+        "the full frame should allocate the real editor"
+    );
+    assert_eq!(
+        app.panel_state_for_test().active_panel.as_deref(),
+        Some(PanelId::Diagnostics.as_str()),
+        "the canonical Problems panel id must survive the priming frame"
+    );
+    let before = app.runtime_snapshot();
+    assert_eq!(
+        before.daily_editing_projection.tabs.active_buffer_id,
+        Some(buffer_id),
+        "the projected active editor is the meaningful focus target"
+    );
+    assert_eq!(
+        ctx.memory(|memory| memory.focused()),
+        None,
+        "the code canvas uses global editor input and should not fabricate TextEdit focus"
+    );
+    let before_viewport = before
+        .daily_editing_projection
+        .viewport_states
+        .iter()
+        .find(|state| state.buffer_id == buffer_id)
+        .cloned()
+        .expect("viewport state should be projected");
+    let before_settings = before.settings_projection.clone();
+    assert_eq!(before_settings.editor_font_size_pt, 17);
+    assert!(dock_layouts[1].left.collapsed);
+    assert_eq!(dock_layouts[1].left.splitter_fraction, 0.37);
+
+    click_rendered_mode(&mut app, &primed, "Assist");
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Assist);
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    click_rendered_mode(&mut app, &primed, "Manual");
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+
+    let after = app.runtime_snapshot();
+    let after_viewport = after
+        .daily_editing_projection
+        .viewport_states
+        .iter()
+        .find(|state| state.buffer_id == buffer_id)
+        .expect("viewport state should remain projected");
+    assert_eq!(after.active_buffer_projection.buffer_id, Some(buffer_id));
+    assert_eq!(
+        after.daily_editing_projection.tabs.active_buffer_id,
+        Some(buffer_id)
+    );
+    assert_eq!(ctx.memory(|memory| memory.focused()), None);
+    assert_eq!(after_viewport.cursor, before_viewport.cursor);
+    assert_eq!(after_viewport.selections, before_viewport.selections);
+    assert_eq!(after_viewport.scroll, before_viewport.scroll);
+    assert_eq!(after.settings_projection, before_settings);
+    assert!(app.panel_state_for_test().bottom_visible);
+    assert_eq!(
+        app.panel_state_for_test().active_panel.as_deref(),
+        Some(PanelId::Diagnostics.as_str())
+    );
+    assert_eq!(app.panel_state_for_test().bottom_height_px, Some(236));
+    assert_eq!(app.panel_state_for_test().side_width_px, Some(312));
+    assert_eq!(app.dock_layouts_for_test(), dock_layouts.as_slice());
+    assert_eq!(
+        egui::PanelState::load(&ctx, explorer_panel_id)
+            .expect("explorer panel memory should survive mode changes")
+            .size()
+            .x,
+        panel_before
+    );
+    assert!(
+        app.last_editor_rect_for_test()
+            .is_some_and(|rect| rect.height() > 0.0),
+        "the real editor should remain allocated after rendered mode clicks"
     );
 }
 

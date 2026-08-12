@@ -1,0 +1,7 @@
+Command: cargo clippy --workspace --all-targets -- -D warnings
+Status: Passed
+Captured: 2026-05-25
+
+Result:
+- Finished dev profile successfully.
+- `cargo clippy --workspace --all-targets -- -D warnings` reported no warnings.

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use legion_app::{AppCommandOutcome, AppComposition};
+use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{PrincipalId, WorkspaceTrustState};
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
@@ -93,10 +94,8 @@ fn replace_one_substitutes_current_match() {
 
     app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindReplace)
         .expect("toggle replace");
-    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText {
-        text: "qux".into(),
-    })
-    .expect("set replace text");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText { text: "qux".into() })
+        .expect("set replace text");
 
     app.dispatch_ui_intent(CommandDispatchIntent::ReplaceOne)
         .expect("replace one");
@@ -105,7 +104,33 @@ fn replace_one_substitutes_current_match() {
     assert_eq!(text, "qux bar foo baz foo\n");
 
     let fb = find_bar(&mut app);
-    assert_eq!(fb.match_count, 2, "match count should drop by one after replace");
+    assert_eq!(
+        fb.match_count, 2,
+        "match count should drop by one after replace"
+    );
+}
+
+#[test]
+fn replace_one_refreshes_ranges_after_buffer_edit() {
+    let (_root, mut app) = setup_with_content("foo bar foo\n");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindBar)
+        .expect("toggle find bar");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindQuery {
+        query: "foo".into(),
+    })
+    .expect("set query");
+    app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindReplace)
+        .expect("toggle replace");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText { text: "qux".into() })
+        .expect("set replace text");
+
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 0), "prefix "))
+        .expect("edit before replacing");
+    app.dispatch_ui_intent(CommandDispatchIntent::ReplaceOne)
+        .expect("replace one after edit");
+
+    assert_eq!(buffer_text(&mut app), "prefix qux bar foo\n");
 }
 
 #[test]
@@ -120,10 +145,8 @@ fn replace_all_substitutes_every_match() {
     .expect("set query");
     app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindReplace)
         .expect("toggle replace");
-    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText {
-        text: "ZZ".into(),
-    })
-    .expect("set replace text");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText { text: "ZZ".into() })
+        .expect("set replace text");
 
     let fb = find_bar(&mut app);
     assert_eq!(fb.match_count, 3);
@@ -135,7 +158,10 @@ fn replace_all_substitutes_every_match() {
     assert_eq!(text, "ZZ bbb ZZ ccc ZZ\n");
 
     let fb = find_bar(&mut app);
-    assert_eq!(fb.match_count, 0, "no matches should remain after replace all");
+    assert_eq!(
+        fb.match_count, 0,
+        "no matches should remain after replace all"
+    );
 }
 
 #[test]
@@ -144,16 +170,12 @@ fn replace_all_is_single_undo_group() {
 
     app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindBar)
         .expect("toggle find bar");
-    app.dispatch_ui_intent(CommandDispatchIntent::SetFindQuery {
-        query: "x".into(),
-    })
-    .expect("set query");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindQuery { query: "x".into() })
+        .expect("set query");
     app.dispatch_ui_intent(CommandDispatchIntent::ToggleFindReplace)
         .expect("toggle replace");
-    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText {
-        text: "W".into(),
-    })
-    .expect("set replace text");
+    app.dispatch_ui_intent(CommandDispatchIntent::SetFindReplaceText { text: "W".into() })
+        .expect("set replace text");
 
     app.dispatch_ui_intent(CommandDispatchIntent::ReplaceAll)
         .expect("replace all");
@@ -166,7 +188,10 @@ fn replace_all_is_single_undo_group() {
         .expect("undo");
 
     let text = buffer_text(&mut app);
-    assert_eq!(text, "x y x y x\n", "single undo should revert all replacements");
+    assert_eq!(
+        text, "x y x y x\n",
+        "single undo should revert all replacements"
+    );
 }
 
 #[test]
@@ -192,7 +217,10 @@ fn replace_one_no_match_is_noop() {
     assert!(matches!(outcome, AppCommandOutcome::Noop));
 
     let text = buffer_text(&mut app);
-    assert_eq!(text, "hello world\n", "buffer should be unchanged when no matches");
+    assert_eq!(
+        text, "hello world\n",
+        "buffer should be unchanged when no matches"
+    );
 }
 
 #[test]
@@ -225,5 +253,8 @@ fn tab_switch_refreshes_find_matches() {
     .expect("switch tab");
 
     let fb = find_bar(&mut app);
-    assert_eq!(fb.match_count, 2, "first file has two 'alpha' matches after tab switch");
+    assert_eq!(
+        fb.match_count, 2,
+        "first file has two 'alpha' matches after tab switch"
+    );
 }

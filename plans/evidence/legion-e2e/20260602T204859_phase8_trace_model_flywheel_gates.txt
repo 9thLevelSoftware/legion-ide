@@ -1,0 +1,209 @@
+# Legion E2E Evidence - Phase 8 trace/model-flywheel dry-run gates
+
+Timestamp: 2026-06-02T20:48:59-04:00
+Working directory: C:\Users\dasbl\RustroverProjects\devil-ide
+Branch: codex/legion-full-implementation
+
+## Scope
+
+- Added consent-gated Legion trace records in `devil-memory`.
+- Added conservative trace/diff/log redaction marker scanning in `devil-security`.
+- Added dry-run model acquisition, local worker, training, conversion, and evaluation helpers.
+- Added `config/workers.example.yaml` for local llama.cpp/Ollama worker endpoint planning.
+- Preserved default-off raw trace retention and hosted training export.
+
+## Focused Rust Verification
+
+Command: `cargo test -p devil-memory --all-targets trace`
+Exit code: 0
+
+```text
+running 5 tests
+test tests::trace_record_rejects_secret_and_raw_payload_markers ... ok
+test tests::trace_export_manifest_requires_consent_and_hashes_only ... ok
+test tests::trace_raw_payload_retention_requires_explicit_consent ... ok
+test tests::trace_record_review_is_metadata_only_without_retention ... ok
+test tests::trace_training_export_requires_hosted_training_consent ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out
+```
+
+Command: `cargo test -p devil-security --all-targets redaction`
+Exit code: 0
+
+```text
+running 2 tests
+test tests::redaction_scanner_allows_metadata_only_hash_summaries ... ok
+test tests::redaction_scanner_blocks_trace_diff_and_log_secret_markers ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out
+
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
+```
+
+Command: `cargo check -p devil-memory --all-targets`
+Exit code: 0
+
+```text
+Checking devil-memory v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo check -p devil-security --all-targets`
+Exit code: 0
+
+```text
+Checking devil-security v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo fmt --all --check`
+Exit code: 0
+
+```text
+<no output>
+```
+
+## Phase 8 Dry-Run Commands
+
+Command: `bash scripts/models/download-models.sh --dry-run`
+Exit code: 0
+
+```text
+Legion Phase 8 model acquisition roster
+output_dir=models
+dry_run=true
+would_download model_id=Qwen/Qwen2.5-Coder-1.5B-Instruct role=docs-summarizer
+would_download model_id=Qwen/Qwen2.5-Coder-3B-Instruct role=rust-compiler-fixer
+would_download model_id=Qwen/Qwen2.5-Coder-7B-Instruct role=reviewer
+would_download model_id=Qwen/Qwen2.5-Coder-14B-Instruct role=heavy-reviewer
+would_download model_id=bigcode/starcoder2-3b role=test-writer-baseline
+would_download model_id=deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct role=remote-escalation-baseline
+network=disabled
+```
+
+Command: `bash scripts/models/start-local-workers.sh --dry-run --config config/workers.example.yaml`
+Exit code: 0
+
+```text
+{
+  "config": "config/workers.example.yaml",
+  "dry_run": true,
+  "worker_count": 3
+}
+```
+
+Command: `python3 evals/run_eval.py --dry-run`
+Exit code: 0
+
+```text
+{
+  "dry_run": true,
+  "eval_count": 5,
+  "metadata_only_default": true,
+  "proposal_only_required": true,
+  "suite": "phase8-specialists"
+}
+```
+
+Command: `python3 -m compileall training evals scripts/models`
+Exit code: 0
+
+```text
+Listing 'training'...
+Compiling 'training\\__init__.py'...
+Compiling 'training\\convert_to_gguf.py'...
+Compiling 'training\\qlora_train.py'...
+Listing 'evals'...
+Compiling 'evals\\__init__.py'...
+Compiling 'evals\\run_eval.py'...
+Listing 'scripts/models'...
+Compiling 'scripts/models\\__init__.py'...
+Compiling 'scripts/models\\local_worker_launcher.py'...
+Compiling 'scripts/models\\model_manifest.py'...
+```
+
+Command: `python3 training/qlora_train.py --dry-run`
+Exit code: 0
+
+```text
+{
+  "consent_required": true,
+  "dataset": "datasets/legion-traces.jsonl",
+  "dry_run": true,
+  "method": "qlora",
+  "model_id": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "raw_trace_default": "disabled",
+  "redaction_required": true,
+  "specialist": "docs-summarizer"
+}
+```
+
+Command: `python3 training/convert_to_gguf.py --dry-run`
+Exit code: 0
+
+```text
+{
+  "dry_run": true,
+  "output": "models/docs-summarizer.Q4_K_M.gguf",
+  "quantization": "Q4_K_M",
+  "tool": "llama.cpp convert + quantize"
+}
+```
+
+## Result
+
+Passed for the Phase 8 trace/model-flywheel dry-run slice. This does not claim real model downloads, GPU training, hosted training export, or production cloud activation.
+
+## Repository Gate Rerun
+
+Command: `cargo run -p xtask -- check-deps`
+Exit code: 0
+
+```text
+dependency policy checks passed
+Running `target\debug\xtask.exe check-deps`
+```
+
+Command: `cargo check --workspace --all-targets`
+Exit code: 0
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo test --workspace --all-targets`
+Exit code: 1
+
+```text
+memory allocation of 1081360 bytes failed
+error: could not compile `devil-desktop` (test "debug_workflow")
+error: could not compile `devil-desktop` (test "large_file_guardrails")
+```
+
+Interpretation: this failed while rustc was compiling/linking multiple `devil-desktop` test binaries on Windows. No product test assertion failed. The failure cascaded into rlib availability errors after the compiler allocation failure.
+
+Command: `cargo test --workspace --all-targets -j 1`
+Exit code: 0
+
+```text
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+Finished `test` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo clippy --workspace --all-targets -- -D warnings`
+Exit code: 0
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo deny check`
+Exit code: 0
+
+```text
+advisories ok, bans ok, licenses ok, sources ok
+warning[duplicate]: found duplicate entries for GUI/platform transitive crates under warning-level policy.
+```

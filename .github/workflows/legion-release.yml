@@ -137,10 +137,12 @@ jobs:
           chmod +x scripts/package-preview.sh
           bash scripts/package-preview.sh --release
 
-      - name: Release pipeline (from-artifacts)
+      # Hosted signing is intentionally deferred until WS17.T2. Keep this
+      # workflow in the repository-safe dry-run mode for now.
+      - name: Release pipeline (dry-run)
         run: >
           cargo run -p xtask -- release-pipeline
-          --from-artifacts target/release/
+          --dry-run
           --channel ${{ steps.channel.outputs.channel }}
 
       - name: Run GP-5 acceptance smoke
@@ -152,7 +154,7 @@ jobs:
         with:
           name: gp5-report-${{ matrix.os }}
           path: target/golden-path/gp5_report.toml
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
