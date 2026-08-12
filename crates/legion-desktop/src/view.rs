@@ -2198,7 +2198,14 @@ fn action_label_to_desktop_action(
     match label {
         "SaveActive" => Some(DesktopAction::SaveActive),
         "SaveAll" => Some(DesktopAction::SaveAll),
-        "ToggleFindBar" => Some(DesktopAction::ToggleFindBar),
+        // Preserve the existing Ctrl/Cmd+F search-palette behavior while
+        // routing it through the published keymap entry. The in-editor find
+        // bar remains available through its explicit UI action.
+        "ToggleFindBar" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
         "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
         "FindNext" => Some(DesktopAction::FindNext),
         "FindPrevious" => Some(DesktopAction::FindPrevious),
@@ -10202,11 +10209,15 @@ mod tests {
     }
 
     #[test]
-    fn find_bar_keybinding_routes_to_in_editor_find_action() {
+    fn find_bar_keybinding_routes_to_search_palette_action() {
         let snapshot = Shell::empty("Keybinding test").projection_snapshot();
         assert!(matches!(
             action_label_to_desktop_action("ToggleFindBar", &snapshot),
-            Some(DesktopAction::ToggleFindBar)
+            Some(DesktopAction::OpenPalette {
+                mode: PaletteMode::Search,
+                query,
+                scope: SearchScopeProjection::ActiveFile,
+            }) if query == "/"
         ));
     }
 
