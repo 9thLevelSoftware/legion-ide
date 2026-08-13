@@ -542,11 +542,11 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
         .expect("ultra-compact render should retain a real editor allocation")
         .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, logical_size));
     assert!(
-        editor.width() >= 360.0 && editor.height() >= 160.0,
+        editor.width() >= 360.0 && editor.height() >= 180.0,
         "200% zoom must collapse secondary panes and preserve a usable editor; editor={editor:?}"
     );
 
-    for label in ["Explorer drawer", "Mode rail drawer", "Bottom panel drawer"] {
+    for label in ["Explorer drawer", "Bottom panel drawer"] {
         let node = update
             .nodes
             .iter()
@@ -567,7 +567,7 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
         &mut view,
         &snapshot,
         &full,
-        "Mode rail drawer",
+        "Explorer drawer",
         physical_size,
     );
     let opened = render_projection(&ctx, &mut view, &snapshot, physical_size);
@@ -589,10 +589,20 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
             .accesskit_update
             .as_ref()
             .is_some_and(|update| update.nodes.iter().any(|(_id, node)| {
-                node.label() == Some("Enable Assist")
+                node.label() == Some("Source Control")
                     && node.supports_action(egui::accesskit::Action::Click)
             })),
-        "the compact mode-rail drawer must make its hidden mode action reachable; labels={opened_labels:?}"
+        "the compact Explorer drawer must make activity selections reachable; labels={opened_labels:?}"
+    );
+    assert!(
+        opened
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some("Settings")
+                    && node.supports_action(egui::accesskit::Action::Click)
+            }))
     );
 }
 

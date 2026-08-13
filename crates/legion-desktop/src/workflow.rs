@@ -3044,7 +3044,7 @@ fn default_panel_state() -> SessionPanelState {
 fn bottom_panel_tab_from_session(panel_state: &SessionPanelState) -> BottomPanelTab {
     match panel_state.active_panel.as_deref().and_then(PanelId::parse) {
         Some(PanelId::Diagnostics) => BottomPanelTab::Problems,
-        Some(PanelId::AgentLogs) => BottomPanelTab::AgentLog,
+        Some(PanelId::AgentLogs) => BottomPanelTab::Activity,
         _ => BottomPanelTab::Terminal,
     }
 }
@@ -3053,7 +3053,7 @@ fn panel_id_for_bottom_tab(tab: BottomPanelTab) -> String {
     match tab {
         BottomPanelTab::Terminal => PanelId::Terminal,
         BottomPanelTab::Problems => PanelId::Diagnostics,
-        BottomPanelTab::AgentLog => PanelId::AgentLogs,
+        BottomPanelTab::Activity => PanelId::AgentLogs,
     }
     .as_str()
     .to_string()
@@ -4716,11 +4716,11 @@ mod tests {
             None,
         ))
         .expect("runtime opens");
-        runtime.persist_bottom_panel_selection(BottomPanelTab::AgentLog);
+        runtime.persist_bottom_panel_selection(BottomPanelTab::Activity);
 
         let state = runtime.projection_view_state();
 
-        assert_eq!(state.selected_bottom_panel, BottomPanelTab::AgentLog);
+        assert_eq!(state.selected_bottom_panel, BottomPanelTab::Activity);
         assert_eq!(
             state.canonical_workspace_root,
             Some(CanonicalPath(
