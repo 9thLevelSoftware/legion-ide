@@ -334,6 +334,9 @@ pub(crate) fn render_delegate_task_draft(
         })
         .inner;
     let task = (submitted && ready).then(|| draft.trim().to_string());
+    if canonical_scope_available && draft.trim().is_empty() {
+        ui.label(theme::muted("Describe a task to start Delegate."));
+    }
     if task.is_some() {
         draft.clear();
     }

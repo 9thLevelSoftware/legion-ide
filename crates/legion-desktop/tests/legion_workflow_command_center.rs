@@ -355,6 +355,19 @@ fn workflow_button_bounds(output: &egui::FullOutput, label: &str) -> egui::acces
         .unwrap_or_else(|| panic!("workflow button `{label}` should be allocated"))
 }
 
+fn workflow_has_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+        })
+}
+
 fn click_workflow_button(
     ctx: &egui::Context,
     view: &mut ProjectionView,
@@ -424,6 +437,25 @@ fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_
             reason_label: "user requested hard stop".to_string(),
         }]
     );
+}
+
+#[test]
+fn legion_workflow_active_session_separates_board_from_inspector_metadata() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Legion Workflows workbench"));
+    assert!(workflow_has_label(&full, "Workflow sessions"));
+    assert!(workflow_has_label(&full, "Selected task"));
+    assert!(workflow_has_label(&full, "Approvals"));
+    assert!(!workflow_has_label(&full, "Force Review"));
+    assert!(!workflow_has_label(&full, "Pause Workflow"));
+    assert!(!workflow_has_label(&full, "Add Constraint"));
+    assert!(!workflow_has_label(&full, "No budget rows projected"));
+    assert!(!workflow_has_label(&full, "No risk gate projected"));
 }
 
 #[test]

@@ -692,14 +692,6 @@ pub(crate) fn code_frame() -> Frame {
         .inner_margin(Margin::same(0))
 }
 
-pub(crate) fn ghost_frame() -> Frame {
-    Frame::NONE
-        .fill(tokens().bg.ghost)
-        .stroke(Stroke::new(1.0_f32, tokens().border.default))
-        .corner_radius(CornerRadius::same(tokens().radius.sm))
-        .inner_margin(Margin::symmetric(tokens().spacing.md, tokens().spacing.sm))
-}
-
 pub(crate) fn heading(text: impl Into<String>) -> RichText {
     RichText::new(text.into())
         .color(tokens().text.primary)

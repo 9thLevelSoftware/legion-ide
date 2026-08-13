@@ -87,7 +87,7 @@ fn render_fleet_board_column(ui: &mut egui::Ui, column: &DesktopFleetBoardColumn
             });
             ui.separator();
             if column.rows.is_empty() {
-                ui.label(theme::muted("No projected rows"));
+                ui.label(theme::muted("No tasks"));
             }
             for row in column.rows.iter().take(5) {
                 theme::small_card_frame().show(ui, |ui| {

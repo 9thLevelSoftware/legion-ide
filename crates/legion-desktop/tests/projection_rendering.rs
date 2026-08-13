@@ -71,6 +71,28 @@ fn fingerprint(value: &str) -> FileFingerprint {
     }
 }
 
+fn available_local_provider() -> AssistedAiProviderCapabilitySummary {
+    AssistedAiProviderCapabilitySummary {
+        provider_id: "local".to_string(),
+        provider_label: "Local fixture".to_string(),
+        provider_class: AssistedAiProviderClass::Local,
+        supported_operations: vec![AssistedAiOperationClass::ProposeEdit],
+        supported_operation_count: 1,
+        model_capability_label_count: 1,
+        tool_capability_label_count: 0,
+        context_window_label: "bounded".to_string(),
+        cost_budget_label: "free".to_string(),
+        risk_budget_label: "review required".to_string(),
+        privacy_retention_label: "local only".to_string(),
+        availability: AssistedAiProviderAvailabilityState::Available,
+        refusal: None,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
 fn populated_proposal_ledger() -> ProposalLedgerProjection {
     ProposalLedgerProjection {
         rows: vec![ProposalLedgerRow {
@@ -344,6 +366,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         .items
         .push(context_item());
     snapshot.assisted_ai_projection.provider_count = 1;
+    snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
     snapshot.assisted_ai_projection.request_count = 1;
     snapshot.delegated_task_projection.plan_count = 1;
     snapshot.plugin_contribution_projections = vec![PluginContributionProjection {
@@ -641,6 +664,8 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
         generated_at: TimestampMillis(150),
         schema_version: 1,
     };
+    snapshot.assisted_ai_projection.provider_count = 1;
+    snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
     snapshot
 }
 
@@ -1868,6 +1893,28 @@ fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
         })
 }
 
+fn accesskit_label_count(output: &egui::FullOutput, label: &str) -> usize {
+    let mut bounds = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map_or_else(Vec::new, |update| {
+            update
+                .nodes
+                .iter()
+                .filter(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+                .filter_map(|(_id, node)| node.bounds())
+                .collect::<Vec<_>>()
+        });
+    bounds.dedup_by(|left, right| {
+        (left.x0 - right.x0).abs() < 0.5
+            && (left.y0 - right.y0).abs() < 0.5
+            && (left.x1 - right.x1).abs() < 0.5
+            && (left.y1 - right.y1).abs() < 0.5
+    });
+    bounds.len()
+}
+
 fn accesskit_has_clickable_label(output: &egui::FullOutput, label: &str) -> bool {
     output
         .platform_output
@@ -1886,26 +1933,6 @@ fn accesskit_has_role(output: &egui::FullOutput, role: egui::accesskit::Role) ->
         .accesskit_update
         .as_ref()
         .is_some_and(|update| update.nodes.iter().any(|(_id, node)| node.role() == role))
-}
-
-fn accesskit_has_role_in_x_range(
-    output: &egui::FullOutput,
-    role: egui::accesskit::Role,
-    x_range: std::ops::RangeInclusive<f32>,
-) -> bool {
-    output
-        .platform_output
-        .accesskit_update
-        .as_ref()
-        .is_some_and(|update| {
-            update.nodes.iter().any(|(_id, node)| {
-                let Some(bounds) = node.bounds() else {
-                    return false;
-                };
-                let center_x = ((bounds.x0 + bounds.x1) * 0.5) as f32;
-                node.role() == role && x_range.contains(&center_x)
-            })
-        })
 }
 
 fn accesskit_label_is_disabled(output: &egui::FullOutput, label: &str) -> bool {
@@ -2437,8 +2464,21 @@ fn projection_rendering_assist_active_prediction_routes_accept_and_dismiss() {
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(accesskit_has_label(&full, "Context"));
     assert!(accesskit_has_label(&full, ".await"));
     assert!(!accesskit_has_label(&full, "Predict"));
+    assert!(!accesskit_has_label(&full, "Assist workbench"));
+    assert!(!accesskit_has_label(&full, "Model Picker"));
+    assert!(!accesskit_contains_text_in_x_range(
+        &full,
+        "Preferred route:",
+        1_115.0..=1_440.0
+    ));
+    assert!(!accesskit_contains_text_in_x_range(
+        &full,
+        "Anthropic BYOK",
+        1_115.0..=1_440.0
+    ));
     let (accepted, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Accept");
     assert_eq!(
         accepted.actions,
@@ -2494,26 +2534,17 @@ fn projection_rendering_assist_richer_surfaces_are_read_only_and_never_emit_gene
     snapshot.assisted_ai_projection.preview_ready_count = 1;
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    let (_advanced, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Advanced rail surfaces");
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(!accesskit_has_label(&full, "Advanced rail surfaces"));
     for label in ["Suggested Fixes", "Explain This Function", "Generate Test"] {
-        assert!(accesskit_has_label(&full, label));
-        assert!(
-            !accesskit_has_clickable_label(&full, label),
-            "Assist richer action `{label}` must remain read-only"
-        );
+        assert!(!accesskit_has_label(&full, label));
     }
 
-    let (_workbench, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(
+        !accesskit_has_label(&full, "Assist workbench"),
+        "Assist must keep prediction and context status in one inspector surface"
+    );
     for label in ["/explain", "/fix", "/test", "/doc"] {
-        assert!(accesskit_has_label(&full, label));
-        assert!(
-            !accesskit_has_clickable_label(&full, label),
-            "Assist slash surface `{label}` must not dispatch proposal/explain actions"
-        );
+        assert!(!accesskit_has_label(&full, label));
     }
 }
 
@@ -2543,13 +2574,15 @@ fn projection_rendering_assist_empty_predictions_do_not_invent_suggestion_rows()
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
-    let mut snapshot = Shell::empty("Empty Assist").projection_snapshot();
-    snapshot.product_mode = DockMode::Assist;
+    let mut snapshot = assist_inline_prediction_snapshot();
+    snapshot.assist_inline_prediction_projection = AssistInlinePredictionProjection::default();
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(
+    assert!(accesskit_has_label(&full, "No predictions yet"));
+    assert!(!accesskit_contains_text_in_x_range(
         &full,
-        "No projected next-edit predictions"
+        "projected",
+        1_115.0..=1_440.0
     ));
     for invented in [
         "Refactor validation into helper",
@@ -2568,14 +2601,30 @@ fn projection_rendering_blank_delegate_draft_is_semantically_disabled() {
     let mut snapshot = Shell::empty("Idle Delegate").projection_snapshot();
     snapshot.product_mode = DockMode::Delegate;
 
-    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(CanonicalPath("D:/workspace".to_string())),
+        ..DesktopProjectionViewState::default()
+    };
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
     assert!(accesskit_label_is_disabled(&full, "Delegate task"));
     assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+    assert!(accesskit_has_label(&full, "Readiness"));
+    assert!(accesskit_has_label(&full, "Ready to delegate"));
+    assert!(accesskit_has_label(
+        &full,
+        "Describe a task to start Delegate."
+    ));
+    assert!(!accesskit_has_label(&full, "Delegate workbench"));
+    assert!(!accesskit_has_label(&full, "Inline prediction"));
 
     seed_delegate_task_draft(&ctx, "   ");
-    let (_persisted, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_persisted, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
     assert!(accesskit_label_is_disabled(&full, "Delegate task"));
     assert!(!accesskit_has_clickable_label(&full, "Delegate task"));
+    assert_eq!(
+        accesskit_label_count(&full, "Describe a task to start Delegate."),
+        1
+    );
 }
 
 #[test]
@@ -2590,7 +2639,11 @@ fn projection_rendering_delegate_runtime_proposal_and_evidence_each_activate_rea
     let mut view = ProjectionView::new();
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &runtime_only);
     assert!(accesskit_has_label(&full, "Phase"));
+    assert!(accesskit_has_label(&full, "Readiness"));
+    assert!(accesskit_has_label(&full, "Task is active"));
     assert!(!accesskit_has_label(&full, "Task description"));
+    assert!(accesskit_has_label(&full, "Delegate workbench"));
+    assert!(!accesskit_has_label(&full, "Inline prediction"));
     let (cancelled, _) =
         click_accessible_control(&ctx, &mut view, &runtime_only, &full, "Cancel task");
     assert_eq!(cancelled.actions, vec![DesktopAction::CancelDelegatedTask]);
@@ -2677,8 +2730,14 @@ fn projection_rendering_delegate_draft_fails_closed_without_projected_workspace_
     assert!(accesskit_label_is_disabled(&full, "Delegate task"));
     assert!(accesskit_has_label(
         &full,
-        "Delegate is unavailable until the runtime projects a canonical workspace root."
+        "Open a workspace to define Delegate scope."
     ));
+    assert!(accesskit_has_label(
+        &full,
+        "Open a trusted workspace, then try again."
+    ));
+    assert!(!accesskit_has_label(&full, "Delegate workbench"));
+    assert!(!accesskit_has_label(&full, "Inline prediction"));
 }
 
 #[test]
@@ -2734,8 +2793,10 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
-    let mut snapshot = Shell::empty("Action targets").projection_snapshot();
-    snapshot.product_mode = DockMode::Assist;
+    let mut snapshot = assist_inline_prediction_snapshot();
+    snapshot
+        .assist_inline_prediction_projection
+        .active_prediction = None;
 
     let (_initial, full) =
         render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
@@ -2751,20 +2812,6 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
         render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
     let predict = accesskit_bounds(&full, "Predict", true);
     assert!(predict.y1 - predict.y0 >= 24.0);
-    for label in [
-        "Auto (local-first)",
-        "Ollama",
-        "Anthropic",
-        "Fixture",
-        "Save Anthropic key",
-        "Clear Anthropic key",
-    ] {
-        let bounds = accesskit_bounds(&full, label, true);
-        assert!(
-            bounds.y1 - bounds.y0 >= 24.0,
-            "{label} must retain a >=24px target; bounds={bounds:?}"
-        );
-    }
 
     snapshot.product_mode = DockMode::Manual;
     let mut manual_view = ProjectionView::new();
@@ -2868,6 +2915,33 @@ fn projection_rendering_settings_selectors_emit_real_actions() {
 }
 
 #[test]
+fn projection_rendering_provider_credentials_live_in_settings_models_section() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = assist_inline_prediction_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(!accesskit_has_label(&full, "Models"));
+    assert!(!accesskit_contains_text_in_x_range(
+        &full,
+        "Anthropic BYOK",
+        1_115.0..=1_440.0
+    ));
+
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Models"));
+    let (_models, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Models");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "Anthropic BYOK",
+        360.0..=1_080.0
+    ));
+}
+
+#[test]
 fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -2876,10 +2950,8 @@ fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
     snapshot.product_mode = DockMode::Delegate;
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    let (_opened, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Advanced rail surfaces");
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(&full, "Human Feedback"));
+    assert!(accesskit_has_label(&full, "Task intent"));
+    assert!(!accesskit_has_label(&full, "Human Feedback"));
     assert!(!accesskit_has_clickable_label(&full, "Send"));
 }
 
@@ -3176,15 +3248,23 @@ fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
     let mut snapshot = Shell::empty("Provider prerequisite").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
 
-    let (_closed, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    let (_opened, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
-    assert!(accesskit_has_label(&full, "Model provider"));
-    assert!(accesskit_has_label(&full, "Required"));
-    assert!(accesskit_has_label(&full, "No model provider configured"));
-    assert!(!accesskit_has_label(&full, "No model providers projected"));
+    assert_eq!(
+        accesskit_label_count(&full, "Choose a model provider to enable predictions."),
+        1
+    );
+    assert!(accesskit_has_clickable_label(&full, "Settings"));
+    assert!(!accesskit_has_label(&full, "Assist workbench"));
+    assert!(!accesskit_has_label(&full, "Inline prediction"));
+    assert!(!accesskit_has_label(&full, "Context Chips"));
+    assert!(!accesskit_has_label(&full, "Model Picker"));
+    assert!(!accesskit_has_label(&full, "Anthropic BYOK"));
+
+    let (opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
+    assert_eq!(opened.actions, vec![DesktopAction::OpenSettings]);
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Models"));
 }
 
 #[test]
@@ -3356,7 +3436,7 @@ fn projection_rendering_desktop_top_bar_uses_three_non_overlapping_regions() {
 }
 
 #[test]
-fn projection_rendering_compact_inspector_drawer_exposes_vertical_scroll_reachability() {
+fn projection_rendering_compact_assist_inspector_keeps_status_reachable() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
@@ -3374,10 +3454,9 @@ fn projection_rendering_compact_inspector_drawer_exposes_vertical_scroll_reachab
     );
     let (_settled, full) =
         render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
-    assert!(
-        accesskit_has_role_in_x_range(&full, egui::accesskit::Role::ScrollBar, 250.0..=720.0,),
-        "overflowing compact inspector content must expose a vertical scrollbar"
-    );
+    assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(accesskit_has_label(&full, "Context"));
+    assert!(!accesskit_has_label(&full, "Assist workbench"));
 }
 
 #[test]
@@ -3401,6 +3480,22 @@ fn projection_rendering_empty_workflows_use_plain_product_copy_without_invented_
     ));
     assert!(!accesskit_has_label(&full, "Running"));
     assert!(!accesskit_has_label(&full, "96k / 250k"));
+    assert_eq!(accesskit_label_count(&full, "No workflow sessions yet"), 1);
+    for absent in [
+        "Legion Workflows workbench",
+        "Force Review",
+        "Pause Workflow",
+        "Add Constraint",
+        "Resource budgets",
+        "Risk gate",
+        "No budget rows projected",
+        "No risk gate projected",
+    ] {
+        assert!(
+            !accesskit_has_label(&full, absent),
+            "empty Workflows must not expose `{absent}`"
+        );
+    }
 }
 
 #[test]
@@ -3602,15 +3697,7 @@ fn projection_rendering_bottom_tabs_are_state_authoritative_and_activity_is_mode
 #[test]
 fn projection_rendering_expanded_workbenches_leave_a_usable_visible_editor() {
     for size in [egui::vec2(960.0, 720.0), egui::vec2(1_440.0, 900.0)] {
-        for (mode, disclosure, action) in [
-            (DockMode::Assist, "Assist workbench", "Predict"),
-            (DockMode::Delegate, "Delegate workbench", "Approve"),
-            (
-                DockMode::Automate,
-                "Legion Workflows workbench",
-                "Force Review",
-            ),
-        ] {
+        for (mode, disclosure, action) in [(DockMode::Delegate, "Delegate workbench", "Approve")] {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
             let mut view = ProjectionView::new();
@@ -3667,16 +3754,7 @@ fn projection_rendering_advanced_disclosure_precedes_editor_and_routes_mode_acti
     snapshot.product_mode = DockMode::Assist;
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    let header = accesskit_bounds(&full, "Assist workbench", true);
-    let editor = accesskit_bounds(&full, "[workspace]", false);
-    assert!(
-        header.y1 <= editor.y0,
-        "collapsed advanced disclosure must be allocated before the editor scroll surface"
-    );
-
-    let (_opened, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
-    let (_open_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(!accesskit_has_label(&full, "Assist workbench"));
     let (assist_action, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Predict");
     assert!(matches!(
         assist_action.actions.as_slice(),
@@ -3685,6 +3763,15 @@ fn projection_rendering_advanced_disclosure_precedes_editor_and_routes_mode_acti
 
     snapshot.product_mode = DockMode::Delegate;
     let (_delegate, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let header = accesskit_bounds(&full, "Delegate workbench", true);
+    let editor = accesskit_bounds(&full, "[workspace]", false);
+    assert!(
+        header.y1 <= editor.y0,
+        "the active Delegate disclosure must be allocated before the editor scroll surface"
+    );
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Delegate workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     let (delegate_action, _) =
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "Approve");
     assert_eq!(
@@ -3696,29 +3783,8 @@ fn projection_rendering_advanced_disclosure_precedes_editor_and_routes_mode_acti
 
     snapshot.product_mode = DockMode::Automate;
     let (_workflows, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(
-        !accesskit_has_label(&full, "Force Review"),
-        "mode-salted disclosure state must not leak open from another mode"
-    );
-    let (_opened, _) = click_accessible_control(
-        &ctx,
-        &mut view,
-        &snapshot,
-        &full,
-        "Legion Workflows workbench",
-    );
-    let mut full = render_projection_frame(&ctx, &mut view, &snapshot).1;
-    for _ in 0..8 {
-        full = render_projection_frame(&ctx, &mut view, &snapshot).1;
-    }
-    let (workflow_action, _) =
-        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Force Review");
-    assert_eq!(
-        workflow_action.actions,
-        vec![DesktopAction::PreviewProposal {
-            proposal_id: ProposalId(7)
-        }]
-    );
+    assert!(!accesskit_has_label(&full, "Legion Workflows workbench"));
+    assert!(!accesskit_has_label(&full, "Force Review"));
 }
 
 #[test]
@@ -4232,7 +4298,7 @@ fn projection_rendering_compact_shell_collapses_navigation_and_exposes_inspector
     );
     let (_settled, full) =
         render_projection_frame_at(&inspector_ctx, &mut inspector_view, &snapshot, compact_size);
-    assert!(accesskit_has_label(&full, "Model provider"));
+    assert!(accesskit_has_label(&full, "Context"));
 
     let standard_size = egui::vec2(1_184.0, 530.0);
     let standard_ctx = egui::Context::default();
