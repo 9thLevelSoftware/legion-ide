@@ -1,4 +1,5 @@
 product-name = "Legion"
+name = "legion-desktop"
 version = "0.0.0"
 binaries = [{ path = "legion-desktop", main = true }]
 binaries-dir = "__BINARIES_DIR__"
