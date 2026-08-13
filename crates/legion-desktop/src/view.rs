@@ -161,6 +161,7 @@ impl ShellGeometry {
     const COMPACT_HEIGHT: f32 = 530.0;
     const ULTRA_COMPACT_WIDTH: f32 = 720.0;
     const MIN_EDITOR_WIDTH: f32 = 360.0;
+    const MIN_STANDARD_EDITOR_WIDTH: f32 = 560.0;
     const TOP_BAR_HEIGHT: f32 = 42.0;
     const STATUS_BAR_HEIGHT: f32 = 24.0;
     const ACTIVITY_RAIL_WIDTH: f32 = 46.0;
@@ -1290,6 +1291,18 @@ impl ProjectionView {
                 bottom,
             )
         } else {
+            let inspector_visible = projected_product_mode(snapshot) != DesktopProductMode::Manual;
+            // Panel frames consume one pixel on each horizontal edge. Reserve
+            // that chrome in addition to the required 560 px editor canvas.
+            let standard_editor_reserve = ShellGeometry::MIN_STANDARD_EDITOR_WIDTH + 2.0;
+            let left_max_width = (ui.available_width()
+                - if inspector_visible {
+                    geometry.right_min_width
+                } else {
+                    0.0
+                }
+                - standard_editor_reserve)
+                .max(geometry.left_min_width);
             let left_panel = egui::Panel::left("legion_desktop_explorer")
                 .frame(theme::pane_frame(theme::tokens().bg.panel))
                 .resizable(!geometry.compact);
@@ -1299,6 +1312,7 @@ impl ProjectionView {
                 left_panel
                     .default_size(geometry.left_width)
                     .min_size(geometry.left_min_width)
+                    .max_size(left_max_width)
             };
             let left = left_panel
                 .show_inside(ui, |ui| {
@@ -1307,16 +1321,18 @@ impl ProjectionView {
                 .response
                 .rect;
 
-            let right = if projected_product_mode(snapshot) == DesktopProductMode::Manual {
+            let right = if !inspector_visible {
                 let remaining = ui.available_rect_before_wrap();
                 egui::Rect::from_min_max(remaining.right_top(), remaining.right_bottom())
             } else {
+                let right_max_width = (ui.available_width() - standard_editor_reserve)
+                    .clamp(geometry.right_min_width, geometry.right_max_width);
                 egui::Panel::right("legion_desktop_trust")
                     .frame(theme::pane_frame(theme::tokens().bg.panel))
                     .resizable(true)
                     .default_size(geometry.right_width)
                     .min_size(geometry.right_min_width)
-                    .max_size(geometry.right_max_width)
+                    .max_size(right_max_width)
                     .show_inside(ui, |ui| {
                         render_right_dock(ui, snapshot, state, &model, self, &mut actions);
                     })
@@ -1501,7 +1517,10 @@ fn render_compact_drawer_overlay(
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width((ctx.content_rect().width() - 24.0).clamp(280.0, 420.0))
+        .default_width((ctx.content_rect().width() - 24.0).clamp(288.0, 420.0))
+        .min_width(288.0)
+        // egui's Window width excludes its 14 px outer resize/title chrome.
+        .max_width(466.0)
         .max_height((ctx.content_rect().height() - 84.0).max(180.0))
         .show(ctx, |ui| match drawer {
             CompactDrawer::Explorer => {
@@ -1983,7 +2002,7 @@ fn render_activity_sidebar(
         }
         ActivitySurface::Symbols => {
             sidebar_header(ui, "SYMBOLS", model.layout_title.clone());
-            render_compact_rows(ui, &model.language_rows, "No symbols projected", 12);
+            render_compact_rows(ui, &symbol_rows(snapshot), "No symbols in this file", 12);
         }
         ActivitySurface::SourceControl => {
             sidebar_header(ui, "SOURCE CONTROL", model.layout_title.clone());
@@ -5185,7 +5204,7 @@ fn render_setup_panel(
             model.settings.telemetry_label
         )));
         ui.label(theme::muted(format!(
-            "{} provider{} currently projected. Provider credentials remain keyring-owned.",
+            "{} model provider{} available. Credentials stay securely stored in the system keyring.",
             snapshot.assisted_ai_projection.provider_count,
             if snapshot.assisted_ai_projection.provider_count == 1 {
                 ""
@@ -5199,6 +5218,10 @@ fn render_setup_panel(
         "Use the top mode switch for Manual, Assist, Delegate, and Legion Workflows. Command opens the keyboard-first command surface.",
     ));
     ui.add_space(12.0);
+    let focus_finish = view.utility_overlay_needs_focus;
+    if focus_finish {
+        view.utility_overlay_needs_focus = false;
+    }
     ui.horizontal(|ui| {
         let review = soft_button(ui, "Review Settings");
         if review.clicked() {
@@ -5208,9 +5231,8 @@ fn render_setup_panel(
             view.utility_overlay_needs_focus = true;
         }
         let finish = primary_button(ui, "Finish setup", theme::tokens().accent.blue);
-        if view.utility_overlay_needs_focus {
+        if focus_finish {
             finish.request_focus();
-            view.utility_overlay_needs_focus = false;
         }
         if finish.clicked() {
             actions.push(DesktopAction::DismissOnboarding);
@@ -5238,7 +5260,7 @@ fn render_settings_panel(
                 },
                 selected,
             );
-            if view.utility_overlay_needs_focus && section == SettingsSection::Appearance {
+            if view.utility_overlay_needs_focus && section == view.settings_section {
                 response.request_focus();
                 view.utility_overlay_needs_focus = false;
             }
@@ -5433,16 +5455,11 @@ fn render_settings_panel(
                 "Telemetry consent: {}",
                 model.settings.telemetry_label
             )));
-            for row in &model.settings.font_fallback_rows {
-                ui.label(theme::muted(row));
-            }
         }
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
-                "schema v{} - {} - {}",
-                model.settings.schema_version,
-                model.settings.theme_label,
-                model.settings.toast_verbosity_label
+                "{} theme · {} notifications",
+                model.settings.theme_label, model.settings.toast_verbosity_label
             )));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if soft_button(ui, "Defaults").clicked() {
@@ -6609,6 +6626,18 @@ fn render_diagnostics_panel(ui: &mut egui::Ui, model: &DesktopProjectionViewMode
     section_label(ui, "Diagnostics", Some(theme::tokens().accent.orange));
     theme::code_frame().show(ui, |ui| {
         render_compact_rows(ui, &model.bottom_console_rows, "No internal diagnostics", 8);
+        ui.label(theme::code_muted(format!(
+            "settings schema={} theme={} notifications={}",
+            model.settings.schema_version,
+            model.settings.theme_label,
+            model.settings.toast_verbosity_label
+        )));
+        for row in model.settings.font_fallback_rows.iter().take(8) {
+            ui.label(theme::code_muted(trim_middle(row, 96)));
+        }
+        for row in model.language_rows.iter().take(12) {
+            ui.label(theme::code_muted(trim_middle(row, 96)));
+        }
         for row in model.operational_health_rows.iter().take(4) {
             ui.label(theme::code_muted(trim_middle(row, 96)));
         }
@@ -9798,6 +9827,29 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         )
     }));
     rows
+}
+
+fn symbol_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    snapshot
+        .language_tooling_projection
+        .outline
+        .iter()
+        .map(|symbol| {
+            let mut row = format!(
+                "{}{} · {}",
+                "  ".repeat(usize::from(symbol.depth)),
+                symbol.label,
+                symbol.kind_label
+            );
+            if let Some(range) = &symbol.range {
+                row.push_str(&format!(" · line {}", range.start.line.saturating_add(1)));
+            }
+            if symbol.children_omitted {
+                row.push_str(" · more nested symbols");
+            }
+            row
+        })
+        .collect()
 }
 
 /// Projection-only LSP health rows derived from the snapshot (D2 wired).

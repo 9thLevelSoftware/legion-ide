@@ -10,7 +10,6 @@ use legion_desktop::view::{
     drag_selection_range, editor_coordinate_from_pointer, line_range_for_code_line,
     word_range_for_coordinate,
 };
-use legion_protocol::LanguageCodeLensProjection;
 use legion_protocol::{
     ApprovalChecklistGateKind, ApprovalChecklistGateStatus, ApprovalChecklistGateSummary,
     ApprovalChecklistReason, ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow,
@@ -33,6 +32,7 @@ use legion_protocol::{
     ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
     ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkspaceId,
 };
+use legion_protocol::{LanguageCodeLensProjection, LanguageOutlineSymbolProjection};
 use legion_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
     EditorViewportStateProjection,
@@ -1941,6 +1941,88 @@ fn accesskit_contains_text_in_x_range(
                         || node.value().is_some_and(|value| value.contains(text)))
             })
         })
+}
+
+fn accesskit_dialog_text(output: &egui::FullOutput, dialog_label: &str) -> Vec<String> {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("dialog should expose AccessKit");
+    let dialog = update
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.role() == egui::accesskit::Role::Dialog && node.label() == Some(dialog_label))
+                .then_some(node)
+        })
+        .unwrap_or_else(|| panic!("dialog `{dialog_label}` should be present"));
+    let mut pending = dialog.children().to_vec();
+    let mut text = Vec::new();
+    while let Some(id) = pending.pop() {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(candidate, node)| (*candidate == id).then_some(node))
+            .unwrap_or_else(|| panic!("dialog descendant {id:?} should be present"));
+        if let Some(label) = node.label() {
+            text.push(label.to_string());
+        }
+        if let Some(value) = node.value() {
+            text.push(value.to_string());
+        }
+        pending.extend(node.children().iter().copied());
+    }
+    text
+}
+
+fn accesskit_focused_label(output: &egui::FullOutput) -> Option<&str> {
+    let update = output.platform_output.accesskit_update.as_ref()?;
+    update
+        .nodes
+        .iter()
+        .find_map(|(id, node)| (*id == update.focus).then(|| node.label()).flatten())
+}
+
+fn drag_projection_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    size: egui::Vec2,
+) {
+    let press = desktop_raw_input_at(
+        size,
+        vec![
+            egui::Event::PointerMoved(from),
+            egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let _ = ctx.run_ui(press, |ui| {
+        let _ = view.render(ui, snapshot);
+    });
+    let drag = desktop_raw_input_at(size, vec![egui::Event::PointerMoved(to)]);
+    let _ = ctx.run_ui(drag, |ui| {
+        let _ = view.render(ui, snapshot);
+    });
+    let release = desktop_raw_input_at(
+        size,
+        vec![egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    let _ = ctx.run_ui(release, |ui| {
+        let _ = view.render(ui, snapshot);
+    });
 }
 
 fn click_accessible_control(
@@ -4166,6 +4248,293 @@ fn projection_rendering_compact_shell_collapses_navigation_and_exposes_inspector
     assert!(
         standard.center.height() >= 240.0,
         "standard editor region height: {standard:?}"
+    );
+}
+
+#[test]
+fn projection_rendering_symbols_setup_and_settings_use_plain_copy_while_diagnostics_keeps_raw_rows()
+{
+    let mut snapshot = populated_snapshot();
+    snapshot.language_tooling_projection.status = legion_protocol::LanguageToolingStatusKind::Ready;
+    snapshot.language_tooling_projection.outline = vec![LanguageOutlineSymbolProjection {
+        symbol_id: "outline:answer".to_string(),
+        label: "answer".to_string(),
+        kind_label: "function".to_string(),
+        range: Some(ProtocolTextRange {
+            start: coord(6, 0, 40),
+            end: coord(8, 1, 64),
+        }),
+        depth: 0,
+        children_omitted: false,
+        schema_version: 1,
+    }];
+
+    let symbols_ctx = egui::Context::default();
+    symbols_ctx.enable_accesskit();
+    let mut symbols_view = ProjectionView::new();
+    let (_initial, full) = render_projection_frame(&symbols_ctx, &mut symbols_view, &snapshot);
+    let (_selected, _full) =
+        click_accessible_control(&symbols_ctx, &mut symbols_view, &snapshot, &full, "Symbols");
+    let (_settled, full) = render_projection_frame(&symbols_ctx, &mut symbols_view, &snapshot);
+    assert!(accesskit_has_label(&full, "answer · function · line 7"));
+    for forbidden in [
+        "schema",
+        "projected",
+        "problems=",
+        "quick_fixes=",
+        "stale=",
+        "cancelled=",
+    ] {
+        assert!(
+            !accesskit_contains_text_in_x_range(&full, forbidden, 46.0..=294.0),
+            "Symbols must not expose internal copy `{forbidden}`"
+        );
+    }
+
+    let diagnostics_bounds = accesskit_button_bounds_in_x_range(&full, "Diagnostics", 0.0..=46.0);
+    let (_diagnostics, _full) = click_projection_at(
+        &symbols_ctx,
+        &mut symbols_view,
+        &snapshot,
+        egui::pos2(
+            ((diagnostics_bounds.x0 + diagnostics_bounds.x1) * 0.5) as f32,
+            ((diagnostics_bounds.y0 + diagnostics_bounds.y1) * 0.5) as f32,
+        ),
+        egui::vec2(1_440.0, 900.0),
+    );
+    let (_settled, full) = render_projection_frame(&symbols_ctx, &mut symbols_view, &snapshot);
+    assert!(
+        accesskit_contains_text_in_x_range(&full, "problems=", 294.0..=1_115.0),
+        "Diagnostics must retain the raw language-tooling row"
+    );
+    assert!(
+        accesskit_contains_text_in_x_range(&full, "requested=", 294.0..=1_115.0),
+        "Diagnostics must retain raw font-fallback rows removed from Settings"
+    );
+    assert!(
+        accesskit_contains_text_in_x_range(&full, "settings schema=", 294.0..=1_115.0),
+        "Diagnostics must retain the settings schema metadata removed from Settings"
+    );
+
+    for (utility, dialog) in [("Setup", "Welcome to Legion"), ("Settings", "Settings")] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, utility);
+        let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        let text = accesskit_dialog_text(&full, dialog);
+        for forbidden in [
+            "schema",
+            "projected",
+            "problems=",
+            "quick_fixes=",
+            "stale=",
+            "cancelled=",
+        ] {
+            assert!(
+                !text
+                    .iter()
+                    .any(|row| row.to_ascii_lowercase().contains(forbidden)),
+                "{utility} must not expose internal copy `{forbidden}`; text={text:?}"
+            );
+        }
+        if utility == "Settings" {
+            let (_privacy, _full) =
+                click_accessible_control(&ctx, &mut view, &snapshot, &full, "Privacy");
+            let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+            let privacy_text = accesskit_dialog_text(&full, dialog);
+            assert!(
+                !privacy_text
+                    .iter()
+                    .flat_map(|row| row.split_whitespace())
+                    .any(|word| word.contains('=')),
+                "Settings sections must not expose raw key=value diagnostics; text={privacy_text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn projection_rendering_persisted_wide_inspector_preserves_standard_editor_minimum() {
+    let ctx = egui::Context::default();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let size = egui::vec2(1_184.0, 720.0);
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    ctx.data_mut(|data| {
+        data.insert_persisted(
+            egui::Id::new("legion_desktop_trust"),
+            egui::PanelState {
+                rect: egui::Rect::from_min_size(
+                    egui::pos2(size.x - 470.0, 70.0),
+                    egui::vec2(470.0, 600.0),
+                ),
+            },
+        );
+    });
+
+    for _ in 0..2 {
+        let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    }
+    let rects = view
+        .last_shell_panel_rects()
+        .expect("standard shell should record panel allocations");
+    let editor = view
+        .last_editor_rect()
+        .expect("standard shell should record the editor allocation");
+    assert!(
+        rects.center.width() >= 560.0 && editor.width() >= 560.0,
+        "a persisted 470px inspector must be clamped before starving the standard editor; rects={rects:?}, editor={editor:?}"
+    );
+}
+
+#[test]
+fn projection_rendering_reopened_settings_focuses_the_selected_editor_section() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_editor, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Editor");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_closed, _full) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Close Settings");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_reopened, _full) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert_eq!(
+        accesskit_focused_label(&full),
+        Some("Editor"),
+        "reopening Settings must focus the section that remains selected"
+    );
+}
+
+#[test]
+fn projection_rendering_setup_review_focuses_privacy_and_escape_restores_setup_trigger() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+    let size = egui::vec2(1_440.0, 900.0);
+
+    let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let setup_node = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("utility rail should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some("Setup")
+                && node.supports_action(egui::accesskit::Action::Focus)
+                && node.bounds().is_some_and(|bounds| bounds.x1 <= 46.0))
+            .then_some(*id)
+        })
+        .expect("Setup utility should be focusable");
+    let focus_input = desktop_raw_input_at(
+        size,
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Focus,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: setup_node,
+                data: None,
+            },
+        )],
+    );
+    let _ = ctx.run_ui(focus_input, |ui| {
+        let _ = view.render(ui, &snapshot);
+    });
+    let setup_trigger_focus = ctx
+        .memory(|memory| memory.focused())
+        .expect("Setup trigger should accept focus");
+
+    let (_opened, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Setup", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let (_review, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Review Settings", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    assert_eq!(accesskit_focused_label(&full), Some("Privacy"));
+
+    let escape = desktop_raw_input_at(
+        size,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    );
+    let _ = ctx.run_ui(escape, |ui| {
+        let _ = view.render(ui, &snapshot);
+    });
+    let (_restored, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    assert!(!accesskit_has_role(&full, egui::accesskit::Role::Dialog));
+    assert_eq!(
+        ctx.memory(|memory| memory.focused()),
+        Some(setup_trigger_focus)
+    );
+}
+
+#[test]
+fn projection_rendering_compact_inspector_drawer_resize_clamps_to_inspector_bounds() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    let size = egui::vec2(960.0, 720.0);
+    let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let (_opened, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Inspector drawer", size);
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let drawer_id = egui::Id::new(("legion_desktop_compact_drawer", "Inspector", "Assist"));
+    let initial = ctx
+        .memory(|memory| memory.area_rect(drawer_id))
+        .expect("compact inspector drawer should have a window rectangle");
+
+    drag_projection_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        initial.right_bottom() - egui::vec2(2.0, 2.0),
+        initial.right_bottom() + egui::vec2(260.0, 0.0),
+        size,
+    );
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let wide = ctx
+        .memory(|memory| memory.area_rect(drawer_id))
+        .expect("resized compact inspector should retain a window rectangle");
+    assert!(
+        wide.width() <= 482.0,
+        "compact inspector must clamp expansion to 480px (plus separator tolerance); rect={wide:?}"
+    );
+
+    drag_projection_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        wide.right_bottom() - egui::vec2(2.0, 2.0),
+        wide.right_bottom() - egui::vec2(360.0, 0.0),
+        size,
+    );
+    let _ = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let narrow = ctx
+        .memory(|memory| memory.area_rect(drawer_id))
+        .expect("narrow compact inspector should retain a window rectangle");
+    assert!(
+        narrow.width() >= 288.0,
+        "compact inspector must clamp contraction to 288px; rect={narrow:?}"
     );
 }
 
