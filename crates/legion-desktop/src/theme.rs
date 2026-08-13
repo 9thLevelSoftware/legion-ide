@@ -66,25 +66,25 @@ impl Theme {
         Self {
             variant: ThemeVariant::Dark,
             surfaces: SurfaceTokens {
-                canvas: Color32::from_rgb(0x12, 0x1a, 0x23),
-                panel: Color32::from_rgb(0x1d, 0x2a, 0x38),
-                raised: Color32::from_rgb(0x22, 0x31, 0x41),
+                canvas: Color32::from_rgb(0x0b, 0x12, 0x19),
+                panel: Color32::from_rgb(0x12, 0x1e, 0x29),
+                raised: Color32::from_rgb(0x1b, 0x2a, 0x38),
                 toolbar: Color32::from_rgb(0x16, 0x20, 0x2b),
                 input: Color32::from_rgb(0x1a, 0x26, 0x33),
                 overlay: Color32::from_rgb(0x20, 0x2e, 0x3d),
             },
             bg: BackgroundTokens {
                 surface: Color32::from_rgb(0x16, 0x20, 0x2b),
-                panel: Color32::from_rgb(0x1d, 0x2a, 0x38),
+                panel: Color32::from_rgb(0x12, 0x1e, 0x29),
                 toolbar: Color32::from_rgb(0x16, 0x20, 0x2b),
-                card: Color32::from_rgb(0x22, 0x31, 0x41),
-                code: Color32::from_rgb(0x12, 0x1a, 0x23),
+                card: Color32::from_rgb(0x1b, 0x2a, 0x38),
+                code: Color32::from_rgb(0x0b, 0x12, 0x19),
                 input: Color32::from_rgb(0x1a, 0x26, 0x33),
                 hover: Color32::from_rgb(0x25, 0x35, 0x46),
                 active: Color32::from_rgb(0x2a, 0x3d, 0x50),
                 overlay: Color32::from_rgb(0x20, 0x2e, 0x3d),
                 scrim: Color32::from_rgba_unmultiplied_const(0, 0, 0, 138),
-                canvas: Color32::from_rgb(0x12, 0x1a, 0x23),
+                canvas: Color32::from_rgb(0x0b, 0x12, 0x19),
                 ghost: Color32::from_rgba_unmultiplied_const(255, 255, 255, 8),
             },
             border: BorderTokens {
@@ -98,16 +98,16 @@ impl Theme {
                 selection: Color32::from_rgb(0x2a, 0x3d, 0x50),
             },
             text: TextTokens {
-                primary: Color32::from_rgb(0xf4, 0xf1, 0xeb),
+                primary: Color32::from_rgb(0xe7, 0xed, 0xf3),
                 secondary: Color32::from_rgb(0xc4, 0xcc, 0xd6),
                 muted: Color32::from_rgb(0x7e, 0x8a, 0x9b),
                 disabled: Color32::from_rgb(0x5d, 0x6a, 0x79),
-                inverted: Color32::from_rgb(0x12, 0x1a, 0x23),
+                inverted: Color32::from_rgb(0x0b, 0x12, 0x19),
             },
             accent: AccentTokens {
-                cyan: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                cyan: Color32::from_rgb(0x55, 0xa8, 0xd7),
                 blue: Color32::from_rgb(0x2e, 0x7f, 0xb8),
-                violet: Color32::from_rgb(0x9b, 0x86, 0xdc),
+                violet: Color32::from_rgb(0xaa, 0x8a, 0xdc),
                 purple: Color32::from_rgb(0xb2, 0x7d, 0xc4),
                 amber: Color32::from_rgb(0xcf, 0x81, 0x36),
                 orange: Color32::from_rgb(0xdc, 0x9a, 0x50),
@@ -116,26 +116,26 @@ impl Theme {
             },
             modes: ModeTokens {
                 manual: Color32::from_rgb(0x7e, 0x8a, 0x9b),
-                assist: Color32::from_rgb(0x55, 0xa7, 0xd8),
-                delegate: Color32::from_rgb(0x9b, 0x86, 0xdc),
+                assist: Color32::from_rgb(0x55, 0xa8, 0xd7),
+                delegate: Color32::from_rgb(0xaa, 0x8a, 0xdc),
                 workflows: Color32::from_rgb(0xb2, 0x7d, 0xc4),
             },
             controls: ControlStateTokens {
-                rest: Color32::from_rgb(0x22, 0x31, 0x41),
+                rest: Color32::from_rgb(0x1b, 0x2a, 0x38),
                 hover: Color32::from_rgb(0x25, 0x35, 0x46),
                 active: Color32::from_rgb(0x2a, 0x3d, 0x50),
                 disabled: Color32::from_rgb(0x16, 0x20, 0x2b),
                 disabled_foreground: Color32::from_rgb(0x5d, 0x6a, 0x79),
             },
             code_canvas: CodeCanvasTokens {
-                background: Color32::from_rgb(0x12, 0x1a, 0x23),
+                background: Color32::from_rgb(0x0b, 0x12, 0x19),
                 current_line: Color32::from_rgba_unmultiplied_const(0xcf, 0x81, 0x36, 28),
                 selection: Color32::from_rgba_unmultiplied_const(0x2e, 0x7f, 0xb8, 72),
                 cursor: Color32::from_rgb(0xcf, 0x81, 0x36),
                 line_number: Color32::from_rgb(0x7e, 0x8a, 0x9b),
                 ident: Color32::from_rgb(0xc4, 0xcc, 0xd6),
                 keyword: Color32::from_rgb(0xcf, 0x81, 0x36),
-                type_name: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                type_name: Color32::from_rgb(0x55, 0xa8, 0xd7),
                 string: Color32::from_rgb(0x4f, 0xae, 0x6d),
                 number: Color32::from_rgb(0xdc, 0x9a, 0x50),
                 comment: Color32::from_rgb(0x7e, 0x8a, 0x9b),
@@ -830,12 +830,20 @@ mod tests {
     fn dark_tokens_match_the_accepted_blue_slate_palette() {
         let dark = Theme::dark();
 
-        assert_eq!(dark.bg.surface, Color32::from_rgb(0x16, 0x20, 0x2b));
-        assert_eq!(dark.bg.code, Color32::from_rgb(0x12, 0x1a, 0x23));
-        assert_eq!(dark.bg.panel, Color32::from_rgb(0x1d, 0x2a, 0x38));
+        assert_eq!(dark.surfaces.canvas, Color32::from_rgb(0x0b, 0x12, 0x19));
+        assert_eq!(dark.surfaces.panel, Color32::from_rgb(0x12, 0x1e, 0x29));
+        assert_eq!(dark.surfaces.raised, Color32::from_rgb(0x1b, 0x2a, 0x38));
+        assert_eq!(dark.bg.canvas, dark.surfaces.canvas);
+        assert_eq!(dark.bg.panel, dark.surfaces.panel);
+        assert_eq!(dark.bg.card, dark.surfaces.raised);
+        assert_eq!(dark.code_canvas.background, dark.surfaces.canvas);
         assert_eq!(dark.border.default, Color32::from_rgb(0x2c, 0x3a, 0x4a));
-        assert_eq!(dark.text.primary, Color32::from_rgb(0xf4, 0xf1, 0xeb));
+        assert_eq!(dark.text.primary, Color32::from_rgb(0xe7, 0xed, 0xf3));
         assert_eq!(dark.text.muted, Color32::from_rgb(0x7e, 0x8a, 0x9b));
+        assert_eq!(dark.modes.assist, Color32::from_rgb(0x55, 0xa8, 0xd7));
+        assert_eq!(dark.accent.cyan, dark.modes.assist);
+        assert_eq!(dark.modes.delegate, Color32::from_rgb(0xaa, 0x8a, 0xdc));
+        assert_eq!(dark.accent.violet, dark.modes.delegate);
         assert_eq!(dark.accent.amber, Color32::from_rgb(0xcf, 0x81, 0x36));
         assert_eq!(dark.accent.blue, Color32::from_rgb(0x2e, 0x7f, 0xb8));
         assert_eq!(dark.accent.green, Color32::from_rgb(0x4f, 0xae, 0x6d));

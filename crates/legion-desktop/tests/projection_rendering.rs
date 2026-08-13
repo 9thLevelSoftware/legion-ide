@@ -12,11 +12,13 @@ use legion_desktop::view::{
 };
 use legion_protocol::LanguageCodeLensProjection;
 use legion_protocol::{
-    ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, AssistedAiOperationClass,
-    AssistedAiProviderAvailabilityState, AssistedAiProviderCapabilitySummary,
-    AssistedAiProviderClass, BufferId, BufferVersion, ByteRange, CanonicalPath, CapabilityId,
-    CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
-    CommandDescriptor, CommandRegistryProjection, CommandRiskLabel, ContextManifestEgressStatus,
+    ApprovalChecklistGateKind, ApprovalChecklistGateStatus, ApprovalChecklistGateSummary,
+    ApprovalChecklistReason, ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow,
+    AssistedAiOperationClass, AssistedAiProviderAvailabilityState,
+    AssistedAiProviderCapabilitySummary, AssistedAiProviderClass, BufferId, BufferVersion,
+    ByteRange, CanonicalPath, CapabilityId, CollaborationParticipantId,
+    CollaborationPresenceProjection, CollaborationSessionId, CommandDescriptor,
+    CommandRegistryProjection, CommandRiskLabel, ContextManifestEgressStatus,
     ContextManifestInclusionState, ContextManifestItem, ContextManifestItemCount,
     ContextManifestItemKind, FileFingerprint, FileId, LanguageStickyScopeProjection,
     LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
@@ -2912,14 +2914,136 @@ fn projection_rendering_authority_ribbon_surfaces_projected_readiness_and_bounda
 
     let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     for expected in [
-        "Workspace 1",
-        "1 provider ready",
+        "Workspace scope",
+        "Provider ready",
         "Ready for approval · acceptance still required",
     ] {
         assert!(
             accesskit_has_label(&full, expected),
             "authority ribbon must surface projected context `{expected}`"
         );
+    }
+    for prohibited in ["Workspace 1", "1 provider ready"] {
+        assert!(
+            !accesskit_has_label(&full, prohibited),
+            "authority ribbon must not expose raw projected detail `{prohibited}`"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_authority_blocker_is_qualitative() {
+    let mut snapshot = Shell::empty("Approval blocker").projection_snapshot();
+    snapshot.approval_checklist_projection.blockers = vec![ApprovalChecklistReason {
+        gate: ApprovalChecklistGateKind::PermissionBudget,
+        reason_code: "approval.required".to_string(),
+        label: "Approval required".to_string(),
+        target_id: None,
+        budget_id: None,
+        capability: None,
+        risk_label: ProposalRiskLabel::Medium,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert_eq!(
+        model.authority_ribbon.approval_boundary.as_deref(),
+        Some("Approval blocked")
+    );
+}
+
+#[test]
+fn projection_rendering_authority_pending_gates_are_qualitative() {
+    let mut snapshot = Shell::empty("Approval gates").projection_snapshot();
+    snapshot.approval_checklist_projection.gates = vec![ApprovalChecklistGateSummary {
+        gate: ApprovalChecklistGateKind::AuditBeforeSuccess,
+        status: ApprovalChecklistGateStatus::Unknown,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        labels: Vec::new(),
+        reasons: Vec::new(),
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    assert_eq!(
+        model.authority_ribbon.approval_boundary.as_deref(),
+        Some("Approval gates remain")
+    );
+}
+
+#[test]
+fn projection_rendering_narrow_authority_ribbon_prioritizes_baseline_without_overflow() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.assisted_ai_projection.providers = vec![AssistedAiProviderCapabilitySummary {
+        provider_id: "local".to_string(),
+        provider_label: "Local".to_string(),
+        provider_class: AssistedAiProviderClass::Local,
+        supported_operations: vec![AssistedAiOperationClass::ProposeEdit],
+        supported_operation_count: 1,
+        model_capability_label_count: 1,
+        tool_capability_label_count: 0,
+        context_window_label: "bounded".to_string(),
+        cost_budget_label: "free".to_string(),
+        risk_budget_label: "review required".to_string(),
+        privacy_retention_label: "local only".to_string(),
+        availability: AssistedAiProviderAvailabilityState::Available,
+        refusal: None,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }];
+    snapshot.approval_checklist_projection.ready_for_approval = true;
+    let size = egui::vec2(480.0, 720.0);
+
+    let (_frame, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let rects = view
+        .last_shell_panel_rects()
+        .expect("the composed shell must record panel rectangles");
+    let baseline = accesskit_bounds(&full, "Assist · Suggestions require acceptance", false);
+    assert!(baseline.x0 >= f64::from(rects.authority.left()) - 1.0);
+    assert!(baseline.x1 <= f64::from(rects.authority.right()) + 1.0);
+    assert!(baseline.y0 >= f64::from(rects.authority.top()) - 1.0);
+    assert!(baseline.y1 <= f64::from(rects.authority.bottom()) + 1.0);
+    for optional in [
+        "Workspace scope",
+        "Provider ready",
+        "Ready for approval · acceptance still required",
+    ] {
+        assert!(
+            !accesskit_has_label(&full, optional),
+            "narrow authority ribbon must hide optional detail `{optional}` before it can overflow"
+        );
+    }
+
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("authority ribbon should expose AccessKit");
+    for (_id, node) in &update.nodes {
+        let Some(bounds) = node.bounds() else {
+            continue;
+        };
+        let inside_authority_band = bounds.y0 >= f64::from(rects.authority.top()) - 1.0
+            && bounds.y1 <= f64::from(rects.authority.bottom()) + 1.0;
+        if inside_authority_band && node.label().is_some() {
+            assert!(
+                bounds.x0 >= f64::from(rects.authority.left()) - 1.0
+                    && bounds.x1 <= f64::from(rects.authority.right()) + 1.0,
+                "authority label {:?} must not overflow the ribbon; bounds={bounds:?}, ribbon={:?}",
+                node.label(),
+                rects.authority
+            );
+        }
     }
 }
 
@@ -2990,7 +3114,7 @@ fn projection_rendering_primary_shell_controls_meet_28px_semantic_target() {
 }
 
 #[test]
-fn projection_rendering_missing_assist_provider_uses_prerequisite_card() {
+fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
@@ -3004,7 +3128,8 @@ fn projection_rendering_missing_assist_provider_uses_prerequisite_card() {
 
     assert!(accesskit_has_label(&full, "Model provider"));
     assert!(accesskit_has_label(&full, "Required"));
-    assert!(accesskit_has_label(&full, "No model providers projected"));
+    assert!(accesskit_has_label(&full, "No model provider configured"));
+    assert!(!accesskit_has_label(&full, "No model providers projected"));
 }
 
 #[test]
@@ -3187,7 +3312,7 @@ fn projection_rendering_compact_right_rail_exposes_vertical_scroll_reachability(
 }
 
 #[test]
-fn projection_rendering_empty_workflows_do_not_invent_running_or_budget_state() {
+fn projection_rendering_empty_workflows_use_plain_product_copy_without_invented_state() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
@@ -3196,7 +3321,15 @@ fn projection_rendering_empty_workflows_do_not_invent_running_or_budget_state() 
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(&full, "Legion Workflows"));
-    assert!(accesskit_has_label(&full, "No workflow sessions projected"));
+    assert!(accesskit_has_label(&full, "No workflow sessions yet"));
+    assert!(accesskit_has_label(
+        &full,
+        "Start a workflow to see its progress here."
+    ));
+    assert!(!accesskit_has_label(
+        &full,
+        "No workflow sessions projected"
+    ));
     assert!(!accesskit_has_label(&full, "Running"));
     assert!(!accesskit_has_label(&full, "96k / 250k"));
 }

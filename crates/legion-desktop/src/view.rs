@@ -1298,21 +1298,27 @@ impl ProjectionView {
 }
 
 fn render_authority_ribbon(ui: &mut egui::Ui, model: &DesktopAuthorityRibbonViewModel) {
+    let available_width = ui.available_width();
     ui.horizontal(|ui| {
-        let summary = ui.label(theme::label(&model.summary));
+        let summary = ui.add(
+            egui::Label::new(theme::label(&model.summary)).wrap_mode(egui::TextWrapMode::Extend),
+        );
         ui.ctx().accesskit_node_builder(summary.id, |node| {
             node.set_role(egui::accesskit::Role::Status);
         });
-        for detail in [
-            model.workspace_scope.as_deref(),
-            model.provider_readiness.as_deref(),
-            model.approval_boundary.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            ui.separator();
-            ui.label(theme::muted(detail));
+        for (minimum_width, detail) in [
+            (680.0, model.approval_boundary.as_deref()),
+            (820.0, model.provider_readiness.as_deref()),
+            (960.0, model.workspace_scope.as_deref()),
+        ] {
+            if available_width >= minimum_width
+                && let Some(detail) = detail
+            {
+                ui.separator();
+                ui.add(
+                    egui::Label::new(theme::muted(detail)).wrap_mode(egui::TextWrapMode::Extend),
+                );
+            }
         }
     });
 }
@@ -4403,7 +4409,7 @@ fn render_assisted_suggestion_panel(
                 prerequisite_card(
                     ui,
                     "Model provider",
-                    "No model providers projected",
+                    "No model provider configured",
                     false,
                 );
             } else {
@@ -5363,8 +5369,8 @@ fn render_fleet_console(
         ui.add_space(32.0);
         empty_state(
             ui,
-            "No workflow sessions projected",
-            "Workflows appear here only after the application projects a real session.",
+            "No workflow sessions yet",
+            "Start a workflow to see its progress here.",
         );
     } else {
         section_label(ui, "Workflow sessions", Some(theme::tokens().accent.purple));
@@ -6428,7 +6434,7 @@ fn authority_ribbon_view_model(
             .active_buffer_projection
             .workspace_id
             .or(snapshot.approval_checklist_projection.workspace_id)
-            .map(|workspace_id| format!("Workspace {}", workspace_id.0)),
+            .map(|_| "Workspace scope".to_string()),
         provider_readiness: if snapshot.assisted_ai_projection.providers.is_empty() {
             None
         } else {
@@ -6436,30 +6442,21 @@ fn authority_ribbon_view_model(
                 .assisted_ai_projection
                 .providers
                 .iter()
-                .filter(|provider| {
+                .any(|provider| {
                     provider.availability == AssistedAiProviderAvailabilityState::Available
-                })
-                .count();
-            Some(if available == 0 {
-                "Providers unavailable".to_string()
-            } else if available == 1 {
-                "1 provider ready".to_string()
+                });
+            Some(if available {
+                "Provider ready".to_string()
             } else {
-                format!("{available} providers ready")
+                "Providers unavailable".to_string()
             })
         },
         approval_boundary: if snapshot.approval_checklist_projection.ready_for_approval {
             Some("Ready for approval · acceptance still required".to_string())
         } else if !snapshot.approval_checklist_projection.blockers.is_empty() {
-            Some(format!(
-                "{} approval blockers",
-                snapshot.approval_checklist_projection.blockers.len()
-            ))
+            Some("Approval blocked".to_string())
         } else if !snapshot.approval_checklist_projection.gates.is_empty() {
-            Some(format!(
-                "{} approval gates remain",
-                snapshot.approval_checklist_projection.gates.len()
-            ))
+            Some("Approval gates remain".to_string())
         } else {
             None
         },
