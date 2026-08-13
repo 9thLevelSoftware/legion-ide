@@ -1,0 +1,6 @@
+Command: `cargo check --workspace --all-targets`
+Result: PASS
+
+Output summary:
+- Workspace checked successfully after adding `devil-collaboration`.
+- Checked crates include `devil-protocol`, `devil-security`, `devil-observability`, `devil-text`, `devil-platform`, `devil-ui`, `devil-collaboration`, `devil-storage`, `devil-editor`, `devil-project`, `devil-index`, `devil-plugin`, `devil-app`, and placeholder/future crates.

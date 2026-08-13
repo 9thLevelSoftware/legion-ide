@@ -1,0 +1,6 @@
+Command: cargo clippy --workspace --all-targets -- -D warnings
+    Checking devil-protocol v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-protocol)
+    Checking devil-agent v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-agent)
+    Checking devil-app v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.69s
+ExitCode: 0

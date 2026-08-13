@@ -1,0 +1,16 @@
+Command: cargo test -p devil-index --all-targets
+Date: 2026-05-24
+Result: passed
+
+Observed summary:
+- `devil-index` lib tests: 0 passed, 0 failed.
+- `tests/index_workflows.rs`: 28 passed, 0 failed, 0 ignored.
+
+Covered acceptance areas:
+- Bounded queue backpressure and priority scheduling.
+- Cancellation and live snapshot supersession.
+- Workspace discovery DTO import and deletion invalidation.
+- Descriptor/lease indexing without full-source retention.
+- Syntax-cache freshness keys and invalidation.
+- Normalized graph records and semantic query APIs.
+- LSP metadata-only contract path and proposal-only edit conversion.

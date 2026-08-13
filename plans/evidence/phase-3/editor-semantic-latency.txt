@@ -1,0 +1,17 @@
+Command: cargo test -p devil-editor --test performance_suite -- --list
+Date: 2026-05-24
+Result: passed
+
+Observed output:
+ci_large_file_degraded_open_and_viewport_are_bounded: test
+ci_mixed_fake_consumers_do_not_block_user_edits: test
+ci_snapshot_retention_budget_is_enforced: test
+ci_typical_edit_latency_on_budget_sized_file: test
+ci_undo_redo_burst_small_deterministic_sample: test
+large_file_100mb_degraded_mode_measurement: test
+snapshot_retention_and_release: test
+undo_redo_latency_under_edit_burst: test
+
+8 tests, 0 benchmarks
+
+Full workspace test gate also ran the CI performance guards: 5 passed, 0 failed, 3 ignored measurement tests.

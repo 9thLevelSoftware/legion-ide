@@ -1,0 +1,13 @@
+Command: cargo test -p devil-protocol --test dto_contracts
+Date: 2026-05-24
+Result: passed
+
+Observed summary:
+- `tests/dto_contracts.rs`: 57 passed, 0 failed, 0 ignored.
+
+Covered acceptance areas:
+- Workspace discovery DTOs.
+- Semantic scheduling and query DTOs.
+- LSP definition/reference/cancellation, mutation proposal, supervision, and redaction DTOs.
+- Storage request/response schema including semantic metadata.
+- Proposal lifecycle, batch payload, ledger projection, and future-surface gating contracts.

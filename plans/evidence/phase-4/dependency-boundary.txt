@@ -1,0 +1,5 @@
+Command: cargo run -p xtask -- check-deps
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `target\debug\xtask.exe check-deps`
+dependency policy checks passed
+ExitCode: 0

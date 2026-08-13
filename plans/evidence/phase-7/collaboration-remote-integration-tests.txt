@@ -1,0 +1,12 @@
+Phase 7 collaboration and remote integration evidence
+
+Status: Passed.
+
+Commands:
+- cargo test -p devil-remote remote_reconnect_and_offline_resume_are_explicit
+- cargo test -p devil-app --test workspace_vfs_integration remote
+
+Observed result:
+- Remote operation-log checkpoints use `CollaborationVersionVector` metadata for compatibility with Phase 6 operation ordering.
+- App-owned remote composition does not grant collaboration runtime remote workspace authority.
+- Remote sessions and collaboration remain separate app-owned compositions mediated through protocol DTOs and proposal/audit metadata.

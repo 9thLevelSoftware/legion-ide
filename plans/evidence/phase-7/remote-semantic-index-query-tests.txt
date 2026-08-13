@@ -1,0 +1,10 @@
+Phase 7 remote semantic query evidence
+
+Status: Passed.
+
+Command:
+- cargo test -p devil-remote remote_execution_surfaces_are_policy_gated_and_bounded
+
+Observed result:
+- Remote semantic query descriptor is accepted only with `remote.semantic.query`, non-nil query id, non-empty purpose, positive result bound, metadata-only redaction, and valid session.
+- Vector indexing, embeddings, and raw-source persistence remain inactive.

@@ -1,0 +1,7 @@
+Command: cargo run -p xtask -- check-deps
+Status: Passed
+Captured: 2026-05-25
+
+Result:
+- dependency policy checks passed
+- xtask Phase 7 accepted-evidence self-tests passed through `cargo test -p xtask`.

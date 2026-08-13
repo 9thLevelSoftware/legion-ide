@@ -1,0 +1,11 @@
+Commands:
+- cargo test -p devil-security phase8
+- cargo run -p xtask -- check-deps
+
+Result: passed
+
+Covered enterprise policy profiles:
+- default-deny Phase 8 transport, terminal, telemetry, retention, and storage migration capabilities
+- air-gap denial for hosted/non-loopback egress paths
+- unknown workspace trust denial for sensitive Phase 8 capability families
+- explicit repair flag required for storage migration repair when repair is enabled

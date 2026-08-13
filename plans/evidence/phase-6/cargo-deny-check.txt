@@ -1,0 +1,21 @@
+Command: `cargo deny check`
+Result: PASS WITH WARNINGS
+
+Schema update:
+- Updated `deny.toml` for `cargo-deny v0.19.7`.
+- Replaced removed advisory fields with current `unmaintained = "workspace"` and `unsound = "workspace"` semantics.
+- Replaced removed license `unlicensed`/`copyleft` lint keys with an explicit license allow list and private workspace ignore.
+
+Output summary:
+- `advisories ok`
+- `bans ok`
+- `licenses ok`
+- `sources ok`
+
+Warnings retained by policy:
+- Duplicate `thiserror` / `thiserror-impl` versions from `cargo_metadata` versus workspace crates.
+- Duplicate `wit-bindgen` versions from WASI dependencies.
+
+Acceptance impact:
+- The local cargo-deny executable is available and the command completes successfully.
+- Duplicate dependency findings remain warning-level policy findings and do not block accepted Phase 6 evidence.

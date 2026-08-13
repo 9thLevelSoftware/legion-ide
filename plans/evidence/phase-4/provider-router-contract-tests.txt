@@ -1,0 +1,15 @@
+Command: cargo test -p devil-ai --all-targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src\lib.rs (target\debug\deps\devil_ai-fd7144f574ca9ab8.exe)
+
+running 6 tests
+test tests::router_refuses_remote_provider_without_invocation ... ok
+test tests::router_refuses_missing_local_provider_as_metadata ... ok
+test tests::router_refuses_provider_without_completion_capability ... ok
+test tests::router_invokes_local_provider_only_after_policy_approval ... ok
+test tests::router_rejects_nil_cancellation_token_before_provider_invocation ... ok
+test tests::router_rejects_raw_health_metadata_before_provider_invocation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ExitCode: 0

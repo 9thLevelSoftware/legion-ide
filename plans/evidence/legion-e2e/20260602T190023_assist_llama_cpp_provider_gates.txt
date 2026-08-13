@@ -1,0 +1,125 @@
+# Legion E2E Evidence - Assist llama.cpp provider route
+
+Timestamp: 2026-06-02T19:00:23-04:00
+Working directory: C:\Users\dasbl\RustroverProjects\devil-ide
+Branch: codex/legion-full-implementation
+
+## Scope
+
+- Implemented a first-class `llama-cpp` local-loopback provider slot in `devil-ai-providers`.
+- Reused the OpenAI-compatible request path for llama.cpp `/v1/chat/completions` and `/v1/embeddings`.
+- Preserved fail-closed BYOK auth for the generic `openai-compatible` provider.
+- Added optional local bearer-token support for llama.cpp without requiring credentials by default.
+- Added metadata-only provider capability and registry tests.
+- Updated ADR-0006 with the live provider configuration contract.
+
+## Source References
+
+- `crates/devil-ai-providers/src/lib.rs`
+- `plans/adrs/ADR-0006-ai-provider-abstraction.md`
+- llama.cpp server documentation checked on 2026-06-02: OpenAI-compatible chat completion and embedding routes are `/v1/chat/completions` and `/v1/embeddings`.
+
+## Focused Verification
+
+Command: `cargo fmt --all --check`
+Exit code: 0
+Output:
+
+```text
+<no output>
+```
+
+Command: `cargo test -p devil-ai-providers --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+running 16 tests
+test tests::llama_cpp_provider_can_attach_optional_local_bearer_token ... ok
+test tests::llama_cpp_provider_posts_loopback_requests_without_bearer_by_default ... ok
+test tests::inline_prediction_registry_exposes_required_provider_slots ... ok
+test tests::provider_registry_exposes_configured_adapters ... ok
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Command: `cargo check -p devil-ai-providers --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+Checking devil-ai-providers v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo clippy -p devil-ai-providers --all-targets -- -D warnings`
+Exit code: 0
+Output excerpt:
+
+```text
+Checking devil-ai-providers v0.1.0
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+## Final Gate Verification
+
+The aggregate `scripts\run-phase-gates.ps1` invocation returned exit code 0, but its combined output included Windows linker `LNK1102` text from the workspace test stage. To avoid overclaiming, the exact documented gates were rerun sequentially and independently.
+
+Command: `cargo run -p xtask -- check-deps`
+Exit code: 0
+Output excerpt:
+
+```text
+dependency policy checks passed
+Running `target\debug\xtask.exe check-deps`
+```
+
+Command: `cargo fmt --all --check`
+Exit code: 0
+Output:
+
+```text
+<no output>
+```
+
+Command: `cargo check --workspace --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo test --workspace --all-targets`
+Exit code: 0
+Output excerpt:
+
+```text
+test tests::llama_cpp_provider_can_attach_optional_local_bearer_token ... ok
+test tests::llama_cpp_provider_posts_loopback_requests_without_bearer_by_default ... ok
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+...
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Command: `cargo clippy --workspace --all-targets -- -D warnings`
+Exit code: 0
+Output excerpt:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+Command: `cargo deny check`
+Exit code: 0
+Output excerpt:
+
+```text
+advisories ok, bans ok, licenses ok, sources ok
+warning[duplicate]: found 2 duplicate entries for crate 'accesskit_consumer'
+warning[duplicate]: found 2 duplicate entries for crate 'bitflags'
+warning[duplicate]: found 2 duplicate entries for crate 'block2'
+```
+
+## Result
+
+Passed. The llama.cpp provider slice has production code, contract tests, documentation, and full gate evidence. Existing `cargo deny` duplicate dependency findings remain warning-level and did not fail the supply-chain policy gate.

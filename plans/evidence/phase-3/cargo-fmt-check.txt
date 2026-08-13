@@ -1,0 +1,5 @@
+Command: cargo fmt --all --check
+Date: 2026-05-24
+Result: passed
+
+Observed output: no formatting differences reported.

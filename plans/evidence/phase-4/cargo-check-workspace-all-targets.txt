@@ -1,0 +1,6 @@
+Command: cargo check --workspace --all-targets
+    Checking devil-protocol v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-protocol)
+    Checking devil-agent v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-agent)
+    Checking devil-app v0.1.0 (C:\Users\dasbl\RustroverProjects\devil-ide\crates\devil-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.54s
+ExitCode: 0

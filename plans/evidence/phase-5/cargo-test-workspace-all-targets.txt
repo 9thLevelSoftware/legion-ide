@@ -1,0 +1,8 @@
+Command: cargo test --workspace --all-targets
+
+Final status: PASS
+
+Output summary:
+- Workspace test suite completed successfully.
+- Phase 5 focused tests included protocol DTO contracts, security plugin capability denial, plugin runtime fail-closed behavior, plugin storage namespace/quota behavior, plugin observability metadata-only redaction, app plugin command routing, and UI projection-only plugin intents.
+- Existing ignored performance measurements remain ignored as before.
