@@ -1,0 +1,37 @@
+product-name = "Legion"
+version = "0.0.0"
+binaries = [{ path = "legion-desktop", main = true }]
+binaries-dir = "__BINARIES_DIR__"
+out-dir = "__OUT_DIR__"
+identifier = "com.legionide.desktop"
+description = "Legion IDE desktop application"
+publisher = "Legion"
+copyright = "Copyright (c) 2026 Legion"
+category = "DeveloperTool"
+icons = [
+  "__PACKAGING_DIR__/icons/legion.ico",
+  "__PACKAGING_DIR__/icons/legion.icns",
+  "__PACKAGING_DIR__/icons/legion-512.png",
+  "__PACKAGING_DIR__/icons/legion-256.png",
+  "__PACKAGING_DIR__/icons/legion-128.png",
+  "__PACKAGING_DIR__/icons/legion-64.png",
+  "__PACKAGING_DIR__/icons/legion-32.png",
+  "__PACKAGING_DIR__/icons/legion-16.png",
+]
+formats = ["__FORMAT__"]
+
+[windows]
+allow-downgrades = false
+
+[macos]
+minimum-system-version = "11.0"
+
+[linux]
+generate-desktop-entry = false
+
+[deb]
+section = "devel"
+files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png" }
+
+[appimage]
+files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion-desktop.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png" }

@@ -44,6 +44,45 @@ The current package-and-support path is intentionally explicit so release notes 
 - GUI beta dry-run: `sh scripts/gui-smoke.sh --beta --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - GUI Phase 8 dry-run: `sh scripts/gui-smoke.sh --phase-8 --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun`
 
+### Native installer release (manual)
+
+The installed `legion-release.yml` is a manual-only native-release workflow. An authorized maintainer starts it from the intended source branch with:
+
+```sh
+gh workflow run legion-release.yml
+gh run list --workflow legion-release.yml
+```
+
+The workflow selects the next unused `v0.0.N` tag, beginning with `v0.0.1`; it creates the GitHub tag and prerelease and publishes the native assets. It passes the corresponding numeric version (for example, `0.0.1`) to the package scripts; the script examples use `0.0.1` only as a placeholder and the workflow substitutes its computed version. This beta release number is independent of the workspace version in `Cargo.toml`.
+
+Each GitHub prerelease contains these unsigned-beta installer assets and their SHA-256 checksum files:
+
+| Platform | Installer asset | Format |
+| --- | --- | --- |
+| macOS Intel | `legion-desktop-macos-x64-dmg.dmg` | DMG |
+| macOS Apple Silicon | `legion-desktop-macos-arm64-dmg.dmg` | DMG |
+| Windows x64 | `legion-desktop-windows-x64-msi.msi` | MSI |
+| Linux x64 | `legion-desktop-linux-x64-deb.deb` | Debian package |
+| Linux x64 | `legion-desktop-linux-x64-appimage.AppImage` | AppImage |
+
+For each package, the release includes the installer, its matching `.sha256` checksum, `<package-stem>-RELEASE-METADATA.toml`, and `<package-stem>-PACKAGE-EVIDENCE.txt`; it does not promise a native package manifest. The evidence file records the package-structure checks, checksum verification, and beta-smoke logs produced by the package job. Treat all five installers as `unsigned-beta/no-os-code-signing`: Windows SmartScreen may warn before opening the MSI, and macOS Gatekeeper may require the tester to use Finder's explicit **Open** action for the DMG or app. Only bypass either warning after independently verifying the release source and checksum.
+
+For DMG inspection, run `hdiutil verify <artifact>`, attach it read-only, then detach the mounted volume with `hdiutil detach <mount-point>` when inspection is complete.
+
+For local Linux testing, download the matching asset and run one of these commands:
+
+```sh
+# Debian/Ubuntu
+sudo apt install ./legion-desktop-linux-x64-deb.deb
+legion-desktop --beta-smoke --duration-ms 1500
+
+# AppImage
+chmod +x ./legion-desktop-linux-x64-appimage.AppImage
+./legion-desktop-linux-x64-appimage.AppImage --appimage-extract-and-run --beta-smoke --duration-ms 1500
+```
+
+`cargo run -p xtask -- verify-release-pipeline` validates the descriptor metadata only. In dry-run mode it may report `dry-run/unchecked`; it does not build installers or execute their OS-specific verification commands. The workflow does not add signing credentials, certificates, notarization material, or other private keys, and it does not rewrite `Cargo.toml`; the packaging scripts receive the computed numeric release version explicitly.
+
 ### Release signer references
 
 The release pipeline config and operator runbook must describe signer references without committing any private material. Pick exactly one source for a given release run and store only the reference string in the repo or CI configuration.

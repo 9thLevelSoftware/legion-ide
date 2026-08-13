@@ -1,34 +1,17 @@
-name: Legion Release
+name: Legion Native Release
 
-# Tag-triggered release pipeline: build, test, package, run release-pipeline
-# with --from-artifacts, run GP-5 acceptance smoke, and upload release artifacts.
-#
-# Triggers:
-# - Push of tags matching v* (e.g. v0.1.0, v1.0.0-preview.1)
-# - Manual workflow_dispatch with channel selection (preview/stable)
-#
-# Uses --from-artifacts for release pipeline (NOT --mode build).
-# Packaging scripts: scripts/package-windows.ps1 (Windows),
-#                    scripts/package-preview.sh (Unix).
-
+# Manual-only unsigned-beta native installer release. This workflow validates
+# the workspace, builds and inspects every native package, and creates the tag
+# only after all package jobs succeed.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
-    inputs:
-      channel:
-        description: 'Release channel'
-        required: true
-        default: 'preview'
-        type: choice
-        options:
-          - preview
-          - stable
+
+permissions:
+  contents: write
 
 concurrency:
-  group: legion-release-${{ github.ref }}
-  cancel-in-progress: true
+  group: legion-release-serial
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -36,22 +19,76 @@ env:
   CARGO_BUILD_JOBS: "4"
 
 jobs:
-  # ── Job 1: Build and Test ──────────────────────────────────────────────────
-  build-and-test:
-    name: Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
+  prepare:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      previous_tag: ${{ steps.release.outputs.previous_tag }}
     steps:
-      - name: Checkout
+      - name: Checkout source and tags
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next v0.0.N release
+        id: release
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          tags = subprocess.run(
+              ["git", "tag", "--list", "v0.0.*"],
+              check=True,
+              text=True,
+              capture_output=True,
+          ).stdout.splitlines()
+          pattern = re.compile(r"v0\.0\.([1-9][0-9]*)")
+          malformed = [tag for tag in tags if pattern.fullmatch(tag) is None]
+          if malformed:
+              raise SystemExit(
+                  "Malformed v0.0.* tag(s): " + ", ".join(sorted(malformed))
+              )
+
+          maximum = max((int(pattern.fullmatch(tag).group(1)) for tag in tags), default=0)
+          next_number = maximum + 1
+          version = f"0.0.{next_number}"
+          tag = f"v{version}"
+          previous_tag = f"v0.0.{maximum}" if maximum else ""
+          source_sha = os.environ["SOURCE_SHA"]
+          if re.fullmatch(r"[0-9a-fA-F]{40}", source_sha) is None:
+              raise SystemExit(f"Unexpected source SHA: {source_sha!r}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+              output.write(f"tag={tag}\n")
+              output.write(f"previous_tag={previous_tag}\n")
+              output.write(f"source_sha={source_sha}\n")
+          print(f"Prepared {tag} from {source_sha}; previous={previous_tag or 'none'}")
+          PY
+
+  validation:
+    name: Validate workspace
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout prepared source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install Linux GUI build dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -79,29 +116,64 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # ── Job 2: Release ─────────────────────────────────────────────────────────
-  release:
-    name: Release (${{ matrix.os }})
-    needs: build-and-test
+  package:
+    name: Package ${{ matrix.platform }} ${{ matrix.architecture || 'x64' }} (${{ matrix.formats }})
+    needs: [prepare, validation]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+      PACKAGE_PLATFORM: ${{ matrix.platform }}
+      PACKAGE_ARCHITECTURE: ${{ matrix.architecture || 'x64' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            formats: deb,appimage
+          - os: windows-latest
+            platform: windows
+            formats: wix
+          - os: macos-15-intel
+            platform: macos
+            architecture: x64
+            formats: dmg
+          - os: macos-15
+            platform: macos
+            architecture: arm64
+            formats: dmg
     steps:
-      - name: Checkout
+      - name: Checkout prepared source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Install Linux GUI build dependencies
-        if: runner.os == 'Linux'
+      - name: Verify prepared source checkout
+        shell: bash
         run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
           sudo apt-get update
+          fuse_package=libfuse2
+          if ! apt-cache show "$fuse_package" >/dev/null 2>&1; then
+            fuse_package=libfuse2t64
+          fi
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
             libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev \
+            libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
+            patchelf xvfb "$fuse_package"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -109,60 +181,681 @@ jobs:
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
-      - name: Resolve release channel
-        id: channel
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == *"-preview"* ]] || [[ "${{ github.ref }}" == *"-beta"* ]]; then
-            echo "channel=preview" >> "$GITHUB_OUTPUT"
-          else
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build release binary
-        run: cargo build --release -p legion-desktop
-
-      - name: Package (Windows)
+      - name: Install WiX when unavailable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Release
+          $ErrorActionPreference = "Stop"
+          $wix = Get-Command wix.exe -ErrorAction SilentlyContinue
+          if ($null -ne $wix) {
+              & $wix.Source --version
+              exit 0
+          }
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+          $currentPath = $env:Path
+          choco install wixtoolset --no-progress -y
+          $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          $env:Path = "$machinePath;$userPath;$currentPath"
+
+          $wix = Get-Command wix.exe -ErrorAction SilentlyContinue
+          if ($null -ne $wix) {
+              & $wix.Source --version
+              Split-Path -Parent $wix.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+              $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+              $light = Get-Command light.exe -ErrorAction SilentlyContinue
+              if ($null -eq $candle -or $null -eq $light) {
+                  throw "WiX installation did not provide wix.exe or the WiX v3 candle/light tools."
+              }
+              & $candle.Source -?
+              & $light.Source -?
+              Split-Path -Parent $candle.Source | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify native package architecture
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          chmod +x scripts/package-preview.sh
-          bash scripts/package-preview.sh --release
+          set -euo pipefail
+          actual="$(uname -m)"
+          case "$PACKAGE_ARCHITECTURE:$actual" in
+            x64:x86_64|arm64:arm64) ;;
+            *) echo "Expected $PACKAGE_ARCHITECTURE runner, got $actual" >&2; exit 1 ;;
+          esac
 
-      # Hosted signing is intentionally deferred until WS17.T2. Keep this
-      # workflow in the repository-safe dry-run mode for now.
-      - name: Release pipeline (dry-run)
-        run: >
-          cargo run -p xtask -- release-pipeline
-          --dry-run
-          --channel ${{ steps.channel.outputs.channel }}
+      - name: Install cargo-packager 0.11.8
+        shell: bash
+        run: cargo install cargo-packager --locked --version 0.11.8
 
-      - name: Run GP-5 acceptance smoke
-        run: cargo run -p xtask -- golden-path-5
+      - name: Package Linux installers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for format in deb appimage; do
+            output_dir="target/native-release/linux-$format"
+            mkdir -p "$output_dir"
+            printf 'tag=%s\nsource_sha=%s\nprevious_tag=%s\nformat=%s\n' \
+              "$RELEASE_TAG" "$SOURCE_SHA" "${PREVIOUS_TAG:-none}" "$format" \
+              > "$output_dir/PACKAGE-EVIDENCE.txt"
+            bash scripts/package-native.sh \
+              --version "$RELEASE_VERSION" \
+              --format "$format" \
+              --out-dir "$output_dir"
+          done
 
-      - name: Upload GP-5 evidence artifact
-        if: always()
+      - name: Validate Linux DEB structure, checksum, and smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/target/native-release/linux-deb"
+          deb_path="$package_dir/legion-desktop-linux-x64-deb.deb"
+          checksum_path="$deb_path.sha256"
+          metadata_path="$package_dir/RELEASE-METADATA.toml"
+          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
+          staging_dir="$RUNNER_TEMP/legion-deb-staging"
+          smoke_dir="$RUNNER_TEMP/legion-deb-smoke"
+          mkdir -p "$staging_dir" "$smoke_dir"
+
+          test -s "$deb_path"
+          test -s "$checksum_path"
+          test -s "$metadata_path"
+          checksum_line="$(tr -d '\r' < "$checksum_path")"
+          expected_hash="${checksum_line%% *}"
+          expected_file="${checksum_line#* }"
+          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
+          test "$expected_file" = "*$(basename "$deb_path")"
+          actual_hash="$(sha256sum "$deb_path" | awk '{print $1}')"
+          test "$actual_hash" = "$expected_hash"
+          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
+          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
+          grep -Fqx 'platform = "linux"' "$metadata_path"
+          grep -Fqx 'architecture = "x64"' "$metadata_path"
+          grep -Fqx 'format = "deb"' "$metadata_path"
+          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
+          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
+
+          dpkg-deb --info "$deb_path" | tee -a "$evidence_path"
+          package_version="$(dpkg-deb -f "$deb_path" Version)"
+          test "$package_version" = "$RELEASE_VERSION"
+          printf 'package_version=passed version=%s\n' "$package_version" >> "$evidence_path"
+          dpkg-deb -x "$deb_path" "$staging_dir"
+          staged_binary="$staging_dir/usr/bin/legion-desktop"
+          desktop_entry="$staging_dir/usr/share/applications/legion.desktop"
+          icon_path="$staging_dir/usr/share/icons/hicolor/512x512/apps/legion.png"
+          test -x "$staged_binary"
+          test -s "$desktop_entry"
+          test -s "$icon_path"
+          printf 'structure=passed binary=%s desktop=%s icon=%s\n' \
+            "$staged_binary" "$desktop_entry" "$icon_path" >> "$evidence_path"
+
+          set +e
+          xvfb-run --auto-servernum "$staged_binary" \
+            --beta-smoke --duration-ms 1500 \
+            --workspace "$GITHUB_WORKSPACE" \
+            --beta-workspace "$smoke_dir/workspace" \
+            --evidence "$smoke_dir/beta-smoke.md" \
+            --session-state "$smoke_dir/session.json" \
+            --diagnostics-export "$smoke_dir/diagnostics.md" \
+            > "$smoke_dir/stdout-stderr.log" 2>&1
+          smoke_status=$?
+          set -e
+          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
+          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
+          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
+          test "$smoke_status" -eq 0
+
+      - name: Validate Linux AppImage structure, checksum, and smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/target/native-release/linux-appimage"
+          appimage_path="$package_dir/legion-desktop-linux-x64-appimage.AppImage"
+          checksum_path="$appimage_path.sha256"
+          metadata_path="$package_dir/RELEASE-METADATA.toml"
+          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
+          smoke_dir="$RUNNER_TEMP/legion-appimage-smoke"
+          extract_dir="$RUNNER_TEMP/legion-appimage-extract"
+          mkdir -p "$smoke_dir" "$extract_dir"
+
+          test -s "$appimage_path"
+          test -s "$checksum_path"
+          test -s "$metadata_path"
+          checksum_line="$(tr -d '\r' < "$checksum_path")"
+          expected_hash="${checksum_line%% *}"
+          expected_file="${checksum_line#* }"
+          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
+          test "$expected_file" = "*$(basename "$appimage_path")"
+          actual_hash="$(sha256sum "$appimage_path" | awk '{print $1}')"
+          test "$actual_hash" = "$expected_hash"
+          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
+          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
+          grep -Fqx 'platform = "linux"' "$metadata_path"
+          grep -Fqx 'architecture = "x64"' "$metadata_path"
+          grep -Fqx 'format = "appimage"' "$metadata_path"
+          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
+          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
+
+          chmod +x "$appimage_path"
+          file "$appimage_path" | tee -a "$evidence_path"
+          (cd "$extract_dir" && "$appimage_path" --appimage-extract >/dev/null)
+          apprun_path="$extract_dir/squashfs-root/AppRun"
+          app_binary="$extract_dir/squashfs-root/usr/bin/legion-desktop"
+          desktop_entry="$extract_dir/squashfs-root/usr/share/applications/legion-desktop.desktop"
+          icon_path="$extract_dir/squashfs-root/usr/share/icons/hicolor/512x512/apps/legion.png"
+          test -x "$apprun_path"
+          test -f "$app_binary"
+          test -x "$app_binary"
+          test -s "$desktop_entry"
+          test -s "$icon_path"
+          printf 'structure=passed apprun=%s binary=%s desktop=%s icon=%s\n' \
+            "$apprun_path" "$app_binary" "$desktop_entry" "$icon_path" >> "$evidence_path"
+
+          set +e
+          xvfb-run --auto-servernum "$appimage_path" --appimage-extract-and-run \
+            --beta-smoke --duration-ms 1500 \
+            --workspace "$GITHUB_WORKSPACE" \
+            --beta-workspace "$smoke_dir/workspace" \
+            --evidence "$smoke_dir/beta-smoke.md" \
+            --session-state "$smoke_dir/session.json" \
+            --diagnostics-export "$smoke_dir/diagnostics.md" \
+            > "$smoke_dir/stdout-stderr.log" 2>&1
+          smoke_status=$?
+          set -e
+          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
+          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
+          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
+          test "$smoke_status" -eq 0
+
+      - name: Package Windows MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $outputDir = "target/native-release/windows-wix"
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          @(
+              "tag=$env:RELEASE_TAG"
+              "source_sha=$env:SOURCE_SHA"
+              "previous_tag=$(if ($env:PREVIOUS_TAG) { $env:PREVIOUS_TAG } else { 'none' })"
+              "format=wix"
+          ) | Set-Content -LiteralPath "$outputDir/PACKAGE-EVIDENCE.txt" -Encoding utf8
+          $packageArguments = @{
+              Version = $env:RELEASE_VERSION
+              Format = "wix"
+              OutDir = $outputDir
+          }
+          & .\scripts\package-native.ps1 @packageArguments
+
+      - name: Validate Windows MSI structure, checksum, and smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageDir = Join-Path $env:GITHUB_WORKSPACE "target/native-release/windows-wix"
+          $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+          $checksumPath = "$msiPath.sha256"
+          $metadataPath = Join-Path $packageDir "RELEASE-METADATA.toml"
+          $evidencePath = Join-Path $packageDir "PACKAGE-EVIDENCE.txt"
+          $stagingDir = Join-Path $env:RUNNER_TEMP "legion-msi-staging"
+          $smokeDir = Join-Path $env:RUNNER_TEMP "legion-msi-smoke"
+          New-Item -ItemType Directory -Force -Path $stagingDir, $smokeDir | Out-Null
+
+          foreach ($required in @($msiPath, $checksumPath, $metadataPath)) {
+              if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                  throw "Missing required package file: $required"
+              }
+          }
+          $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Replace("`r", "").Trim()
+          if ($checksumLine -notmatch '^([0-9a-f]{64}) \*(.+)$') {
+              throw "Malformed checksum file: $checksumPath"
+          }
+          if ($Matches[2] -ne (Split-Path -Leaf $msiPath)) {
+              throw "Checksum names unexpected installer: $($Matches[2])"
+          }
+          $actualHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $Matches[1]) {
+              throw "MSI checksum mismatch"
+          }
+          $metadata = Get-Content -LiteralPath $metadataPath
+          foreach ($line in @(
+              "release_version = `"$env:RELEASE_VERSION`""
+              "git_sha = `"$env:SOURCE_SHA`""
+              'platform = "windows"'
+              'architecture = "x64"'
+              'format = "wix"'
+              'signer_status = "unsigned-beta/no-os-code-signing"'
+          )) {
+              if ($metadata -cnotcontains $line) {
+                  throw "Missing metadata line: $line"
+              }
+          }
+          Add-Content -LiteralPath $evidencePath -Value "checksum=passed sha256=$actualHash"
+
+          $env:MSI_PATH = $msiPath
+          $env:STAGING_DIR = $stagingDir
+          $arguments = @('/a', "`"$env:MSI_PATH`"", '/qn', "TARGETDIR=`"$env:STAGING_DIR`"", '/norestart')
+          $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+              throw "msiexec administrative install failed with exit code $($process.ExitCode)"
+          }
+          $stagedBinaries = @(
+              Get-ChildItem -LiteralPath $env:STAGING_DIR -Recurse -File -Filter "legion-desktop.exe"
+          )
+          if ($stagedBinaries.Count -ne 1) {
+              $found = ($stagedBinaries.FullName -join ", ")
+              throw "Expected exactly one staged legion-desktop.exe; found $($stagedBinaries.Count): $found"
+          }
+          $stagedBinary = $stagedBinaries[0].FullName
+
+          $windowsInstaller = $null
+          $database = $null
+          $view = $null
+          $record = $null
+          try {
+              $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
+              $database = $windowsInstaller.GetType().InvokeMember(
+                  "OpenDatabase",
+                  [System.Reflection.BindingFlags]::InvokeMethod,
+                  $null,
+                  $windowsInstaller,
+                  @($msiPath, 0)
+              )
+              $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''
+              $view = $database.GetType().InvokeMember(
+                  "OpenView",
+                  [System.Reflection.BindingFlags]::InvokeMethod,
+                  $null,
+                  $database,
+                  @($query)
+              )
+              $view.GetType().InvokeMember(
+                  "Execute",
+                  [System.Reflection.BindingFlags]::InvokeMethod,
+                  $null,
+                  $view,
+                  $null
+              ) | Out-Null
+              $record = $view.GetType().InvokeMember(
+                  "Fetch",
+                  [System.Reflection.BindingFlags]::InvokeMethod,
+                  $null,
+                  $view,
+                  $null
+              )
+              if ($null -eq $record) {
+                  throw "MSI Property table does not contain ProductVersion"
+              }
+              $productVersion = $record.GetType().InvokeMember(
+                  "StringData",
+                  [System.Reflection.BindingFlags]::GetProperty,
+                  $null,
+                  $record,
+                  @(1)
+              )
+              if ($productVersion -cne $env:RELEASE_VERSION) {
+                  throw "MSI ProductVersion mismatch: expected $env:RELEASE_VERSION, found $productVersion"
+              }
+          } finally {
+              if ($null -ne $view) {
+                  $view.GetType().InvokeMember(
+                      "Close",
+                      [System.Reflection.BindingFlags]::InvokeMethod,
+                      $null,
+                      $view,
+                      $null
+                  ) | Out-Null
+              }
+              foreach ($comObject in @($record, $view, $database, $windowsInstaller)) {
+                  if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                      [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
+                  }
+              }
+          }
+          Add-Content -LiteralPath $evidencePath -Value "package_version=passed version=$productVersion"
+          Add-Content -LiteralPath $evidencePath -Value "structure=passed binary=$stagedBinary"
+
+          $smokeLog = Join-Path $smokeDir "stdout-stderr.log"
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $smokeArguments = @(
+              "--beta-smoke"
+              "--duration-ms", "1500"
+              "--workspace", $env:GITHUB_WORKSPACE
+              "--beta-workspace", (Join-Path $smokeDir "workspace")
+              "--evidence", (Join-Path $smokeDir "beta-smoke.md")
+              "--session-state", (Join-Path $smokeDir "session.json")
+              "--diagnostics-export", (Join-Path $smokeDir "diagnostics.md")
+          )
+          & $stagedBinary @smokeArguments *> $smokeLog
+          $smokeStatus = $LASTEXITCODE
+          $ErrorActionPreference = $oldPreference
+          Add-Content -LiteralPath $evidencePath -Value "smoke_exit=$smokeStatus policy=hard-fail-beta-workflow-is-headless"
+          if (Test-Path -LiteralPath $smokeLog) {
+              Get-Content -LiteralPath $smokeLog | Add-Content -LiteralPath $evidencePath
+          }
+          $betaEvidence = Join-Path $smokeDir "beta-smoke.md"
+          if (Test-Path -LiteralPath $betaEvidence) {
+              Get-Content -LiteralPath $betaEvidence | Add-Content -LiteralPath $evidencePath
+          }
+          if ($smokeStatus -ne 0) {
+              throw "Installed MSI beta smoke failed with exit code $smokeStatus"
+          }
+
+      - name: Package macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir="target/native-release/macos-$PACKAGE_ARCHITECTURE-dmg"
+          mkdir -p "$output_dir"
+          printf 'tag=%s\nsource_sha=%s\nprevious_tag=%s\nformat=dmg\narchitecture=%s\n' \
+            "$RELEASE_TAG" "$SOURCE_SHA" "${PREVIOUS_TAG:-none}" "$PACKAGE_ARCHITECTURE" \
+            > "$output_dir/PACKAGE-EVIDENCE.txt"
+          bash scripts/package-native.sh \
+            --version "$RELEASE_VERSION" \
+            --format dmg \
+            --out-dir "$output_dir"
+
+      - name: Validate macOS DMG structure, checksum, and smoke
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stem="legion-desktop-macos-$PACKAGE_ARCHITECTURE-dmg"
+          package_dir="$GITHUB_WORKSPACE/target/native-release/macos-$PACKAGE_ARCHITECTURE-dmg"
+          dmg_path="$package_dir/$stem.dmg"
+          checksum_path="$dmg_path.sha256"
+          metadata_path="$package_dir/RELEASE-METADATA.toml"
+          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
+          staging_dir="$RUNNER_TEMP/legion-dmg-staging"
+          smoke_dir="$RUNNER_TEMP/legion-dmg-smoke"
+          attach_plist="$RUNNER_TEMP/legion-dmg-attach.plist"
+          mkdir -p "$staging_dir" "$smoke_dir"
+
+          test -s "$dmg_path"
+          test -s "$checksum_path"
+          test -s "$metadata_path"
+          checksum_line="$(tr -d '\r' < "$checksum_path")"
+          expected_hash="${checksum_line%% *}"
+          expected_file="${checksum_line#* }"
+          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
+          test "$expected_file" = "*$(basename "$dmg_path")"
+          actual_hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
+          test "$actual_hash" = "$expected_hash"
+          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
+          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
+          grep -Fqx 'platform = "macos"' "$metadata_path"
+          grep -Fqx "architecture = \"$PACKAGE_ARCHITECTURE\"" "$metadata_path"
+          grep -Fqx 'format = "dmg"' "$metadata_path"
+          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
+          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
+
+          hdiutil verify "$dmg_path" | tee -a "$evidence_path"
+          hdiutil attach "$dmg_path" -readonly -nobrowse -plist > "$attach_plist"
+          mount_point="$(python3 - "$attach_plist" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as source:
+              data = plistlib.load(source)
+          mounts = [
+              entity["mount-point"]
+              for entity in data.get("system-entities", [])
+              if "mount-point" in entity
+          ]
+          if len(mounts) != 1:
+              raise SystemExit(f"Expected one mounted volume, got {mounts!r}")
+          print(mounts[0])
+          PY
+          )"
+          cleanup() {
+            if [[ -n "${mount_point:-}" ]]; then
+              hdiutil detach "$mount_point" || true
+            fi
+          }
+          trap cleanup EXIT
+          app_count="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')"
+          test "$app_count" -eq 1
+          app_path="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          copied_app="$staging_dir/$(basename "$app_path")"
+          ditto "$app_path" "$copied_app"
+          info_plist="$copied_app/Contents/Info.plist"
+          staged_binary="$copied_app/Contents/MacOS/legion-desktop"
+          test -f "$info_plist"
+          test -x "$staged_binary"
+          bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")"
+          test "$bundle_version" = "$RELEASE_VERSION"
+          hdiutil detach "$mount_point"
+          mount_point=""
+          printf 'structure=passed app=%s binary=%s bundle_version=%s\n' \
+            "$copied_app" "$staged_binary" "$bundle_version" >> "$evidence_path"
+
+          set +e
+          "$staged_binary" \
+            --beta-smoke --duration-ms 1500 \
+            --workspace "$GITHUB_WORKSPACE" \
+            --beta-workspace "$smoke_dir/workspace" \
+            --evidence "$smoke_dir/beta-smoke.md" \
+            --session-state "$smoke_dir/session.json" \
+            --diagnostics-export "$smoke_dir/diagnostics.md" \
+            > "$smoke_dir/stdout-stderr.log" 2>&1
+          smoke_status=$?
+          set -e
+          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
+          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
+          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
+          test "$smoke_status" -eq 0
+
+      - name: Upload Linux DEB artifact
+        if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: gp5-report-${{ matrix.os }}
-          path: target/golden-path/gp5_report.toml
+          name: legion-desktop-linux-x64-deb
+          path: |
+            target/native-release/linux-deb/legion-desktop-linux-x64-deb.deb
+            target/native-release/linux-deb/legion-desktop-linux-x64-deb.deb.sha256
+            target/native-release/linux-deb/RELEASE-METADATA.toml
+            target/native-release/linux-deb/PACKAGE-EVIDENCE.txt
           if-no-files-found: error
 
-      - name: Upload release artifacts
+      - name: Upload Linux AppImage artifact
+        if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: legion-release-${{ matrix.os }}
+          name: legion-desktop-linux-x64-appimage
           path: |
-            target/release/legion-desktop*
-            target/release-pipeline/
-            target/preview/*.zip
-            target/preview/*.tar.gz
-          if-no-files-found: warn
+            target/native-release/linux-appimage/legion-desktop-linux-x64-appimage.AppImage
+            target/native-release/linux-appimage/legion-desktop-linux-x64-appimage.AppImage.sha256
+            target/native-release/linux-appimage/RELEASE-METADATA.toml
+            target/native-release/linux-appimage/PACKAGE-EVIDENCE.txt
+          if-no-files-found: error
+
+      - name: Upload Windows MSI artifact
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-desktop-windows-x64-msi
+          path: |
+            target/native-release/windows-wix/legion-desktop-windows-x64-msi.msi
+            target/native-release/windows-wix/legion-desktop-windows-x64-msi.msi.sha256
+            target/native-release/windows-wix/RELEASE-METADATA.toml
+            target/native-release/windows-wix/PACKAGE-EVIDENCE.txt
+          if-no-files-found: error
+
+      - name: Upload macOS DMG artifact
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-desktop-macos-${{ matrix.architecture }}-dmg
+          path: |
+            target/native-release/macos-${{ matrix.architecture }}-dmg/legion-desktop-macos-${{ matrix.architecture }}-dmg.dmg
+            target/native-release/macos-${{ matrix.architecture }}-dmg/legion-desktop-macos-${{ matrix.architecture }}-dmg.dmg.sha256
+            target/native-release/macos-${{ matrix.architecture }}-dmg/RELEASE-METADATA.toml
+            target/native-release/macos-${{ matrix.architecture }}-dmg/PACKAGE-EVIDENCE.txt
+          if-no-files-found: error
+
+  publish:
+    name: Publish unsigned beta prerelease
+    needs: [prepare, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+    steps:
+      - name: Checkout prepared source and tags
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Download native package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: legion-desktop-*
+          path: downloaded
+
+      - name: Verify and stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          verify_package() {
+            local stem="$1"
+            local extension="$2"
+            local platform="$3"
+            local architecture="$4"
+            local format="$5"
+            local artifact_dir="downloaded/$stem"
+            local installer="$artifact_dir/$stem.$extension"
+            local checksum="$installer.sha256"
+            local metadata="$artifact_dir/RELEASE-METADATA.toml"
+            local evidence="$artifact_dir/PACKAGE-EVIDENCE.txt"
+            local checksum_line expected_hash expected_file actual_hash
+
+            for required in "$installer" "$checksum" "$metadata" "$evidence"; do
+              test -s "$required" || { echo "Missing required release file: $required" >&2; return 1; }
+            done
+            checksum_line="$(tr -d '\r' < "$checksum")"
+            expected_hash="${checksum_line%% *}"
+            expected_file="${checksum_line#* }"
+            [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
+            test "$expected_file" = "*$(basename "$installer")"
+            actual_hash="$(sha256sum "$installer" | awk '{print $1}')"
+            test "$actual_hash" = "$expected_hash"
+            grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata"
+            grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata"
+            grep -Fqx "platform = \"$platform\"" "$metadata"
+            grep -Fqx "architecture = \"$architecture\"" "$metadata"
+            grep -Fqx "format = \"$format\"" "$metadata"
+            grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata"
+
+            cp "$installer" "$checksum" dist/
+            cp "$metadata" "dist/$stem-RELEASE-METADATA.toml"
+            cp "$evidence" "dist/$stem-PACKAGE-EVIDENCE.txt"
+          }
+
+          verify_package legion-desktop-linux-x64-deb deb linux x64 deb
+          verify_package legion-desktop-linux-x64-appimage AppImage linux x64 appimage
+          verify_package legion-desktop-windows-x64-msi msi windows x64 wix
+          verify_package legion-desktop-macos-x64-dmg dmg macos x64 dmg
+          verify_package legion-desktop-macos-arm64-dmg dmg macos arm64 dmg
+
+          artifact_count="$(find downloaded -mindepth 1 -maxdepth 1 -type d -name 'legion-desktop-*' | wc -l | tr -d ' ')"
+          installer_count="$(find downloaded -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*.dmg' \) | wc -l | tr -d ' ')"
+          test "$artifact_count" -eq 5
+          test "$installer_count" -eq 5
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 20
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          source_sha = os.environ["SOURCE_SHA"]
+          previous_tag = os.environ.get("PREVIOUS_TAG") or "none (first native prerelease)"
+          notes = f"""# Legion {tag}
+
+          Source commit: `{source_sha}`
+          Previous native tag: `{previous_tag}`
+
+          > **Unsigned beta:** these installers have no OS code signature or notarization. Verify the matching SHA-256 file before testing. Windows SmartScreen and macOS Gatekeeper may warn.
+
+          ## Windows x64 MSI
+
+          Verify the checksum, then install with `msiexec /i legion-desktop-windows-x64-msi.msi`. For a non-installing test, extract with `msiexec /a legion-desktop-windows-x64-msi.msi /qn TARGETDIR=<staging-dir>`, locate the single extracted `legion-desktop.exe` below that directory, and run it with `--beta-smoke --duration-ms 1500`.
+
+          ## macOS DMG
+
+          Choose the x64 DMG for Intel or the arm64 DMG for Apple Silicon. Run `hdiutil verify <dmg>`, open it, and copy Legion to Applications. Because it is unsigned, use Finder's explicit **Open** action only after verifying the checksum. Test with `/Applications/Legion.app/Contents/MacOS/legion-desktop --beta-smoke --duration-ms 1500`.
+
+          ## Debian/Ubuntu x64
+
+          Verify the checksum, install with `sudo apt install ./legion-desktop-linux-x64-deb.deb`, then run `legion-desktop --beta-smoke --duration-ms 1500`.
+
+          ## Linux x64 AppImage
+
+          Verify the checksum, run `chmod +x legion-desktop-linux-x64-appimage.AppImage`, then test with `./legion-desktop-linux-x64-appimage.AppImage --appimage-extract-and-run --beta-smoke --duration-ms 1500`.
+
+          The beta smoke command is supported by the current application and runs the headless beta workflow. Package structure and checksum validation are hard release gates.
+          """
+          Path("release-notes.md").write_text(notes, encoding="utf-8")
+          PY
+
+      - name: Recheck tag and publish prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          read -r fresh_tag fresh_version < <(python3 - <<'PY'
+          import re
+          import subprocess
+
+          tags = subprocess.run(
+              ["git", "tag", "--list", "v0.0.*"],
+              check=True,
+              text=True,
+              capture_output=True,
+          ).stdout.splitlines()
+          pattern = re.compile(r"v0\.0\.([1-9][0-9]*)")
+          malformed = [tag for tag in tags if pattern.fullmatch(tag) is None]
+          if malformed:
+              raise SystemExit(
+                  "Malformed v0.0.* tag(s): " + ", ".join(sorted(malformed))
+              )
+
+          maximum = max((int(pattern.fullmatch(tag).group(1)) for tag in tags), default=0)
+          version = f"0.0.{maximum + 1}"
+          print(f"v{version} {version}")
+          PY
+          )
+          if [[ "$fresh_tag" != "$TAG" || "$fresh_version" != "$RELEASE_VERSION" ]]; then
+            echo "A tag appeared after prepare; expected $TAG/$RELEASE_VERSION, found $fresh_tag/$fresh_version. Rerun this workflow." >&2
+            exit 1
+          fi
+
+          git push origin "$SOURCE_SHA:refs/tags/$TAG"
+          remote_tag="$(git ls-remote origin "refs/tags/$TAG")"
+          if [[ "$remote_tag" != "$SOURCE_SHA"$'\t'"refs/tags/$TAG" ]]; then
+            echo "Origin tag $TAG does not resolve exactly to $SOURCE_SHA" >&2
+            exit 1
+          fi
+
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Legion $TAG" \
+            --prerelease \
+            --notes-file release-notes.md
+          gh release upload "$TAG" dist/*

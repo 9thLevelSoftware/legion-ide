@@ -1,7 +1,16 @@
-# Legion desktop release pipeline (WS17.T1 dry-run scaffold + PKT-SIGN signing paths)
+# Legion desktop release pipeline (supplementary dry-run descriptors + PKT-SIGN signing paths)
 #
-# channel: "stable"  -> version = <workspace.package.version>, rollout_policy = "full"
-# channel: "preview" -> version = <workspace.package.version>-preview, rollout_policy = "staged"
+# These descriptors are planning metadata for `xtask release-pipeline --dry-run`;
+# they do not build installers or create GitHub tags/releases. Their version stamp
+# is derived from the workspace package version and channel, and is not a GitHub
+# release tag. The installed manual-only Legion Native Release
+# (`legion-release.yml`) workflow is authoritative for release publication: it computes the next `v0.0.N` tag
+# and injects its numeric version into the package scripts. The concrete `0.0.1`
+# command values below are placeholders; the workflow substitutes its computed
+# version before invoking each script.
+#
+# channel: "stable"  -> descriptor rollout_policy = "full"
+# channel: "preview" -> descriptor rollout_policy = "staged"
 #
 # Signing modes (PKT-SIGN / ADR-0042):
 #   --dry-run         : signer_status = "dry-run/no-production-signer", sha256 = "pending"
@@ -22,7 +31,7 @@
 #
 # NEVER put key material in this file — only reference strings.
 package_name = "legion-desktop"
-dist_tool = "cargo-dist"
+dist_tool = "cargo-packager"
 
 # ---------------------------------------------------------------------------
 # Signer reference (ADR-0042 / PKT-SIGN) — reference only, no key material.
@@ -53,47 +62,41 @@ signature = "ed25519-detached"
 [[installer_targets]]
 name = "legion-desktop-macos-x64-dmg"
 platform = "macos"
+# Run this descriptor only on a native x86_64 macOS runner.
 target = "x86_64-apple-darwin"
 artifact = "dmg"
-build_command = "cargo dist build --target x86_64-apple-darwin"
-verification_command = "spctl --assess --type open --context context:primary-signature <artifact>"
+build_command = "bash scripts/package-native.sh --version 0.0.1 --format dmg --out-dir target/release-pipeline/legion-desktop-macos-x64-dmg"
+verification_command = "hdiutil verify <artifact> && hdiutil attach -nobrowse -readonly <artifact> && hdiutil detach <mount-point>"
 
 [[installer_targets]]
 name = "legion-desktop-macos-arm64-dmg"
 platform = "macos"
+# Run this descriptor only on a native aarch64 macOS runner.
 target = "aarch64-apple-darwin"
 artifact = "dmg"
-build_command = "cargo dist build --target aarch64-apple-darwin"
-verification_command = "spctl --assess --type open --context context:primary-signature <artifact>"
+build_command = "bash scripts/package-native.sh --version 0.0.1 --format dmg --out-dir target/release-pipeline/legion-desktop-macos-arm64-dmg"
+verification_command = "hdiutil verify <artifact> && hdiutil attach -nobrowse -readonly <artifact> && hdiutil detach <mount-point>"
 
 [[installer_targets]]
 name = "legion-desktop-windows-x64-msi"
 platform = "windows"
 target = "x86_64-pc-windows-msvc"
 artifact = "msi"
-build_command = "cargo dist build --target x86_64-pc-windows-msvc"
-verification_command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -DryRun"
+build_command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-native.ps1 -Version 0.0.1 -Format wix -OutDir target/release-pipeline/legion-desktop-windows-x64-msi"
+verification_command = "msiexec /a <artifact> /qn TARGETDIR=<staging-dir> && recursively locate exactly one legion-desktop.exe below <staging-dir> && <discovered-legion-desktop.exe> --beta-smoke --duration-ms 1500"
 
 [[installer_targets]]
 name = "legion-desktop-linux-x64-deb"
 platform = "linux"
 target = "x86_64-unknown-linux-gnu"
 artifact = "deb"
-build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
-verification_command = "dpkg-deb --info <artifact>"
-
-[[installer_targets]]
-name = "legion-desktop-linux-x64-rpm"
-platform = "linux"
-target = "x86_64-unknown-linux-gnu"
-artifact = "rpm"
-build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
-verification_command = "rpm --checksig <artifact>"
+build_command = "bash scripts/package-native.sh --version 0.0.1 --format deb --out-dir target/release-pipeline/legion-desktop-linux-x64-deb"
+verification_command = "dpkg-deb --info <artifact> && dpkg-deb -x <artifact> <staging-dir>"
 
 [[installer_targets]]
 name = "legion-desktop-linux-x64-appimage"
 platform = "linux"
 target = "x86_64-unknown-linux-gnu"
 artifact = "AppImage"
-build_command = "cargo dist build --target x86_64-unknown-linux-gnu"
-verification_command = "bash scripts/gui-smoke.sh --dry-run"
+build_command = "bash scripts/package-native.sh --version 0.0.1 --format appimage --out-dir target/release-pipeline/legion-desktop-linux-x64-appimage"
+verification_command = "chmod +x <artifact> && xvfb-run --auto-servernum <artifact> --appimage-extract-and-run --beta-smoke --duration-ms 1500"

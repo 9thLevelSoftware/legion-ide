@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Legion
+Comment=Legion IDE desktop application
+Exec=legion-desktop
+Icon=legion
+Terminal=false
+Categories=Development;IDE;
