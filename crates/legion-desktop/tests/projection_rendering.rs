@@ -12,23 +12,24 @@ use legion_desktop::view::{
 };
 use legion_protocol::LanguageCodeLensProjection;
 use legion_protocol::{
-    ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, BufferId, BufferVersion, ByteRange,
-    CanonicalPath, CapabilityId, CollaborationParticipantId, CollaborationPresenceProjection,
-    CollaborationSessionId, CommandDescriptor, CommandRegistryProjection, CommandRiskLabel,
-    ContextManifestEgressStatus, ContextManifestInclusionState, ContextManifestItem,
-    ContextManifestItemCount, ContextManifestItemKind, FileFingerprint, FileId,
-    LanguageStickyScopeProjection, LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor,
-    PluginContribution, PluginContributionProjection, PluginId, PrincipalId,
-    ProposalContextManifestSummary, ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId,
-    ProposalLedgerProjection, ProposalLedgerRow, ProposalLifecycleState,
-    ProposalLifecycleStateDisplay, ProposalPayloadKind, ProposalPrivacyLabel, ProposalRiskLabel,
-    ProposalRollbackAvailability, ProposalTargetCoverage, ProposalTargetCoverageKind,
-    ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId, SystemGraphEdge,
-    SystemGraphNode, SystemGraphProjection, TerminalSessionId, TextCoordinate, TimestampMillis,
-    Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow, VerificationRunState,
-    ViewportDimensions, ViewportFoldRange, ViewportLineSlice, ViewportLineTruncationState,
-    ViewportProjection, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay, WorkspaceId,
+    ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow, AssistedAiOperationClass,
+    AssistedAiProviderAvailabilityState, AssistedAiProviderCapabilitySummary,
+    AssistedAiProviderClass, BufferId, BufferVersion, ByteRange, CanonicalPath, CapabilityId,
+    CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
+    CommandDescriptor, CommandRegistryProjection, CommandRiskLabel, ContextManifestEgressStatus,
+    ContextManifestInclusionState, ContextManifestItem, ContextManifestItemCount,
+    ContextManifestItemKind, FileFingerprint, FileId, LanguageStickyScopeProjection,
+    LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
+    PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
+    ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
+    ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
+    ProposalPrivacyLabel, ProposalRiskLabel, ProposalRollbackAvailability, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProtocolTextRange, RedactionHint, SemanticPrivacyScope, SnapshotId,
+    SystemGraphEdge, SystemGraphNode, SystemGraphProjection, TerminalSessionId, TextCoordinate,
+    TimestampMillis, Utf16Position, Utf16Range, VerificationRunProjection, VerificationRunRow,
+    VerificationRunState, ViewportDimensions, ViewportFoldRange, ViewportLineSlice,
+    ViewportLineTruncationState, ViewportProjection, ViewportProjectionMode, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, WorkspaceId,
 };
 use legion_ui::ui::{
     CloseDirtyPromptProjection, DailyEditingProjection, EditorTabProjection, EditorTabsProjection,
@@ -2826,6 +2827,187 @@ fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
 }
 
 #[test]
+fn projection_rendering_authority_ribbon_is_28px_below_top_bar() {
+    let ctx = egui::Context::default();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Authority ribbon").projection_snapshot();
+
+    let _ = render_projection_frame(&ctx, &mut view, &snapshot);
+    let rects = view
+        .last_shell_panel_rects()
+        .expect("the composed shell must record panel rectangles");
+
+    assert!((rects.authority.height() - 28.0).abs() <= 1.0);
+    assert!((rects.authority.top() - rects.top.bottom()).abs() <= 1.0);
+
+    for (label, top) in [
+        ("left workspace surface", rects.left.top()),
+        ("right workspace surface", rects.right.top()),
+        ("center workspace surface", rects.center.top()),
+    ] {
+        assert!(
+            (top - rects.top.bottom() - 28.0).abs() <= 1.0,
+            "{label} must begin immediately below the 28px authority ribbon; top={top}, command_bar_bottom={}",
+            rects.top.bottom()
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_authority_ribbon_uses_exact_mode_baselines() {
+    for (mode, expected) in [
+        (DockMode::Manual, "Manual · AI off · Workspace tools only"),
+        (DockMode::Assist, "Assist · Suggestions require acceptance"),
+        (
+            DockMode::Delegate,
+            "Delegate · Workspace scope · Changes remain proposals",
+        ),
+        (
+            DockMode::Automate,
+            "Workflows · Reviews remain approval-gated",
+        ),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let mut snapshot = Shell::empty("Authority baseline").projection_snapshot();
+        snapshot.product_mode = mode;
+
+        let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        assert!(
+            accesskit_has_label(&full, expected),
+            "{mode:?} must render its exact authority baseline `{expected}`"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_authority_ribbon_surfaces_projected_readiness_and_boundary() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.assisted_ai_projection.providers = vec![AssistedAiProviderCapabilitySummary {
+        provider_id: "local".to_string(),
+        provider_label: "Local".to_string(),
+        provider_class: AssistedAiProviderClass::Local,
+        supported_operations: vec![AssistedAiOperationClass::ProposeEdit],
+        supported_operation_count: 1,
+        model_capability_label_count: 1,
+        tool_capability_label_count: 0,
+        context_window_label: "bounded".to_string(),
+        cost_budget_label: "free".to_string(),
+        risk_budget_label: "review required".to_string(),
+        privacy_retention_label: "local only".to_string(),
+        availability: AssistedAiProviderAvailabilityState::Available,
+        refusal: None,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }];
+    snapshot.assisted_ai_projection.provider_count = 1;
+    snapshot.approval_checklist_projection.ready_for_approval = true;
+
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for expected in [
+        "Workspace 1",
+        "1 provider ready",
+        "Ready for approval · acceptance still required",
+    ] {
+        assert!(
+            accesskit_has_label(&full, expected),
+            "authority ribbon must surface projected context `{expected}`"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_each_mode_exposes_authority_status_in_shell_hierarchy() {
+    for (mode, expected) in [
+        (DockMode::Manual, "Manual · AI off · Workspace tools only"),
+        (DockMode::Assist, "Assist · Suggestions require acceptance"),
+        (
+            DockMode::Delegate,
+            "Delegate · Workspace scope · Changes remain proposals",
+        ),
+        (
+            DockMode::Automate,
+            "Workflows · Reviews remain approval-gated",
+        ),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let mut snapshot = Shell::empty("Authority hierarchy").projection_snapshot();
+        snapshot.product_mode = mode;
+
+        let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+        let rects = view
+            .last_shell_panel_rects()
+            .expect("the composed shell must record panel rectangles");
+        let node = full
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("authority hierarchy should expose AccessKit")
+            .nodes
+            .iter()
+            .find_map(|(_id, node)| {
+                (node.label() == Some(expected) || node.value() == Some(expected)).then_some(node)
+            })
+            .unwrap_or_else(|| panic!("{mode:?} authority status must be rendered"));
+        let bounds = node.bounds().expect("authority status must have bounds");
+
+        assert_eq!(node.role(), egui::accesskit::Role::Status);
+        assert!(bounds.y0 >= f64::from(rects.top.bottom()) - 1.0);
+        assert!(bounds.y1 <= f64::from(rects.left.top()) + 1.0);
+    }
+}
+
+#[test]
+fn projection_rendering_primary_shell_controls_meet_28px_semantic_target() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("Semantic targets").projection_snapshot();
+
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    for label in [
+        "Manual",
+        "Assist",
+        "Delegate",
+        "Legion Workflows",
+        "Command",
+    ] {
+        let bounds = accesskit_bounds(&full, label, true);
+        assert!(
+            bounds.y1 - bounds.y0 >= 28.0,
+            "primary shell control `{label}` must use the semantic >=28px target; bounds={bounds:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_missing_assist_provider_uses_prerequisite_card() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Provider prerequisite").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+
+    let (_closed, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Assist workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert!(accesskit_has_label(&full, "Model provider"));
+    assert!(accesskit_has_label(&full, "Required"));
+    assert!(accesskit_has_label(&full, "No model providers projected"));
+}
+
+#[test]
 fn projection_rendering_shell_panels_preserve_physical_prototype_edges() {
     let assert_edge = |label: &str, actual: f32, expected: f32| {
         assert!(
@@ -2847,15 +3029,19 @@ fn projection_rendering_shell_panels_preserve_physical_prototype_edges() {
         assert_edge("top right", rects.top.right(), size.x);
         assert_edge("status left", rects.status.left(), 0.0);
         assert_edge("status right", rects.status.right(), size.x);
-        assert_edge("left top", rects.left.top(), rects.top.bottom());
+        assert_edge("authority top", rects.authority.top(), rects.top.bottom());
+        assert_edge("authority left", rects.authority.left(), 0.0);
+        assert_edge("authority right", rects.authority.right(), size.x);
+        assert_edge("left top", rects.left.top(), rects.authority.bottom());
         assert_edge("left bottom", rects.left.bottom(), rects.status.top());
-        assert_edge("right top", rects.right.top(), rects.top.bottom());
+        assert_edge("right top", rects.right.top(), rects.authority.bottom());
         assert_edge("right bottom", rects.right.bottom(), rects.status.top());
         assert_edge("bottom left", rects.bottom.left(), rects.left.right());
         assert_edge("bottom right", rects.bottom.right(), rects.right.left());
         assert_edge("bottom bottom", rects.bottom.bottom(), rects.status.top());
         assert_edge("center left", rects.center.left(), rects.left.right());
         assert_edge("center right", rects.center.right(), rects.right.left());
+        assert_edge("center top", rects.center.top(), rects.authority.bottom());
         assert_edge("center bottom", rects.center.bottom(), rects.bottom.top());
         assert_edge(
             "console height",

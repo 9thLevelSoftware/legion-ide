@@ -43,10 +43,14 @@ impl ThemePreference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Theme {
     pub(crate) variant: ThemeVariant,
+    pub(crate) surfaces: SurfaceTokens,
     pub(crate) bg: BackgroundTokens,
     pub(crate) border: BorderTokens,
+    pub(crate) focus: FocusTokens,
     pub(crate) text: TextTokens,
     pub(crate) accent: AccentTokens,
+    pub(crate) modes: ModeTokens,
+    pub(crate) controls: ControlStateTokens,
     pub(crate) diagnostic: DiagnosticTokens,
     pub(crate) search: SearchTokens,
     pub(crate) chrome: ChromeTokens,
@@ -54,12 +58,21 @@ pub(crate) struct Theme {
     pub(crate) spacing: SpacingScale,
     pub(crate) radius: RadiusScale,
     pub(crate) typography: TypographyScale,
+    pub(crate) control_height: ControlHeightScale,
 }
 
 impl Theme {
     pub(crate) const fn dark() -> Self {
         Self {
             variant: ThemeVariant::Dark,
+            surfaces: SurfaceTokens {
+                canvas: Color32::from_rgb(0x12, 0x1a, 0x23),
+                panel: Color32::from_rgb(0x1d, 0x2a, 0x38),
+                raised: Color32::from_rgb(0x22, 0x31, 0x41),
+                toolbar: Color32::from_rgb(0x16, 0x20, 0x2b),
+                input: Color32::from_rgb(0x1a, 0x26, 0x33),
+                overlay: Color32::from_rgb(0x20, 0x2e, 0x3d),
+            },
             bg: BackgroundTokens {
                 surface: Color32::from_rgb(0x16, 0x20, 0x2b),
                 panel: Color32::from_rgb(0x1d, 0x2a, 0x38),
@@ -80,6 +93,10 @@ impl Theme {
                 strong: Color32::from_rgb(0x3b, 0x4d, 0x60),
                 focus: Color32::from_rgb(0x55, 0xa7, 0xd8),
             },
+            focus: FocusTokens {
+                ring: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                selection: Color32::from_rgb(0x2a, 0x3d, 0x50),
+            },
             text: TextTokens {
                 primary: Color32::from_rgb(0xf4, 0xf1, 0xeb),
                 secondary: Color32::from_rgb(0xc4, 0xcc, 0xd6),
@@ -96,6 +113,19 @@ impl Theme {
                 orange: Color32::from_rgb(0xdc, 0x9a, 0x50),
                 green: Color32::from_rgb(0x4f, 0xae, 0x6d),
                 red: Color32::from_rgb(0xd2, 0x3b, 0x2e),
+            },
+            modes: ModeTokens {
+                manual: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                assist: Color32::from_rgb(0x55, 0xa7, 0xd8),
+                delegate: Color32::from_rgb(0x9b, 0x86, 0xdc),
+                workflows: Color32::from_rgb(0xb2, 0x7d, 0xc4),
+            },
+            controls: ControlStateTokens {
+                rest: Color32::from_rgb(0x22, 0x31, 0x41),
+                hover: Color32::from_rgb(0x25, 0x35, 0x46),
+                active: Color32::from_rgb(0x2a, 0x3d, 0x50),
+                disabled: Color32::from_rgb(0x16, 0x20, 0x2b),
+                disabled_foreground: Color32::from_rgb(0x5d, 0x6a, 0x79),
             },
             code_canvas: CodeCanvasTokens {
                 background: Color32::from_rgb(0x12, 0x1a, 0x23),
@@ -131,12 +161,21 @@ impl Theme {
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
             typography: TypographyScale::standard(),
+            control_height: ControlHeightScale::standard(),
         }
     }
 
     pub(crate) const fn light() -> Self {
         Self {
             variant: ThemeVariant::Light,
+            surfaces: SurfaceTokens {
+                canvas: Color32::from_rgb(242, 243, 246),
+                panel: Color32::from_rgb(248, 248, 250),
+                raised: Color32::from_rgb(255, 255, 255),
+                toolbar: Color32::from_rgb(255, 255, 255),
+                input: Color32::from_rgb(243, 243, 245),
+                overlay: Color32::from_rgb(255, 255, 255),
+            },
             bg: BackgroundTokens {
                 surface: Color32::from_rgb(255, 255, 255),
                 panel: Color32::from_rgb(248, 248, 250),
@@ -157,6 +196,10 @@ impl Theme {
                 strong: Color32::from_rgba_unmultiplied_const(0, 0, 0, 46),
                 focus: Color32::from_rgb(0x1e, 0x70, 0xaa),
             },
+            focus: FocusTokens {
+                ring: Color32::from_rgb(0x1e, 0x70, 0xaa),
+                selection: Color32::from_rgb(236, 236, 240),
+            },
             text: TextTokens {
                 primary: Color32::from_rgb(3, 2, 19),
                 secondary: Color32::from_rgb(74, 75, 88),
@@ -173,6 +216,19 @@ impl Theme {
                 orange: Color32::from_rgb(180, 91, 18),
                 green: Color32::from_rgb(35, 125, 72),
                 red: Color32::from_rgb(190, 48, 38),
+            },
+            modes: ModeTokens {
+                manual: Color32::from_rgb(113, 113, 130),
+                assist: Color32::from_rgb(22, 113, 158),
+                delegate: Color32::from_rgb(111, 76, 219),
+                workflows: Color32::from_rgb(145, 83, 220),
+            },
+            controls: ControlStateTokens {
+                rest: Color32::from_rgb(255, 255, 255),
+                hover: Color32::from_rgb(233, 235, 239),
+                active: Color32::from_rgb(236, 236, 240),
+                disabled: Color32::from_rgb(248, 248, 250),
+                disabled_foreground: Color32::from_rgb(151, 153, 166),
             },
             code_canvas: CodeCanvasTokens {
                 background: Color32::from_rgb(247, 247, 249),
@@ -208,8 +264,19 @@ impl Theme {
             spacing: SpacingScale::standard(),
             radius: RadiusScale::standard(),
             typography: TypographyScale::standard(),
+            control_height: ControlHeightScale::standard(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SurfaceTokens {
+    pub(crate) canvas: Color32,
+    pub(crate) panel: Color32,
+    pub(crate) raised: Color32,
+    pub(crate) toolbar: Color32,
+    pub(crate) input: Color32,
+    pub(crate) overlay: Color32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +304,12 @@ pub(crate) struct BorderTokens {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FocusTokens {
+    pub(crate) ring: Color32,
+    pub(crate) selection: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TextTokens {
     pub(crate) primary: Color32,
     pub(crate) secondary: Color32,
@@ -255,6 +328,23 @@ pub(crate) struct AccentTokens {
     pub(crate) orange: Color32,
     pub(crate) green: Color32,
     pub(crate) red: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModeTokens {
+    pub(crate) manual: Color32,
+    pub(crate) assist: Color32,
+    pub(crate) delegate: Color32,
+    pub(crate) workflows: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ControlStateTokens {
+    pub(crate) rest: Color32,
+    pub(crate) hover: Color32,
+    pub(crate) active: Color32,
+    pub(crate) disabled: Color32,
+    pub(crate) disabled_foreground: Color32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +447,23 @@ impl TypographyScale {
             title: 15,
             code: 12,
             code_muted: 11,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ControlHeightScale {
+    pub(crate) compact: u8,
+    pub(crate) standard: u8,
+    pub(crate) prominent: u8,
+}
+
+impl ControlHeightScale {
+    const fn standard() -> Self {
+        Self {
+            compact: 24,
+            standard: 28,
+            prominent: 32,
         }
     }
 }
@@ -509,26 +616,27 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
         ThemeVariant::Dark => egui::Visuals::dark(),
         ThemeVariant::Light => egui::Visuals::light(),
     };
-    visuals.panel_fill = theme.bg.surface;
-    visuals.window_fill = theme.bg.overlay;
+    visuals.panel_fill = theme.surfaces.canvas;
+    visuals.window_fill = theme.surfaces.overlay;
     visuals.extreme_bg_color = theme.code_canvas.background;
-    visuals.faint_bg_color = theme.bg.card;
-    visuals.selection.bg_fill = theme.bg.active;
-    visuals.selection.stroke = Stroke::new(1.0_f32, theme.accent.cyan);
+    visuals.faint_bg_color = theme.surfaces.raised;
+    visuals.selection.bg_fill = theme.focus.selection;
+    visuals.selection.stroke = Stroke::new(1.0_f32, theme.focus.ring);
     visuals.warn_fg_color = theme.accent.amber;
     visuals.error_fg_color = theme.accent.red;
-    visuals.widgets.noninteractive.bg_fill = theme.bg.panel;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, theme.text.secondary);
-    visuals.widgets.inactive.bg_fill = theme.bg.card;
+    visuals.widgets.noninteractive.bg_fill = theme.controls.disabled;
+    visuals.widgets.noninteractive.fg_stroke =
+        Stroke::new(1.0_f32, theme.controls.disabled_foreground);
+    visuals.widgets.inactive.bg_fill = theme.controls.rest;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, theme.text.secondary);
-    visuals.widgets.hovered.bg_fill = theme.bg.hover;
+    visuals.widgets.hovered.bg_fill = theme.controls.hover;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, theme.border.strong);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, theme.text.primary);
-    visuals.widgets.active.bg_fill = theme.bg.active;
+    visuals.widgets.active.bg_fill = theme.controls.active;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, theme.border.strong);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, theme.text.primary);
-    visuals.widgets.open.bg_fill = theme.bg.active;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, theme.border.focus);
+    visuals.widgets.open.bg_fill = theme.controls.active;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, theme.focus.ring);
     visuals.window_corner_radius = CornerRadius::same(theme.radius.md);
     visuals.menu_corner_radius = CornerRadius::same(theme.radius.md);
     ctx.set_visuals(visuals);
@@ -550,7 +658,7 @@ pub(crate) fn pane_frame(fill: Color32) -> Frame {
 
 pub(crate) fn toolbar_frame() -> Frame {
     Frame::NONE
-        .fill(tokens().bg.toolbar)
+        .fill(tokens().surfaces.toolbar)
         .stroke(Stroke::new(1.0_f32, tokens().border.subtle))
         .inner_margin(Margin::symmetric(
             tokens().spacing.lg,
@@ -568,7 +676,7 @@ pub(crate) fn card_frame_tinted(fill: Color32, stroke: Color32) -> Frame {
 
 pub(crate) fn small_card_frame() -> Frame {
     Frame::NONE
-        .fill(tokens().bg.card)
+        .fill(tokens().surfaces.raised)
         .stroke(Stroke::new(1.0_f32, tokens().border.default))
         .corner_radius(CornerRadius::same(tokens().radius.sm))
         .inner_margin(Margin::symmetric(
@@ -679,12 +787,20 @@ mod tests {
 
         assert_eq!(dark.variant, ThemeVariant::Dark);
         assert_eq!(light.variant, ThemeVariant::Light);
+        assert_ne!(dark.surfaces.canvas, light.surfaces.canvas);
+        assert_ne!(dark.surfaces.panel, dark.surfaces.raised);
         assert_ne!(dark.bg.surface, light.bg.surface);
         assert_ne!(dark.text.primary, light.text.primary);
         assert_ne!(dark.border.default, light.border.default);
+        assert_ne!(dark.focus.ring, light.focus.ring);
         assert_ne!(dark.accent.red, light.accent.red);
+        assert_ne!(dark.modes.assist, light.modes.assist);
+        assert_ne!(dark.controls.rest, dark.controls.hover);
         assert_eq!(dark.spacing.md, light.spacing.md);
         assert_eq!(dark.radius.md, light.radius.md);
+        assert_eq!(dark.control_height.compact, 24);
+        assert_eq!(dark.control_height.standard, 28);
+        assert_eq!(dark.control_height.prominent, 32);
     }
 
     #[test]
