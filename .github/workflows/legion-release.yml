@@ -1,13 +1,21 @@
 name: Legion Native Release
 
-# Manual-only unsigned-beta native installer release. This workflow validates
-# the workspace, builds and inspects every native package, and creates the tag
-# only after all package jobs succeed.
+# Manual-only unsigned-beta native installer release. This workflow supports a
+# verify-only mode that can build and validate all installers without mutating
+# GitHub state, and a publish mode that may tag and release only after every
+# package job succeeds.
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Validate installers only, or validate and publish the next v0.0.N release"
+        required: true
+        default: verify-only
+        type: choice
+        options: [verify-only, publish]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: legion-release-serial
@@ -24,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
+      mode: ${{ steps.release.outputs.mode }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       source_sha: ${{ steps.release.outputs.source_sha }}
@@ -38,10 +47,12 @@ jobs:
         id: release
         shell: bash
         env:
+          RELEASE_MODE: ${{ inputs.mode }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           git fetch --force --tags origin
+          printf 'mode=%s\n' "$RELEASE_MODE" >> "$GITHUB_OUTPUT"
           python3 - <<'PY'
           import os
           import re
@@ -257,6 +268,7 @@ jobs:
           evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
           staging_dir="$RUNNER_TEMP/legion-deb-staging"
           smoke_dir="$RUNNER_TEMP/legion-deb-smoke"
+          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/linux-x64-deb/workspace"
           mkdir -p "$staging_dir" "$smoke_dir"
 
           test -s "$deb_path"
@@ -295,7 +307,7 @@ jobs:
           xvfb-run --auto-servernum "$staged_binary" \
             --beta-smoke --duration-ms 1500 \
             --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$smoke_dir/workspace" \
+            --beta-workspace "$beta_workspace" \
             --evidence "$smoke_dir/beta-smoke.md" \
             --session-state "$smoke_dir/session.json" \
             --diagnostics-export "$smoke_dir/diagnostics.md" \
@@ -319,6 +331,7 @@ jobs:
           evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
           smoke_dir="$RUNNER_TEMP/legion-appimage-smoke"
           extract_dir="$RUNNER_TEMP/legion-appimage-extract"
+          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/linux-x64-appimage/workspace"
           mkdir -p "$smoke_dir" "$extract_dir"
 
           test -s "$appimage_path"
@@ -358,7 +371,7 @@ jobs:
           xvfb-run --auto-servernum "$appimage_path" --appimage-extract-and-run \
             --beta-smoke --duration-ms 1500 \
             --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$smoke_dir/workspace" \
+            --beta-workspace "$beta_workspace" \
             --evidence "$smoke_dir/beta-smoke.md" \
             --session-state "$smoke_dir/session.json" \
             --diagnostics-export "$smoke_dir/diagnostics.md" \
@@ -402,6 +415,7 @@ jobs:
           $evidencePath = Join-Path $packageDir "PACKAGE-EVIDENCE.txt"
           $stagingDir = Join-Path $env:RUNNER_TEMP "legion-msi-staging"
           $smokeDir = Join-Path $env:RUNNER_TEMP "legion-msi-smoke"
+          $betaWorkspace = Join-Path $env:GITHUB_WORKSPACE "target/release-smoke/windows-x64-msi/workspace"
           New-Item -ItemType Directory -Force -Path $stagingDir, $smokeDir | Out-Null
 
           foreach ($required in @($msiPath, $checksumPath, $metadataPath)) {
@@ -457,57 +471,21 @@ jobs:
           $record = $null
           try {
               $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
-              $database = $windowsInstaller.GetType().InvokeMember(
-                  "OpenDatabase",
-                  [System.Reflection.BindingFlags]::InvokeMethod,
-                  $null,
-                  $windowsInstaller,
-                  @($msiPath, 0)
-              )
+              $database = $windowsInstaller.OpenDatabase($msiPath, 0)
               $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''
-              $view = $database.GetType().InvokeMember(
-                  "OpenView",
-                  [System.Reflection.BindingFlags]::InvokeMethod,
-                  $null,
-                  $database,
-                  @($query)
-              )
-              $view.GetType().InvokeMember(
-                  "Execute",
-                  [System.Reflection.BindingFlags]::InvokeMethod,
-                  $null,
-                  $view,
-                  $null
-              ) | Out-Null
-              $record = $view.GetType().InvokeMember(
-                  "Fetch",
-                  [System.Reflection.BindingFlags]::InvokeMethod,
-                  $null,
-                  $view,
-                  $null
-              )
+              $view = $database.OpenView($query)
+              $view.Execute()
+              $record = $view.Fetch()
               if ($null -eq $record) {
                   throw "MSI Property table does not contain ProductVersion"
               }
-              $productVersion = $record.GetType().InvokeMember(
-                  "StringData",
-                  [System.Reflection.BindingFlags]::GetProperty,
-                  $null,
-                  $record,
-                  @(1)
-              )
+              $productVersion = $record.StringData(1)
               if ($productVersion -cne $env:RELEASE_VERSION) {
                   throw "MSI ProductVersion mismatch: expected $env:RELEASE_VERSION, found $productVersion"
               }
           } finally {
               if ($null -ne $view) {
-                  $view.GetType().InvokeMember(
-                      "Close",
-                      [System.Reflection.BindingFlags]::InvokeMethod,
-                      $null,
-                      $view,
-                      $null
-                  ) | Out-Null
+                  $view.Close()
               }
               foreach ($comObject in @($record, $view, $database, $windowsInstaller)) {
                   if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
@@ -525,7 +503,7 @@ jobs:
               "--beta-smoke"
               "--duration-ms", "1500"
               "--workspace", $env:GITHUB_WORKSPACE
-              "--beta-workspace", (Join-Path $smokeDir "workspace")
+              "--beta-workspace", $betaWorkspace
               "--evidence", (Join-Path $smokeDir "beta-smoke.md")
               "--session-state", (Join-Path $smokeDir "session.json")
               "--diagnostics-export", (Join-Path $smokeDir "diagnostics.md")
@@ -574,6 +552,7 @@ jobs:
           staging_dir="$RUNNER_TEMP/legion-dmg-staging"
           smoke_dir="$RUNNER_TEMP/legion-dmg-smoke"
           attach_plist="$RUNNER_TEMP/legion-dmg-attach.plist"
+          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/macos-$PACKAGE_ARCHITECTURE-dmg/workspace"
           mkdir -p "$staging_dir" "$smoke_dir"
 
           test -s "$dmg_path"
@@ -638,7 +617,7 @@ jobs:
           "$staged_binary" \
             --beta-smoke --duration-ms 1500 \
             --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$smoke_dir/workspace" \
+            --beta-workspace "$beta_workspace" \
             --evidence "$smoke_dir/beta-smoke.md" \
             --session-state "$smoke_dir/session.json" \
             --diagnostics-export "$smoke_dir/diagnostics.md" \
@@ -701,8 +680,11 @@ jobs:
   publish:
     name: Publish unsigned beta prerelease
     needs: [prepare, package]
+    if: ${{ inputs.mode == 'publish' && needs.package.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
