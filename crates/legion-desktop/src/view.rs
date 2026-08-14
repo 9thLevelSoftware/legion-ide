@@ -5489,6 +5489,54 @@ fn delegated_runtime_label(
     }
 }
 
+fn legion_workflow_lifecycle_label(state: legion_protocol::LegionWorkflowState) -> &'static str {
+    use legion_protocol::LegionWorkflowState as State;
+    match state {
+        State::Draft => "Draft",
+        State::Planning => "Planning",
+        State::Executing => "Running",
+        State::Verifying => "Verifying",
+        State::WaitingForApproval => "Waiting for approval",
+        State::WaitingOnHuman => "Waiting for input",
+        State::Blocked => "Blocked",
+        State::Completed => "Completed",
+        State::Failed => "Failed",
+        State::Cancelled => "Cancelled",
+    }
+}
+
+fn legion_workflow_merge_label(
+    state: legion_protocol::LegionWorkflowMergeReadinessState,
+) -> &'static str {
+    use legion_protocol::LegionWorkflowMergeReadinessState as State;
+    match state {
+        State::WaitingForApproval => "Waiting for approval",
+        State::Ready => "Ready for review",
+        State::Blocked => "Blocked",
+    }
+}
+
+fn legion_workflow_risk_state_label(
+    state: legion_protocol::LegionWorkflowRiskMonitorState,
+) -> &'static str {
+    use legion_protocol::LegionWorkflowRiskMonitorState as State;
+    match state {
+        State::Nominal => "Within limits",
+        State::Warning => "Approaching limit",
+        State::Halted => "Work stopped",
+    }
+}
+
+fn proposal_risk_label(risk: ProposalRiskLabel) -> &'static str {
+    match risk {
+        ProposalRiskLabel::Informational => "Informational",
+        ProposalRiskLabel::Low => "Low",
+        ProposalRiskLabel::Medium => "Medium",
+        ProposalRiskLabel::High => "High",
+        ProposalRiskLabel::Unknown => "Unknown",
+    }
+}
+
 fn render_fleet_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -5515,7 +5563,7 @@ fn render_fleet_console(
                 )));
                 ui.horizontal_wrapped(|ui| {
                     ui.label(theme::accent(
-                        format!("{:?}", row.lifecycle_state),
+                        legion_workflow_lifecycle_label(row.lifecycle_state),
                         theme::tokens().accent.blue,
                     ));
                     ui.separator();
@@ -5527,11 +5575,11 @@ fn render_fleet_console(
                     )));
                 });
                 ui.label(theme::muted(format!(
-                    "sign-off {}/{} · conflicts {} · merge {:?}",
+                    "Sign-off {} of {} · Conflicts {} · Merge: {}",
                     row.signed_off_count,
                     row.sign_off_count,
                     row.unresolved_conflict_count,
-                    row.merge_readiness.state
+                    legion_workflow_merge_label(row.merge_readiness.state)
                 )));
             });
         }
@@ -5547,9 +5595,10 @@ fn render_fleet_console(
             section_label(ui, "Permissions", Some(theme::tokens().accent.orange));
             render_legion_workflow_tool_permission_controls(ui, snapshot, actions);
         }
-        if has_armed_cancellable_legion_workflow(snapshot) {
+        let stoppable_workflows = visible_stoppable_legion_workflows(snapshot);
+        if !stoppable_workflows.is_empty() {
             section_label(ui, "Stop controls", Some(theme::tokens().accent.red));
-            render_legion_workflow_kill_switch_controls(ui, snapshot, actions);
+            render_legion_workflow_kill_switch_controls(ui, &stoppable_workflows, actions);
         }
 
         let worker_panel = worker_panel::DesktopWorkerPanelViewModel::from_snapshot(snapshot);
@@ -5570,8 +5619,8 @@ fn render_fleet_console(
                 ui.label(theme::body_strong(format!("Workflow risk {}", index + 1)));
                 ui.label(theme::accent(
                     format!(
-                        "{:?} · score {}/{} · high risk {} · denied {}",
-                        monitor.state,
+                        "{} · Risk score {} of {} · High-risk actions {} · Denied tools {}",
+                        legion_workflow_risk_state_label(monitor.state),
                         monitor.risk_score,
                         monitor.halt_threshold,
                         monitor.high_risk_action_count,
@@ -5614,10 +5663,10 @@ fn render_legion_workflow_budget_rows(
         theme::small_card_frame().show(ui, |ui| {
             ui.label(theme::body_strong(format!("Worker budget {}", index + 1)));
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::muted(&row.budget_label));
+                ui.label(theme::muted(user_facing_protocol_label(&row.budget_label)));
                 ui.separator();
                 ui.label(theme::accent(
-                    &row.status_label,
+                    user_facing_protocol_label(&row.status_label),
                     if row.status_label == "within-budget" {
                         theme::tokens().accent.green
                     } else {
@@ -5625,13 +5674,65 @@ fn render_legion_workflow_budget_rows(
                     },
                 ));
             });
-            ui.label(theme::muted(&row.model_turns_label));
-            ui.label(theme::muted(&row.tool_calls_label));
-            ui.label(theme::muted(&row.retry_label));
-            ui.label(theme::muted(&row.output_bytes_label));
-            ui.label(theme::muted(&row.wall_clock_label));
+            ui.label(theme::muted(workflow_budget_usage_label(
+                &row.model_turns_label,
+                "model_turns=",
+                "Model turns",
+                "",
+            )));
+            ui.label(theme::muted(workflow_budget_usage_label(
+                &row.tool_calls_label,
+                "tool_calls=",
+                "Tool calls",
+                "",
+            )));
+            ui.label(theme::muted(workflow_budget_usage_label(
+                &row.retry_label,
+                "retries=",
+                "Retries",
+                "",
+            )));
+            ui.label(theme::muted(workflow_budget_usage_label(
+                &row.output_bytes_label,
+                "output_bytes=",
+                "Output",
+                " bytes",
+            )));
+            ui.label(theme::muted(workflow_budget_usage_label(
+                &row.wall_clock_label,
+                "wall_clock=",
+                "Time",
+                " ms",
+            )));
         });
     }
+}
+
+fn workflow_budget_usage_label(raw: &str, prefix: &str, title: &str, unit: &str) -> String {
+    let parsed = raw
+        .strip_prefix(prefix)
+        .and_then(|usage| usage.split_once('/'))
+        .map(|(used, limit)| {
+            let limit = if unit == " ms" {
+                limit.strip_suffix("ms").unwrap_or(limit)
+            } else {
+                limit
+            };
+            (used, limit)
+        })
+        .filter(|(used, limit)| !used.is_empty() && !limit.is_empty());
+    match parsed {
+        Some((used, limit)) => format!("{title} {used} of {limit}{unit}"),
+        None => user_facing_protocol_label(raw),
+    }
+}
+
+fn user_facing_protocol_label(raw: &str) -> String {
+    let mut label = raw.replace(['_', '-'], " ").replace('=', ":");
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
 }
 
 fn render_proposal_cards(
@@ -5672,7 +5773,7 @@ fn render_proposal_cards(
                 ui.label(theme::muted(format!("{:?}", row.payload_kind)));
                 ui.separator();
                 ui.label(theme::accent(
-                    format!("{:?} risk", row.risk_label),
+                    format!("Risk: {}", proposal_risk_label(row.risk_label)),
                     risk_color(row.risk_label),
                 ));
             });
@@ -5848,12 +5949,16 @@ fn render_legion_workflow_tool_permission_controls(
                 index + 1
             )));
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::muted(format!("{:?}", request.profile)));
+                ui.label(theme::muted(workflow_permission_profile_label(
+                    request.profile,
+                )));
                 ui.separator();
-                ui.label(theme::muted(format!("{:?}", request.action_class)));
+                ui.label(theme::muted(workflow_permission_action_label(
+                    request.action_class,
+                )));
                 ui.separator();
                 ui.label(theme::accent(
-                    format!("{:?}", request.disposition),
+                    workflow_permission_disposition_label(request.disposition),
                     if request.deny_overrides {
                         theme::tokens().accent.red
                     } else if request.runtime_allowed {
@@ -5884,6 +5989,46 @@ fn render_legion_workflow_tool_permission_controls(
     }
 }
 
+fn workflow_permission_profile_label(
+    profile: legion_protocol::DelegatedTaskToolPermissionProfile,
+) -> &'static str {
+    use legion_protocol::DelegatedTaskToolPermissionProfile as Profile;
+    match profile {
+        Profile::Ask => "Ask each time",
+        Profile::Write => "Changes workspace",
+    }
+}
+
+fn workflow_permission_action_label(
+    action: legion_protocol::PermissionBudgetActionClass,
+) -> &'static str {
+    use legion_protocol::PermissionBudgetActionClass as Action;
+    match action {
+        Action::ReadContext => "Reads task context",
+        Action::ReadSemanticMetadata => "Reads code metadata",
+        Action::InvokeLocalTool => "Uses a local tool",
+        Action::InvokeProvider => "Uses a model provider",
+        Action::ProposeEdits => "Proposes edits",
+        Action::ApplyApprovedProposal => "Applies an approved proposal",
+        Action::AccessNetwork => "Uses the network",
+        Action::AccessTerminal => "Uses the terminal",
+        Action::AccessWorkspaceFiles => "Accesses workspace files",
+        Action::RetainMemory => "Retains workspace memory",
+    }
+}
+
+fn workflow_permission_disposition_label(
+    disposition: legion_protocol::DelegatedTaskToolPermissionDisposition,
+) -> &'static str {
+    use legion_protocol::DelegatedTaskToolPermissionDisposition as Disposition;
+    match disposition {
+        Disposition::WaitingForConfirmation => "Waiting for confirmation",
+        Disposition::AllowedOnce => "Allowed once",
+        Disposition::AlwaysAllowed => "Always allowed",
+        Disposition::Denied => "Denied",
+    }
+}
+
 fn parse_automate_permission_session(
     request: &legion_protocol::DelegatedTaskToolPermissionRequest,
 ) -> Option<legion_protocol::LegionWorkflowSessionId> {
@@ -5897,22 +6042,10 @@ fn parse_automate_permission_session(
 
 fn render_legion_workflow_kill_switch_controls(
     ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
+    rows: &[&legion_protocol::LegionWorkflowProjectionRow],
     actions: &mut Vec<DesktopAction>,
 ) {
-    for row in snapshot.legion_workflow_projection.rows.iter().take(3) {
-        let armed = legion_workflow_is_cancellable(row.lifecycle_state)
-            && snapshot
-                .legion_workflow_projection
-                .kill_switches
-                .iter()
-                .any(|switch| {
-                    switch.session_id == row.session_id
-                        && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
-                });
-        if !armed {
-            continue;
-        }
+    for row in rows {
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::muted("Workflow stop"));
             if soft_button(ui, "Kill").clicked() {
@@ -5925,18 +6058,26 @@ fn render_legion_workflow_kill_switch_controls(
     }
 }
 
-fn has_armed_cancellable_legion_workflow(snapshot: &ShellProjectionSnapshot) -> bool {
-    snapshot.legion_workflow_projection.rows.iter().any(|row| {
-        legion_workflow_is_cancellable(row.lifecycle_state)
-            && snapshot
-                .legion_workflow_projection
-                .kill_switches
-                .iter()
-                .any(|switch| {
-                    switch.session_id == row.session_id
-                        && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
-                })
-    })
+fn visible_stoppable_legion_workflows(
+    snapshot: &ShellProjectionSnapshot,
+) -> Vec<&legion_protocol::LegionWorkflowProjectionRow> {
+    snapshot
+        .legion_workflow_projection
+        .rows
+        .iter()
+        .take(3)
+        .filter(|row| {
+            legion_workflow_is_cancellable(row.lifecycle_state)
+                && snapshot
+                    .legion_workflow_projection
+                    .kill_switches
+                    .iter()
+                    .any(|switch| {
+                        switch.session_id == row.session_id
+                            && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
+                    })
+        })
+        .collect()
 }
 
 fn legion_workflow_is_cancellable(state: legion_protocol::LegionWorkflowState) -> bool {
