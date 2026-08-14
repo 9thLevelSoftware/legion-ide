@@ -5902,9 +5902,14 @@ fn render_fleet_console(
     }
     if !workflows.risk_monitors.is_empty() {
         section_label(ui, "Risk gate", Some(theme::tokens().accent.red));
-        for (index, monitor) in workflows.risk_monitors.iter().take(3).enumerate() {
+        for monitor in workflows.risk_monitors.iter().take(3) {
             theme::small_card_frame().show(ui, |ui| {
-                ui.label(theme::body_strong(format!("Workflow risk {}", index + 1)));
+                let workflow_label = legion_workflow_ordinal(snapshot, &monitor.session_id)
+                    .map_or_else(
+                        || "Unlisted workflow".to_string(),
+                        |ordinal| format!("Workflow {ordinal}"),
+                    );
+                ui.label(theme::body_strong(format!("{workflow_label} risk")));
                 ui.label(theme::accent(
                     format!(
                         "{} · Risk score {} of {} · High-risk actions {} · Denied tools {}",
@@ -6238,9 +6243,18 @@ fn render_legion_workflow_tool_permission_controls(
             continue;
         };
         theme::small_card_frame().show(ui, |ui| {
+            let workflow_label = legion_workflow_ordinal(snapshot, &session_id).map_or_else(
+                || "Unlisted workflow".to_string(),
+                |ordinal| format!("Workflow {ordinal}"),
+            );
             ui.label(theme::body_strong(format!(
-                "Tool permission request {}",
+                "{workflow_label} · Tool permission request {}",
                 index + 1
+            )));
+            ui.label(theme::body(format!(
+                "Target: {} · {}",
+                workflow_permission_server_label(snapshot, &server_id),
+                tool_name.0
             )));
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::muted(workflow_permission_profile_label(
@@ -6334,6 +6348,33 @@ fn parse_automate_permission_session(
     })
 }
 
+fn legion_workflow_ordinal(
+    snapshot: &ShellProjectionSnapshot,
+    session_id: &legion_protocol::LegionWorkflowSessionId,
+) -> Option<usize> {
+    snapshot
+        .legion_workflow_projection
+        .rows
+        .iter()
+        .position(|row| &row.session_id == session_id)
+        .map(|index| index + 1)
+}
+
+fn workflow_permission_server_label(
+    snapshot: &ShellProjectionSnapshot,
+    server_id: &legion_protocol::McpServerId,
+) -> String {
+    snapshot
+        .legion_workflow_projection
+        .mcp_registries
+        .iter()
+        .find(|registry| &registry.server.server_id == server_id)
+        .map(|registry| registry.server.display_label.trim())
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Unregistered MCP server")
+        .to_string()
+}
+
 fn render_legion_workflow_kill_switch_controls(
     ui: &mut egui::Ui,
     rows: &[(usize, &legion_protocol::LegionWorkflowProjectionRow)],
@@ -6341,7 +6382,7 @@ fn render_legion_workflow_kill_switch_controls(
 ) {
     for (row_index, row) in rows {
         ui.horizontal_wrapped(|ui| {
-            ui.label(theme::muted("Workflow stop"));
+            ui.label(theme::muted(format!("Workflow {} stop", row_index + 1)));
             let stop = soft_button(ui, "Kill");
             ui.ctx().accesskit_node_builder(stop.id, |node| {
                 node.set_label(format!("Stop workflow session {}", row_index + 1));

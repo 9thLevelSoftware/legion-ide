@@ -576,6 +576,85 @@ fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
 }
 
 #[test]
+fn legion_workflow_stop_controls_show_the_target_workflow_visibly() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    let mut second_row = snapshot.legion_workflow_projection.rows[0].clone();
+    second_row.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.rows.push(second_row);
+    let mut second_switch = snapshot.legion_workflow_projection.kill_switches[0].clone();
+    second_switch.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot
+        .legion_workflow_projection
+        .kill_switches
+        .push(second_switch);
+    snapshot.legion_workflow_projection.total_session_count = 2;
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Workflow 1 stop"));
+    assert!(workflow_has_label(&full, "Workflow 2 stop"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 1"
+    ));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 2"
+    ));
+}
+
+#[test]
+fn legion_workflow_permission_card_shows_the_authorized_server_and_tool() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_contains_text(
+        &full,
+        "Target: Test MCP · write_file"
+    ));
+    assert!(workflow_contains_text(
+        &full,
+        "Workflow 1 · Tool permission request 1"
+    ));
+}
+
+#[test]
+fn legion_workflow_risk_cards_follow_session_identity_not_monitor_order() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    let mut second_row = snapshot.legion_workflow_projection.rows[0].clone();
+    second_row.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.rows.push(second_row);
+    snapshot.legion_workflow_projection.total_session_count = 2;
+
+    let first_monitor = snapshot.legion_workflow_projection.risk_monitors[0].clone();
+    let mut second_monitor = first_monitor.clone();
+    second_monitor.monitor_id = LegionWorkflowRiskMonitorId("risk:beta".to_string());
+    second_monitor.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.risk_monitors = vec![second_monitor, first_monitor];
+    snapshot.legion_workflow_projection.risk_monitor_count = 2;
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Workflow 2 risk"));
+    assert!(workflow_has_label(&full, "Workflow 1 risk"));
+    assert!(!workflow_has_label(&full, "Workflow risk 1"));
+    assert!(!workflow_has_label(&full, "Workflow risk 2"));
+}
+
+#[test]
 fn legion_workflow_live_surfaces_hide_projection_copy_and_raw_identifiers() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
