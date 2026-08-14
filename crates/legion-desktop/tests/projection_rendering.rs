@@ -3274,6 +3274,55 @@ fn projection_rendering_delegate_review_targets_owned_proposal_in_one_home() {
 }
 
 #[test]
+fn projection_rendering_delegate_review_advances_past_terminal_owned_proposals() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = Shell::empty("Delegate review queue").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.plan_count = 1;
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::WaitingForApproval;
+    let preview_link = |proposal_id: u64, lifecycle_state| DelegatedTaskProposalPreviewLink {
+        link_id: format!("delegate:preview:{proposal_id}"),
+        proposal_id: ProposalId(proposal_id),
+        payload_kind: ProposalPayloadKind::WorkspaceEdit,
+        lifecycle_state,
+        approval_checklist: None,
+        checkpoint_rollback: None,
+        target_count: 1,
+        hunk_count: 1,
+        full_source_redacted: true,
+        risk_label: ProposalRiskLabel::Low,
+        privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    };
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .push(preview_link(701, ProposalLifecycleState::Applied));
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .push(preview_link(702, ProposalLifecycleState::Created));
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Delegate workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (approved, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Approve");
+
+    assert_eq!(
+        approved.actions,
+        vec![DesktopAction::ApproveProposal {
+            proposal_id: ProposalId(702)
+        }],
+        "a terminal proposal must not strand the next delegated proposal awaiting review"
+    );
+}
+
+#[test]
 fn projection_rendering_delegate_owned_runtime_and_task_rows_activate_real_console() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -3701,6 +3750,32 @@ fn projection_rendering_setup_is_one_four_item_checklist() {
             "Setup must not split the checklist into the old `{old_section}` section"
         );
     }
+}
+
+#[test]
+fn projection_rendering_setup_does_not_claim_an_empty_workspace_is_open() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("First run").projection_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Setup");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let setup_text = accesskit_dialog_text(&full, "Welcome to Legion");
+
+    assert!(
+        setup_text
+            .iter()
+            .any(|row| row == "No workspace is open. Open a workspace to begin."),
+        "an empty first-run snapshot should explain the workspace prerequisite: {setup_text:?}"
+    );
+    assert!(
+        setup_text
+            .iter()
+            .all(|row| !row.starts_with("This workspace is open.")),
+        "Setup must not claim an unprojected workspace is open: {setup_text:?}"
+    );
 }
 
 #[test]

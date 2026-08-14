@@ -651,14 +651,32 @@ impl DesktopSetupChecklistViewModel {
                 provider.availability == AssistedAiProviderAvailabilityState::Available
             })
             .count();
+        let manifest = &snapshot.context_manifest_projection.manifest;
+        let workspace_projected = snapshot.active_buffer_projection.workspace_id.is_some()
+            || manifest.workspace_id.is_some()
+            || manifest.workspace_trust_state.is_some();
+        let workspace_detail = if !workspace_projected {
+            "No workspace is open. Open a workspace to begin.".to_string()
+        } else {
+            match manifest.workspace_trust_state.as_ref() {
+                Some(legion_protocol::WorkspaceTrustState::Trusted) => {
+                    "Workspace is open and trusted. Workspace tools are available.".to_string()
+                }
+                Some(legion_protocol::WorkspaceTrustState::Untrusted) => {
+                    "Workspace is open but not trusted. Review workspace trust before running tools."
+                        .to_string()
+                }
+                Some(legion_protocol::WorkspaceTrustState::Unknown) | None => format!(
+                    "Workspace is open. Review its trust before running workspace tools. Current mode: {}.",
+                    projected_product_mode(snapshot).label()
+                ),
+            }
+        };
         Self {
             items: [
                 DesktopSetupChecklistItem {
                     title: "Step 1 · Open and trust a workspace",
-                    detail: format!(
-                        "This workspace is open. Review its trust before running workspace tools. Current mode: {}.",
-                        projected_product_mode(snapshot).label()
-                    ),
+                    detail: workspace_detail,
                 },
                 DesktopSetupChecklistItem {
                     title: "Step 2 · Optionally configure an AI provider",
@@ -4932,7 +4950,7 @@ fn render_delegated_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    if let Some(proposal_id) = first_delegate_owned_proposal_id(snapshot) {
+    if let Some(proposal_id) = next_delegate_owned_proposal_id(snapshot) {
         let lifecycle = delegate_owned_proposal_lifecycle(snapshot, proposal_id);
         let awaiting_decision = lifecycle.is_some_and(|state| {
             matches!(
@@ -7240,18 +7258,34 @@ fn delegate_owned_proposal_ids(snapshot: &ShellProjectionSnapshot) -> Vec<Propos
         })
 }
 
-fn first_delegate_owned_proposal_id(snapshot: &ShellProjectionSnapshot) -> Option<ProposalId> {
+fn next_delegate_owned_proposal_id(snapshot: &ShellProjectionSnapshot) -> Option<ProposalId> {
     let owned = delegate_owned_proposal_ids(snapshot);
-    snapshot
+    let mut candidates = snapshot
         .delegated_task_projection
         .proposal_reviews
         .iter()
-        .find_map(|review| {
+        .filter_map(|review| {
             owned
                 .contains(&review.proposal_id)
                 .then_some(review.proposal_id)
         })
-        .or_else(|| owned.first().copied())
+        .collect::<Vec<_>>();
+    for proposal_id in owned {
+        if !candidates.contains(&proposal_id) {
+            candidates.push(proposal_id);
+        }
+    }
+    candidates.into_iter().find(|proposal_id| {
+        delegate_owned_proposal_lifecycle(snapshot, *proposal_id).is_some_and(|state| {
+            matches!(
+                state,
+                ProposalLifecycleState::Created
+                    | ProposalLifecycleState::Validated
+                    | ProposalLifecycleState::Previewed
+                    | ProposalLifecycleState::Approved
+            )
+        })
+    })
 }
 
 fn delegate_owned_proposal_lifecycle(
