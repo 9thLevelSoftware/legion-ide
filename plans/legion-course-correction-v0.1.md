@@ -142,6 +142,22 @@ before committing this plan: `git pull --ff-only origin main` brought local to `
 Lesson for future reviews: always `git fetch` and check `rev-list --count HEAD...origin/main`
 before drawing any divergence conclusion.
 
+### W9 (LOW) — Canonical docs deleted by a broad cleanup commit while README/INDEX still referenced them. FIXED.
+
+Commit `293d80f` ("clean up", 2026-08-12) swept away `.almanac/`, `.omh/`, and — as
+collateral — the two canonical docs `docs/LEGION_PIVOT.md` and `docs/LEGION_RENAME.md`,
+while `README.md` (lines 22, 111) and `docs/INDEX.md` (lines 16, 18, 27, 30) still list
+them as primary docs. `LEGION_RENAME.md` documents a real validator rule ("validators
+intentionally accept historical markers when checking archived evidence") that the xtask
+evidence gates implement, and `LEGION_PIVOT.md` is the canonical product/roadmap entry
+point. Both were restored from history (`git checkout 293d80f^ -- docs/LEGION_PIVOT.md
+docs/LEGION_RENAME.md`). Root-cause note: the `docs-hygiene` gate's `BrokenRelativeLink`
+check only catches Markdown-link syntax (bracket-then-parenthesis), not backtick-quoted
+prose references like `` `docs/LEGION_PIVOT.md` ``, so this class of dangling-reference
+regressed silently.
+A follow-up could teach `docs-hygiene` to also validate backtick `docs/*.md` references in
+`README.md`/`docs/INDEX.md`.
+
 ---
 
 ## PART 4 — COURSE CORRECTION (replace wrongs with rights)
