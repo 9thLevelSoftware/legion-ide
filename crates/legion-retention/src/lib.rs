@@ -1,3 +1,4 @@
+//! Substrate complete; product activation gated on PR-UI-001 (see ADR-0046).
 //! Phase 8 raw-source retention fixture and production vault primitives.
 
 #![warn(missing_docs)]

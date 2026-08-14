@@ -336,3 +336,140 @@ fn text_file_with_no_nul_opens_normally() {
         result.err()
     );
 }
+
+/// Streaming open produces the same buffer state as the String-based open path.
+#[test]
+fn streaming_open_matches_string_open() {
+    const THRESHOLD: usize = 512;
+
+    let text = large_text(THRESHOLD + 128);
+    let dir = std::env::temp_dir().join("legion_editor_streaming_test");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file_path = dir.join("streaming_match.rs");
+    std::fs::write(&file_path, &text).expect("write test file");
+
+    // String-based open.
+    let mut engine_string = EditorEngine::with_thresholds(EditorThresholds {
+        large_file_threshold_bytes: THRESHOLD,
+        retention_budget_snapshots: 8,
+    });
+    let buf_string = engine_string
+        .open_buffer(
+            WorkspaceId(1),
+            FileId(1),
+            "streaming_match.rs",
+            text.clone(),
+        )
+        .expect("string open");
+
+    // Streaming open.
+    let mut engine_stream = EditorEngine::with_thresholds(EditorThresholds {
+        large_file_threshold_bytes: THRESHOLD,
+        retention_budget_snapshots: 8,
+    });
+    let buf_stream = engine_stream
+        .open_buffer_streaming(WorkspaceId(1), FileId(1), "streaming_match.rs", &file_path)
+        .expect("streaming open");
+
+    // Both must be in degraded mode.
+    assert_eq!(
+        engine_string.buffer_mode(buf_string).unwrap(),
+        BufferMode::Degraded
+    );
+    assert_eq!(
+        engine_stream.buffer_mode(buf_stream).unwrap(),
+        BufferMode::Degraded
+    );
+
+    // Snapshot metadata must match.
+    let snap_string = engine_string.current_snapshot(buf_string).unwrap();
+    let snap_stream = engine_stream.current_snapshot(buf_stream).unwrap();
+    assert_eq!(snap_string.byte_len, snap_stream.byte_len);
+    assert_eq!(snap_string.line_count, snap_stream.line_count);
+    assert_eq!(snap_string.content_hash, snap_stream.content_hash);
+
+    // Viewport projections must produce identical visible text.
+    let request = EditorViewportRequest {
+        buffer_id: buf_string,
+        scroll: ViewportScroll {
+            top_line: 5,
+            left_column: 0,
+        },
+        dimensions: ViewportDimensions {
+            width_px: 800,
+            height_px: 640,
+        },
+    };
+    let proj_string = engine_string.viewport_projection(request).unwrap();
+    let proj_stream = engine_stream
+        .viewport_projection(EditorViewportRequest {
+            buffer_id: buf_stream,
+            ..request
+        })
+        .unwrap();
+    assert_eq!(proj_string.line_slices.len(), proj_stream.line_slices.len());
+    for (s, r) in proj_string
+        .line_slices
+        .iter()
+        .zip(proj_stream.line_slices.iter())
+    {
+        assert_eq!(s.visible_text, r.visible_text);
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// Streaming open detects binary files and refuses them.
+#[test]
+fn streaming_open_detects_binary() {
+    let dir = std::env::temp_dir().join("legion_editor_streaming_binary_test");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file_path = dir.join("binary.bin");
+    std::fs::write(&file_path, b"hello\x00world binary").expect("write binary file");
+
+    let mut engine = EditorEngine::new();
+    let result = engine.open_buffer_streaming(WorkspaceId(1), FileId(1), "binary.bin", &file_path);
+    assert!(result.is_err(), "binary file should be refused");
+    let err = result.unwrap_err();
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("binary"),
+        "error should mention binary: {err_msg}"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// Streaming open of a small (normal-mode) file works correctly.
+#[test]
+fn streaming_open_small_file_is_normal_mode() {
+    let dir = std::env::temp_dir().join("legion_editor_streaming_small_test");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let file_path = dir.join("small.rs");
+    let text = "fn main() {\n    println!(\"hello\");\n}\n";
+    std::fs::write(&file_path, text).expect("write test file");
+
+    let mut engine = EditorEngine::new();
+    let buffer = engine
+        .open_buffer_streaming(WorkspaceId(1), FileId(1), "small.rs", &file_path)
+        .expect("streaming open small file");
+
+    assert_eq!(
+        engine.buffer_mode(buffer).unwrap(),
+        BufferMode::Normal,
+        "small file must open in Normal mode via streaming"
+    );
+    assert_eq!(
+        engine.text(buffer).unwrap(),
+        text,
+        "text must match for small file opened via streaming"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir(&dir);
+}

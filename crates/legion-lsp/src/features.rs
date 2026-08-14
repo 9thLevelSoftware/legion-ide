@@ -196,6 +196,47 @@ mod tests {
     }
 }
 
+/// Build a JSON-RPC `textDocument/prepareCallHierarchy` request.
+pub fn prepare_call_hierarchy_request(
+    id: u64,
+    text_document_uri: &str,
+    position: &TextCoordinate,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "textDocument/prepareCallHierarchy",
+        "params": {
+            "textDocument": { "uri": text_document_uri },
+            "position": { "line": position.line, "character": position.character }
+        }
+    })
+}
+
+/// Build a JSON-RPC `callHierarchy/incomingCalls` request.
+pub fn incoming_calls_request(id: u64, item: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "callHierarchy/incomingCalls",
+        "params": {
+            "item": item
+        }
+    })
+}
+
+/// Build a JSON-RPC `callHierarchy/outgoingCalls` request.
+pub fn outgoing_calls_request(id: u64, item: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "callHierarchy/outgoingCalls",
+        "params": {
+            "item": item
+        }
+    })
+}
+
 /// Build a JSON-RPC `textDocument/rename` request.
 pub fn rename_request(
     id: u64,

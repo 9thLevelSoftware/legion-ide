@@ -25,7 +25,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules across the UI, app composition, workspace/project, AI/provider, and other layers. Read this before making any change that crosses a layer boundary.
 - `SECURITY.md` — public-facing security model, platform caveats, egress policy, secret-handling posture, plugin isolation, and responsible-disclosure policy.
 - `LEGION_PIVOT.md` — product direction, pivot context, and the boundaries between the current validated substrate and the eventual product surface.
-- `MODES.md` — semantics and boundaries of the Manual, Assist, Delegate, and Legion Workflow modes; includes what each mode permits and forbids.
+- `MODES.md` — semantics and boundaries of the Manual (default), Assist, Delegate, and Legion Workflow modes; Manual is the primary mode with zero AI and zero egress.
 - `OPERATOR_RUNBOOK.md` — operator-oriented gate list, subagent execution pattern, safety checks, and Phase 8 dry-run procedures. The runbook is the day-to-day reference for running the phase gates and dispatching work.
 - `LEGION_RENAME.md` — history of the Devil → Legion rename, including the rationale for allowing old Devil-era markers to remain in archived evidence and the rules for current user-facing docs.
 
@@ -39,6 +39,8 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/legion-production-master-plan-v0.2.md` — the current production master plan: current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, and milestones from accepted substrate evidence to production utility.
 - `../plans/evidence/production/WS-A-D/campaign-charter.md` — **active next-wave campaign** after WS-P0: dogfood → real DAP → sandbox isolation → WS17 release (no VSIX).
 - `../plans/adrs/ADR-0044-dap-client-architecture.md` — **Proposed** real DAP client architecture (Phase 2 B0); fixture dual-path until accepted + dependency-policy activation.
+- `../plans/adrs/ADR-0046-surface-expansion-freeze.md` — no new crates or surface activation until Manual mode is daily-drivable (PR-UI-001 promotion).
+- `../plans/adrs/ADR-0047-extension-distribution.md` — hybrid tiered extension distribution: signed WASM bundles for runtime extensions, Open VSX read-only for declarative content.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `../audit-reports/` — durable audit artifacts.

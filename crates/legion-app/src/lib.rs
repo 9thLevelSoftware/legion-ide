@@ -12478,6 +12478,25 @@ impl CommandDispatcher {
             | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
                 Ok(AppCommandRequest::Noop)
             }
+            // Vim modal editing intents are resolved by the desktop keyboard
+            // handler before reaching this router; satisfy exhaustiveness.
+            CommandDispatchIntent::SetVimModeEnabled { .. }
+            | CommandDispatchIntent::VimMotion { .. }
+            | CommandDispatchIntent::VimOperatorMotion { .. }
+            | CommandDispatchIntent::VimLinewiseOperator { .. }
+            | CommandDispatchIntent::VimChangeMode { .. }
+            | CommandDispatchIntent::VimInsertBefore
+            | CommandDispatchIntent::VimInsertAfter
+            | CommandDispatchIntent::VimInsertLineBelow
+            | CommandDispatchIntent::VimInsertLineAbove
+            | CommandDispatchIntent::VimPut
+            | CommandDispatchIntent::VimSearchForward
+            | CommandDispatchIntent::VimDeleteChar => Ok(AppCommandRequest::Noop),
+            // Call hierarchy intents are dispatched by the language subsystem;
+            // satisfy exhaustiveness until app-layer wiring lands.
+            CommandDispatchIntent::PrepareCallHierarchy { .. }
+            | CommandDispatchIntent::ShowIncomingCalls { .. }
+            | CommandDispatchIntent::ShowOutgoingCalls { .. } => Ok(AppCommandRequest::Noop),
             // Find/replace intents are handled by AppComposition::dispatch_ui_intent
             // before reaching this router; these arms satisfy exhaustiveness.
             CommandDispatchIntent::ToggleFindBar
@@ -19163,6 +19182,13 @@ impl AppComposition {
     fn bind_opened_file(&mut self, opened: OpenedFileText) -> Result<FileId, AppCompositionError> {
         let identity = opened.identity.clone();
 
+        // For files above the editor's large-file threshold whose canonical path points to a
+        // readable disk file, open the buffer via the streaming path. This avoids cloning the
+        // workspace-provided `String` into a second allocation for the rope builder.
+        let threshold = self.editor.thresholds().large_file_threshold_bytes;
+        let disk_path = std::path::Path::new(&identity.canonical_path.0);
+        let use_streaming = opened.text.len() > threshold && disk_path.exists();
+
         let buffer_id = self
             .editor
             .buffer_for_file(identity.workspace_id, identity.file_id)
@@ -19172,29 +19198,44 @@ impl AppComposition {
             })
             .map_or_else(
                 || {
-                    self.editor.open_buffer(
-                        identity.workspace_id,
-                        identity.file_id,
-                        identity.canonical_path.0.clone(),
-                        opened.text.clone(),
-                    )
+                    if use_streaming {
+                        self.editor.open_buffer_streaming(
+                            identity.workspace_id,
+                            identity.file_id,
+                            identity.canonical_path.0.clone(),
+                            disk_path,
+                        )
+                    } else {
+                        self.editor.open_buffer(
+                            identity.workspace_id,
+                            identity.file_id,
+                            identity.canonical_path.0.clone(),
+                            opened.text.clone(),
+                        )
+                    }
                 },
                 Ok,
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
-        let document = SourceDocument::with_versions(
-            identity.workspace_id,
-            identity.file_id,
-            identity.canonical_path.clone(),
-            language_id_for_path(&identity.canonical_path),
-            opened.file_content_version,
-            opened.workspace_generation,
-            None,
-            SemanticPrivacyScope::Workspace,
-            opened.text.clone(),
-        );
-        self.language_tooling.refresh_retrieval_document(&document);
+
+        // Skip full-text language-tooling indexing for streaming (large) files to avoid an
+        // additional 100MB+ String clone. Large files are already in degraded mode where
+        // semantic overlays, completions, and retrieval are deferred.
+        if !use_streaming {
+            let document = SourceDocument::with_versions(
+                identity.workspace_id,
+                identity.file_id,
+                identity.canonical_path.clone(),
+                language_id_for_path(&identity.canonical_path),
+                opened.file_content_version,
+                opened.workspace_generation,
+                None,
+                SemanticPrivacyScope::Workspace,
+                opened.text.clone(),
+            );
+            self.language_tooling.refresh_retrieval_document(&document);
+        }
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
 

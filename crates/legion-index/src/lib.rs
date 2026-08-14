@@ -3934,6 +3934,41 @@ impl SemanticIndex {
         &self.graph_records
     }
 
+    /// Returns call-edge records related to a symbol name as `(incoming, outgoing)`.
+    ///
+    /// Incoming calls are `CallEdge` records whose target endpoint matches `symbol_name`.
+    /// Outgoing calls are `CallEdge` records whose source endpoint matches `symbol_name`.
+    /// Matching is by `SemanticGraphEndpoint::symbol_id` label comparison.
+    pub fn query_call_edges(
+        &self,
+        symbol_name: &str,
+    ) -> (Vec<SemanticGraphRecord>, Vec<SemanticGraphRecord>) {
+        let mut incoming = Vec::new();
+        let mut outgoing = Vec::new();
+        for record in &self.graph_records {
+            if record.kind != SemanticGraphRecordKind::CallEdge {
+                continue;
+            }
+            let source_matches = record
+                .source
+                .symbol_id
+                .as_ref()
+                .is_some_and(|sid| sid.0 == symbol_name);
+            let target_matches = record
+                .target
+                .as_ref()
+                .and_then(|t| t.symbol_id.as_ref())
+                .is_some_and(|sid| sid.0 == symbol_name);
+            if target_matches {
+                incoming.push(record.clone());
+            }
+            if source_matches {
+                outgoing.push(record.clone());
+            }
+        }
+        (incoming, outgoing)
+    }
+
     /// Returns all retrieval chunk records in deterministic order.
     pub fn retrieval_chunks(&self) -> &[RetrievalChunkRecord] {
         &self.retrieval_chunk_records

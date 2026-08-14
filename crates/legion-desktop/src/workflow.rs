@@ -51,6 +51,7 @@ use crate::{
         DEFAULT_MANUAL_RENDERER_REPORT_PATH, DEFAULT_MANUAL_RENDERER_SAMPLE_COUNT,
         DEFAULT_SCROLL_P95_BUDGET_MS, ManualPerfConfig,
     },
+    metrics::FrameTimingRecorder,
     platform::{
         NativePlatformObservation, build_platform_adapter_checks, build_platform_smoke_snapshot,
     },
@@ -3394,6 +3395,10 @@ pub struct DesktopEframeApp {
     /// state (focus, modifiers, active widgets) survives between calls. A
     /// fresh context per frame would silently drop that state.
     ctx: egui::Context,
+    /// Live input-to-paint timing recorder. Records keyboard input timestamps
+    /// and paint-complete timestamps each frame to produce p50/p95 latency
+    /// summaries via [`FrameTimingRecorder::summary`].
+    frame_timing: FrameTimingRecorder,
 }
 
 impl DesktopEframeApp {
@@ -3402,6 +3407,7 @@ impl DesktopEframeApp {
         Self {
             runtime,
             ctx: egui::Context::default(),
+            frame_timing: FrameTimingRecorder::new(),
         }
     }
 
@@ -3504,6 +3510,22 @@ impl DesktopEframeApp {
     /// Render one full application frame: keyboard handling, the projection
     /// view, and the command-palette overlay.
     fn render_app_frame(&mut self, ui: &mut egui::Ui) {
+        let frame_start = Instant::now();
+
+        // Record input timing when keyboard events are present this frame.
+        // FrameTimingRecorder::record_paint_now (called at the end of this
+        // method) only produces a sample when a pending input exists, so
+        // frames without keyboard input are effectively no-ops for timing.
+        let has_keyboard_input = ui.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text { .. }))
+        });
+        if has_keyboard_input {
+            self.frame_timing.record_input_now();
+        }
+
         self.handle_keyboard(ui);
         // Tier 1 A8: poll active terminal every frame so output streams without
         // requiring another user gesture after launch.
@@ -3569,6 +3591,14 @@ impl DesktopEframeApp {
             ui.ctx().request_repaint();
         }
         self.render_command_palette_overlay(ui.ctx());
+
+        // Close the input-to-paint timing sample. If record_input_now was
+        // called at the top of this frame, this produces a measured sample;
+        // otherwise it is a no-op (no pending input to close).
+        self.frame_timing.record_paint_now();
+        self.frame_timing
+            .record_frame_duration(frame_start.elapsed());
+
         if self.runtime.quit_requested() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }

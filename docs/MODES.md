@@ -1,5 +1,7 @@
 # Legion Product Modes
 
+> **Default mode:** Manual is the default and primary mode. AI features (Assist, Delegate, Legion Workflows) are opt-in layers that require explicit user activation. No AI feature enables itself without user consent.
+
 Legion has four primary modes. Mode policy is a product contract, not a visual preference.
 
 ## Manual

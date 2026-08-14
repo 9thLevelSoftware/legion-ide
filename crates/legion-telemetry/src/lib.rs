@@ -1,3 +1,4 @@
+//! Substrate complete; product activation gated on PR-UI-001 (see ADR-0046).
 //! Deterministic Phase 8 hosted telemetry fixture spool and exporter.
 
 #![warn(missing_docs)]

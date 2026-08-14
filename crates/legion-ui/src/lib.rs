@@ -4,6 +4,7 @@
 
 pub mod projection;
 pub mod ui;
+pub mod vim;
 
 pub use projection::{
     LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
@@ -11,6 +12,8 @@ pub use projection::{
     LegionWorkflowFleetCardProjection, legion_workflow_board_columns,
     legion_workflow_fleet_card_projections,
 };
+
+pub use vim::{EditorInputMode, VimAction, VimMotionKind, VimOperatorKind, VimState};
 
 pub use ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,

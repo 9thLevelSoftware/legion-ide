@@ -21,12 +21,13 @@ use legion_protocol::{
     BufferVersion, CanonicalPath, EventId, EventSequence, FileFingerprint, FileId,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
-    LanguageProblemProjection, LspDiagnosticSummary, LspFormattingOptions, LspHealthState,
-    LspLaunchDisposition, LspLaunchPolicyDecision, LspOperationContext, LspRequestId,
-    LspRestartBackoffMetadata, LspResultStatus, LspSupervisionEvent, LspSupervisionEventKind,
-    LspSupervisionLifecycleState, ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint,
-    SemanticFreshnessState, SemanticPrivacyScope, SnapshotId, TextCoordinate, Utf16Position,
-    Utf16Range, WorkspaceId,
+    LanguageProblemProjection, LspCallHierarchyIncomingCall, LspCallHierarchyItem,
+    LspCallHierarchyOutgoingCall, LspDiagnosticSummary, LspFormattingOptions, LspHealthState,
+    LspLaunchDisposition, LspLaunchPolicyDecision, LspOperationContext, LspPrepareRenameResult,
+    LspRequestId, LspRestartBackoffMetadata, LspResultStatus, LspSupervisionEvent,
+    LspSupervisionEventKind, LspSupervisionLifecycleState, ProtocolDiagnosticSeverity,
+    ProtocolTextRange, RedactionHint, SemanticFreshnessState, SemanticPrivacyScope, SnapshotId,
+    TextCoordinate, Utf16Position, Utf16Range, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1470,6 +1471,154 @@ pub fn references_request(
     )
 }
 
+/// Builds a JSON-RPC `textDocument/prepareCallHierarchy` request.
+pub fn prepare_call_hierarchy_request(
+    id: u64,
+    document: &LspTextDocumentIdentity,
+    position: Utf16Position,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "textDocument/prepareCallHierarchy",
+        json!({
+            "textDocument": {"uri": document.uri},
+            "position": {"line": position.line, "character": position.character},
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `callHierarchy/incomingCalls` request.
+pub fn incoming_calls_request(id: u64, item: &LspCallHierarchyItem) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "callHierarchy/incomingCalls",
+        json!({
+            "item": call_hierarchy_item_to_json(item),
+        }),
+    )
+}
+
+/// Builds a JSON-RPC `callHierarchy/outgoingCalls` request.
+pub fn outgoing_calls_request(id: u64, item: &LspCallHierarchyItem) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "callHierarchy/outgoingCalls",
+        json!({
+            "item": call_hierarchy_item_to_json(item),
+        }),
+    )
+}
+
+fn call_hierarchy_item_to_json(item: &LspCallHierarchyItem) -> Value {
+    let mut obj = json!({
+        "name": item.name,
+        "kind": item.kind,
+        "uri": item.uri,
+        "range": protocol_range_to_lsp_json(&item.range),
+        "selectionRange": protocol_range_to_lsp_json(&item.selection_range),
+    });
+    if let Some(detail) = &item.detail {
+        obj["detail"] = json!(detail);
+    }
+    obj
+}
+
+fn protocol_range_to_lsp_json(range: &ProtocolTextRange) -> Value {
+    json!({
+        "start": {"line": range.start.line, "character": range.start.character},
+        "end": {"line": range.end.line, "character": range.end.character},
+    })
+}
+
+/// Converts an LSP `textDocument/prepareCallHierarchy` response into call hierarchy items.
+///
+/// Returns `None` when the response is `null` (call hierarchy not available at the position).
+/// Returns `Some(vec![])` for an empty array response.
+pub fn project_prepare_call_hierarchy_response(
+    response: &Value,
+) -> Option<Vec<LspCallHierarchyItem>> {
+    if response.is_null() {
+        return None;
+    }
+    let items = response.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(call_hierarchy_item_from_json)
+            .collect(),
+    )
+}
+
+/// Converts an LSP `callHierarchy/incomingCalls` response into incoming call projections.
+pub fn project_incoming_calls_response(response: &Value) -> Vec<LspCallHierarchyIncomingCall> {
+    let Some(calls) = response.as_array() else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .filter_map(|call| {
+            let from = call.get("from").and_then(call_hierarchy_item_from_json)?;
+            let from_ranges = call
+                .get("fromRanges")
+                .and_then(Value::as_array)
+                .map(|ranges| {
+                    ranges
+                        .iter()
+                        .filter_map(protocol_range_from_lsp_json)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(LspCallHierarchyIncomingCall { from, from_ranges })
+        })
+        .collect()
+}
+
+/// Converts an LSP `callHierarchy/outgoingCalls` response into outgoing call projections.
+pub fn project_outgoing_calls_response(response: &Value) -> Vec<LspCallHierarchyOutgoingCall> {
+    let Some(calls) = response.as_array() else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .filter_map(|call| {
+            let to = call.get("to").and_then(call_hierarchy_item_from_json)?;
+            let from_ranges = call
+                .get("fromRanges")
+                .and_then(Value::as_array)
+                .map(|ranges| {
+                    ranges
+                        .iter()
+                        .filter_map(protocol_range_from_lsp_json)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(LspCallHierarchyOutgoingCall { to, from_ranges })
+        })
+        .collect()
+}
+
+fn call_hierarchy_item_from_json(value: &Value) -> Option<LspCallHierarchyItem> {
+    let name = value.get("name")?.as_str()?;
+    let kind = value.get("kind")?.as_u64()?.try_into().ok()?;
+    let uri = value.get("uri")?.as_str()?;
+    let range = value.get("range").and_then(protocol_range_from_lsp_json)?;
+    let selection_range = value
+        .get("selectionRange")
+        .and_then(protocol_range_from_lsp_json)?;
+    let detail = value
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(|s| bounded_lsp_label(s, 160));
+    Some(LspCallHierarchyItem {
+        name: bounded_lsp_label(name, 120),
+        kind,
+        uri: uri.to_string(),
+        range,
+        selection_range,
+        detail,
+    })
+}
+
 /// Builds a JSON-RPC `textDocument/codeAction` request.
 pub fn code_action_request(
     id: u64,
@@ -1507,6 +1656,26 @@ pub fn organize_imports_request(
         range,
         diagnostics,
         Some(vec!["source.organizeImports".to_string()]),
+    )
+}
+
+/// Builds a JSON-RPC `workspace/executeCommand` request.
+///
+/// Used to execute commands returned by code action responses. The `command`
+/// string is the server-provided command identifier; `arguments` are opaque
+/// values forwarded from the code action's `command.arguments` array.
+pub fn execute_command_request(
+    id: u64,
+    command: impl Into<String>,
+    arguments: Vec<Value>,
+) -> JsonRpcEnvelope {
+    JsonRpcEnvelope::request(
+        id,
+        "workspace/executeCommand",
+        json!({
+            "command": command.into(),
+            "arguments": arguments,
+        }),
     )
 }
 
@@ -1930,6 +2099,206 @@ fn location_projection_for_item(
         degraded,
         schema_version: 1,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Write-side response projections (format, prepareRename, code action).
+//
+// Write-side actions produce edits that feed into the proposal lifecycle,
+// not display metadata. These projections bridge raw LSP JSON responses
+// to structured types that the proposal pipeline can consume.
+// ---------------------------------------------------------------------------
+
+/// Converts an LSP formatting response (`TextEdit[]` or `null`) into a
+/// proposal-ready workspace edit for a single document.
+///
+/// The caller supplies the document URI so the resulting edits can be
+/// associated with the formatted file. Returns `None` when the response
+/// is `null`, empty, or contains no parseable text edits.
+pub fn project_formatting_response(
+    response: &Value,
+    uri: &str,
+) -> Option<features::LspWorkspaceEditProposal> {
+    let edits_array = response.as_array()?;
+    if edits_array.is_empty() {
+        return None;
+    }
+    let text_edits: Vec<features::LspTextEdit> = edits_array
+        .iter()
+        .filter_map(|edit| {
+            let range = edit.get("range").and_then(protocol_range_from_lsp_json)?;
+            let new_text = edit.get("newText")?.as_str()?.to_string();
+            Some(features::LspTextEdit { range, new_text })
+        })
+        .collect();
+    if text_edits.is_empty() {
+        return None;
+    }
+    Some(features::LspWorkspaceEditProposal {
+        label: "Format document".to_string(),
+        file_edits: vec![features::LspFileEdit {
+            uri: uri.to_string(),
+            edits: text_edits,
+        }],
+    })
+}
+
+/// Converts an LSP `textDocument/prepareRename` response into a structured
+/// prepare-rename result.
+///
+/// The LSP spec defines three response shapes:
+/// - `Range` (the range that may be renamed)
+/// - `{ range: Range, placeholder: string }` (range with placeholder text)
+/// - `{ defaultBehavior: boolean }` (server defers to client word-boundary logic)
+///
+/// Returns `None` for `null` responses (rename not available at the position)
+/// and for `{ defaultBehavior: false }`.
+///
+/// The `{ defaultBehavior: true }` shape cannot produce a valid range without
+/// cursor context, so it returns `None`; callers should fall through to a
+/// rename request using the word at the cursor position.
+pub fn project_prepare_rename_response(response: &Value) -> Option<LspPrepareRenameResult> {
+    if response.is_null() {
+        return None;
+    }
+    // Shape: `{ range, placeholder }`.
+    if let Some(range_json) = response.get("range") {
+        let range = protocol_range_from_lsp_json(range_json)?;
+        let placeholder = response
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(|s| bounded_lsp_label(s, 120));
+        return Some(LspPrepareRenameResult {
+            range,
+            placeholder,
+            allowed: true,
+        });
+    }
+    // Shape: `{ defaultBehavior: bool }`.
+    if response.get("defaultBehavior").is_some() {
+        // Cannot produce a valid range without cursor context.
+        return None;
+    }
+    // Shape: bare `Range` (start + end directly on the response object).
+    let range = protocol_range_from_lsp_json(response)?;
+    Some(LspPrepareRenameResult {
+        range,
+        placeholder: None,
+        allowed: true,
+    })
+}
+
+/// Metadata-only projection of a single LSP code-action candidate.
+///
+/// This is the write-side counterpart of read-side projection rows: it
+/// surfaces enough metadata for the UI to display available actions without
+/// including the full workspace edit or command payload. The full payloads
+/// remain in the raw JSON for the app layer to translate through the
+/// proposal pipeline when the user selects an action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspCodeActionMetadata {
+    /// Stable identifier for this action within the response.
+    pub action_id: String,
+    /// User-visible action title.
+    pub title: String,
+    /// Server-provided action kind (e.g., `"quickfix"`, `"refactor.extract"`).
+    pub kind: Option<String>,
+    /// Whether the server marked this as a preferred action.
+    pub is_preferred: bool,
+    /// Whether the action carries a workspace edit.
+    pub has_edit: bool,
+    /// Whether the action carries a command.
+    pub has_command: bool,
+    /// Disabled reason, if the action is disabled.
+    pub disabled_reason: Option<String>,
+    /// Schema version.
+    pub schema_version: u16,
+}
+
+/// Converts an LSP `textDocument/codeAction` response into metadata-only
+/// projections of available actions.
+///
+/// Each item in the response may be a `Command` (title + command + arguments)
+/// or a `CodeAction` (title + kind + optional edit + optional command).
+/// This projection extracts metadata only; the raw JSON is preserved for
+/// the app layer to translate edits through the proposal pipeline.
+pub fn project_code_action_response(response: &Value, limit: usize) -> Vec<LspCodeActionMetadata> {
+    let Some(actions) = response.as_array() else {
+        return Vec::new();
+    };
+    actions
+        .iter()
+        .take(limit)
+        .enumerate()
+        .filter_map(|(index, action)| code_action_metadata_for_item(index, action))
+        .collect()
+}
+
+fn code_action_metadata_for_item(index: usize, action: &Value) -> Option<LspCodeActionMetadata> {
+    let title = action.get("title")?.as_str()?;
+    let title = bounded_lsp_label(title, 120);
+
+    // Distinguish Command vs CodeAction: a Command has `command` as a string
+    // at the top level; a CodeAction has `command` as an object.
+    let is_command_shape = action.get("command").is_some_and(|c| c.is_string());
+
+    if is_command_shape {
+        // Pure Command shape: { title, command, arguments? }
+        return Some(LspCodeActionMetadata {
+            action_id: format!("lsp-action-{index}-{:016x}", stable_hash(&title)),
+            title,
+            kind: None,
+            is_preferred: false,
+            has_edit: false,
+            has_command: true,
+            disabled_reason: None,
+            schema_version: 1,
+        });
+    }
+
+    // CodeAction shape.
+    let kind = action
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(|k| bounded_lsp_label(k, 80));
+    let is_preferred = action
+        .get("isPreferred")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let has_edit = action.get("edit").is_some();
+    let has_command = action.get("command").is_some();
+    let disabled_reason = action
+        .get("disabled")
+        .and_then(|d| d.get("reason"))
+        .and_then(Value::as_str)
+        .map(|r| bounded_lsp_label(r, 160));
+
+    Some(LspCodeActionMetadata {
+        action_id: format!("lsp-action-{index}-{:016x}", stable_hash(&title)),
+        title,
+        kind,
+        is_preferred,
+        has_edit,
+        has_command,
+        disabled_reason,
+        schema_version: 1,
+    })
+}
+
+/// Converts an LSP rename response (`WorkspaceEdit` or `null`) into a
+/// proposal-ready workspace edit.
+///
+/// This is a thin delegation to
+/// [`features::LspWorkspaceEditProposal::from_workspace_edit_json`] for
+/// consistency with the other `project_*` response functions in this module.
+pub fn project_rename_response(
+    response: &Value,
+    label: &str,
+) -> Option<features::LspWorkspaceEditProposal> {
+    if response.is_null() {
+        return None;
+    }
+    features::LspWorkspaceEditProposal::from_workspace_edit_json(response, label.to_string())
 }
 
 /// Convert an LSP `file://` URI into a filesystem path for navigation.

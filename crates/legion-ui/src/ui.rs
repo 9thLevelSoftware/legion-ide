@@ -3257,6 +3257,27 @@ pub enum CommandDispatchIntent {
         /// Operation identifier selected from projection data.
         operation_id: String,
     },
+    /// Prepare call hierarchy at the cursor position through app-owned language tooling.
+    PrepareCallHierarchy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Show incoming calls for a call-hierarchy item through app-owned language tooling.
+    ShowIncomingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
+    /// Show outgoing calls for a call-hierarchy item through app-owned language tooling.
+    ShowOutgoingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position from projection space.
+        position: TextCoordinate,
+    },
     /// Launch a policy-gated terminal session through app authority.
     TerminalLaunch {
         /// Display-safe command label or fixture command.
@@ -3571,6 +3592,49 @@ pub enum CommandDispatchIntent {
         /// Whether regex mode is enabled.
         enabled: bool,
     },
+
+    // ── Vim modal editing intents ──
+    /// Enable or disable Vim modal editing.
+    SetVimModeEnabled(bool),
+    /// Execute a Vim cursor motion with an optional repeat count.
+    VimMotion {
+        /// The motion to execute.
+        motion: crate::vim::VimMotionKind,
+        /// Repeat count (minimum 1).
+        count: usize,
+    },
+    /// Execute a Vim operator applied to a motion-defined range.
+    VimOperatorMotion {
+        /// The operator to apply.
+        operator: crate::vim::VimOperatorKind,
+        /// Repeat count (minimum 1).
+        count: usize,
+        /// The motion that defines the range.
+        motion: crate::vim::VimMotionKind,
+    },
+    /// Execute a Vim line-wise operator (e.g. `dd`, `yy`).
+    VimLinewiseOperator {
+        /// The operator to apply.
+        operator: crate::vim::VimOperatorKind,
+        /// Number of lines (minimum 1).
+        count: usize,
+    },
+    /// Change the Vim editing mode.
+    VimChangeMode(crate::vim::EditorInputMode),
+    /// Enter insert mode before the cursor.
+    VimInsertBefore,
+    /// Enter insert mode after the cursor.
+    VimInsertAfter,
+    /// Open a new line below and enter insert mode.
+    VimInsertLineBelow,
+    /// Open a new line above and enter insert mode.
+    VimInsertLineAbove,
+    /// Put (paste) from the Vim register.
+    VimPut,
+    /// Begin Vim forward search.
+    VimSearchForward,
+    /// Delete the character under the cursor.
+    VimDeleteChar,
 }
 
 /// Maximum visible foreground toast notifications.

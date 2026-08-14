@@ -1,3 +1,5 @@
+//! Substrate complete; product activation gated on PR-UI-001 (see ADR-0046).
+
 #![warn(missing_docs)]
 
 //! Metadata-only VS Code extension compatibility analysis.

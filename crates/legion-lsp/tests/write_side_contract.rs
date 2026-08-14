@@ -1,6 +1,8 @@
 use legion_lsp::{
-    LspTextDocumentIdentity, code_action_request, formatting_request, organize_imports_request,
-    prepare_rename_request, range_formatting_request, rename_request,
+    LspTextDocumentIdentity, code_action_request, execute_command_request, formatting_request,
+    organize_imports_request, prepare_rename_request, project_code_action_response,
+    project_formatting_response, project_prepare_rename_response, project_rename_response,
+    range_formatting_request, rename_request,
 };
 use legion_protocol::{
     BufferVersion, FileFingerprint, FileId, LanguageId, LspFormattingOptions, SnapshotId,
@@ -159,4 +161,283 @@ fn code_action_and_organize_imports_requests_include_context() {
         params["context"]["diagnostics"].as_array().map(Vec::len),
         Some(1)
     );
+}
+
+// ---------------------------------------------------------------------------
+// execute_command_request
+// ---------------------------------------------------------------------------
+
+#[test]
+fn execute_command_request_uses_command_and_arguments() {
+    let request = execute_command_request(
+        67,
+        "rust-analyzer.runSingle",
+        vec![json!({"label": "test"})],
+    );
+    assert_eq!(request.id, Some(67));
+    assert_eq!(request.method.as_deref(), Some("workspace/executeCommand"));
+    let params = request.params.expect("params");
+    assert_eq!(params["command"].as_str(), Some("rust-analyzer.runSingle"));
+    assert_eq!(params["arguments"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn execute_command_request_with_empty_arguments() {
+    let request = execute_command_request(68, "organizeImports", vec![]);
+    let params = request.params.expect("params");
+    assert_eq!(params["command"].as_str(), Some("organizeImports"));
+    assert_eq!(params["arguments"].as_array().map(Vec::len), Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// project_formatting_response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn formatting_response_projects_text_edits_for_document() {
+    let response = json!([
+        {
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 4}
+            },
+            "newText": "    "
+        },
+        {
+            "range": {
+                "start": {"line": 2, "character": 0},
+                "end": {"line": 2, "character": 0}
+            },
+            "newText": "\n"
+        }
+    ]);
+
+    let proposal = project_formatting_response(&response, "file:///workspace/src/main.rs")
+        .expect("formatting response should produce a proposal");
+    assert_eq!(proposal.label, "Format document");
+    assert_eq!(proposal.file_count(), 1);
+    assert_eq!(proposal.total_edit_count(), 2);
+    assert_eq!(proposal.file_edits[0].uri, "file:///workspace/src/main.rs");
+    assert_eq!(proposal.file_edits[0].edits[0].new_text, "    ");
+    assert_eq!(proposal.file_edits[0].edits[1].new_text, "\n");
+}
+
+#[test]
+fn formatting_response_returns_none_for_null_and_empty() {
+    assert!(project_formatting_response(&json!(null), "file:///test.rs").is_none());
+    assert!(project_formatting_response(&json!([]), "file:///test.rs").is_none());
+}
+
+#[test]
+fn formatting_response_skips_malformed_edits() {
+    // Only the first edit is valid; the second lacks a range.
+    let response = json!([
+        {
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 1}
+            },
+            "newText": "x"
+        },
+        {
+            "newText": "orphan"
+        }
+    ]);
+    let proposal =
+        project_formatting_response(&response, "file:///test.rs").expect("should project");
+    assert_eq!(proposal.total_edit_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// project_prepare_rename_response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prepare_rename_response_projects_range_and_placeholder() {
+    let response = json!({
+        "range": {
+            "start": {"line": 5, "character": 4},
+            "end": {"line": 5, "character": 10}
+        },
+        "placeholder": "old_name"
+    });
+    let result = project_prepare_rename_response(&response).expect("should parse prepare rename");
+    assert_eq!(result.range.start.line, 5);
+    assert_eq!(result.range.start.character, 4);
+    assert_eq!(result.range.end.character, 10);
+    assert_eq!(result.placeholder.as_deref(), Some("old_name"));
+    assert!(result.allowed);
+}
+
+#[test]
+fn prepare_rename_response_projects_bare_range() {
+    let response = json!({
+        "start": {"line": 3, "character": 7},
+        "end": {"line": 3, "character": 12}
+    });
+    let result = project_prepare_rename_response(&response).expect("bare range");
+    assert_eq!(result.range.start.line, 3);
+    assert_eq!(result.range.start.character, 7);
+    assert!(result.placeholder.is_none());
+    assert!(result.allowed);
+}
+
+#[test]
+fn prepare_rename_response_returns_none_for_null_and_default_behavior() {
+    assert!(project_prepare_rename_response(&json!(null)).is_none());
+    assert!(project_prepare_rename_response(&json!({"defaultBehavior": true})).is_none());
+    assert!(project_prepare_rename_response(&json!({"defaultBehavior": false})).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// project_rename_response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rename_response_projects_workspace_edit() {
+    let response = json!({
+        "changes": {
+            "file:///src/main.rs": [
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 6}
+                    },
+                    "newText": "bar"
+                }
+            ],
+            "file:///src/lib.rs": [
+                {
+                    "range": {
+                        "start": {"line": 2, "character": 10},
+                        "end": {"line": 2, "character": 13}
+                    },
+                    "newText": "bar"
+                }
+            ]
+        }
+    });
+    let proposal =
+        project_rename_response(&response, "Rename foo to bar").expect("rename response");
+    assert_eq!(proposal.label, "Rename foo to bar");
+    assert_eq!(proposal.file_count(), 2);
+    assert_eq!(proposal.total_edit_count(), 2);
+}
+
+#[test]
+fn rename_response_returns_none_for_null() {
+    assert!(project_rename_response(&json!(null), "test").is_none());
+    assert!(project_rename_response(&json!({}), "test").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// project_code_action_response
+// ---------------------------------------------------------------------------
+
+#[test]
+fn code_action_response_projects_code_action_metadata() {
+    let response = json!([
+        {
+            "title": "Extract to function",
+            "kind": "refactor.extract",
+            "isPreferred": false,
+            "edit": {
+                "changes": {
+                    "file:///main.rs": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}}, "newText": "fn()"}]
+                }
+            }
+        },
+        {
+            "title": "Remove unused import",
+            "kind": "quickfix",
+            "isPreferred": true,
+            "edit": {
+                "changes": {}
+            },
+            "command": {
+                "title": "Apply fix",
+                "command": "rust-analyzer.applyFix",
+                "arguments": []
+            }
+        },
+        {
+            "title": "Disabled action",
+            "kind": "refactor",
+            "disabled": {
+                "reason": "Not applicable here"
+            }
+        }
+    ]);
+
+    let actions = project_code_action_response(&response, 10);
+    assert_eq!(actions.len(), 3);
+
+    // First action: edit-only code action.
+    assert_eq!(actions[0].title, "Extract to function");
+    assert_eq!(actions[0].kind.as_deref(), Some("refactor.extract"));
+    assert!(!actions[0].is_preferred);
+    assert!(actions[0].has_edit);
+    assert!(!actions[0].has_command);
+    assert!(actions[0].disabled_reason.is_none());
+
+    // Second action: edit + command code action.
+    assert_eq!(actions[1].title, "Remove unused import");
+    assert_eq!(actions[1].kind.as_deref(), Some("quickfix"));
+    assert!(actions[1].is_preferred);
+    assert!(actions[1].has_edit);
+    assert!(actions[1].has_command);
+
+    // Third action: disabled code action.
+    assert_eq!(actions[2].title, "Disabled action");
+    assert_eq!(
+        actions[2].disabled_reason.as_deref(),
+        Some("Not applicable here")
+    );
+}
+
+#[test]
+fn code_action_response_projects_command_shape() {
+    // A pure Command (not CodeAction): { title, command, arguments }.
+    let response = json!([
+        {
+            "title": "Run test",
+            "command": "rust-analyzer.runSingle",
+            "arguments": [{"label": "test"}]
+        }
+    ]);
+
+    let actions = project_code_action_response(&response, 10);
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Run test");
+    assert!(actions[0].kind.is_none());
+    assert!(!actions[0].has_edit);
+    assert!(actions[0].has_command);
+}
+
+#[test]
+fn code_action_response_returns_empty_for_null_and_empty() {
+    assert!(project_code_action_response(&json!(null), 10).is_empty());
+    assert!(project_code_action_response(&json!([]), 10).is_empty());
+}
+
+#[test]
+fn code_action_response_respects_limit() {
+    let response = json!([
+        {"title": "a", "kind": "quickfix"},
+        {"title": "b", "kind": "quickfix"},
+        {"title": "c", "kind": "quickfix"}
+    ]);
+    let actions = project_code_action_response(&response, 2);
+    assert_eq!(actions.len(), 2);
+}
+
+#[test]
+fn code_action_response_has_stable_action_ids() {
+    let response = json!([
+        {"title": "Fix import", "kind": "quickfix"}
+    ]);
+    let a = project_code_action_response(&response, 10);
+    let b = project_code_action_response(&response, 10);
+    assert_eq!(a[0].action_id, b[0].action_id);
+    assert!(a[0].action_id.starts_with("lsp-action-0-"));
 }
