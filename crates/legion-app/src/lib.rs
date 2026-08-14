@@ -241,6 +241,7 @@ use legion_ui::{
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection,
     GitConflictChoiceProjection, LegionWorkflowBudgetUsageRowProjection, ShellLayoutProjection,
     ShellProjectionSnapshot, legion_workflow_board_columns, legion_workflow_fleet_card_projections,
+    palette_command_group,
 };
 #[cfg(not(feature = "ai"))]
 use offline_ai::{
@@ -15980,10 +15981,14 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
     results.sort_by(|left, right| {
-        left.result
-            .disabled_reason
-            .is_some()
-            .cmp(&right.result.disabled_reason.is_some())
+        palette_command_group(&left.result.id)
+            .cmp(&palette_command_group(&right.result.id))
+            .then_with(|| {
+                left.result
+                    .disabled_reason
+                    .is_some()
+                    .cmp(&right.result.disabled_reason.is_some())
+            })
             .then_with(|| right.score.cmp(&left.score))
             .then_with(|| left.result.title.cmp(&right.result.title))
             .then_with(|| left.result.id.cmp(&right.result.id))
@@ -37546,11 +37551,10 @@ mod tests {
 
     /// SEARCH.06: frequency bonus lifts heavily-used palette commands.
     ///
-    /// "Refresh Explorer" and "Refresh Git" score identically for query
-    /// "refresh" (same subsequence bonuses, both are start-prefixes).
-    /// The alphabetical tiebreaker puts "Refresh Explorer" first ("E" < "G").
-    /// After recording 20 usages for "command:refresh-git" that command
-    /// gains +100 frequency bonus and rises above "Refresh Explorer".
+    /// "Preferences: Theme Dark" and "Preferences: Theme Light" score
+    /// identically for query "preferences theme". The alphabetical
+    /// tiebreaker puts Dark first. After recording 20 usages for Light, its
+    /// +100 frequency bonus lifts it within the canonical View group.
     #[test]
     fn palette_usage_frequency_bonus_lifts_heavily_used_command() {
         let workspace_id = WorkspaceId(42);
@@ -37564,42 +37568,39 @@ mod tests {
             correlation_id: CorrelationId(0),
         });
 
-        // Baseline: "Refresh Explorer" and "Refresh Git" tie on fuzzy score;
-        // the alphabetical tiebreaker puts "Refresh Explorer" first.
-        let baseline = app.palette_command_results("refresh");
-        let git_pos_base = baseline
+        let baseline = app.palette_command_results("preferences theme");
+        let light_pos_base = baseline
             .iter()
-            .position(|r| r.id == "command:refresh-git")
-            .expect("Refresh Git should match 'refresh'");
-        let explorer_pos_base = baseline
+            .position(|r| r.id == "command:preferences-theme-light")
+            .expect("Theme Light should match 'preferences theme'");
+        let dark_pos_base = baseline
             .iter()
-            .position(|r| r.id == "command:refresh-explorer")
-            .expect("Refresh Explorer should match 'refresh'");
+            .position(|r| r.id == "command:preferences-theme-dark")
+            .expect("Theme Dark should match 'preferences theme'");
         assert!(
-            explorer_pos_base <= git_pos_base,
-            "Refresh Explorer should rank at least as high as Refresh Git without frequency boost \
-             (alphabetical tiebreak: 'E' < 'G')"
+            dark_pos_base <= light_pos_base,
+            "Theme Dark should rank at least as high as Theme Light without a frequency boost"
         );
 
-        // Record 20 usages for refresh-git -> +100 frequency bonus.
+        // Record 20 usages for Theme Light -> +100 frequency bonus.
         for _ in 0..20 {
             app.palette_usage
-                .record_usage(workspace_id, "command:refresh-git");
+                .record_usage(workspace_id, "command:preferences-theme-light");
         }
 
-        let boosted = app.palette_command_results("refresh");
-        let git_pos_boosted = boosted
+        let boosted = app.palette_command_results("preferences theme");
+        let light_pos_boosted = boosted
             .iter()
-            .position(|r| r.id == "command:refresh-git")
-            .expect("Refresh Git should still match 'refresh' after boost");
-        let explorer_pos_boosted = boosted
+            .position(|r| r.id == "command:preferences-theme-light")
+            .expect("Theme Light should still match after boost");
+        let dark_pos_boosted = boosted
             .iter()
-            .position(|r| r.id == "command:refresh-explorer")
-            .expect("Refresh Explorer should still match 'refresh' after boost");
+            .position(|r| r.id == "command:preferences-theme-dark")
+            .expect("Theme Dark should still match after boost");
 
         assert!(
-            git_pos_boosted < explorer_pos_boosted,
-            "Refresh Git (20 usages, +100 freq bonus) must outrank Refresh Explorer (0 usages)"
+            light_pos_boosted < dark_pos_boosted,
+            "Theme Light (20 usages, +100 frequency bonus) must outrank Theme Dark within View"
         );
     }
 

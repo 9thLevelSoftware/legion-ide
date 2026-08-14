@@ -217,6 +217,30 @@ fn palette_option_semantics(
         .unwrap_or_default()
 }
 
+fn palette_group_headings(output: &egui::FullOutput) -> Vec<String> {
+    const GROUPS: [&str; 6] = ["Suggested", "Files", "View", "Run", "Git", "Destructive"];
+    let mut headings = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter_map(|(_id, node)| {
+                    let label = node.label().or(node.value())?;
+                    let bounds = node.bounds()?;
+                    GROUPS
+                        .contains(&label)
+                        .then(|| (bounds.y0, label.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    headings.sort_by(|left, right| left.0.total_cmp(&right.0));
+    headings.into_iter().map(|(_, label)| label).collect()
+}
+
 fn press_enter() -> egui::RawInput {
     input(vec![egui::Event::Key {
         key: egui::Key::Enter,
@@ -356,6 +380,24 @@ fn command_palette_renders_all_product_groups() {
             "command palette should render the {group} group"
         );
     }
+}
+
+#[test]
+fn command_palette_group_headings_are_contiguous_and_canonical() {
+    let (_workspace, mut app) = app();
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("command palette should open");
+
+    let output = app.run_headless_input(input(Vec::new()));
+    assert_eq!(
+        palette_group_headings(&output),
+        ["Suggested", "Files", "View", "Run", "Git", "Destructive"],
+        "each command group heading should appear once in canonical product order"
+    );
 }
 
 #[test]

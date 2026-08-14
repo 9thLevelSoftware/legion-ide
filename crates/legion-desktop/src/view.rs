@@ -89,7 +89,7 @@ use legion_ui::{
     DockSideLayout, GitBlameLineProjection, GitHunkProjection, PaletteMode, PaletteProjection,
     PaletteResultKind, PanelId, PanelRegistry, SearchScopeProjection, SettingsProjection,
     ShellProjectionSnapshot, StatusSeverity, ThemePreferenceProjection, ToastActionProjection,
-    ToastStackProjection, ToastVerbosityProjection,
+    ToastStackProjection, ToastVerbosityProjection, palette_command_group,
 };
 
 use crate::{
@@ -7946,32 +7946,7 @@ fn command_palette_result_rows(
 }
 
 pub(crate) fn command_palette_group_label(result_id: &str) -> &'static str {
-    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
-    if matches!(
-        command_id,
-        "git-delete-branch"
-            | "git-prune-worktrees"
-            | "git-remove-worktree"
-            | "preferences-settings-reset"
-    ) {
-        return "Destructive";
-    }
-    if command_id.starts_with("git-") || command_id == "refresh-git" {
-        return "Git";
-    }
-    if command_id.starts_with("lsp-") {
-        return "Run";
-    }
-    if command_id.starts_with("preferences-") || command_id == "close-palette" {
-        return "View";
-    }
-    if matches!(
-        command_id,
-        "save-all" | "save-active-buffer" | "close-active-tab" | "reveal-active-file"
-    ) {
-        return "Files";
-    }
-    "Suggested"
+    palette_command_group(result_id).label()
 }
 
 fn command_palette_visible_result_start(total: usize, selected_index: usize) -> usize {

@@ -8,7 +8,13 @@ pub(super) fn section_header(ui: &mut egui::Ui, label: &str, color: Option<egui:
     ui.add_space(6.0);
     match color {
         Some(color) => {
-            ui.label(theme::accent(label, color));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (_id, marker) = ui.allocate_space(egui::vec2(3.0, 11.0));
+                ui.painter()
+                    .rect_filled(marker, egui::CornerRadius::same(1), color);
+                ui.label(theme::body_strong(label).size(theme::tokens().typography.eyebrow as f32));
+            });
         }
         None => {
             ui.label(theme::eyebrow(label));
@@ -211,5 +217,110 @@ pub(super) fn primary_button_enabled(
         ui.add(button)
     } else {
         ui.add_enabled(false, button.sense(egui::Sense::hover()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn painted_text_color(theme_tokens: theme::Theme, accent: egui::Color32) -> egui::Color32 {
+        fn collect(shape: &egui::Shape, colors: &mut Vec<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Section heading" => {
+                    colors.extend(
+                        text.galley
+                            .job
+                            .sections
+                            .iter()
+                            .map(|section| section.format.color),
+                    );
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, colors);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let context = egui::Context::default();
+        theme::install(&context, &theme_tokens);
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 180.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show_inside(context, |ui| {
+                    section_header(ui, "Section heading", Some(accent));
+                });
+            },
+        );
+        let mut colors = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut colors);
+        }
+        colors.sort_unstable_by_key(|color| color.to_array());
+        colors.dedup();
+        assert_eq!(
+            colors.len(),
+            1,
+            "the rendered section heading should use one text color: {colors:?}"
+        );
+        colors[0]
+    }
+
+    fn contrast_ratio(foreground: egui::Color32, background: egui::Color32) -> f64 {
+        fn channel(value: u8) -> f64 {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(color: egui::Color32) -> f64 {
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        }
+
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn colored_section_heading_text_meets_normal_text_contrast_on_shell_surfaces() {
+        for (theme_name, theme_tokens) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (accent_name, accent) in [
+                ("cyan", theme_tokens.accent.cyan),
+                ("blue", theme_tokens.accent.blue),
+                ("violet", theme_tokens.accent.violet),
+                ("purple", theme_tokens.accent.purple),
+                ("amber", theme_tokens.accent.amber),
+                ("orange", theme_tokens.accent.orange),
+                ("green", theme_tokens.accent.green),
+                ("red", theme_tokens.accent.red),
+            ] {
+                let text_color = painted_text_color(theme_tokens, accent);
+                for (surface_name, surface) in [
+                    ("panel", theme_tokens.surfaces.panel),
+                    ("raised", theme_tokens.surfaces.raised),
+                ] {
+                    let ratio = contrast_ratio(text_color, surface);
+                    assert!(
+                        ratio >= 4.5,
+                        "{theme_name} {accent_name} section text on {surface_name} must meet 4.5:1; actual={ratio:.3}:1, color={text_color:?}"
+                    );
+                }
+            }
+        }
     }
 }

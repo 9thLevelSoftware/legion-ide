@@ -2334,6 +2334,67 @@ pub enum PaletteResultKind {
     StructuralSearch,
 }
 
+/// Stable product group used to order and label command-palette results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PaletteCommandGroup {
+    /// Frequently useful workspace-level commands.
+    Suggested,
+    /// File and buffer commands.
+    Files,
+    /// View and preference commands.
+    View,
+    /// Run and language-tool commands.
+    Run,
+    /// Source-control commands.
+    Git,
+    /// Destructive commands that require confirmation.
+    Destructive,
+}
+
+impl PaletteCommandGroup {
+    /// User-facing heading for this product group.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Suggested => "Suggested",
+            Self::Files => "Files",
+            Self::View => "View",
+            Self::Run => "Run",
+            Self::Git => "Git",
+            Self::Destructive => "Destructive",
+        }
+    }
+}
+
+/// Classify a palette result into Legion's canonical command group.
+pub fn palette_command_group(result_id: &str) -> PaletteCommandGroup {
+    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
+    if matches!(
+        command_id,
+        "git-delete-branch"
+            | "git-prune-worktrees"
+            | "git-remove-worktree"
+            | "preferences-settings-reset"
+    ) {
+        return PaletteCommandGroup::Destructive;
+    }
+    if command_id.starts_with("git-") || command_id == "refresh-git" {
+        return PaletteCommandGroup::Git;
+    }
+    if command_id.starts_with("lsp-") {
+        return PaletteCommandGroup::Run;
+    }
+    if command_id.starts_with("preferences-") || command_id == "close-palette" {
+        return PaletteCommandGroup::View;
+    }
+    if matches!(
+        command_id,
+        "save-all" | "save-active-buffer" | "close-active-tab" | "reveal-active-file"
+    ) {
+        return PaletteCommandGroup::Files;
+    }
+    PaletteCommandGroup::Suggested
+}
+
 /// One app-ranked result in the command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteResult {
