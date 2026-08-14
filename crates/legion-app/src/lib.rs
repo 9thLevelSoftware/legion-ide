@@ -339,6 +339,14 @@ struct PaletteState {
     scope: SearchScopeProjection,
     selected_index: usize,
     results: Vec<PaletteResult>,
+    pending_confirmation: Option<PendingPaletteConfirmation>,
+    next_confirmation_token: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPaletteConfirmation {
+    projection: legion_ui::PaletteConfirmationProjection,
+    intent: CommandDispatchIntent,
 }
 
 impl PaletteState {
@@ -350,6 +358,10 @@ impl PaletteState {
             scope: self.scope,
             selected_index: self.selected_index,
             results: self.results.clone(),
+            pending_confirmation: self
+                .pending_confirmation
+                .as_ref()
+                .map(|pending| pending.projection.clone()),
         }
     }
 
@@ -357,6 +369,13 @@ impl PaletteState {
         self.open = false;
         self.selected_index = 0;
         self.results.clear();
+        self.pending_confirmation = None;
+    }
+
+    fn next_confirmation_token(&mut self) -> u64 {
+        let token = self.next_confirmation_token.max(1);
+        self.next_confirmation_token = token.wrapping_add(1).max(1);
+        token
     }
 
     fn clamp_selection(&mut self) {
@@ -385,6 +404,8 @@ impl Default for PaletteState {
             scope: SearchScopeProjection::ActiveFile,
             selected_index: 0,
             results: Vec::new(),
+            pending_confirmation: None,
+            next_confirmation_token: 1,
         }
     }
 }
@@ -407,6 +428,8 @@ struct PaletteCommandSpec {
 enum PaletteCommandOperands {
     Branch(String),
     WorktreePath(String),
+    CommitMessage(String),
+    StashMessage(String),
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -428,6 +451,12 @@ impl PaletteCommandOperands {
             ("git-remove-worktree", Self::WorktreePath(path)) => {
                 format!("Remove worktree ‘{path}’")
             }
+            ("git-commit", Self::CommitMessage(message)) => {
+                format!("Commit staged changes as ‘{message}’")
+            }
+            ("git-stash", Self::StashMessage(message)) => {
+                format!("Stash changes as ‘{message}’")
+            }
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -436,6 +465,18 @@ impl PaletteCommandOperands {
                 },
             ) => format!("Create worktree ‘{worktree_path}’ from branch ‘{branch}’"),
             _ => String::new(),
+        }
+    }
+
+    fn values(&self) -> Vec<String> {
+        match self {
+            Self::Branch(branch) => vec![branch.clone()],
+            Self::WorktreePath(path) => vec![path.clone()],
+            Self::CommitMessage(message) | Self::StashMessage(message) => vec![message.clone()],
+            Self::NewWorktree {
+                branch,
+                worktree_path,
+            } => vec![branch.clone(), worktree_path.clone()],
         }
     }
 }
@@ -447,6 +488,8 @@ fn argument_command_prefix(command_id: &str) -> Option<&'static str> {
         "git-delete-branch" => Some("git delete branch"),
         "git-remove-worktree" => Some("git remove worktree"),
         "git-new-worktree" => Some("git new worktree"),
+        "git-commit" => Some("git commit"),
+        "git-stash" => Some("git stash"),
         _ => None,
     }
 }
@@ -470,6 +513,8 @@ fn parse_palette_command_operands(
         "git-switch-branch" | "git-create-branch" | "git-delete-branch" => "Enter a branch name",
         "git-remove-worktree" => "Enter a worktree path",
         "git-new-worktree" => "Enter a branch and worktree path",
+        "git-commit" => "Enter a commit message",
+        "git-stash" => "Enter a stash message",
         _ => return None,
     };
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
@@ -483,6 +528,8 @@ fn parse_palette_command_operands(
             Ok(PaletteCommandOperands::Branch(operands.to_string()))
         }
         "git-remove-worktree" => Ok(PaletteCommandOperands::WorktreePath(operands.to_string())),
+        "git-commit" => Ok(PaletteCommandOperands::CommitMessage(operands.to_string())),
+        "git-stash" => Ok(PaletteCommandOperands::StashMessage(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -501,6 +548,19 @@ fn parse_palette_command_operands(
         }
         _ => unreachable!("argument commands are matched above"),
     })
+}
+
+fn palette_command_requires_confirmation(result_id: &str) -> bool {
+    matches!(
+        result_id.strip_prefix("command:").unwrap_or(result_id),
+        "git-switch-branch"
+            | "git-create-branch"
+            | "git-delete-branch"
+            | "git-prune-worktrees"
+            | "git-remove-worktree"
+            | "git-new-worktree"
+            | "preferences-settings-reset"
+    )
 }
 
 /// App-level composition errors.
@@ -10873,6 +10933,20 @@ pub enum AppCommandRequest {
     CompletePaletteSelection,
     /// Dispatch the selected command palette result.
     DispatchPaletteSelection,
+    /// Confirm an app-owned pending palette command.
+    ConfirmPaletteSelection {
+        /// App-issued confirmation token.
+        token: u64,
+        /// Stable pending command identifier.
+        command_id: String,
+        /// Canonical parsed operands for the pending command.
+        operands: Vec<String>,
+    },
+    /// Cancel an app-owned pending palette confirmation.
+    CancelPaletteConfirmation {
+        /// App-issued confirmation token to cancel.
+        token: u64,
+    },
     /// Open the app-owned Settings projection.
     OpenSettings,
     /// Update the app-owned theme preference.
@@ -11631,6 +11705,8 @@ impl CommandExecutionService {
             | AppCommandRequest::MovePaletteSelection { .. }
             | AppCommandRequest::CompletePaletteSelection
             | AppCommandRequest::DispatchPaletteSelection
+            | AppCommandRequest::ConfirmPaletteSelection { .. }
+            | AppCommandRequest::CancelPaletteConfirmation { .. }
             | AppCommandRequest::OpenSettings
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
@@ -11879,6 +11955,18 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::DispatchPaletteSelection => {
                 Ok(AppCommandRequest::DispatchPaletteSelection)
+            }
+            CommandDispatchIntent::ConfirmPaletteSelection {
+                token,
+                command_id,
+                operands,
+            } => Ok(AppCommandRequest::ConfirmPaletteSelection {
+                token,
+                command_id,
+                operands,
+            }),
+            CommandDispatchIntent::CancelPaletteConfirmation { token } => {
+                Ok(AppCommandRequest::CancelPaletteConfirmation { token })
             }
             CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
             CommandDispatchIntent::SetThemePreference { preference } => {
@@ -19235,6 +19323,7 @@ impl AppComposition {
         query: String,
         scope: SearchScopeProjection,
     ) -> Result<PaletteProjection, AppCompositionError> {
+        self.palette.pending_confirmation = None;
         self.palette.open = true;
         self.palette.mode = mode;
         self.palette.query = palette_open_query(mode, query);
@@ -19248,6 +19337,7 @@ impl AppComposition {
         &mut self,
         query: String,
     ) -> Result<PaletteProjection, AppCompositionError> {
+        self.palette.pending_confirmation = None;
         self.palette.open = true;
         self.palette.query = query;
         self.palette.selected_index = 0;
@@ -19261,6 +19351,7 @@ impl AppComposition {
     }
 
     fn move_palette_selection(&mut self, delta: i32) -> PaletteProjection {
+        self.palette.pending_confirmation = None;
         if self.palette.results.is_empty() {
             self.palette.selected_index = 0;
             return self.palette.projection();
@@ -19294,6 +19385,7 @@ impl AppComposition {
     }
 
     fn complete_palette_selection(&mut self) -> Result<PaletteProjection, AppCompositionError> {
+        self.palette.pending_confirmation = None;
         if !self.palette.open {
             return Ok(self.palette.projection());
         }
@@ -19318,6 +19410,9 @@ impl AppComposition {
         if !self.palette.open {
             return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
         }
+        if self.palette.pending_confirmation.is_some() {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
         let Some(result) = self
             .palette
             .results
@@ -19332,6 +19427,22 @@ impl AppComposition {
         let Some(intent) = self.palette_result_intent(&result) else {
             return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
         };
+
+        if palette_command_requires_confirmation(&result.id) {
+            let operands = self.palette_result_operands(&result);
+            let token = self.palette.next_confirmation_token();
+            self.palette.pending_confirmation = Some(PendingPaletteConfirmation {
+                projection: legion_ui::PaletteConfirmationProjection {
+                    token,
+                    command_id: result.id.clone(),
+                    operands,
+                    title: result.title.clone(),
+                    detail: result.detail.clone(),
+                },
+                intent,
+            });
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
 
         // Record metadata-only usage count for frequency blending.
         // Uses `result.id` as the item key (stable command/file identifier).
@@ -19348,6 +19459,62 @@ impl AppComposition {
 
         self.palette.close();
         self.dispatch_ui_intent(intent)
+    }
+
+    fn confirm_palette_selection(
+        &mut self,
+        token: u64,
+        command_id: String,
+        operands: Vec<String>,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        let Some(pending) = self.palette.pending_confirmation.clone() else {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        };
+        if pending.projection.token != token
+            || pending.projection.command_id != command_id
+            || pending.projection.operands != operands
+        {
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
+
+        let Some(result) = self
+            .palette
+            .results
+            .get(self.palette.selected_index)
+            .cloned()
+        else {
+            self.palette.pending_confirmation = None;
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        };
+        let current_operands = self.palette_result_operands(&result);
+        let current_intent = self.palette_result_intent(&result);
+        if result.disabled_reason.is_some()
+            || result.id != command_id
+            || current_operands != operands
+            || current_intent.as_ref() != Some(&pending.intent)
+        {
+            self.palette.pending_confirmation = None;
+            return Ok(AppCommandOutcome::PaletteUpdated(self.palette.projection()));
+        }
+
+        self.palette.pending_confirmation = None;
+        if let Some(workspace_id) = self.active_documents.workspace_id() {
+            self.palette_usage.record_usage(workspace_id, &result.id);
+        }
+        self.palette.close();
+        self.dispatch_ui_intent(pending.intent)
+    }
+
+    fn cancel_palette_confirmation(&mut self, token: u64) -> PaletteProjection {
+        if self
+            .palette
+            .pending_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending.projection.token == token)
+        {
+            self.palette.pending_confirmation = None;
+        }
+        self.palette.projection()
     }
 
     fn sync_search_palette_results(&mut self) {
@@ -19891,18 +20058,15 @@ impl AppComposition {
                                 })
                         }),
                         "git-commit" => {
-                            let body =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            let message = body
-                                .strip_prefix("git commit")
-                                .or_else(|| body.strip_prefix("commit"))
-                                .unwrap_or(&body)
-                                .trim()
-                                .to_string();
-                            (!message.is_empty())
-                                .then_some(CommandDispatchIntent::CommitGitChanges { message })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::CommitMessage(message))) => {
+                                    Some(CommandDispatchIntent::CommitGitChanges { message })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-switch-branch" => {
                             match parse_palette_command_operands(
@@ -19938,13 +20102,17 @@ impl AppComposition {
                             }
                         }
                         "git-stash" => {
-                            let message =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            Some(CommandDispatchIntent::StashGitChanges {
-                                message: (!message.is_empty()).then_some(message),
-                            })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::StashMessage(message))) => {
+                                    Some(CommandDispatchIntent::StashGitChanges {
+                                        message: Some(message),
+                                    })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
                         "git-remove-worktree" => {
@@ -20024,6 +20192,18 @@ impl AppComposition {
                 })
             }
         }
+    }
+
+    fn palette_result_operands(&self, result: &PaletteResult) -> Vec<String> {
+        let Some(command_id) = result.id.strip_prefix("command:") else {
+            return Vec::new();
+        };
+        parse_palette_command_operands(
+            command_id,
+            palette_query_body(PaletteMode::Command, &self.palette.query),
+        )
+        .and_then(Result::ok)
+        .map_or_else(Vec::new, |operands| operands.values())
     }
 
     /// Route a UI dispatch intent through editor and workspace authorities.
@@ -20335,6 +20515,14 @@ impl AppComposition {
                 self.complete_palette_selection()?,
             )),
             AppCommandRequest::DispatchPaletteSelection => self.dispatch_palette_selection(),
+            AppCommandRequest::ConfirmPaletteSelection {
+                token,
+                command_id,
+                operands,
+            } => self.confirm_palette_selection(token, command_id, operands),
+            AppCommandRequest::CancelPaletteConfirmation { token } => Ok(
+                AppCommandOutcome::PaletteUpdated(self.cancel_palette_confirmation(token)),
+            ),
             AppCommandRequest::OpenSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
             }

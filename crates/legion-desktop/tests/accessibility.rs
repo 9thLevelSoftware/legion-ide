@@ -13,8 +13,8 @@ use legion_desktop::{
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
 use legion_protocol::{
-    BufferId, CanonicalPath, FileId, ProtocolTextRange, TextCoordinate, TimestampMillis,
-    WorkbenchAccessibilityProfile,
+    BufferId, CanonicalPath, FileId, ProtocolTextRange, TerminalSessionId, TextCoordinate,
+    TimestampMillis, WorkbenchAccessibilityProfile,
 };
 use legion_ui::ui::{
     DailyEditingProjection, EditorTabProjection, EditorTabsProjection, SearchScopeProjection,
@@ -142,6 +142,62 @@ fn accessible_button_bounds(output: &egui::FullOutput, label: &str) -> egui::Rec
         egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
         egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
     )
+}
+
+fn assert_minimum_interactive_target(output: &egui::FullOutput, label: &str) {
+    let bounds = accessible_button_bounds(output, label);
+    assert!(
+        bounds.width() >= 28.0 && bounds.height() >= 28.0,
+        "interactive control `{label}` must be at least 28x28 logical pixels; bounds={bounds:?}"
+    );
+}
+
+fn assert_all_click_targets_meet_minimum(output: &egui::FullOutput, layout: &str) {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("interactive controls should expose AccessKit");
+    let mut checked = 0_usize;
+    for (_id, node) in &update.nodes {
+        let role = node.role();
+        let is_control = matches!(
+            role,
+            egui::accesskit::Role::Button
+                | egui::accesskit::Role::DefaultButton
+                | egui::accesskit::Role::CheckBox
+                | egui::accesskit::Role::RadioButton
+                | egui::accesskit::Role::Switch
+                | egui::accesskit::Role::Tab
+                | egui::accesskit::Role::TreeItem
+                | egui::accesskit::Role::ListBoxOption
+                | egui::accesskit::Role::MenuItem
+                | egui::accesskit::Role::MenuItemCheckBox
+                | egui::accesskit::Role::MenuItemRadio
+                | egui::accesskit::Role::DisclosureTriangle
+                | egui::accesskit::Role::ComboBox
+                | egui::accesskit::Role::EditableComboBox
+                | egui::accesskit::Role::TextInput
+                | egui::accesskit::Role::MultilineTextInput
+                | egui::accesskit::Role::SearchInput
+                | egui::accesskit::Role::PasswordInput
+                | egui::accesskit::Role::Link
+        );
+        if !is_control || !node.supports_action(egui::accesskit::Action::Click) {
+            continue;
+        }
+        checked += 1;
+        let label = node.label().unwrap_or("<unnamed>");
+        let description = node.description().unwrap_or("<none>");
+        let bounds = node
+            .bounds()
+            .unwrap_or_else(|| panic!("{layout} clickable control `{label}` must expose bounds"));
+        assert!(
+            bounds.x1 - bounds.x0 >= 28.0 && bounds.y1 - bounds.y0 >= 28.0,
+            "{layout} clickable control `{label}` ({role:?}, description={description}) must be at least 28x28 logical pixels; bounds={bounds:?}"
+        );
+    }
+    assert!(checked > 0, "{layout} frame must expose clickable controls");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,6 +683,67 @@ fn accessibility_profile_round_trips_high_contrast_and_reduced_motion_flags() {
 }
 
 #[test]
+fn representative_interactive_controls_meet_28px_targets_in_standard_and_compact_layouts() {
+    let mut snapshot = Shell::empty("Accessible target sizes").projection_snapshot();
+    snapshot.daily_editing_projection.tabs = EditorTabsProjection {
+        tabs: vec![EditorTabProjection {
+            buffer_id: BufferId(7),
+            file_id: Some(FileId(1)),
+            file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+            title: "lib.rs".to_string(),
+            active: true,
+            dirty: false,
+            pinned: false,
+            preview: false,
+        }],
+        active_buffer_id: Some(BufferId(7)),
+    };
+    snapshot.terminal_panel_projection.active_session_id = Some(TerminalSessionId(9));
+
+    let standard_ctx = egui::Context::default();
+    standard_ctx.enable_accesskit();
+    let mut standard_view = ProjectionView::new();
+    let standard = render_projection(
+        &standard_ctx,
+        &mut standard_view,
+        &snapshot,
+        egui::vec2(1_440.0, 900.0),
+    );
+    for label in [
+        "Manual",
+        "Command",
+        "Explorer",
+        "Close lib.rs",
+        "Send",
+        "Poll",
+        "Kill",
+        "Close",
+    ] {
+        assert_minimum_interactive_target(&standard, label);
+    }
+    assert_all_click_targets_meet_minimum(&standard, "standard");
+
+    let compact_ctx = egui::Context::default();
+    compact_ctx.enable_accesskit();
+    let mut compact_view = ProjectionView::new();
+    let compact = render_projection(
+        &compact_ctx,
+        &mut compact_view,
+        &snapshot,
+        egui::vec2(960.0, 720.0),
+    );
+    for label in [
+        "Manual",
+        "Command",
+        "Explorer drawer",
+        "Bottom panel drawer",
+    ] {
+        assert_minimum_interactive_target(&compact, label);
+    }
+    assert_all_click_targets_meet_minimum(&compact, "compact");
+}
+
+#[test]
 fn keyboard_only_operation_opens_the_command_palette() {
     let workspace = TempWorkspace::new();
     let runtime = open_runtime(workspace.path());
@@ -817,8 +934,8 @@ fn rendered_mode_switch_and_confirmation_dialog_expose_accessible_semantics() {
         assert!(node.supports_action(egui::accesskit::Action::Click));
         assert!(node.supports_action(egui::accesskit::Action::Focus));
         let bounds = node.bounds().expect("mode button should have bounds");
-        assert!(bounds.x1 - bounds.x0 >= 24.0);
-        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x1 - bounds.x0 >= 28.0);
+        assert!(bounds.y1 - bounds.y0 >= 28.0);
     }
 
     let _modal_full = click_projection_control(&ctx, &mut view, &snapshot, &full, "Delegate", size);
@@ -868,8 +985,8 @@ fn rendered_mode_switch_and_confirmation_dialog_expose_accessible_semantics() {
             })
             .unwrap_or_else(|| panic!("dialog should expose {label}"));
         let bounds = action.bounds().expect("dialog action should have bounds");
-        assert!(bounds.x1 - bounds.x0 >= 24.0);
-        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x1 - bounds.x0 >= 28.0);
+        assert!(bounds.y1 - bounds.y0 >= 28.0);
         assert!(action.supports_action(egui::accesskit::Action::Click));
         assert!(action.supports_action(egui::accesskit::Action::Focus));
     }
@@ -917,8 +1034,8 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
     });
 
     for (label, node, bounds, expected_selected) in &modes {
-        assert!(bounds.x1 - bounds.x0 >= 24.0);
-        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x1 - bounds.x0 >= 28.0);
+        assert!(bounds.y1 - bounds.y0 >= 28.0);
         assert!(bounds.x0 >= 0.0 && bounds.x1 <= 480.0);
         assert!(bounds.y0 >= 0.0 && bounds.y1 <= 42.0);
         assert_eq!(
@@ -959,8 +1076,8 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
     let command_bounds = command.bounds().expect("Command should be allocated");
     assert!(command_bounds.x0 >= 0.0 && command_bounds.x1 <= 480.0);
     assert!(command_bounds.y0 >= 0.0 && command_bounds.y1 <= 42.0);
-    assert!(command_bounds.x1 - command_bounds.x0 >= 24.0);
-    assert!(command_bounds.y1 - command_bounds.y0 >= 24.0);
+    assert!(command_bounds.x1 - command_bounds.x0 >= 28.0);
+    assert!(command_bounds.y1 - command_bounds.y0 >= 28.0);
 
     let painted = top_bar_painted_text(&full);
     for label in ["Manual", "Assist", "Delegate", "Legion Workflows"] {
@@ -991,8 +1108,8 @@ fn physical_960_by_720_mode_switch_is_accessible_at_two_hundred_percent_zoom() {
             })
             .unwrap_or_else(|| panic!("ultra-compact layout must expose `{label}`"));
         let bounds = node.bounds().expect("drawer control should have bounds");
-        assert!(bounds.x1 - bounds.x0 >= 24.0);
-        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x1 - bounds.x0 >= 28.0);
+        assert!(bounds.y1 - bounds.y0 >= 28.0);
     }
 
     let _opened = click_projection_control(

@@ -2359,6 +2359,22 @@ pub struct PaletteResult {
     pub disabled_reason: Option<String>,
 }
 
+/// App-owned confirmation request for a palette command that can change
+/// authority or destroy state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteConfirmationProjection {
+    /// Monotonic app-issued token identifying this exact pending request.
+    pub token: u64,
+    /// Stable command identifier selected when the request was created.
+    pub command_id: String,
+    /// Canonical parsed operands, excluding the command title or query prefix.
+    pub operands: Vec<String>,
+    /// User-facing command title.
+    pub title: String,
+    /// User-facing description of the exact target, when available.
+    pub detail: Option<String>,
+}
+
 /// App-owned command palette projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteProjection {
@@ -2374,6 +2390,8 @@ pub struct PaletteProjection {
     pub selected_index: usize,
     /// Ranked palette results.
     pub results: Vec<PaletteResult>,
+    /// Pending confirmation owned by the application authority boundary.
+    pub pending_confirmation: Option<PaletteConfirmationProjection>,
 }
 
 impl PaletteProjection {
@@ -2386,6 +2404,7 @@ impl PaletteProjection {
             scope: SearchScopeProjection::ActiveFile,
             selected_index: 0,
             results: Vec::new(),
+            pending_confirmation: None,
         }
     }
 }
@@ -2774,6 +2793,20 @@ pub enum CommandDispatchIntent {
     CompletePaletteSelection,
     /// Dispatch the currently selected palette result through app authority.
     DispatchPaletteSelection,
+    /// Confirm an app-owned pending palette command after revalidating its identity.
+    ConfirmPaletteSelection {
+        /// App-issued confirmation token.
+        token: u64,
+        /// Stable pending command identifier.
+        command_id: String,
+        /// Canonical parsed operands projected for this exact command.
+        operands: Vec<String>,
+    },
+    /// Cancel an app-owned pending palette confirmation.
+    CancelPaletteConfirmation {
+        /// App-issued confirmation token to cancel.
+        token: u64,
+    },
     /// Open the projected Settings surface.
     OpenSettings,
     /// Update the app-owned theme preference.

@@ -122,12 +122,13 @@ fn run_git(root: &Path, args: &[&str]) -> String {
 }
 
 fn input(events: Vec<egui::Event>) -> egui::RawInput {
+    input_at(egui::vec2(1_200.0, 900.0), events)
+}
+
+fn input_at(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
         focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_200.0, 900.0),
-        )),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
         events,
         ..egui::RawInput::default()
     }
@@ -146,6 +147,22 @@ fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
         })
 }
 
+fn accesskit_clickable_bounds(output: &egui::FullOutput, label: &str) -> egui::accesskit::Rect {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("frame should expose clickable bounds for `{label}`"))
+}
+
 fn accesskit_text(output: &egui::FullOutput) -> Vec<String> {
     output
         .platform_output
@@ -159,6 +176,43 @@ fn accesskit_text(output: &egui::FullOutput) -> Vec<String> {
                 .flatten()
                 .map(str::to_string)
                 .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn palette_option_semantics(
+    output: &egui::FullOutput,
+) -> Vec<(String, Option<String>, Option<bool>, bool)> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            let Some((_list_id, list)) = update.nodes.iter().find(|(_id, node)| {
+                node.role() == egui::accesskit::Role::ListBox
+                    && node.label() == Some("Command results")
+            }) else {
+                return Vec::new();
+            };
+            let mut pending = list.children().to_vec();
+            let mut options = Vec::new();
+            while let Some(id) = pending.first().copied() {
+                pending.remove(0);
+                let Some((_id, node)) = update.nodes.iter().find(|(candidate, _)| *candidate == id)
+                else {
+                    continue;
+                };
+                if node.role() == egui::accesskit::Role::ListBoxOption {
+                    options.push((
+                        node.label().unwrap_or_default().to_string(),
+                        node.description().map(str::to_string),
+                        node.is_selected(),
+                        node.is_disabled(),
+                    ));
+                }
+                pending.splice(0..0, node.children().iter().copied());
+            }
+            options
         })
         .unwrap_or_default()
 }
@@ -181,6 +235,81 @@ fn press_arrow_down() -> egui::RawInput {
         repeat: false,
         modifiers: egui::Modifiers::default(),
     }])
+}
+
+fn press_escape() -> egui::RawInput {
+    press_escape_at(egui::vec2(1_200.0, 900.0))
+}
+
+fn press_escape_at(size: egui::Vec2) -> egui::RawInput {
+    input_at(
+        size,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    )
+}
+
+fn full_frame_click_at(
+    app: &mut DesktopEframeApp,
+    output: &egui::FullOutput,
+    label: &str,
+    size: egui::Vec2,
+) -> egui::FullOutput {
+    let target = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("frame should expose clickable `{label}`"));
+    app.run_headless_full_frame(input_at(
+        size,
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: target,
+                data: None,
+            },
+        )],
+    ))
+}
+
+fn full_frame_accesskit_action(
+    app: &mut DesktopEframeApp,
+    output: &egui::FullOutput,
+    label: &str,
+    action: egui::accesskit::Action,
+) -> egui::FullOutput {
+    let target = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(action)).then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("frame should expose {action:?} for `{label}`"));
+    app.run_headless_full_frame(input(vec![egui::Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
+        },
+    )]))
 }
 
 fn click_accessible_control(
@@ -250,6 +379,105 @@ fn command_palette_uses_product_copy_instead_of_implementation_terms() {
 }
 
 #[test]
+fn command_palette_visual_keyboard_and_accessibility_order_match_app_projection() {
+    let (_workspace, mut app) = app();
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("command palette should open");
+    let projected = app.runtime_snapshot().palette_projection;
+    let first_disabled = projected
+        .results
+        .iter()
+        .position(|result| result.disabled_reason.is_some())
+        .expect("an empty workspace should expose unavailable commands");
+    assert!(
+        projected.results[..first_disabled]
+            .iter()
+            .all(|result| result.disabled_reason.is_none()),
+        "the app projection must rank every available command first"
+    );
+
+    let output = app.run_headless_input(input(Vec::new()));
+    let options = palette_option_semantics(&output);
+    assert_eq!(
+        options.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        projected
+            .results
+            .iter()
+            .take(options.len())
+            .map(|result| result.title.as_str())
+            .collect::<Vec<_>>(),
+        "painted/list-option order must be the app-owned navigation order"
+    );
+    let update = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("palette should expose AccessKit");
+    assert!(update.nodes.iter().any(|(_id, node)| {
+        node.role() == egui::accesskit::Role::ListBox && node.label() == Some("Command results")
+    }));
+    for (index, (label, description, selected, disabled)) in options.iter().enumerate() {
+        let result = &projected.results[index];
+        assert_eq!(label, &result.title);
+        assert_eq!(
+            description.as_deref(),
+            result
+                .disabled_reason
+                .as_deref()
+                .or(result.detail.as_deref())
+        );
+        assert_eq!(*selected, Some(index == projected.selected_index));
+        assert_eq!(*disabled, result.disabled_reason.is_some());
+    }
+
+    let moved = app.run_headless_input(press_arrow_down());
+    let moved_projection = app.runtime_snapshot().palette_projection;
+    assert!(
+        moved_projection.results[moved_projection.selected_index]
+            .disabled_reason
+            .is_none()
+    );
+    let moved_selected = palette_option_semantics(&moved)
+        .into_iter()
+        .find_map(|(label, _, selected, _)| (selected == Some(true)).then_some(label));
+    assert_eq!(
+        moved_selected.as_deref(),
+        Some(
+            moved_projection.results[moved_projection.selected_index]
+                .title
+                .as_str()
+        )
+    );
+
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">save".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("mixed available and unavailable commands should remain searchable");
+    let mixed_projection = app.runtime_snapshot().palette_projection;
+    let mixed = palette_option_semantics(&app.run_headless_input(input(Vec::new())));
+    assert_eq!(mixed.len(), mixed_projection.results.len());
+    assert!(mixed.iter().any(|row| row.3));
+    for (index, (_, description, selected, disabled)) in mixed.iter().enumerate() {
+        let result = &mixed_projection.results[index];
+        assert_eq!(
+            description.as_deref(),
+            result
+                .disabled_reason
+                .as_deref()
+                .or(result.detail.as_deref())
+        );
+        assert_eq!(*selected, Some(index == mixed_projection.selected_index));
+        assert_eq!(*disabled, result.disabled_reason.is_some());
+    }
+}
+
+#[test]
 fn destructive_palette_command_requires_confirmation_before_dispatch() {
     let (_workspace, mut app) = app();
     app.handle_action(DesktopAction::OpenPalette {
@@ -264,10 +492,24 @@ fn destructive_palette_command_requires_confirmation_before_dispatch() {
         app.runtime_snapshot().palette_projection.open,
         "Enter must not dispatch a destructive command before confirmation"
     );
+    assert!(
+        app.runtime_snapshot()
+            .palette_projection
+            .pending_confirmation
+            .is_some(),
+        "the renderer must display the app-owned pending confirmation"
+    );
     assert!(accesskit_has_label(
         &output,
         "Confirm Preferences: Reset Settings"
     ));
+    for label in ["Confirm", "Cancel"] {
+        let bounds = accesskit_clickable_bounds(&output, label);
+        assert!(
+            bounds.x1 - bounds.x0 >= 28.0 && bounds.y1 - bounds.y0 >= 28.0,
+            "{label} confirmation target must be at least 28x28: {bounds:?}"
+        );
+    }
 
     let confirm = output
         .platform_output
@@ -294,6 +536,38 @@ fn destructive_palette_command_requires_confirmation_before_dispatch() {
         !app.runtime_snapshot().palette_projection.open,
         "Confirm should dispatch through the existing palette intent"
     );
+}
+
+#[test]
+fn palette_escape_closes_only_the_foreground_layer_over_a_compact_drawer() {
+    let (_workspace, mut app) = app();
+    let size = egui::vec2(960.0, 720.0);
+    let initial = app.run_headless_full_frame(input_at(size, Vec::new()));
+    let _opened = full_frame_click_at(&mut app, &initial, "Explorer drawer", size);
+    let drawer = app.run_headless_full_frame(input_at(size, Vec::new()));
+    assert!(accesskit_has_label(&drawer, "Close Explorer drawer"));
+
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("palette should open above the compact drawer");
+    let layered = app.run_headless_full_frame(input_at(size, Vec::new()));
+    assert!(accesskit_has_label(&layered, "Close Explorer drawer"));
+    assert!(app.runtime_snapshot().palette_projection.open);
+
+    app.run_headless_full_frame(press_escape_at(size));
+    let drawer = app.run_headless_full_frame(input_at(size, Vec::new()));
+    assert!(!app.runtime_snapshot().palette_projection.open);
+    assert!(
+        accesskit_has_label(&drawer, "Close Explorer drawer"),
+        "the Escape consumed by the foreground palette must not close its underlying drawer"
+    );
+
+    app.run_headless_full_frame(press_escape_at(size));
+    let closed = app.run_headless_full_frame(input_at(size, Vec::new()));
+    assert!(!accesskit_has_label(&closed, "Close Explorer drawer"));
 }
 
 #[test]
@@ -345,6 +619,53 @@ fn git_command_confirmation_dispatches_the_resolved_operand() {
         app.runtime_snapshot().status_messages
     );
     assert!(!app.runtime_snapshot().palette_projection.open);
+}
+
+#[test]
+fn palette_settings_command_opens_overlay_and_escape_restores_command_focus() {
+    let (_workspace, mut app) = app();
+    let initial = app.run_headless_full_frame(input(Vec::new()));
+    let focused = full_frame_accesskit_action(
+        &mut app,
+        &initial,
+        "Command",
+        egui::accesskit::Action::Focus,
+    );
+    let origin = app
+        .headless_egui_context()
+        .memory(|memory| memory.focused())
+        .expect("Command should accept keyboard focus");
+    let _opened = full_frame_accesskit_action(
+        &mut app,
+        &focused,
+        "Command",
+        egui::accesskit::Action::Click,
+    );
+    let _palette = app.run_headless_full_frame(input(Vec::new()));
+    app.run_headless_full_frame(input(vec![egui::Event::Text(
+        "preferences open settings".to_string(),
+    )]));
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.query,
+        ">preferences open settings"
+    );
+
+    app.run_headless_full_frame(press_enter());
+    let settings = app.run_headless_full_frame(input(Vec::new()));
+    assert!(
+        accesskit_has_label(&settings, "Close Settings"),
+        "palette outcome must open the renderer-local Settings overlay"
+    );
+    assert!(!app.runtime_snapshot().palette_projection.open);
+
+    app.run_headless_full_frame(press_escape());
+    app.run_headless_full_frame(input(Vec::new()));
+    assert_eq!(
+        app.headless_egui_context()
+            .memory(|memory| memory.focused()),
+        Some(origin),
+        "Escape must restore focus to the Command control that originated the palette"
+    );
 }
 
 #[test]

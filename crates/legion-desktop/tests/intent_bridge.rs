@@ -847,6 +847,22 @@ fn intent_bridge_routes_palette_reducer_actions() {
         DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
     );
     assert_eq!(
+        translate(DesktopAction::ConfirmPaletteSelection {
+            token: 7,
+            command_id: "command:git-create-branch".to_string(),
+            operands: vec!["feature/confirmed".to_string()],
+        }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ConfirmPaletteSelection {
+            token: 7,
+            command_id: "command:git-create-branch".to_string(),
+            operands: vec!["feature/confirmed".to_string()],
+        })
+    );
+    assert_eq!(
+        translate(DesktopAction::CancelPaletteConfirmation { token: 7 }),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelPaletteConfirmation { token: 7 })
+    );
+    assert_eq!(
         translate(DesktopAction::ClosePalette),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::ClosePalette)
     );

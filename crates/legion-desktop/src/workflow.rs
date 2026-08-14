@@ -65,7 +65,6 @@ use crate::{
 };
 
 const WINDOW_TITLE: &str = PRODUCT_NAME;
-const COMMAND_PALETTE_VISIBLE_RESULT_ROWS: usize = 10;
 
 fn is_new_definition_response(last_operation_id: Option<&str>, operation_id: Option<&str>) -> bool {
     operation_id.is_some_and(|current| last_operation_id != Some(current))
@@ -3395,14 +3394,6 @@ pub struct DesktopEframeApp {
     /// state (focus, modifiers, active widgets) survives between calls. A
     /// fresh context per frame would silently drop that state.
     ctx: egui::Context,
-    pending_palette_confirmation: Option<PendingPaletteConfirmation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingPaletteConfirmation {
-    result_id: String,
-    title: String,
-    target_detail: String,
 }
 
 impl DesktopEframeApp {
@@ -3411,7 +3402,6 @@ impl DesktopEframeApp {
         Self {
             runtime,
             ctx: egui::Context::default(),
-            pending_palette_confirmation: None,
         }
     }
 
@@ -3606,13 +3596,21 @@ impl DesktopEframeApp {
         let input = ui.input(|input| input.clone());
         let command = input.modifiers.command;
 
-        if self.pending_palette_confirmation.is_some() {
+        if let Some(pending) = snapshot.palette_projection.pending_confirmation.as_ref() {
             if input.key_pressed(egui::Key::Escape) {
-                self.pending_palette_confirmation = None;
+                actions.push(DesktopAction::CancelPaletteConfirmation {
+                    token: pending.token,
+                });
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Escape);
+                });
             }
         } else if snapshot.palette_projection.open {
             if input.key_pressed(egui::Key::Escape) {
                 actions.push(DesktopAction::ClosePalette);
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Escape);
+                });
             }
             let palette_enter_enabled = snapshot.palette_projection.mode != PaletteMode::Search
                 || !matches!(
@@ -3856,9 +3854,9 @@ impl DesktopEframeApp {
         let width = screen.width().clamp(320.0, 760.0);
         let pos = egui::pos2(screen.center().x - width / 2.0, screen.top() + 72.0);
         let search_interaction = search_palette_interaction(palette, &snapshot.search_projection);
-        let mut grouped_result_indices = palette_grouped_result_indices(palette);
+        let mut display_result_indices = palette_display_result_indices(palette);
         if search_interaction == SearchPaletteInteraction::Running {
-            grouped_result_indices.clear();
+            display_result_indices.clear();
         }
         let search_model = (palette.mode == PaletteMode::Search).then(|| {
             crate::search::DesktopSearchViewModel::from_projection(&snapshot.search_projection)
@@ -3924,6 +3922,13 @@ impl DesktopEframeApp {
                                 .max_height(420.0)
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
+                                    ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                                        node.set_role(egui::accesskit::Role::ListBox);
+                                        node.set_label(match palette.mode {
+                                            PaletteMode::Command => "Command results".to_string(),
+                                            _ => format!("{} results", palette.mode.label()),
+                                        });
+                                    });
                                     if current_search && let Some(search) = &search_model {
                                         for status in &search.status_rows {
                                             ui.label(theme::muted(status));
@@ -3942,7 +3947,7 @@ impl DesktopEframeApp {
                                         }
                                     }
                                     let mut previous_group = None;
-                                    for index in grouped_result_indices.iter().copied() {
+                                    for index in display_result_indices.iter().copied() {
                                         let result = &palette.results[index];
                                         let group =
                                             crate::view::command_palette_group_label(&result.id);
@@ -3968,6 +3973,26 @@ impl DesktopEframeApp {
                                             row_response
                                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                         };
+                                        let detail = result
+                                            .disabled_reason
+                                            .as_deref()
+                                            .or(result.detail.as_deref())
+                                            .unwrap_or("");
+                                        ui.ctx().accesskit_node_builder(row_response.id, |node| {
+                                            node.set_role(egui::accesskit::Role::ListBoxOption);
+                                            node.set_label(result.title.as_str());
+                                            if detail.is_empty() {
+                                                node.clear_description();
+                                            } else {
+                                                node.set_description(detail);
+                                            }
+                                            node.set_selected(selected);
+                                            if result.disabled_reason.is_some() {
+                                                node.set_disabled();
+                                            } else {
+                                                node.clear_disabled();
+                                            }
+                                        });
                                         if selected && result.disabled_reason.is_none() {
                                             ui.painter().rect_filled(
                                                 row_rect,
@@ -3984,11 +4009,6 @@ impl DesktopEframeApp {
                                         row_ui.add_space(8.0);
                                         row_ui.vertical(|ui| {
                                             ui.label(theme::body_strong(&result.title));
-                                            let detail = result
-                                                .disabled_reason
-                                                .as_deref()
-                                                .or(result.detail.as_deref())
-                                                .unwrap_or("");
                                             if !detail.is_empty() {
                                                 ui.label(theme::muted(detail));
                                             }
@@ -4004,9 +4024,10 @@ impl DesktopEframeApp {
                                         if row_response.clicked()
                                             && result.disabled_reason.is_none()
                                         {
-                                            let delta =
-                                                index as i32 - palette.selected_index as i32;
-                                            if delta != 0 {
+                                            if let Some(delta) =
+                                                palette_available_selection_delta(palette, index)
+                                                && delta != 0
+                                            {
                                                 self.runtime.dispatch_ui_action(
                                                     DesktopAction::MovePaletteSelection { delta },
                                                 );
@@ -4039,20 +4060,26 @@ impl DesktopEframeApp {
         if result.disabled_reason.is_some() {
             return;
         }
-        if palette_command_requires_confirmation(&result.id) {
-            self.pending_palette_confirmation = Some(PendingPaletteConfirmation {
-                result_id: result.id.clone(),
-                title: result.title.clone(),
-                target_detail: result.detail.clone().unwrap_or_default(),
-            });
-            return;
+        let opens_settings = result.id == "command:preferences-open";
+        match self
+            .runtime
+            .handle_action(DesktopAction::DispatchPaletteSelection)
+        {
+            Ok(DesktopWorkflowOutcome::SettingsUpdated { .. }) if opens_settings => {
+                self.runtime.view.open_settings_from_palette();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.runtime
+                    .set_status(StatusSeverity::Error, format!("Action failed: {error}"));
+                let _ = self.runtime.refresh_projection();
+            }
         }
-        self.runtime
-            .dispatch_ui_action(DesktopAction::DispatchPaletteSelection);
     }
 
     fn render_palette_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_palette_confirmation.clone() else {
+        let snapshot = self.runtime.projection_snapshot();
+        let Some(pending) = snapshot.palette_projection.pending_confirmation.clone() else {
             return;
         };
         let title = format!("Confirm {}", pending.title);
@@ -4065,19 +4092,26 @@ impl DesktopEframeApp {
                 node.set_modal();
             });
             ui.label(theme::title(&title));
-            if pending.target_detail.is_empty() {
+            if pending.detail.as_deref().is_none_or(str::is_empty) {
                 ui.label(theme::muted(
                     "Review this command before it changes workspace or application state.",
                 ));
-            } else {
-                ui.label(theme::body_strong(&pending.target_detail));
+            } else if let Some(detail) = &pending.detail {
+                ui.label(theme::body_strong(detail));
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Confirm").clicked() {
+                let minimum = f32::from(theme::tokens().control_height.compact);
+                if ui
+                    .add(egui::Button::new("Confirm").min_size(egui::vec2(minimum, minimum)))
+                    .clicked()
+                {
                     confirm = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui
+                    .add(egui::Button::new("Cancel").min_size(egui::vec2(minimum, minimum)))
+                    .clicked()
+                {
                     cancel = true;
                 }
             });
@@ -4086,51 +4120,40 @@ impl DesktopEframeApp {
             cancel = true;
         }
         if confirm {
-            let snapshot = self.runtime.projection_snapshot();
-            let selected_still_matches = snapshot
-                .palette_projection
-                .results
-                .get(snapshot.palette_projection.selected_index)
-                .is_some_and(|result| {
-                    result.id == pending.result_id
-                        && result.detail.as_deref() == Some(pending.target_detail.as_str())
-                        && result.disabled_reason.is_none()
+            self.runtime
+                .dispatch_ui_action(DesktopAction::ConfirmPaletteSelection {
+                    token: pending.token,
+                    command_id: pending.command_id,
+                    operands: pending.operands,
                 });
-            self.pending_palette_confirmation = None;
-            if selected_still_matches {
-                self.runtime
-                    .dispatch_ui_action(DesktopAction::DispatchPaletteSelection);
-            }
         } else if cancel {
-            self.pending_palette_confirmation = None;
+            self.runtime
+                .dispatch_ui_action(DesktopAction::CancelPaletteConfirmation {
+                    token: pending.token,
+                });
         }
     }
 }
 
-fn palette_grouped_result_indices(palette: &legion_ui::PaletteProjection) -> Vec<usize> {
-    if palette.mode == PaletteMode::Search {
-        return (0..palette.results.len()).collect();
-    }
-    if palette.mode != PaletteMode::Command {
-        let visible_start =
-            palette_visible_result_start(palette.results.len(), palette.selected_index);
-        return (visible_start
-            ..(visible_start + COMMAND_PALETTE_VISIBLE_RESULT_ROWS).min(palette.results.len()))
-            .collect();
-    }
+fn palette_display_result_indices(palette: &legion_ui::PaletteProjection) -> Vec<usize> {
+    (0..palette.results.len()).collect()
+}
 
-    ["Suggested", "Files", "View", "Run", "Git", "Destructive"]
-        .into_iter()
-        .flat_map(|group| {
-            palette
-                .results
-                .iter()
-                .enumerate()
-                .filter_map(move |(index, result)| {
-                    (crate::view::command_palette_group_label(&result.id) == group).then_some(index)
-                })
-        })
-        .collect()
+fn palette_available_selection_delta(
+    palette: &legion_ui::PaletteProjection,
+    target_index: usize,
+) -> Option<i32> {
+    let available = palette
+        .results
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| result.disabled_reason.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    let current = available
+        .iter()
+        .position(|index| *index == palette.selected_index)?;
+    let target = available.iter().position(|index| *index == target_index)?;
+    Some(target as i32 - current as i32)
 }
 
 fn palette_search_query(palette: &legion_ui::PaletteProjection) -> &str {
@@ -4153,15 +4176,6 @@ fn palette_search_projection_is_current(
                 .results
                 .first()
                 .is_none_or(|result| result.id != "search:run"))
-}
-
-fn palette_command_requires_confirmation(result_id: &str) -> bool {
-    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
-    crate::view::command_palette_group_label(result_id) == "Destructive"
-        || matches!(
-            command_id,
-            "git-switch-branch" | "git-create-branch" | "git-new-worktree"
-        )
 }
 
 fn command_palette_empty_state(palette: &legion_ui::PaletteProjection) -> &'static str {
@@ -4238,18 +4252,6 @@ impl eframe::App for DesktopEframeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_app_frame(ui);
     }
-}
-
-fn palette_visible_result_start(total: usize, selected_index: usize) -> usize {
-    if total <= COMMAND_PALETTE_VISIBLE_RESULT_ROWS {
-        return 0;
-    }
-
-    let selected_index = selected_index.min(total.saturating_sub(1));
-    selected_index
-        .saturating_add(1)
-        .saturating_sub(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
-        .min(total - COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
 }
 
 fn settings_status_label(projection: &SettingsProjection) -> String {
@@ -5010,6 +5012,7 @@ mod tests {
             query: "/needle".to_string(),
             scope: SearchScopeProjection::Workspace,
             selected_index: 0,
+            pending_confirmation: None,
             results: vec![legion_ui::PaletteResult {
                 id: "search:run".to_string(),
                 kind: legion_ui::PaletteResultKind::Search,

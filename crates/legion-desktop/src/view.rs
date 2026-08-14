@@ -74,15 +74,15 @@ use components::{
 use legion_protocol::{
     AssistedAiProviderAvailabilityState, BufferId, CANONICAL_PRODUCT_MODES, CanonicalPath,
     CanonicalProductMode, ContextManifestEgressStatus, ContextManifestInclusionState,
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance, DelegatedTaskScope,
-    DelegatedTaskScopeTargetKind, DelegatedTaskToolPermissionDecision, FileId,
-    LanguageInlayHintProjection, LanguageLocationProjection, LanguageProblemProjection,
-    LegionToolKind, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
-    PluginContributionProjection, PrivacyInspectorRedactionState, ProposalCancellationReason,
-    ProposalId, ProposalLifecycleState, ProposalRejectionReason, ProposalRiskLabel,
-    ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate, ViewportLineTruncationState,
-    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance,
+    DelegatedTaskRuntimeActivationState, DelegatedTaskScope, DelegatedTaskScopeTargetKind,
+    DelegatedTaskToolPermissionDecision, FileId, LanguageInlayHintProjection,
+    LanguageLocationProjection, LanguageProblemProjection, LegionToolKind, LineWrappingPolicy,
+    PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
+    PrivacyInspectorRedactionState, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
+    ProposalRejectionReason, ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange,
+    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
@@ -643,7 +643,14 @@ impl DesktopSetupChecklistViewModel {
         snapshot: &ShellProjectionSnapshot,
         settings: &DesktopSettingsViewModel,
     ) -> Self {
-        let provider_count = snapshot.assisted_ai_projection.provider_count;
+        let provider_count = snapshot
+            .assisted_ai_projection
+            .providers
+            .iter()
+            .filter(|provider| {
+                provider.availability == AssistedAiProviderAvailabilityState::Available
+            })
+            .count();
         Self {
             items: [
                 DesktopSetupChecklistItem {
@@ -769,6 +776,19 @@ pub enum SurfaceAvailability {
     Hidden,
 }
 
+/// Renderer lifecycle derived only from Delegate-owned app projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegateLifecycle {
+    /// No submitted task is running; the rail may collect a new bounded task.
+    Draft,
+    /// A submitted task is planning, isolated, executing, or verifying.
+    Running,
+    /// A submitted task is waiting on approval or a resolvable prerequisite.
+    Waiting,
+    /// A submitted task completed, failed, was refused, or was cancelled.
+    Terminal,
+}
+
 /// Coherent center/inspector presentation derived from projections and local UI state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeSurfaceModel {
@@ -776,6 +796,8 @@ pub struct ModeSurfaceModel {
     pub center: SurfaceAvailability,
     /// Availability of the contextual right inspector.
     pub inspector: SurfaceAvailability,
+    /// Explicit Delegate lifecycle when Delegate is the projected product mode.
+    pub delegate_lifecycle: Option<DelegateLifecycle>,
 }
 
 impl ModeSurfaceModel {
@@ -787,6 +809,7 @@ impl ModeSurfaceModel {
             DesktopProductMode::Manual => Self {
                 center: SurfaceAvailability::Hidden,
                 inspector: SurfaceAvailability::Hidden,
+                delegate_lifecycle: None,
             },
             DesktopProductMode::Assist => {
                 let inspector = if snapshot.assisted_ai_projection.providers.is_empty() {
@@ -794,7 +817,7 @@ impl ModeSurfaceModel {
                         reason: "Choose an AI provider to enable predictions.".to_string(),
                         resolution: "Settings".to_string(),
                     }
-                } else if snapshot
+                } else if !snapshot
                     .assisted_ai_projection
                     .providers
                     .iter()
@@ -802,27 +825,40 @@ impl ModeSurfaceModel {
                         provider.availability == AssistedAiProviderAvailabilityState::Available
                     })
                 {
-                    SurfaceAvailability::Ready
-                } else {
                     SurfaceAvailability::Blocked {
                         reason: "No AI provider is ready for predictions.".to_string(),
                         resolution: "Settings".to_string(),
                     }
+                } else if snapshot.active_buffer_projection.buffer_id.is_none() {
+                    SurfaceAvailability::Blocked {
+                        reason: "Open a file to enable predictions.".to_string(),
+                        resolution: "Open file".to_string(),
+                    }
+                } else {
+                    SurfaceAvailability::Ready
                 };
                 Self {
                     center: SurfaceAvailability::Hidden,
                     inspector,
+                    delegate_lifecycle: None,
                 }
             }
             DesktopProductMode::Delegate => {
-                let active = delegated_activity_projected(snapshot);
+                let lifecycle = delegate_lifecycle(snapshot);
+                let task_owned = delegated_task_owned_state_projected(snapshot);
+                let blocked = task_owned && delegated_task_is_blocked(snapshot);
                 Self {
-                    center: if active {
+                    center: if task_owned && !blocked {
                         SurfaceAvailability::Ready
                     } else {
                         SurfaceAvailability::Hidden
                     },
-                    inspector: if active || state.canonical_workspace_root.is_some() {
+                    inspector: if blocked {
+                        SurfaceAvailability::Blocked {
+                            reason: "Task is blocked".to_string(),
+                            resolution: "Review task scope and approvals, then retry.".to_string(),
+                        }
+                    } else if task_owned || state.canonical_workspace_root.is_some() {
                         SurfaceAvailability::Ready
                     } else {
                         SurfaceAvailability::Blocked {
@@ -830,6 +866,7 @@ impl ModeSurfaceModel {
                             resolution: "Open a trusted workspace, then try again.".to_string(),
                         }
                     },
+                    delegate_lifecycle: Some(lifecycle),
                 }
             }
             DesktopProductMode::LegionWorkflows => Self {
@@ -839,6 +876,7 @@ impl ModeSurfaceModel {
                     SurfaceAvailability::Ready
                 },
                 inspector: SurfaceAvailability::Ready,
+                delegate_lifecycle: None,
             },
         }
     }
@@ -1159,7 +1197,11 @@ pub struct ProjectionView {
     utility_overlay_origin: Option<egui::Id>,
     utility_overlay_needs_focus: bool,
     utility_restore_focus: Option<egui::Id>,
+    command_palette_origin: Option<egui::Id>,
     compact_drawer: Option<CompactDrawer>,
+    compact_drawer_origin: Option<egui::Id>,
+    compact_drawer_needs_focus: bool,
+    compact_drawer_restore_focus: Option<egui::Id>,
     last_editor_rect: Option<egui::Rect>,
     last_shell_panel_rects: Option<ShellPanelRects>,
     /// Renderer-only presentation state. This is not product-mode authority.
@@ -1268,7 +1310,11 @@ impl ProjectionView {
             utility_overlay_origin: None,
             utility_overlay_needs_focus: false,
             utility_restore_focus: None,
+            command_palette_origin: None,
             compact_drawer: None,
+            compact_drawer_origin: None,
+            compact_drawer_needs_focus: false,
+            compact_drawer_restore_focus: None,
             last_editor_rect: None,
             last_shell_panel_rects: None,
             pending_mode_confirmation: None,
@@ -1352,6 +1398,26 @@ impl ProjectionView {
         self.utility_restore_focus = if restore_focus { origin } else { None };
     }
 
+    pub(crate) fn open_settings_from_palette(&mut self) {
+        if let Some(origin) = self.command_palette_origin {
+            self.open_utility_overlay(UtilitySurface::Settings, origin);
+        }
+    }
+
+    fn open_compact_drawer(&mut self, drawer: CompactDrawer, origin: egui::Id) {
+        self.compact_drawer = Some(drawer);
+        self.compact_drawer_origin = Some(origin);
+        self.compact_drawer_needs_focus = true;
+        self.compact_drawer_restore_focus = None;
+    }
+
+    fn close_compact_drawer(&mut self, restore_focus: bool) {
+        self.compact_drawer = None;
+        self.compact_drawer_needs_focus = false;
+        let origin = self.compact_drawer_origin.take();
+        self.compact_drawer_restore_focus = if restore_focus { origin } else { None };
+    }
+
     /// Renders the current projection snapshot into egui panels.
     pub fn render(
         &mut self,
@@ -1380,6 +1446,12 @@ impl ProjectionView {
         ui.ctx()
             .set_zoom_factor(settings.zoom_percent as f32 / 100.0);
         theme::install(ui.ctx(), &active_theme);
+        let current_interact_size = ui.style().spacing.interact_size;
+        let minimum_target = f32::from(active_theme.control_height.compact);
+        ui.style_mut().spacing.interact_size = egui::vec2(
+            current_interact_size.x.max(minimum_target),
+            current_interact_size.y.max(minimum_target),
+        );
         let mut model = DesktopProjectionViewModel::from_snapshot_with_state(snapshot, state);
         model.bottom_tab_rows = bottom_tab_rows(
             snapshot,
@@ -1564,7 +1636,10 @@ impl ProjectionView {
                 &mut actions,
             );
         } else {
-            self.compact_drawer = None;
+            self.close_compact_drawer(false);
+        }
+        if let Some(origin) = self.compact_drawer_restore_focus.take() {
+            ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
@@ -1637,10 +1712,17 @@ fn render_compact_drawer_strip(
             let response = ui.add(
                 egui::Button::new(theme::label(label))
                     .selected(selected)
-                    .min_size(egui::vec2(24.0, 24.0)),
+                    .min_size(egui::vec2(
+                        f32::from(theme::tokens().control_height.compact),
+                        f32::from(theme::tokens().control_height.compact),
+                    )),
             );
             if response.clicked() {
-                view.compact_drawer = if selected { None } else { Some(drawer) };
+                if selected {
+                    view.close_compact_drawer(true);
+                } else {
+                    view.open_compact_drawer(drawer, response.id);
+                }
             }
         }
     });
@@ -1666,6 +1748,14 @@ fn render_compact_drawer_overlay(
         CompactDrawer::BottomPanel => "Bottom panel",
     };
     let mut open = true;
+    let mut close_requested = false;
+    let request_initial_focus = std::mem::take(&mut view.compact_drawer_needs_focus);
+    let escape_requested = ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        && !matches!(
+            view.utility_surface,
+            Some(UtilitySurface::Settings | UtilitySurface::Setup)
+        )
+        && view.pending_mode_confirmation.is_none();
     egui::Window::new(title)
         .id(egui::Id::new((
             "legion_desktop_compact_drawer",
@@ -1680,27 +1770,39 @@ fn render_compact_drawer_overlay(
         // egui's Window width excludes its 14 px outer resize/title chrome.
         .max_width(466.0)
         .max_height((ctx.content_rect().height() - 84.0).max(180.0))
-        .show(ctx, |ui| match drawer {
-            CompactDrawer::Explorer => {
-                render_left_sidebar(ui, snapshot, state, model, geometry, view, actions);
+        .show(ctx, |ui| {
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::Dialog);
+                node.set_label(format!("{title} drawer"));
+            });
+            let close = soft_button(ui, &format!("Close {title} drawer"));
+            if request_initial_focus {
+                close.request_focus();
             }
-            CompactDrawer::Inspector => {
-                render_right_dock(ui, snapshot, state, model, view, actions);
-            }
-            CompactDrawer::BottomPanel => {
-                render_bottom_console(
-                    ui,
-                    snapshot,
-                    model,
-                    state.problems_selected_index,
-                    selected_bottom_panel,
-                    view,
-                    actions,
-                );
+            close_requested = close.clicked();
+            ui.separator();
+            match drawer {
+                CompactDrawer::Explorer => {
+                    render_left_sidebar(ui, snapshot, state, model, geometry, view, actions);
+                }
+                CompactDrawer::Inspector => {
+                    render_right_dock(ui, snapshot, state, model, view, actions);
+                }
+                CompactDrawer::BottomPanel => {
+                    render_bottom_console(
+                        ui,
+                        snapshot,
+                        model,
+                        state.problems_selected_index,
+                        selected_bottom_panel,
+                        view,
+                        actions,
+                    );
+                }
             }
         });
-    if !open {
-        view.compact_drawer = None;
+    if !open || close_requested || escape_requested {
+        view.close_compact_drawer(true);
     }
 }
 
@@ -1781,8 +1883,12 @@ fn render_top_command_bar(
             .max_rect(right_rect)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
-    if composition.shows_command_palette && top_bar_command_button(&mut right_ui).clicked() {
-        actions.push(command_palette_control_action());
+    if composition.shows_command_palette {
+        let command = top_bar_command_button(&mut right_ui);
+        view.command_palette_origin = Some(command.id);
+        if command.clicked() {
+            actions.push(command_palette_control_action());
+        }
     }
     let presence_count = projected_presence_count_for_chrome(snapshot);
     if presence_count > 0 {
@@ -2341,8 +2447,13 @@ fn render_right_dock(
             DesktopProductMode::Manual => {}
             DesktopProductMode::Assist => render_assist_rail(ui, snapshot, model, view, actions),
             DesktopProductMode::Delegate => {
-                if delegated_activity_projected(snapshot) {
+                if delegated_task_owned_state_projected(snapshot) {
                     render_delegation_console(ui, snapshot, state, model, actions)
+                } else if matches!(
+                    model.mode_surface.inspector,
+                    SurfaceAvailability::Blocked { .. }
+                ) {
+                    render_delegate_prerequisite_rail(ui, model)
                 } else {
                     render_delegate_draft_rail(ui, snapshot, state, model, actions)
                 }
@@ -3528,7 +3639,10 @@ fn render_tab_strip(
                                     .fill(egui::Color32::TRANSPARENT)
                                     .stroke(egui::Stroke::NONE)
                                     .corner_radius(egui::CornerRadius::same(3))
-                                    .min_size(egui::vec2(24.0, 24.0)),
+                                    .min_size(egui::vec2(
+                                        f32::from(theme::tokens().control_height.compact),
+                                        f32::from(theme::tokens().control_height.compact),
+                                    )),
                             );
                             ui.ctx().accesskit_node_builder(close_response.id, |node| {
                                 node.set_label(format!("Close {}", tab.title));
@@ -4810,39 +4924,37 @@ fn render_delegated_canvas(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
-        ui.set_height(220.0);
-        ui.horizontal(|ui| {
-            section_label(
-                ui,
-                "Delegated Diff Review",
-                Some(theme::tokens().accent.violet),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if primary_button(ui, "Approve", theme::tokens().accent.blue).clicked()
-                    && let Some(proposal_id) = first_proposal_id(snapshot)
-                {
-                    actions.push(DesktopAction::ApproveProposal { proposal_id });
-                }
-                if soft_button(ui, "Request Changes").clicked()
-                    && let Some(proposal_id) = first_proposal_id(snapshot)
-                {
-                    actions.push(DesktopAction::RejectProposal {
-                        proposal_id,
-                        reason: ProposalRejectionReason::UserRejected,
-                    });
-                }
+    if let Some(proposal_id) = first_delegate_owned_proposal_id(snapshot) {
+        theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
+            ui.set_height(220.0);
+            ui.horizontal(|ui| {
+                section_label(
+                    ui,
+                    "Delegated Diff Review",
+                    Some(theme::tokens().accent.violet),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if primary_button(ui, "Approve", theme::tokens().accent.blue).clicked() {
+                        actions.push(DesktopAction::ApproveProposal { proposal_id });
+                    }
+                    if soft_button(ui, "Request Changes").clicked() {
+                        actions.push(DesktopAction::RejectProposal {
+                            proposal_id,
+                            reason: ProposalRejectionReason::UserRejected,
+                        });
+                    }
+                });
             });
+            render_compact_rows(
+                ui,
+                &delegated_proposal_rows(snapshot),
+                "No delegated proposal selected",
+                1,
+            );
+            render_delegated_hunk_review_controls(ui, snapshot, actions);
         });
-        render_compact_rows(
-            ui,
-            &model.proposal_rows,
-            "No delegated proposal selected",
-            8,
-        );
-        render_delegated_hunk_review_controls(ui, snapshot, actions);
-    });
-    ui.separator();
+        ui.separator();
+    }
     render_delegate_task_board(ui, snapshot, model, actions);
 }
 
@@ -4898,19 +5010,14 @@ fn render_delegate_task_board(
                     ui,
                     "TESTING",
                     theme::tokens().accent.violet,
-                    model.test_rows.iter().take(4).cloned().collect(),
+                    delegated_testing_rows(snapshot),
                     actions,
                 );
                 delegate_task_column(
                     ui,
                     "DONE",
                     theme::tokens().accent.green,
-                    model
-                        .operational_health_rows
-                        .iter()
-                        .take(4)
-                        .cloned()
-                        .collect(),
+                    delegated_done_rows(snapshot),
                     actions,
                 );
             });
@@ -5438,10 +5545,18 @@ fn render_assist_rail(
         surface_card(ui, |ui| {
             ui.label(theme::body_strong(reason));
             if soft_button(ui, resolution).clicked() {
-                actions.push(DesktopAction::OpenSettings);
-                view.utility_surface = Some(UtilitySurface::Settings);
-                view.settings_section = SettingsSection::AiProviders;
-                view.utility_overlay_needs_focus = true;
+                if resolution == "Open file" {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::File,
+                        query: String::new(),
+                        scope: SearchScopeProjection::Workspace,
+                    });
+                } else {
+                    actions.push(DesktopAction::OpenSettings);
+                    view.utility_surface = Some(UtilitySurface::Settings);
+                    view.settings_section = SettingsSection::AiProviders;
+                    view.utility_overlay_needs_focus = true;
+                }
             }
         });
         return;
@@ -5451,6 +5566,16 @@ fn render_assist_rail(
     ui.label(theme::muted(
         "Assist never writes to the workspace until you accept a suggestion.",
     ));
+}
+
+fn render_delegate_prerequisite_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
+    inspector_header(ui, "Delegate", DesktopProductMode::Delegate);
+    if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
+        surface_card(ui, |ui| {
+            ui.label(theme::body_strong(reason));
+            ui.label(theme::muted(resolution));
+        });
+    }
 }
 
 fn render_delegate_draft_rail(
@@ -5521,17 +5646,43 @@ fn render_delegation_console(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Delegate", DesktopProductMode::Delegate);
+    if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
+        surface_card(ui, |ui| {
+            ui.label(theme::body_strong(reason));
+            ui.label(theme::muted(resolution));
+        });
+        return;
+    }
+    let lifecycle = model
+        .mode_surface
+        .delegate_lifecycle
+        .unwrap_or(DelegateLifecycle::Draft);
     section_label(ui, "Task intent", Some(theme::tokens().accent.blue));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
     });
     section_label(ui, "Readiness", Some(theme::tokens().accent.green));
-    prerequisite_card(
-        ui,
-        "Task is active",
-        "Changes remain proposals until you approve them.",
-        true,
-    );
+    let (readiness, detail, ready) = match lifecycle {
+        DelegateLifecycle::Draft => (
+            "Task draft projected",
+            "Review the projected task metadata before runtime work begins.",
+            false,
+        ),
+        DelegateLifecycle::Running => (
+            "Task is active",
+            "Changes remain proposals until you approve them.",
+            true,
+        ),
+        DelegateLifecycle::Waiting => (
+            "Task is waiting",
+            "Review the requested approval or prerequisite to continue.",
+            false,
+        ),
+        DelegateLifecycle::Terminal => {
+            ("Task ended", "No further delegated work is running.", false)
+        }
+    };
+    prerequisite_card(ui, readiness, detail, ready);
     section_label(ui, "Phase", Some(theme::tokens().accent.violet));
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(delegated_runtime_label(
@@ -5550,11 +5701,6 @@ fn render_delegation_console(
         }
     });
 
-    if !snapshot.proposal_ledger_projection.rows.is_empty() {
-        section_label(ui, "Proposal review", Some(theme::tokens().accent.orange));
-        render_proposal_cards(ui, snapshot, actions);
-    }
-    render_delegated_hunk_review_controls(ui, snapshot, actions);
     if !snapshot
         .delegated_task_projection
         .tool_permission_requests
@@ -5959,7 +6105,13 @@ fn render_delegated_hunk_review_controls(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let reviews = &snapshot.delegated_task_projection.proposal_reviews;
+    let owned = delegate_owned_proposal_ids(snapshot);
+    let reviews = snapshot
+        .delegated_task_projection
+        .proposal_reviews
+        .iter()
+        .filter(|review| owned.contains(&review.proposal_id))
+        .collect::<Vec<_>>();
     if reviews.is_empty() {
         return;
     }
@@ -5970,7 +6122,7 @@ fn render_delegated_hunk_review_controls(
         .id_salt("delegated_hunk_review_scroll")
         .max_height(280.0)
         .show(ui, |ui| {
-            for review in reviews.iter() {
+            for review in reviews {
                 theme::small_card_frame().show(ui, |ui| {
                     ui.label(theme::body_strong(format!(
                         "proposal {} accepted={} rejected={} pending={}",
@@ -6176,13 +6328,17 @@ fn parse_automate_permission_session(
 
 fn render_legion_workflow_kill_switch_controls(
     ui: &mut egui::Ui,
-    rows: &[&legion_protocol::LegionWorkflowProjectionRow],
+    rows: &[(usize, &legion_protocol::LegionWorkflowProjectionRow)],
     actions: &mut Vec<DesktopAction>,
 ) {
-    for row in rows {
+    for (row_index, row) in rows {
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::muted("Workflow stop"));
-            if soft_button(ui, "Kill").clicked() {
+            let stop = soft_button(ui, "Kill");
+            ui.ctx().accesskit_node_builder(stop.id, |node| {
+                node.set_label(format!("Stop workflow session {}", row_index + 1));
+            });
+            if stop.clicked() {
                 actions.push(DesktopAction::TriggerLegionWorkflowKillSwitch {
                     session_id: row.session_id.clone(),
                     reason_label: "user requested hard stop".to_string(),
@@ -6194,13 +6350,13 @@ fn render_legion_workflow_kill_switch_controls(
 
 fn visible_stoppable_legion_workflows(
     snapshot: &ShellProjectionSnapshot,
-) -> Vec<&legion_protocol::LegionWorkflowProjectionRow> {
+) -> Vec<(usize, &legion_protocol::LegionWorkflowProjectionRow)> {
     snapshot
         .legion_workflow_projection
         .rows
         .iter()
-        .take(3)
-        .filter(|row| {
+        .enumerate()
+        .filter(|(_, row)| {
             legion_workflow_is_cancellable(row.lifecycle_state)
                 && snapshot
                     .legion_workflow_projection
@@ -6211,6 +6367,7 @@ fn visible_stoppable_legion_workflows(
                             && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
                     })
         })
+        .take(3)
         .collect()
 }
 
@@ -6974,46 +7131,63 @@ fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {
 
 fn current_objective(snapshot: &ShellProjectionSnapshot) -> String {
     snapshot
-        .proposal_ledger_projection
-        .rows
+        .delegated_task_projection
+        .plan_rows
         .first()
-        .map(|row| row.title.clone())
-        .or_else(|| {
+        .map(|row| {
+            row.labels
+                .iter()
+                .find(|label| !label.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| row.plan_id.0.clone())
+        })
+        .unwrap_or_else(|| "Delegated task".to_string())
+}
+
+fn delegate_owned_proposal_ids(snapshot: &ShellProjectionSnapshot) -> Vec<ProposalId> {
+    if !delegated_task_owned_state_projected(snapshot) {
+        return Vec::new();
+    }
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .iter()
+        .map(|link| link.proposal_id)
+        .chain(
             snapshot
                 .delegated_task_projection
-                .plan_rows
-                .first()
-                .map(|row| row.plan_id.0.clone())
-        })
-        .unwrap_or_else(|| {
-            let path = current_path(snapshot);
-            if path == "<none>" {
-                "Inspect the workspace and keep changes proposal-mediated".to_string()
-            } else {
-                format!("Work on {path}")
+                .step_summaries
+                .iter()
+                .filter_map(|step| step.proposal_id),
+        )
+        .fold(Vec::new(), |mut proposal_ids, proposal_id| {
+            if !proposal_ids.contains(&proposal_id) {
+                proposal_ids.push(proposal_id);
             }
+            proposal_ids
         })
 }
 
-fn first_proposal_id(snapshot: &ShellProjectionSnapshot) -> Option<ProposalId> {
+fn first_delegate_owned_proposal_id(snapshot: &ShellProjectionSnapshot) -> Option<ProposalId> {
+    let owned = delegate_owned_proposal_ids(snapshot);
     snapshot
-        .proposal_ledger_projection
-        .selected_proposal_id
-        .or_else(|| {
-            snapshot
-                .proposal_ledger_projection
-                .rows
-                .first()
-                .map(|row| row.proposal_id)
+        .delegated_task_projection
+        .proposal_reviews
+        .iter()
+        .find_map(|review| {
+            owned
+                .contains(&review.proposal_id)
+                .then_some(review.proposal_id)
         })
+        .or_else(|| owned.first().copied())
 }
 
 fn delegated_plan_rows(
     snapshot: &ShellProjectionSnapshot,
-    model: &DesktopProjectionViewModel,
+    _model: &DesktopProjectionViewModel,
     skip: usize,
 ) -> Vec<String> {
-    let rows = snapshot
+    snapshot
         .delegated_task_projection
         .plan_rows
         .iter()
@@ -7024,19 +7198,14 @@ fn delegated_plan_rows(
                 row.plan_id.0, row.plan_state, row.readiness, row.risk_label
             )
         })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        model.assistant_rows.iter().take(3).cloned().collect()
-    } else {
-        rows
-    }
+        .collect::<Vec<_>>()
 }
 
 fn delegated_step_rows(
     snapshot: &ShellProjectionSnapshot,
-    model: &DesktopProjectionViewModel,
+    _model: &DesktopProjectionViewModel,
 ) -> Vec<String> {
-    let rows = snapshot
+    snapshot
         .delegated_task_projection
         .step_summaries
         .iter()
@@ -7049,44 +7218,35 @@ fn delegated_step_rows(
                 row.proposal_id.map(|proposal| proposal.0)
             )
         })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        model.main_canvas_rows.iter().take(3).cloned().collect()
-    } else {
-        rows
-    }
+        .collect::<Vec<_>>()
+}
+
+fn delegated_testing_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    matches!(
+        snapshot.delegated_task_projection.runtime_activation,
+        DelegatedTaskRuntimeActivationState::Verifying
+    )
+    .then(|| "Delegate verification is running".to_string())
+    .into_iter()
+    .collect()
+}
+
+fn delegated_done_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let label = match snapshot.delegated_task_projection.runtime_activation {
+        DelegatedTaskRuntimeActivationState::Completed => "Delegate task completed",
+        DelegatedTaskRuntimeActivationState::Cancelled => "Delegate task cancelled",
+        DelegatedTaskRuntimeActivationState::Failed => "Delegate task failed",
+        _ => return Vec::new(),
+    };
+    vec![label.to_string()]
 }
 
 fn proposal_board_rows(
     snapshot: &ShellProjectionSnapshot,
-    model: &DesktopProjectionViewModel,
+    _model: &DesktopProjectionViewModel,
 ) -> Vec<String> {
-    let rows = snapshot
-        .proposal_ledger_projection
-        .rows
-        .iter()
-        .map(|row| {
-            format!(
-                "{} payload={:?} risk={:?} lifecycle={}",
-                row.title, row.payload_kind, row.risk_label, row.lifecycle.label
-            )
-        })
-        .chain(
-            snapshot
-                .delegated_task_projection
-                .proposal_reviews
-                .iter()
-                .flat_map(|review| {
-                    review.hunks.iter().map(move |hunk| {
-                        format!(
-                            "delegate hunk {} proposal={} {:?}",
-                            trim_middle(&hunk.hunk_id, 32),
-                            review.proposal_id.0,
-                            hunk.disposition
-                        )
-                    })
-                }),
-        )
+    delegated_proposal_rows(snapshot)
+        .into_iter()
         .chain(
             snapshot
                 .delegated_task_projection
@@ -7101,12 +7261,40 @@ fn proposal_board_rows(
                     )
                 }),
         )
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        model.proposal_rows.iter().take(3).cloned().collect()
-    } else {
-        rows
-    }
+        .collect()
+}
+
+fn delegated_proposal_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
+    let owned = delegate_owned_proposal_ids(snapshot);
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .iter()
+        .filter(|link| owned.contains(&link.proposal_id))
+        .map(|link| {
+            format!(
+                "delegate proposal {} payload={:?} risk={:?} lifecycle={:?}",
+                link.proposal_id.0, link.payload_kind, link.risk_label, link.lifecycle_state
+            )
+        })
+        .chain(
+            snapshot
+                .delegated_task_projection
+                .proposal_reviews
+                .iter()
+                .filter(|review| owned.contains(&review.proposal_id))
+                .flat_map(|review| {
+                    review.hunks.iter().map(move |hunk| {
+                        format!(
+                            "delegate hunk {} proposal={} {:?}",
+                            trim_middle(&hunk.hunk_id, 32),
+                            review.proposal_id.0,
+                            hunk.disposition
+                        )
+                    })
+                }),
+        )
+        .collect()
 }
 
 fn level_color(level: DesktopProductMode) -> egui::Color32 {
@@ -7883,21 +8071,62 @@ fn bottom_tab_specs(
     tabs
 }
 
-fn delegated_activity_projected(snapshot: &ShellProjectionSnapshot) -> bool {
+fn delegated_task_owned_state_projected(snapshot: &ShellProjectionSnapshot) -> bool {
     let delegated = &snapshot.delegated_task_projection;
     delegated.runtime_activation != legion_protocol::DelegatedTaskRuntimeActivationState::NotEncoded
         || delegated.plan_count > 0
         || !delegated.plan_rows.is_empty()
         || !delegated.step_summaries.is_empty()
+}
+
+fn delegated_task_is_blocked(snapshot: &ShellProjectionSnapshot) -> bool {
+    use legion_protocol::{
+        DelegatedTaskPlanState as PlanState, DelegatedTaskRuntimeActivationState,
+    };
+    let delegated = &snapshot.delegated_task_projection;
+    delegated.runtime_activation == DelegatedTaskRuntimeActivationState::Blocked
         || !delegated.blockers.is_empty()
-        || !delegated.refusals.is_empty()
-        || !delegated.required_approvals.is_empty()
-        || !delegated.proposal_preview_links.is_empty()
-        || !delegated.audit_readiness.is_empty()
-        || !delegated.chat_messages.is_empty()
-        || !delegated.context_citations.is_empty()
-        || !delegated.proposal_reviews.is_empty()
-        || !delegated.tool_permission_requests.is_empty()
+        || delegated
+            .plan_rows
+            .iter()
+            .any(|row| row.plan_state == PlanState::Blocked)
+}
+
+fn delegate_lifecycle(snapshot: &ShellProjectionSnapshot) -> DelegateLifecycle {
+    use legion_protocol::{
+        DelegatedTaskPlanState as PlanState, DelegatedTaskRuntimeActivationState as RuntimeState,
+    };
+    let delegated = &snapshot.delegated_task_projection;
+    match delegated.runtime_activation {
+        RuntimeState::Planned
+        | RuntimeState::SandboxAllocated
+        | RuntimeState::Executing
+        | RuntimeState::Verifying => DelegateLifecycle::Running,
+        RuntimeState::WaitingForApproval | RuntimeState::Blocked => DelegateLifecycle::Waiting,
+        RuntimeState::Completed | RuntimeState::Cancelled | RuntimeState::Failed => {
+            DelegateLifecycle::Terminal
+        }
+        RuntimeState::NotEncoded => {
+            if !delegated.plan_rows.is_empty()
+                && delegated
+                    .plan_rows
+                    .iter()
+                    .all(|row| matches!(row.plan_state, PlanState::Refused | PlanState::Cancelled))
+            {
+                DelegateLifecycle::Terminal
+            } else if delegated.plan_rows.iter().any(|row| {
+                matches!(
+                    row.plan_state,
+                    PlanState::Planned | PlanState::AwaitingApproval | PlanState::Blocked
+                )
+            }) || !delegated.blockers.is_empty()
+            {
+                DelegateLifecycle::Waiting
+            } else {
+                DelegateLifecycle::Draft
+            }
+        }
+    }
 }
 
 fn delegated_runtime_is_cancellable(

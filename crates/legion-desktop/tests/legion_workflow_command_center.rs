@@ -426,34 +426,28 @@ fn click_workflow_button(
     primed: &egui::FullOutput,
     label: &str,
 ) -> Vec<DesktopAction> {
-    let bounds = workflow_button_bounds(primed, label);
-    let pos = egui::pos2(
-        ((bounds.x0 + bounds.x1) * 0.5) as f32,
-        ((bounds.y0 + bounds.y1) * 0.5) as f32,
-    );
-    let press = workflow_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
+    let target = primed
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("workflow button `{label}` should be actionable"));
+    let click = workflow_raw_input(vec![egui::Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Click,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
         },
-    ]);
-    let _ = ctx.run_ui(press, |ui| {
-        let _ = view.render(ui, snapshot);
-    });
-    let release = workflow_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]);
+    )]);
     let mut actions = None;
-    let _ = ctx.run_ui(release, |ui| {
+    let _ = ctx.run_ui(click, |ui| {
         actions = Some(view.render(ui, snapshot).actions);
     });
     actions.expect("workflow click frame should render")
@@ -468,7 +462,13 @@ fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
 
-    for label in ["Approve", "Review", "Reject", "Cancel proposal", "Kill"] {
+    for label in [
+        "Approve",
+        "Review",
+        "Reject",
+        "Cancel proposal",
+        "Stop workflow session 1",
+    ] {
         let _ = workflow_button_bounds(&full, label);
     }
     let cancelled = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Cancel proposal");
@@ -481,7 +481,8 @@ fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_
     );
 
     let (_next, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
-    let killed = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Kill");
+    let killed =
+        click_workflow_button(&ctx, &mut view, &snapshot, &full, "Stop workflow session 1");
     assert_eq!(
         killed,
         vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
@@ -526,7 +527,7 @@ fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
         let mut view = ProjectionView::new();
         let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
         assert!(
-            !workflow_has_clickable_label(&full, "Kill"),
+            !workflow_has_clickable_label(&full, "Stop workflow session 1"),
             "{lifecycle:?} workflow must not expose Kill"
         );
     }
@@ -537,7 +538,7 @@ fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
     assert!(
-        !workflow_has_clickable_label(&full, "Kill"),
+        !workflow_has_clickable_label(&full, "Stop workflow session 1"),
         "a workflow without a projected kill switch must not expose Kill"
     );
 
@@ -550,7 +551,7 @@ fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &triggered);
     assert!(
-        !workflow_has_clickable_label(&full, "Kill"),
+        !workflow_has_clickable_label(&full, "Stop workflow session 1"),
         "a triggered kill switch must not expose Kill again"
     );
 
@@ -560,8 +561,11 @@ fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
     add_automate_sidecars(&mut armed.legion_workflow_projection);
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &armed);
-    assert!(workflow_has_clickable_label(&full, "Kill"));
-    let killed = click_workflow_button(&ctx, &mut view, &armed, &full, "Kill");
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 1"
+    ));
+    let killed = click_workflow_button(&ctx, &mut view, &armed, &full, "Stop workflow session 1");
     assert_eq!(
         killed,
         vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
@@ -667,8 +671,20 @@ fn legion_workflow_stop_section_uses_the_same_visible_rows_as_kill_actions() {
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
-    assert!(!workflow_has_label(&full, "Stop controls"));
-    assert!(!workflow_has_clickable_label(&full, "Kill"));
+    assert!(workflow_has_label(&full, "Stop controls"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 4"
+    ));
+    let stopped =
+        click_workflow_button(&ctx, &mut view, &snapshot, &full, "Stop workflow session 4");
+    assert_eq!(
+        stopped,
+        vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
+            session_id: LegionWorkflowSessionId("session:legion:3".to_string()),
+            reason_label: "user requested hard stop".to_string(),
+        }]
+    );
 
     snapshot.legion_workflow_projection.kill_switches[0].session_id =
         snapshot.legion_workflow_projection.rows[2]
@@ -679,7 +695,10 @@ fn legion_workflow_stop_section_uses_the_same_visible_rows_as_kill_actions() {
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
     assert!(workflow_has_label(&full, "Stop controls"));
-    assert!(workflow_has_clickable_label(&full, "Kill"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 3"
+    ));
 }
 
 #[test]

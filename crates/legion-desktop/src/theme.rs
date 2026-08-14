@@ -89,8 +89,8 @@ impl Theme {
             },
             border: BorderTokens {
                 subtle: Color32::from_rgb(0x24, 0x32, 0x41),
-                default: Color32::from_rgb(0x2c, 0x3a, 0x4a),
-                strong: Color32::from_rgb(0x3b, 0x4d, 0x60),
+                default: Color32::from_rgb(0x66, 0x79, 0x8d),
+                strong: Color32::from_rgb(0x81, 0x95, 0xaa),
                 focus: Color32::from_rgb(0x55, 0xa7, 0xd8),
             },
             focus: FocusTokens {
@@ -100,7 +100,7 @@ impl Theme {
             text: TextTokens {
                 primary: Color32::from_rgb(0xe7, 0xed, 0xf3),
                 secondary: Color32::from_rgb(0xc4, 0xcc, 0xd6),
-                muted: Color32::from_rgb(0x7e, 0x8a, 0x9b),
+                muted: Color32::from_rgb(0x87, 0x95, 0xa6),
                 disabled: Color32::from_rgb(0x5d, 0x6a, 0x79),
                 inverted: Color32::from_rgb(0x0b, 0x12, 0x19),
             },
@@ -192,8 +192,8 @@ impl Theme {
             },
             border: BorderTokens {
                 subtle: Color32::from_rgba_unmultiplied_const(0, 0, 0, 13),
-                default: Color32::from_rgba_unmultiplied_const(0, 0, 0, 26),
-                strong: Color32::from_rgba_unmultiplied_const(0, 0, 0, 46),
+                default: Color32::from_rgb(138, 138, 148),
+                strong: Color32::from_rgb(111, 112, 124),
                 focus: Color32::from_rgb(0x1e, 0x70, 0xaa),
             },
             focus: FocusTokens {
@@ -461,7 +461,7 @@ pub(crate) struct ControlHeightScale {
 impl ControlHeightScale {
     const fn standard() -> Self {
         Self {
-            compact: 24,
+            compact: 28,
             standard: 28,
             prominent: 32,
         }
@@ -772,6 +772,67 @@ pub(crate) const fn dim(color: Color32, alpha: u8) -> Color32 {
 mod tests {
     use super::*;
 
+    fn composite_channel(foreground: u8, foreground_alpha: u8, background: u8) -> f64 {
+        let alpha = f64::from(foreground_alpha) / 255.0;
+        f64::from(foreground) * alpha + f64::from(background) * (1.0 - alpha)
+    }
+
+    fn relative_luminance(foreground: Color32, background: Color32) -> f64 {
+        let linear_channel = |channel: f64| {
+            let channel = channel / 255.0;
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let red = composite_channel(foreground.r(), foreground.a(), background.r());
+        let green = composite_channel(foreground.g(), foreground.a(), background.g());
+        let blue = composite_channel(foreground.b(), foreground.a(), background.b());
+        0.2126 * linear_channel(red)
+            + 0.7152 * linear_channel(green)
+            + 0.0722 * linear_channel(blue)
+    }
+
+    fn contrast_ratio(foreground: Color32, background: Color32) -> f64 {
+        let foreground = relative_luminance(foreground, background);
+        let background = relative_luminance(background, background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn muted_text_meets_wcag_contrast_on_raised_surfaces() {
+        for (name, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let muted_ratio = contrast_ratio(theme.text.muted, theme.surfaces.raised);
+            assert!(
+                muted_ratio >= 4.5,
+                "{name} muted text on a raised surface must meet 4.5:1; actual={muted_ratio:.3}:1"
+            );
+        }
+    }
+
+    #[test]
+    fn significant_boundaries_meet_wcag_non_text_contrast_on_shell_surfaces() {
+        for (name, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for (boundary_name, boundary) in [
+                ("default", theme.border.default),
+                ("strong", theme.border.strong),
+                ("focus", theme.focus.ring),
+            ] {
+                for (surface_name, surface) in [
+                    ("panel", theme.surfaces.panel),
+                    ("raised", theme.surfaces.raised),
+                ] {
+                    let ratio = contrast_ratio(boundary, surface);
+                    assert!(
+                        ratio >= 3.0,
+                        "{name} {boundary_name} boundary on {surface_name} must meet 3:1; actual={ratio:.3}:1"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn dark_and_light_tokens_are_distinct_and_complete() {
         let dark = Theme::dark();
@@ -790,7 +851,7 @@ mod tests {
         assert_ne!(dark.controls.rest, dark.controls.hover);
         assert_eq!(dark.spacing.md, light.spacing.md);
         assert_eq!(dark.radius.md, light.radius.md);
-        assert_eq!(dark.control_height.compact, 24);
+        assert_eq!(dark.control_height.compact, 28);
         assert_eq!(dark.control_height.standard, 28);
         assert_eq!(dark.control_height.prominent, 32);
     }
@@ -850,9 +911,9 @@ mod tests {
         assert_eq!(dark.bg.panel, dark.surfaces.panel);
         assert_eq!(dark.bg.card, dark.surfaces.raised);
         assert_eq!(dark.code_canvas.background, dark.surfaces.canvas);
-        assert_eq!(dark.border.default, Color32::from_rgb(0x2c, 0x3a, 0x4a));
+        assert_eq!(dark.border.default, Color32::from_rgb(0x66, 0x79, 0x8d));
         assert_eq!(dark.text.primary, Color32::from_rgb(0xe7, 0xed, 0xf3));
-        assert_eq!(dark.text.muted, Color32::from_rgb(0x7e, 0x8a, 0x9b));
+        assert_eq!(dark.text.muted, Color32::from_rgb(0x87, 0x95, 0xa6));
         assert_eq!(dark.modes.assist, Color32::from_rgb(0x55, 0xa8, 0xd7));
         assert_eq!(dark.accent.cyan, dark.modes.assist);
         assert_eq!(dark.modes.delegate, Color32::from_rgb(0xaa, 0x8a, 0xdc));

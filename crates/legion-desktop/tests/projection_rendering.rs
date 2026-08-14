@@ -15,11 +15,14 @@ use legion_protocol::{
     ApprovalChecklistReason, ArtifactKind, ArtifactLedgerProjection, ArtifactLedgerRow,
     AssistedAiOperationClass, AssistedAiProviderAvailabilityState,
     AssistedAiProviderCapabilitySummary, AssistedAiProviderClass, BufferId, BufferVersion,
-    ByteRange, CanonicalPath, CapabilityId, CollaborationParticipantId,
+    ByteRange, CanonicalPath, CapabilityId, CausalityId, CollaborationParticipantId,
     CollaborationPresenceProjection, CollaborationSessionId, CommandDescriptor,
     CommandRegistryProjection, CommandRiskLabel, ContextManifestEgressStatus,
     ContextManifestInclusionState, ContextManifestItem, ContextManifestItemCount,
-    ContextManifestItemKind, FileFingerprint, FileId, LanguageStickyScopeProjection,
+    ContextManifestItemKind, CorrelationId, DelegatedTaskChatMessage, DelegatedTaskChatRole,
+    DelegatedTaskProposalHunkDisposition, DelegatedTaskProposalHunkReview,
+    DelegatedTaskProposalPreviewLink, DelegatedTaskProposalReview,
+    DelegatedTaskRuntimeActivationState, FileFingerprint, FileId, LanguageStickyScopeProjection,
     LargeFileStatus, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessBlocker,
     LegionWorkflowMergeReadinessState, LegionWorkflowProjectionRow, LegionWorkflowSessionId,
     LegionWorkflowState, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
@@ -72,6 +75,11 @@ fn fingerprint(value: &str) -> FileFingerprint {
         algorithm: "test".to_string(),
         value: value.to_string(),
     }
+}
+
+fn causality_id() -> CausalityId {
+    serde_json::from_str("\"dddddddd-dddd-dddd-dddd-dddddddddddd\"")
+        .expect("causality id should deserialize")
 }
 
 fn available_local_provider() -> AssistedAiProviderCapabilitySummary {
@@ -372,6 +380,24 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
     snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
     snapshot.assisted_ai_projection.request_count = 1;
     snapshot.delegated_task_projection.plan_count = 1;
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .push(DelegatedTaskProposalPreviewLink {
+            link_id: "delegate:preview:7".to_string(),
+            proposal_id: ProposalId(7),
+            payload_kind: ProposalPayloadKind::SaveFile,
+            lifecycle_state: ProposalLifecycleState::Created,
+            approval_checklist: None,
+            checkpoint_rollback: None,
+            target_count: 1,
+            hunk_count: 1,
+            full_source_redacted: true,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
     snapshot.plugin_contribution_projections = vec![PluginContributionProjection {
         plugin_id: PluginId(7),
         contributions: vec![PluginContribution::Command(PluginCommandDescriptor {
@@ -797,7 +823,7 @@ fn state_matrix_case(
         (DockMode::Assist, UiStateMatrixState::Empty) => {
             snapshot.assisted_ai_projection.provider_count = 1;
             snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
-            UiStateMatrixExpectation::Text("No predictions yet")
+            UiStateMatrixExpectation::Text("Open a file to enable predictions.")
         }
         (DockMode::Assist, UiStateMatrixState::Blocked) => {
             UiStateMatrixExpectation::Text("Choose an AI provider to enable predictions.")
@@ -826,7 +852,8 @@ fn state_matrix_case(
             UiStateMatrixExpectation::Clickable("Delegate task")
         }
         (DockMode::Delegate, UiStateMatrixState::Active) => {
-            snapshot.delegated_task_projection.plan_count = 1;
+            snapshot.delegated_task_projection.runtime_activation =
+                DelegatedTaskRuntimeActivationState::Executing;
             UiStateMatrixExpectation::Text("Task is active")
         }
         (DockMode::Automate, UiStateMatrixState::Empty) => {
@@ -1285,6 +1312,7 @@ fn projection_rendering_models_structured_command_palette_overlay() {
         query: "car".to_string(),
         scope: SearchScopeProjection::ActiveFile,
         selected_index: 0,
+        pending_confirmation: None,
         results: vec![
             PaletteResult {
                 id: "file:Cargo.toml".to_string(),
@@ -1339,6 +1367,7 @@ fn projection_rendering_keeps_selected_palette_result_visible_in_overlay_window(
         query: String::new(),
         scope: SearchScopeProjection::Workspace,
         selected_index: 12,
+        pending_confirmation: None,
         results: (0..15)
             .map(|index| PaletteResult {
                 id: format!("file:item-{index}"),
@@ -1379,6 +1408,7 @@ fn projection_rendering_groups_command_palette_results_in_the_product_hierarchy(
         query: ">".to_string(),
         scope: SearchScopeProjection::Workspace,
         selected_index: 5,
+        pending_confirmation: None,
         results: [
             ("refresh-explorer", "Refresh Explorer", None),
             ("save-all", "Save All", None),
@@ -2969,6 +2999,51 @@ fn projection_rendering_assist_empty_predictions_do_not_invent_suggestion_rows()
 }
 
 #[test]
+fn projection_rendering_assist_provider_without_active_buffer_has_one_open_file_resolution() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = Shell::empty("Assist without a file").projection_snapshot();
+    snapshot.product_mode = DockMode::Assist;
+    snapshot.assisted_ai_projection.provider_count = 1;
+    snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert_eq!(
+        accesskit_label_count(&full, "Open a file to enable predictions."),
+        1
+    );
+    assert!(!accesskit_has_clickable_label(&full, "Predict"));
+    let (opened, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Open file");
+    assert_eq!(
+        opened.actions,
+        vec![DesktopAction::OpenPalette {
+            mode: PaletteMode::File,
+            query: String::new(),
+            scope: SearchScopeProjection::Workspace,
+        }]
+    );
+}
+
+#[test]
+fn projection_rendering_assist_provider_and_active_buffer_enable_predict() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = assist_inline_prediction_snapshot();
+    snapshot.assist_inline_prediction_projection = AssistInlinePredictionProjection::default();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert!(accesskit_has_clickable_label(&full, "Predict"));
+    assert!(!accesskit_has_label(
+        &full,
+        "Open a file to enable predictions."
+    ));
+}
+
+#[test]
 fn projection_rendering_blank_delegate_draft_is_semantically_disabled() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -3029,6 +3104,163 @@ fn projection_rendering_global_ledgers_do_not_activate_delegate_task_surface() {
 }
 
 #[test]
+fn projection_rendering_unlinked_delegate_chat_does_not_activate_a_task() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = Shell::empty("Idle Delegate with chat history").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot
+        .delegated_task_projection
+        .chat_messages
+        .push(DelegatedTaskChatMessage {
+            message_id: "delegate:chat:unlinked".to_string(),
+            role: DelegatedTaskChatRole::Assistant,
+            content_label: "An earlier unrelated conversation".to_string(),
+            plan_id: None,
+            proposal_id: None,
+            citation_ids: Vec::new(),
+            tool_permission_request_ids: Vec::new(),
+            correlation_id: CorrelationId(44),
+            causality_id: causality_id(),
+            created_at: TimestampMillis(45),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    snapshot.delegated_task_projection.chat_message_count = 1;
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(CanonicalPath("D:/workspace".to_string())),
+        ..DesktopProjectionViewState::default()
+    };
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+
+    assert!(accesskit_has_label(&full, "Task description"));
+    assert!(accesskit_has_label(&full, "Ready to delegate"));
+    assert!(!accesskit_has_label(&full, "Task is active"));
+    assert!(!accesskit_has_label(&full, "Delegate workbench"));
+}
+
+#[test]
+fn projection_rendering_terminal_delegate_lifecycle_stays_terminal() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = Shell::empty("Completed Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::Completed;
+    snapshot.proposal_ledger_projection = populated_proposal_ledger();
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert!(accesskit_has_label(&full, "Task ended"));
+    assert!(accesskit_has_label(&full, "Completed"));
+    assert!(!accesskit_has_label(&full, "Task is active"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+    assert!(!accesskit_has_clickable_label(&full, "Cancel task"));
+    assert!(!accesskit_has_label(&full, "Save Cargo manifest"));
+}
+
+#[test]
+fn projection_rendering_blocked_delegate_shows_one_prerequisite_and_resolution() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = Shell::empty("Blocked Delegate").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::Blocked;
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert_eq!(accesskit_label_count(&full, "Task is blocked"), 1);
+    assert_eq!(
+        accesskit_label_count(&full, "Review task scope and approvals, then retry."),
+        1
+    );
+    assert!(!accesskit_has_label(&full, "Task description"));
+    assert!(!accesskit_has_label(&full, "Task is active"));
+    assert!(!accesskit_has_label(&full, "Delegate task"));
+}
+
+#[test]
+fn projection_rendering_delegate_review_targets_owned_proposal_in_one_home() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = Shell::empty("Delegate review").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.plan_count = 1;
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::WaitingForApproval;
+    snapshot
+        .delegated_task_projection
+        .proposal_preview_links
+        .push(DelegatedTaskProposalPreviewLink {
+            link_id: "delegate:preview:701".to_string(),
+            proposal_id: ProposalId(701),
+            payload_kind: ProposalPayloadKind::WorkspaceEdit,
+            lifecycle_state: ProposalLifecycleState::Created,
+            approval_checklist: None,
+            checkpoint_rollback: None,
+            target_count: 1,
+            hunk_count: 1,
+            full_source_redacted: true,
+            risk_label: ProposalRiskLabel::Low,
+            privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        });
+    snapshot.delegated_task_projection.proposal_reviews.push(
+        DelegatedTaskProposalReview::from_hunks(
+            "delegate:review:701",
+            ProposalId(701),
+            vec![DelegatedTaskProposalHunkReview {
+                hunk_id: "delegate:hunk:701:1".to_string(),
+                proposal_id: ProposalId(701),
+                target_id: Some("delegate:target:701".to_string()),
+                payload_kind: ProposalPayloadKind::WorkspaceEdit,
+                path: Some(CanonicalPath("src/lib.rs".to_string())),
+                byte_range: Some(ByteRange::new(0, 4)),
+                changed_line_count: 1,
+                inserted_line_count: 1,
+                deleted_line_count: 0,
+                content_hash: Some(fingerprint("delegate-hunk-701")),
+                disposition: DelegatedTaskProposalHunkDisposition::Pending,
+                risk_label: ProposalRiskLabel::Low,
+                privacy_label: ProposalPrivacyLabel::WorkspaceMetadata,
+                labels: vec!["Delegate change".to_string()],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            }],
+            vec!["Delegate review".to_string()],
+            1,
+        ),
+    );
+    snapshot.delegated_task_projection.proposal_review_count = 1;
+    snapshot.proposal_ledger_projection = populated_proposal_ledger();
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Delegate workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert_eq!(
+        accesskit_label_count(&full, "Hunk Review"),
+        1,
+        "Delegate review should have one contextual home"
+    );
+    assert!(!accesskit_has_label(&full, "Save Cargo manifest"));
+    let (approved, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Approve");
+    assert_eq!(
+        approved.actions,
+        vec![DesktopAction::ApproveProposal {
+            proposal_id: ProposalId(701)
+        }]
+    );
+}
+
+#[test]
 fn projection_rendering_delegate_owned_runtime_and_task_rows_activate_real_console() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -3054,9 +3286,35 @@ fn projection_rendering_delegate_owned_runtime_and_task_rows_activate_real_conso
     task_owned.delegated_task_projection.plan_count = 1;
     let mut view = ProjectionView::new();
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &task_owned);
-    assert!(accesskit_has_label(&full, "Task is active"));
+    assert!(accesskit_has_label(&full, "Task draft projected"));
     assert!(accesskit_has_label(&full, "Delegate workbench"));
     assert!(!accesskit_has_label(&full, "Task description"));
+}
+
+#[test]
+fn projection_rendering_delegate_board_does_not_claim_global_test_or_health_rows() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = populated_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.delegated_task_projection.runtime_activation =
+        DelegatedTaskRuntimeActivationState::Verifying;
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Delegate workbench");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert!(
+        !accesskit_contains_text(&full, "verification:test"),
+        "global verification runs must not be presented as Delegate-owned testing"
+    );
+    assert!(
+        !accesskit_has_label(&full, "workspace: Foundation Mode"),
+        "global operational health must not be presented as Delegate-owned completion evidence"
+    );
+    assert!(accesskit_contains_text(&full, "Delegate verification"));
 }
 
 #[test]
@@ -3082,7 +3340,7 @@ fn projection_rendering_delegate_draft_routes_real_scoped_task_action() {
     assert!(accesskit_has_label(&full, "Task description"));
     let (_persisted, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
     let cta = accesskit_bounds(&full, "Delegate task", true);
-    assert!(cta.y1 - cta.y0 >= 24.0);
+    assert!(cta.y1 - cta.y0 >= 28.0);
     let delegated = desktop_delegated_task_action(&state, " Fix the delegated task rail ")
         .expect("non-empty draft should create one delegated task action");
     assert_eq!(
@@ -3115,7 +3373,8 @@ fn projection_rendering_delegate_draft_fails_closed_without_projected_workspace_
     );
     seed_delegate_task_draft(&ctx, "Do not dispatch without a root");
     let (_frame, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
-    assert!(accesskit_label_is_disabled(&full, "Delegate task"));
+    assert!(!accesskit_has_label(&full, "Task description"));
+    assert!(!accesskit_has_label(&full, "Delegate task"));
     assert!(accesskit_has_label(
         &full,
         "Open a workspace to define Delegate scope."
@@ -3199,7 +3458,7 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
     let (_settled, full) =
         render_projection_frame_at(&ctx, &mut view, &snapshot, egui::vec2(960.0, 720.0));
     let predict = accesskit_bounds(&full, "Predict", true);
-    assert!(predict.y1 - predict.y0 >= 24.0);
+    assert!(predict.y1 - predict.y0 >= 28.0);
 
     snapshot.product_mode = DockMode::Manual;
     let mut manual_view = ProjectionView::new();
@@ -3218,8 +3477,8 @@ fn projection_rendering_visible_actions_meet_minimum_target_height() {
     for label in ["Settings", "Setup", "Diagnostics"] {
         let bounds = accesskit_bounds(&full, label, true);
         assert!(
-            bounds.y1 - bounds.y0 >= 24.0,
-            "{label} must retain a >=24px target in the compact viewport; bounds={bounds:?}"
+            bounds.y1 - bounds.y0 >= 28.0,
+            "{label} must retain a >=28px target in the compact viewport; bounds={bounds:?}"
         );
     }
 }
@@ -3246,7 +3505,7 @@ fn projection_rendering_compact_activity_labels_keep_full_accessible_names() {
     for label in ["Explorer", "Search", "Symbols"] {
         let bounds = accesskit_button_bounds_in_x_range(&full, label, 0.0..=46.0);
         assert!(bounds.x1 - bounds.x0 <= 38.0, "{label}: {bounds:?}");
-        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 28.0, "{label}: {bounds:?}");
     }
 
     let search = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
@@ -3429,6 +3688,38 @@ fn projection_rendering_setup_is_one_four_item_checklist() {
             "Setup must not split the checklist into the old `{old_section}` section"
         );
     }
+}
+
+#[test]
+fn projection_rendering_setup_counts_only_available_ai_providers() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    let mut unavailable = available_local_provider();
+    unavailable.provider_id = "disabled-local".to_string();
+    unavailable.provider_label = "Disabled local fixture".to_string();
+    unavailable.availability = AssistedAiProviderAvailabilityState::Disabled;
+    snapshot.assisted_ai_projection.providers.push(unavailable);
+    snapshot.assisted_ai_projection.provider_count = 2;
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Setup");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let setup_text = accesskit_dialog_text(&full, "Welcome to Legion");
+
+    assert!(
+        setup_text
+            .iter()
+            .any(|row| row.starts_with("1 AI provider is available.")),
+        "only Available providers may be described as available: {setup_text:?}"
+    );
+    assert!(
+        setup_text
+            .iter()
+            .all(|row| !row.starts_with("2 AI providers are available.")),
+        "configured but disabled providers must not inflate availability: {setup_text:?}"
+    );
 }
 
 #[test]
@@ -4128,8 +4419,8 @@ fn projection_rendering_editor_tabs_expose_tab_state_and_named_close_buttons() {
         let bounds = close
             .bounds()
             .expect("tab close control should have bounds");
-        assert!(bounds.x1 - bounds.x0 >= 24.0);
-        assert!(bounds.y1 - bounds.y0 >= 24.0);
+        assert!(bounds.x1 - bounds.x0 >= 28.0);
+        assert!(bounds.y1 - bounds.y0 >= 28.0);
     }
 }
 
@@ -4169,8 +4460,8 @@ fn projection_rendering_active_terminal_controls_meet_shared_minimum_target() {
     for label in ["Send", "Poll", "Kill", "Close"] {
         let bounds = accesskit_bounds(&full, label, true);
         assert!(
-            bounds.x1 - bounds.x0 >= 24.0 && bounds.y1 - bounds.y0 >= 24.0,
-            "terminal action `{label}` must use the shared >=24px target; bounds={bounds:?}"
+            bounds.x1 - bounds.x0 >= 28.0 && bounds.y1 - bounds.y0 >= 28.0,
+            "terminal action `{label}` must use the shared >=28px target; bounds={bounds:?}"
         );
     }
 }
@@ -4188,7 +4479,7 @@ fn projection_rendering_bottom_tabs_are_state_authoritative_and_activity_is_mode
         render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
     assert_eq!(initial.selected_bottom_panel, BottomPanelTab::Terminal);
     let terminal = accesskit_bounds(&full, "TERMINAL", true);
-    assert!(terminal.y1 - terminal.y0 >= 24.0);
+    assert!(terminal.y1 - terminal.y0 >= 28.0);
     assert!(accesskit_has_label(&full, "Terminal / Runtime"));
 
     let (problems_click_frame, next) = click_accessible_control_with_state(
@@ -4414,7 +4705,7 @@ fn projection_rendering_activity_surfaces_keep_explorer_workspace_only_and_actio
     ] {
         let bounds = accesskit_button_bounds_in_x_range(&full, label, 0.0..=46.0);
         assert!(bounds.x1 - bounds.x0 <= 38.0, "{label}: {bounds:?}");
-        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 28.0, "{label}: {bounds:?}");
     }
 
     let (source_control, full) =
@@ -4650,7 +4941,7 @@ fn projection_rendering_settings_and_setup_are_mode_independent_utility_overlays
     for label in ["Settings", "Setup"] {
         let bounds = accesskit_button_bounds_in_x_range(&full, label, 0.0..=46.0);
         assert!(bounds.x1 - bounds.x0 <= 38.0, "{label}: {bounds:?}");
-        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 28.0, "{label}: {bounds:?}");
     }
     for forbidden in ["Settings", "First-run onboarding"] {
         assert!(
@@ -4932,8 +5223,8 @@ fn projection_rendering_compact_shell_collapses_navigation_and_exposes_inspector
     );
     for label in ["Explorer drawer", "Inspector drawer", "Bottom panel drawer"] {
         let bounds = accesskit_bounds(&full, label, true);
-        assert!(bounds.x1 - bounds.x0 >= 24.0, "{label}: {bounds:?}");
-        assert!(bounds.y1 - bounds.y0 >= 24.0, "{label}: {bounds:?}");
+        assert!(bounds.x1 - bounds.x0 >= 28.0, "{label}: {bounds:?}");
+        assert!(bounds.y1 - bounds.y0 >= 28.0, "{label}: {bounds:?}");
     }
 
     let (_explorer, _full) = click_accessible_control_at(
@@ -4981,6 +5272,87 @@ fn projection_rendering_compact_shell_collapses_navigation_and_exposes_inspector
         standard.center.height() >= 240.0,
         "standard editor region height: {standard:?}"
     );
+}
+
+#[test]
+fn projection_rendering_compact_drawers_focus_content_and_escape_restores_each_trigger() {
+    let snapshot = {
+        let mut snapshot = populated_snapshot();
+        snapshot.product_mode = DockMode::Assist;
+        snapshot
+    };
+    let size = egui::vec2(960.0, 720.0);
+    for (trigger, close) in [
+        ("Explorer drawer", "Close Explorer drawer"),
+        ("Inspector drawer", "Close Inspector drawer"),
+        ("Bottom panel drawer", "Close Bottom panel drawer"),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        let trigger_node = full
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("compact shell should expose AccessKit")
+            .nodes
+            .iter()
+            .find_map(|(id, node)| {
+                (node.label() == Some(trigger)
+                    && node.supports_action(egui::accesskit::Action::Focus))
+                .then_some(*id)
+            })
+            .unwrap_or_else(|| panic!("{trigger} should be keyboard focusable"));
+        let focus = desktop_raw_input_at(
+            size,
+            vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Focus,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: trigger_node,
+                    data: None,
+                },
+            )],
+        );
+        let _ = ctx.run_ui(focus, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        let trigger_focus = ctx
+            .memory(|memory| memory.focused())
+            .unwrap_or_else(|| panic!("AccessKit focus should reach {trigger}"));
+
+        let (_opened, _full) =
+            click_accessible_control_at(&ctx, &mut view, &snapshot, &full, trigger, size);
+        let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        assert!(accesskit_has_role(&full, egui::accesskit::Role::Dialog));
+        assert_eq!(
+            accesskit_focused_label(&full),
+            Some(close),
+            "{trigger} should move focus to deliberate drawer content"
+        );
+
+        let escape = desktop_raw_input_at(
+            size,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: Some(egui::Key::Escape),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let _ = ctx.run_ui(escape, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        let (_restored, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        assert!(!accesskit_has_label(&full, close));
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(trigger_focus),
+            "Escape must restore focus to {trigger}"
+        );
+    }
 }
 
 #[test]
