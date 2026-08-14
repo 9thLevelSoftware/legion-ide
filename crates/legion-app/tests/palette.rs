@@ -585,7 +585,6 @@ fn argument_dependent_git_commands_require_explicit_operands() {
             "Git: Commit Staged Changes",
             "Enter a commit message",
         ),
-        (">git stash", "Git: Stash Changes", "Enter a stash message"),
     ] {
         app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
             mode: PaletteMode::Command,
@@ -606,6 +605,59 @@ fn argument_dependent_git_commands_require_explicit_operands() {
         assert_eq!(result.disabled_reason.as_deref(), Some(reason), "{query}");
         assert_ne!(palette.selected_index, 0, "{query} must not be selected");
     }
+}
+
+#[test]
+fn palette_git_stash_allows_omitting_the_optional_message() {
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("src/lib.rs", "pub fn value() -> u8 { 1 }\n");
+    run_git(workspace.path(), &["init"]);
+    run_git(
+        workspace.path(),
+        &["config", "user.email", "palette@example.test"],
+    );
+    run_git(workspace.path(), &["config", "user.name", "Palette Test"]);
+    run_git(workspace.path(), &["add", "."]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    let mut app = open_app(workspace.path(), Some(&source));
+
+    workspace.write("src/lib.rs", "pub fn value() -> u8 { 2 }\n");
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git stash".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("stash command should open");
+
+    let palette = app
+        .shell_projection_snapshot("optional stash message")
+        .expect("projection should build")
+        .palette_projection;
+    let stash = palette
+        .results
+        .iter()
+        .find(|result| result.title == "Git: Stash Changes")
+        .expect("stash command should remain searchable");
+    assert_eq!(stash.disabled_reason, None);
+    assert_eq!(
+        palette
+            .results
+            .get(palette.selected_index)
+            .map(|result| &result.id),
+        Some(&stash.id),
+        "bare git stash should be the available selection"
+    );
+    assert!(matches!(
+        app.dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+            .expect("stash command should dispatch"),
+        AppCommandOutcome::GitUpdated(_)
+    ));
+
+    let stash_subject = run_git(workspace.path(), &["stash", "list", "--format=%gs"]);
+    assert!(
+        stash_subject.trim_start().starts_with("WIP on "),
+        "omitting the message should use Git's default stash subject: {stash_subject:?}"
+    );
 }
 
 #[test]

@@ -430,7 +430,7 @@ enum PaletteCommandOperands {
     Branch(String),
     WorktreePath(String),
     CommitMessage(String),
-    StashMessage(String),
+    StashMessage(Option<String>),
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -455,9 +455,10 @@ impl PaletteCommandOperands {
             ("git-commit", Self::CommitMessage(message)) => {
                 format!("Commit staged changes as ‘{message}’")
             }
-            ("git-stash", Self::StashMessage(message)) => {
+            ("git-stash", Self::StashMessage(Some(message))) => {
                 format!("Stash changes as ‘{message}’")
             }
+            ("git-stash", Self::StashMessage(None)) => "Stash local changes".to_string(),
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -473,7 +474,8 @@ impl PaletteCommandOperands {
         match self {
             Self::Branch(branch) => vec![branch.clone()],
             Self::WorktreePath(path) => vec![path.clone()],
-            Self::CommitMessage(message) | Self::StashMessage(message) => vec![message.clone()],
+            Self::CommitMessage(message) => vec![message.clone()],
+            Self::StashMessage(message) => message.iter().cloned().collect(),
             Self::NewWorktree {
                 branch,
                 worktree_path,
@@ -521,6 +523,9 @@ fn parse_palette_command_operands(
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
         return Some(Err(missing));
     };
+    if command_id == "git-stash" && operands.is_empty() {
+        return Some(Ok(PaletteCommandOperands::StashMessage(None)));
+    }
     if operands.is_empty() {
         return Some(Err(missing));
     }
@@ -530,7 +535,9 @@ fn parse_palette_command_operands(
         }
         "git-remove-worktree" => Ok(PaletteCommandOperands::WorktreePath(operands.to_string())),
         "git-commit" => Ok(PaletteCommandOperands::CommitMessage(operands.to_string())),
-        "git-stash" => Ok(PaletteCommandOperands::StashMessage(operands.to_string())),
+        "git-stash" => Ok(PaletteCommandOperands::StashMessage(Some(
+            operands.to_string(),
+        ))),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -19335,6 +19342,9 @@ impl AppComposition {
         self.palette.scope = scope;
         self.palette.selected_index = 0;
         self.refresh_palette_results()?;
+        if mode == PaletteMode::Search {
+            self.sync_search_palette_results();
+        }
         Ok(self.palette.projection())
     }
 
@@ -20112,9 +20122,7 @@ impl AppComposition {
                                 palette_query_body(PaletteMode::Command, &self.palette.query),
                             ) {
                                 Some(Ok(PaletteCommandOperands::StashMessage(message))) => {
-                                    Some(CommandDispatchIntent::StashGitChanges {
-                                        message: Some(message),
-                                    })
+                                    Some(CommandDispatchIntent::StashGitChanges { message })
                                 }
                                 _ => None,
                             }

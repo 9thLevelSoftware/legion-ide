@@ -831,6 +831,47 @@ fn search_palette_enter_opens_the_selected_match() {
 }
 
 #[test]
+fn search_palette_reopens_the_existing_result_set_after_opening_a_match() {
+    let (workspace, mut app) = app_with_workspace_files(&[("match.txt", "needle here\n")]);
+    let target = workspace.path().join("match.txt");
+    app.handle_action(DesktopAction::OpenPathText(
+        target.to_string_lossy().into_owned(),
+    ))
+    .expect("matching file should open");
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/needle".to_string(),
+        scope: SearchScopeProjection::ActiveFile,
+    })
+    .expect("search palette should open");
+
+    app.run_headless_input(press_enter());
+    app.run_headless_input(press_enter());
+    assert!(
+        !app.runtime_snapshot().palette_projection.open,
+        "opening the selected match should close the palette"
+    );
+
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "needle".to_string(),
+        scope: SearchScopeProjection::ActiveFile,
+    })
+    .expect("Search activity should reopen the current query");
+
+    let reopened = app.runtime_snapshot().palette_projection;
+    assert!(reopened.open, "Search should reopen the palette");
+    assert_eq!(reopened.query, "/needle");
+    assert!(
+        reopened
+            .results
+            .iter()
+            .any(|result| result.id.starts_with("search:match:")),
+        "reopening Search should restore the current projected matches"
+    );
+}
+
+#[test]
 fn search_palette_keeps_all_matches_in_one_scrollable_result_list() {
     let files = [
         ("result-0.txt", "needle-0\n"),

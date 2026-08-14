@@ -4904,7 +4904,7 @@ fn projection_rendering_does_not_duplicate_palette_search_results_in_fixed_panel
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     let search_bounds = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
-    let (_selected, _full) = click_projection_at(
+    let (selected, _full) = click_projection_at(
         &ctx,
         &mut view,
         &snapshot,
@@ -4913,6 +4913,15 @@ fn projection_rendering_does_not_duplicate_palette_search_results_in_fixed_panel
             ((search_bounds.y0 + search_bounds.y1) * 0.5) as f32,
         ),
         egui::vec2(1_440.0, 900.0),
+    );
+    assert_eq!(
+        selected.actions,
+        vec![DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "needle".to_string(),
+            scope: SearchScopeProjection::Workspace,
+        }],
+        "reopening Search should preserve the current projected query"
     );
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(

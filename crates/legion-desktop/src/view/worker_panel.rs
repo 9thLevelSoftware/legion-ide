@@ -194,7 +194,7 @@ fn render_section(ui: &mut egui::Ui, label: &str, rows: &[String], empty: &str) 
 
 fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerRecoveryAction> {
     let mut actions = Vec::new();
-    for row in &snapshot.legion_workflow_projection.rows {
+    for (workflow_index, row) in snapshot.legion_workflow_projection.rows.iter().enumerate() {
         match row.merge_readiness.state {
             LegionWorkflowMergeReadinessState::Blocked => {
                 actions.push(DesktopWorkerRecoveryAction {
@@ -257,7 +257,10 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                 first_label_with_prefix(&row.display_safe_labels, "conflict:")
         {
             actions.push(DesktopWorkerRecoveryAction {
-                label: "Resolve workflow conflict".to_string(),
+                label: format!(
+                    "Resolve conflict · Workflow {}",
+                    workflow_index.saturating_add(1)
+                ),
                 rationale: "Resolve the blocking conflict before this workflow can continue."
                     .to_string(),
                 action: DesktopAction::ResolveLegionWorkflowConflict {
@@ -449,12 +452,57 @@ mod tests {
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Resolve workflow conflict"
+            action.label == "Resolve conflict · Workflow 4"
                 && action.action
                     == DesktopAction::ResolveLegionWorkflowConflict {
                         session_id: LegionWorkflowSessionId("session:conflict".to_string()),
                         conflict_id: LegionWorkflowConflictId("conflict:shared".to_string()),
                     }
         }));
+    }
+
+    #[test]
+    fn conflict_recovery_actions_use_distinct_display_safe_workflow_ordinals() {
+        let mut snapshot = recovery_snapshot();
+        snapshot.legion_workflow_projection.rows = vec![
+            workflow_row(
+                "session:first-conflict",
+                LegionWorkflowMergeReadinessState::Ready,
+                0,
+                0,
+                1,
+                vec!["conflict:first"],
+            ),
+            workflow_row(
+                "session:second-conflict",
+                LegionWorkflowMergeReadinessState::Ready,
+                0,
+                0,
+                1,
+                vec!["conflict:second"],
+            ),
+        ];
+        snapshot.legion_workflow_projection.total_session_count = 2;
+
+        let model = DesktopWorkerPanelViewModel::from_snapshot(&snapshot);
+        let labels = model
+            .recovery_actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action.action,
+                    DesktopAction::ResolveLegionWorkflowConflict { .. }
+                )
+            })
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "Resolve conflict · Workflow 1",
+                "Resolve conflict · Workflow 2",
+            ]
+        );
     }
 }

@@ -2270,11 +2270,14 @@ fn render_activity_rail(
         if response.clicked() {
             view.selected_activity = surface;
             if let Some((mode, query)) = palette {
-                actions.push(DesktopAction::OpenPalette {
-                    mode,
-                    query: query.to_string(),
-                    scope,
-                });
+                let query = if mode == PaletteMode::Search
+                    && !snapshot.search_projection.query_label.trim().is_empty()
+                {
+                    snapshot.search_projection.query_label.clone()
+                } else {
+                    query.to_string()
+                };
+                actions.push(DesktopAction::OpenPalette { mode, query, scope });
             }
         }
     }
