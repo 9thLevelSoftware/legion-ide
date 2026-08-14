@@ -20,7 +20,9 @@ use legion_protocol::{
     CommandRegistryProjection, CommandRiskLabel, ContextManifestEgressStatus,
     ContextManifestInclusionState, ContextManifestItem, ContextManifestItemCount,
     ContextManifestItemKind, FileFingerprint, FileId, LanguageStickyScopeProjection,
-    LargeFileStatus, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
+    LargeFileStatus, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessBlocker,
+    LegionWorkflowMergeReadinessState, LegionWorkflowProjectionRow, LegionWorkflowSessionId,
+    LegionWorkflowState, LineWrappingPolicy, PluginCommandDescriptor, PluginContribution,
     PluginContributionProjection, PluginId, PrincipalId, ProposalContextManifestSummary,
     ProposalDiffSummary, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
     ProposalLedgerRow, ProposalLifecycleState, ProposalLifecycleStateDisplay, ProposalPayloadKind,
@@ -668,6 +670,165 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
     snapshot.assisted_ai_projection.provider_count = 1;
     snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
     snapshot
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiStateMatrixState {
+    Empty,
+    Blocked,
+    Ready,
+    Active,
+}
+
+fn state_matrix_active_buffer(snapshot: &mut legion_ui::ShellProjectionSnapshot, dirty: bool) {
+    snapshot.active_buffer_projection = ActiveBufferProjection {
+        state: ActiveBufferProjectionState::Full,
+        workspace_id: Some(WorkspaceId(1)),
+        buffer_id: Some(BufferId(3)),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+        viewport: None,
+        degraded: false,
+        small_buffer_preview: Some("fn state_matrix() {}".to_string()),
+        dirty,
+    };
+}
+
+fn state_matrix_workflow_row(
+    lifecycle_state: LegionWorkflowState,
+    readiness_state: LegionWorkflowMergeReadinessState,
+) -> LegionWorkflowProjectionRow {
+    LegionWorkflowProjectionRow {
+        session_id: LegionWorkflowSessionId("state-matrix".to_string()),
+        directive_artifact_id: None,
+        spec_artifact_id: None,
+        task_graph_artifact_id: None,
+        lifecycle_state,
+        worker_count: 1,
+        provider_route_required_count: 0,
+        dependency_count: 0,
+        unresolved_conflict_count: u32::from(
+            readiness_state == LegionWorkflowMergeReadinessState::Blocked,
+        ),
+        verification_gate_count: 1,
+        passed_verification_count: u32::from(
+            readiness_state != LegionWorkflowMergeReadinessState::Blocked,
+        ),
+        sign_off_count: 1,
+        signed_off_count: u32::from(readiness_state == LegionWorkflowMergeReadinessState::Ready),
+        linked_proposals: Vec::new(),
+        merge_readiness: LegionWorkflowMergeReadiness {
+            state: readiness_state,
+            blockers: if readiness_state == LegionWorkflowMergeReadinessState::Blocked {
+                vec![LegionWorkflowMergeReadinessBlocker::FailedVerification]
+            } else {
+                Vec::new()
+            },
+            labels: vec!["state matrix".to_string()],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        },
+        display_safe_labels: vec!["state matrix".to_string()],
+        redaction_hints: vec![RedactionHint::MetadataOnly],
+        schema_version: 1,
+    }
+}
+
+fn state_matrix_case(
+    mode: DockMode,
+    matrix_state: UiStateMatrixState,
+) -> (
+    legion_ui::ShellProjectionSnapshot,
+    DesktopProjectionViewState,
+    &'static str,
+    bool,
+) {
+    let mut snapshot = Shell::empty("State matrix").projection_snapshot();
+    snapshot.product_mode = mode;
+    let mut view_state = DesktopProjectionViewState::default();
+    let (expected_label, expected_clickable) = match (mode, matrix_state) {
+        (DockMode::Manual, UiStateMatrixState::Empty) => ("<no active buffer>", false),
+        (DockMode::Manual, UiStateMatrixState::Blocked) => {
+            snapshot.status_messages = vec![StatusMessageProjection {
+                severity: StatusSeverity::Error,
+                message: "Manual action blocked by workspace trust.".to_string(),
+            }];
+            ("Manual action blocked by workspace trust.", false)
+        }
+        (DockMode::Manual, UiStateMatrixState::Ready) => {
+            state_matrix_active_buffer(&mut snapshot, false);
+            ("fn state_matrix() {}", false)
+        }
+        (DockMode::Manual, UiStateMatrixState::Active) => {
+            state_matrix_active_buffer(&mut snapshot, true);
+            snapshot.status_messages = vec![StatusMessageProjection {
+                severity: StatusSeverity::Warning,
+                message: "Manual edit in progress.".to_string(),
+            }];
+            ("Manual edit in progress.", false)
+        }
+        (DockMode::Assist, UiStateMatrixState::Empty) => {
+            snapshot.assisted_ai_projection.provider_count = 1;
+            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
+            ("No predictions yet", false)
+        }
+        (DockMode::Assist, UiStateMatrixState::Blocked) => {
+            ("Choose an AI provider to enable predictions.", false)
+        }
+        (DockMode::Assist, UiStateMatrixState::Ready) => {
+            state_matrix_active_buffer(&mut snapshot, false);
+            snapshot.assisted_ai_projection.provider_count = 1;
+            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
+            ("Predict", true)
+        }
+        (DockMode::Assist, UiStateMatrixState::Active) => {
+            snapshot = assist_inline_prediction_snapshot();
+            (".await", false)
+        }
+        (DockMode::Delegate, UiStateMatrixState::Empty) => {
+            view_state.canonical_workspace_root =
+                Some(CanonicalPath("D:/state-matrix".to_string()));
+            ("Describe a task to start Delegate.", false)
+        }
+        (DockMode::Delegate, UiStateMatrixState::Blocked) => {
+            ("Open a workspace to define Delegate scope.", false)
+        }
+        (DockMode::Delegate, UiStateMatrixState::Ready) => {
+            view_state.canonical_workspace_root =
+                Some(CanonicalPath("D:/state-matrix".to_string()));
+            ("Delegate task", true)
+        }
+        (DockMode::Delegate, UiStateMatrixState::Active) => {
+            snapshot.delegated_task_projection.plan_count = 1;
+            ("Task is active", false)
+        }
+        (DockMode::Automate, UiStateMatrixState::Empty) => ("No workflow sessions yet", false),
+        (DockMode::Automate, UiStateMatrixState::Blocked) => {
+            snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
+                LegionWorkflowState::Blocked,
+                LegionWorkflowMergeReadinessState::Blocked,
+            )];
+            snapshot.legion_workflow_projection.total_session_count = 1;
+            ("Blocked", false)
+        }
+        (DockMode::Automate, UiStateMatrixState::Ready) => {
+            snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
+                LegionWorkflowState::Draft,
+                LegionWorkflowMergeReadinessState::Ready,
+            )];
+            snapshot.legion_workflow_projection.total_session_count = 1;
+            ("Ready for review", false)
+        }
+        (DockMode::Automate, UiStateMatrixState::Active) => {
+            snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
+                LegionWorkflowState::Executing,
+                LegionWorkflowMergeReadinessState::WaitingForApproval,
+            )];
+            snapshot.legion_workflow_projection.total_session_count = 1;
+            ("Running", false)
+        }
+    };
+    (snapshot, view_state, expected_label, expected_clickable)
 }
 
 #[test]
@@ -1856,13 +2017,20 @@ fn render_projection_frame_with_state(
     snapshot: &legion_ui::ShellProjectionSnapshot,
     state: &DesktopProjectionViewState,
 ) -> (ProjectionViewOutput, egui::FullOutput) {
+    render_projection_frame_with_state_at(ctx, view, snapshot, state, egui::vec2(1_440.0, 900.0))
+}
+
+fn render_projection_frame_with_state_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
     let mut projection_output = None;
-    let full_output = ctx.run_ui(
-        desktop_raw_input_at(egui::vec2(1_440.0, 900.0), Vec::new()),
-        |ui| {
-            projection_output = Some(view.render_with_state(ui, snapshot, state));
-        },
-    );
+    let full_output = ctx.run_ui(desktop_raw_input_at(size, Vec::new()), |ui| {
+        projection_output = Some(view.render_with_state(ui, snapshot, state));
+    });
     (
         projection_output.expect("projection view with state should render"),
         full_output,
@@ -1946,6 +2114,19 @@ fn accesskit_has_label(output: &egui::FullOutput, label: &str) -> bool {
                 .nodes
                 .iter()
                 .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+        })
+}
+
+fn accesskit_contains_text(output: &egui::FullOutput, text: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label().is_some_and(|label| label.contains(text))
+                    || node.value().is_some_and(|value| value.contains(text))
+            })
         })
 }
 
@@ -2194,12 +2375,31 @@ fn click_accessible_control_with_state(
     primed: &egui::FullOutput,
     label: &str,
 ) -> (ProjectionViewOutput, egui::FullOutput) {
+    click_accessible_control_with_state_at(
+        ctx,
+        view,
+        snapshot,
+        state,
+        primed,
+        label,
+        egui::vec2(1_440.0, 900.0),
+    )
+}
+
+fn click_accessible_control_with_state_at(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
+    primed: &egui::FullOutput,
+    label: &str,
+    size: egui::Vec2,
+) -> (ProjectionViewOutput, egui::FullOutput) {
     let bounds = accesskit_bounds(primed, label, true);
     let pos = egui::pos2(
         ((bounds.x0 + bounds.x1) * 0.5) as f32,
         ((bounds.y0 + bounds.y1) * 0.5) as f32,
     );
-    let size = egui::vec2(1_440.0, 900.0);
     let press = desktop_raw_input_at(
         size,
         vec![
@@ -4949,6 +5149,118 @@ fn projection_rendering_compact_inspector_drawer_resize_clamps_to_inspector_boun
         narrow.width() >= 288.0,
         "compact inspector must clamp contraction to 288px; rect={narrow:?}"
     );
+}
+
+#[test]
+fn projection_rendering_covers_the_four_mode_state_matrix_at_standard_and_compact_sizes() {
+    let modes = [
+        DockMode::Manual,
+        DockMode::Assist,
+        DockMode::Delegate,
+        DockMode::Automate,
+    ];
+    let states = [
+        UiStateMatrixState::Empty,
+        UiStateMatrixState::Blocked,
+        UiStateMatrixState::Ready,
+        UiStateMatrixState::Active,
+    ];
+    let layouts = [
+        ("standard", egui::vec2(1_440.0, 900.0)),
+        ("compact", egui::vec2(960.0, 720.0)),
+    ];
+
+    for mode in modes {
+        for matrix_state in states {
+            for (layout, size) in layouts {
+                let (snapshot, view_state, expected_label, expected_clickable) =
+                    state_matrix_case(mode, matrix_state);
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                if mode == DockMode::Delegate && matrix_state == UiStateMatrixState::Ready {
+                    seed_delegate_task_draft(&ctx, "Run the focused state-matrix checks");
+                }
+                let mut view = ProjectionView::new();
+                let (_initial, full) = render_projection_frame_with_state_at(
+                    &ctx,
+                    &mut view,
+                    &snapshot,
+                    &view_state,
+                    size,
+                );
+                let update = full
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap_or_else(|| {
+                        panic!("{mode:?}/{matrix_state:?}/{layout} must expose AccessKit")
+                    });
+                let mode_node = update
+                    .nodes
+                    .iter()
+                    .find_map(|(_id, node)| {
+                        (node.label() == Some(mode.label())
+                            && node.role() == egui::accesskit::Role::Button
+                            && node.bounds().is_some_and(|bounds| bounds.y1 <= 42.0))
+                        .then_some(node)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{mode:?}/{matrix_state:?}/{layout} must retain its mode control")
+                    });
+                assert_eq!(mode_node.is_selected(), Some(true));
+                assert_eq!(
+                    mode_node.aria_current(),
+                    Some(egui::accesskit::AriaCurrent::True)
+                );
+
+                let editor = view
+                    .last_editor_rect()
+                    .expect("every matrix frame must retain the editor")
+                    .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+                assert!(
+                    editor.width() >= 360.0 && editor.height() >= 180.0,
+                    "{mode:?}/{matrix_state:?}/{layout} must preserve a usable editor; editor={editor:?}"
+                );
+
+                let visible = if layout == "compact" && mode != DockMode::Manual {
+                    assert!(
+                        accesskit_has_clickable_label(&full, "Inspector drawer"),
+                        "{mode:?}/{matrix_state:?} must keep its compact inspector reachable"
+                    );
+                    let (_opened, _full) = click_accessible_control_with_state_at(
+                        &ctx,
+                        &mut view,
+                        &snapshot,
+                        &view_state,
+                        &full,
+                        "Inspector drawer",
+                        size,
+                    );
+                    render_projection_frame_with_state_at(
+                        &ctx,
+                        &mut view,
+                        &snapshot,
+                        &view_state,
+                        size,
+                    )
+                    .1
+                } else {
+                    full
+                };
+                if expected_clickable {
+                    assert!(
+                        accesskit_has_clickable_label(&visible, expected_label),
+                        "{mode:?}/{matrix_state:?}/{layout} ready action `{expected_label}` must be operable"
+                    );
+                } else {
+                    assert!(
+                        accesskit_contains_text(&visible, expected_label),
+                        "{mode:?}/{matrix_state:?}/{layout} must expose `{expected_label}`"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

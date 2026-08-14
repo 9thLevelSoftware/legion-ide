@@ -95,7 +95,7 @@ impl Theme {
             },
             focus: FocusTokens {
                 ring: Color32::from_rgb(0x55, 0xa7, 0xd8),
-                selection: Color32::from_rgb(0x2a, 0x3d, 0x50),
+                selection: Color32::from_rgb(0x23, 0x46, 0x5c),
             },
             text: TextTokens {
                 primary: Color32::from_rgb(0xe7, 0xed, 0xf3),
@@ -198,7 +198,7 @@ impl Theme {
             },
             focus: FocusTokens {
                 ring: Color32::from_rgb(0x1e, 0x70, 0xaa),
-                selection: Color32::from_rgb(236, 236, 240),
+                selection: Color32::from_rgb(217, 232, 242),
             },
             text: TextTokens {
                 primary: Color32::from_rgb(3, 2, 19),
@@ -793,6 +793,27 @@ mod tests {
         assert_eq!(dark.control_height.compact, 24);
         assert_eq!(dark.control_height.standard, 28);
         assert_eq!(dark.control_height.prominent, 32);
+    }
+
+    #[test]
+    fn interactive_control_states_are_visually_distinct() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let fills = [
+                theme.controls.rest,
+                theme.controls.hover,
+                theme.controls.active,
+                theme.focus.selection,
+                theme.controls.disabled,
+            ];
+            for (index, fill) in fills.iter().enumerate() {
+                assert!(
+                    fills[index + 1..].iter().all(|other| other != fill),
+                    "rest, hover, pressed, selected, and disabled fills must be pairwise distinct: {fills:?}"
+                );
+            }
+            assert_ne!(theme.focus.ring, theme.border.strong);
+            assert_ne!(theme.controls.disabled_foreground, theme.text.secondary);
+        }
     }
 
     #[test]

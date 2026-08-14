@@ -1977,6 +1977,13 @@ fn render_mode_confirmation_dialog(
                 "Mode selection alone does not start execution, grant a capability, or apply a change.",
             ));
             ui.add_space(12.0);
+            let focused_before_tab = ui.ctx().memory(|memory| memory.focused());
+            let tab_forward = ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+            });
+            let tab_backward = ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)
+            });
             ui.horizontal(|ui| {
                 let confirm = ui
                     .push_id("legion_desktop_mode_confirmation_confirm", |ui| {
@@ -2006,6 +2013,21 @@ fn render_mode_confirmation_dialog(
                     .inner;
                 if cancel.clicked() {
                     decision = Some(ModeConfirmationDecision::Cancel);
+                }
+
+                if tab_forward || tab_backward {
+                    let next = if tab_backward {
+                        if focused_before_tab == Some(confirm.id) {
+                            cancel.id
+                        } else {
+                            confirm.id
+                        }
+                    } else if focused_before_tab == Some(cancel.id) {
+                        confirm.id
+                    } else {
+                        cancel.id
+                    };
+                    ui.ctx().memory_mut(|memory| memory.request_focus(next));
                 }
             });
         });

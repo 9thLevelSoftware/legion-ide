@@ -328,6 +328,44 @@ fn product_mode_switch_accepts_keyboard_activation() {
 }
 
 #[test]
+fn product_mode_switch_supports_left_and_right_arrow_focus_navigation() {
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+
+    let primed = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let manual_id = accessible_top_button_id(&primed, "Manual");
+    let assist_id = accessible_top_button_id(&primed, "Assist");
+    let _focused = app.run_headless_full_frame(accesskit_focus_input(manual_id));
+
+    let moved_right = app.run_headless_full_frame(full_frame_key_input(egui::Key::ArrowRight));
+    assert_eq!(
+        moved_right
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("arrow navigation should expose AccessKit")
+            .focus,
+        assist_id,
+        "ArrowRight should move focus to the next mode without activating it"
+    );
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+
+    let moved_left = app.run_headless_full_frame(full_frame_key_input(egui::Key::ArrowLeft));
+    assert_eq!(
+        moved_left
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("reverse arrow navigation should expose AccessKit")
+            .focus,
+        manual_id,
+        "ArrowLeft should return focus to the previous mode without activating it"
+    );
+    assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+}
+
+#[test]
 fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoration() {
     let workspace = TempWorkspace::new();
     let runtime = open_runtime(workspace.path());
@@ -398,7 +436,29 @@ fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoratio
             .expect("tabbed dialog should expose AccessKit")
             .focus,
         cancel_id,
-        "Tab should advance from Confirm to Cancel without trapping focus"
+        "Tab should advance from Confirm to Cancel inside the modal"
+    );
+    let wrapped = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        wrapped
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("wrapped dialog should expose AccessKit")
+            .focus,
+        confirm_id,
+        "Tab must wrap inside the modal instead of moving focus behind it"
+    );
+    let returned_to_cancel = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        returned_to_cancel
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("cycled dialog should expose AccessKit")
+            .focus,
+        cancel_id,
+        "a second modal cycle should return focus to Cancel"
     );
     let _cancelled = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
     assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
