@@ -10,7 +10,9 @@ use legion_desktop::{
     bridge::DesktopAction,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
-use legion_ui::{PaletteMode, SearchScopeProjection, SearchStatusKindProjection};
+use legion_ui::{
+    PaletteMode, SearchScopeProjection, SearchStatusKindProjection, palette_command_group,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -430,17 +432,24 @@ fn command_palette_visual_keyboard_and_accessibility_order_match_app_projection(
     })
     .expect("command palette should open");
     let projected = app.runtime_snapshot().palette_projection;
-    let first_disabled = projected
-        .results
-        .iter()
-        .position(|result| result.disabled_reason.is_some())
-        .expect("an empty workspace should expose unavailable commands");
-    assert!(
-        projected.results[..first_disabled]
-            .iter()
-            .all(|result| result.disabled_reason.is_none()),
-        "the app projection must rank every available command first"
-    );
+    let mut current_group = None;
+    let mut disabled_seen = false;
+    for result in &projected.results {
+        let group = palette_command_group(&result.id);
+        if current_group != Some(group) {
+            current_group = Some(group);
+            disabled_seen = false;
+        }
+        if result.disabled_reason.is_some() {
+            disabled_seen = true;
+        } else {
+            assert!(
+                !disabled_seen,
+                "enabled command `{}` must precede disabled commands inside {group:?}",
+                result.title
+            );
+        }
+    }
 
     let output = app.run_headless_input(input(Vec::new()));
     let options = palette_option_semantics(&output);
