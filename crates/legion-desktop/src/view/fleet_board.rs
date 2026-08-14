@@ -4,13 +4,13 @@ use legion_ui::{
     LegionWorkflowBoardRowProjection,
 };
 
-use super::{avatar, pill, status_dot, theme, trim_middle};
+use super::{avatar, pill, status_dot, theme};
 
 /// Renderer-ready workflow board row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopFleetBoardRowViewModel {
-    /// Workflow session label.
-    pub session_id: String,
+    /// Qualitative workflow task label.
+    pub task_label: String,
     /// Coordinator state label.
     pub state_label: String,
     /// Display-safe row summary.
@@ -46,9 +46,9 @@ fn fleet_board_row_view_model(
     row: &LegionWorkflowBoardRowProjection,
 ) -> DesktopFleetBoardRowViewModel {
     DesktopFleetBoardRowViewModel {
-        session_id: row.session_id.0.clone(),
+        task_label: "Workflow task".to_string(),
         state_label: row.state_label.clone(),
-        summary_label: row.summary_label.clone(),
+        summary_label: "Open the inspector for workflow details.".to_string(),
     }
 }
 
@@ -91,8 +91,8 @@ fn render_fleet_board_column(ui: &mut egui::Ui, column: &DesktopFleetBoardColumn
             }
             for row in column.rows.iter().take(5) {
                 theme::small_card_frame().show(ui, |ui| {
-                    ui.label(theme::body_strong(trim_middle(&row.session_id, 38)));
-                    ui.label(theme::muted(trim_middle(&row.summary_label, 64)));
+                    ui.label(theme::body_strong(&row.task_label));
+                    ui.label(theme::muted(&row.summary_label));
                     ui.horizontal(|ui| {
                         avatar(ui, state_initial(&row.state_label), color);
                         ui.label(theme::muted(&row.state_label));

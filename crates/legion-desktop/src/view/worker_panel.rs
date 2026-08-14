@@ -119,39 +119,32 @@ pub(crate) fn render_worker_panel(
         ui,
         "Live status",
         &panel.live_status_rows,
-        "No worker status projected",
+        "No worker status available",
     );
-    render_section(ui, "Plan", &panel.plan_rows, "No worker plan projected");
+    render_section(ui, "Plan", &panel.plan_rows, "No worker plan available");
     render_section(
         ui,
         "Tool calls",
         &panel.tool_rows,
-        "No worker tool calls projected",
+        "No worker tool activity",
     );
     render_section(
         ui,
         "Test evidence",
         &panel.test_evidence_rows,
-        "No worker evidence projected",
+        "No worker evidence available",
     );
     render_section(
         ui,
         "Proposal bundle",
         &panel.proposal_bundle_rows,
-        "No proposal bundle projected",
+        "No proposal bundle available",
     );
 
     if !panel.recovery_actions.is_empty() {
         ui.add_space(4.0);
         ui.label(theme::eyebrow("Recovery actions"));
-        for recovery in &panel.recovery_actions {
-            ui.horizontal(|ui| {
-                if ui.button(&recovery.label).clicked() {
-                    actions.push(recovery.action.clone());
-                }
-                ui.label(theme::muted(&recovery.rationale));
-            });
-        }
+        render_worker_recovery_actions(ui, panel, actions);
     }
 
     ui.add_space(4.0);
@@ -163,8 +156,27 @@ pub(crate) fn render_worker_panel(
             ui,
             "Other surfaced rows",
             &panel.other_rows,
-            "No additional worker rows projected",
+            "No additional worker details",
         );
+    }
+}
+
+/// Render only actionable recovery controls for a workflow inspector.
+pub(crate) fn render_worker_recovery_actions(
+    ui: &mut egui::Ui,
+    panel: &DesktopWorkerPanelViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    if panel.recovery_actions.is_empty() {
+        return;
+    }
+    for recovery in &panel.recovery_actions {
+        ui.horizontal(|ui| {
+            if ui.button(&recovery.label).clicked() {
+                actions.push(recovery.action.clone());
+            }
+            ui.label(theme::muted(&recovery.rationale));
+        });
     }
 }
 
@@ -186,8 +198,8 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
         match row.merge_readiness.state {
             LegionWorkflowMergeReadinessState::Blocked => {
                 actions.push(DesktopWorkerRecoveryAction {
-                    label: format!("Recheck blocked workflow {}", row.session_id.0),
-                    rationale: "blocked -> re-evaluate merge readiness".to_string(),
+                    label: "Recheck blocked workflow".to_string(),
+                    rationale: "Re-evaluate merge readiness.".to_string(),
                     action: DesktopAction::RequestLegionWorkflowMergeReadiness {
                         session_id: row.session_id.clone(),
                     },
@@ -198,8 +210,9 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                     first_label_with_prefix(&row.display_safe_labels, "signoff:")
                 {
                     actions.push(DesktopWorkerRecoveryAction {
-                        label: format!("Request sign-off {}", row.session_id.0),
-                        rationale: format!("needs approval -> signoff {sign_off_id}"),
+                        label: "Request workflow sign-off".to_string(),
+                        rationale: "Approval is required before this workflow can continue."
+                            .to_string(),
                         action: DesktopAction::RequestLegionWorkflowSignOff {
                             session_id: row.session_id.clone(),
                             sign_off_id: LegionWorkflowSignOffId(sign_off_id),
@@ -228,8 +241,9 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                 || matching_verification_failed
             {
                 actions.push(DesktopWorkerRecoveryAction {
-                    label: format!("Request verification {}", row.session_id.0),
-                    rationale: format!("validation failed -> verification {gate_id}"),
+                    label: "Request workflow verification".to_string(),
+                    rationale: "Verification must pass before this workflow can continue."
+                        .to_string(),
                     action: DesktopAction::RequestLegionWorkflowVerification {
                         session_id: row.session_id.clone(),
                         gate_id: LegionWorkflowVerificationGateId(gate_id),
@@ -243,8 +257,9 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                 first_label_with_prefix(&row.display_safe_labels, "conflict:")
         {
             actions.push(DesktopWorkerRecoveryAction {
-                label: format!("Resolve conflict {}", row.session_id.0),
-                rationale: format!("conflict -> resolve {conflict_id}"),
+                label: "Resolve workflow conflict".to_string(),
+                rationale: "Resolve the blocking conflict before this workflow can continue."
+                    .to_string(),
                 action: DesktopAction::ResolveLegionWorkflowConflict {
                     session_id: row.session_id.clone(),
                     conflict_id: LegionWorkflowConflictId(conflict_id),
@@ -411,14 +426,14 @@ mod tests {
         let model = DesktopWorkerPanelViewModel::from_snapshot(&snapshot);
 
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Recheck blocked workflow session:blocked"
+            action.label == "Recheck blocked workflow"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowMergeReadiness {
                         session_id: LegionWorkflowSessionId("session:blocked".to_string()),
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Request sign-off session:approval"
+            action.label == "Request workflow sign-off"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowSignOff {
                         session_id: LegionWorkflowSessionId("session:approval".to_string()),
@@ -426,7 +441,7 @@ mod tests {
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Request verification session:validation"
+            action.label == "Request workflow verification"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowVerification {
                         session_id: LegionWorkflowSessionId("session:validation".to_string()),
@@ -434,7 +449,7 @@ mod tests {
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Resolve conflict session:conflict"
+            action.label == "Resolve workflow conflict"
                 && action.action
                     == DesktopAction::ResolveLegionWorkflowConflict {
                         session_id: LegionWorkflowSessionId("session:conflict".to_string()),

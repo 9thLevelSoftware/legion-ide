@@ -56,7 +56,7 @@ pub fn fleet_card_view_models(
 pub fn render_fleet_cards(ui: &mut egui::Ui, cards: &[LegionWorkflowFleetCardProjection]) {
     let cards = fleet_card_view_models(cards);
     if cards.is_empty() {
-        ui.label(theme::muted("No fleet cards projected"));
+        ui.label(theme::muted("No task details available"));
         return;
     }
 

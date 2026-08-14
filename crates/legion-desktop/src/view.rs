@@ -2151,17 +2151,25 @@ fn render_advanced_center_surface(
     if !matches!(model.mode_surface.center, SurfaceAvailability::Ready) {
         return;
     }
-    let label = match mode {
-        DesktopProductMode::Manual | DesktopProductMode::Assist => return,
-        DesktopProductMode::Delegate => "Delegate workbench",
-        DesktopProductMode::LegionWorkflows => "Legion Workflows workbench",
-    };
     let header_height = ui.spacing().interact_size.y;
     let body_height = (ui.available_height()
         - MIN_USABLE_EDITOR_HEIGHT
         - EDITOR_CHROME_HEIGHT_RESERVE
         - header_height)
         .clamp(96.0, MAX_ADVANCED_WORKBENCH_HEIGHT);
+    if mode == DesktopProductMode::LegionWorkflows {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), body_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| render_fleet_canvas(ui, snapshot, model, actions),
+        );
+        return;
+    }
+    let label = match mode {
+        DesktopProductMode::Manual | DesktopProductMode::Assist => return,
+        DesktopProductMode::Delegate => "Delegate workbench",
+        DesktopProductMode::LegionWorkflows => unreachable!("handled above"),
+    };
     disclosure_row(
         ui,
         label,
@@ -2177,9 +2185,7 @@ fn render_advanced_center_surface(
                     DesktopProductMode::Delegate => {
                         render_delegated_canvas(ui, snapshot, model, actions)
                     }
-                    DesktopProductMode::LegionWorkflows => {
-                        render_fleet_canvas(ui, snapshot, model, actions);
-                    }
+                    DesktopProductMode::LegionWorkflows => {}
                 });
         },
     );
@@ -4629,14 +4635,8 @@ fn render_assisted_suggestion_panel(
                     theme::tokens().accent.blue,
                     true,
                 );
-                if let Some(workspace_id) = snapshot.active_buffer_projection.workspace_id {
-                    let workspace_id = workspace_id.0.to_string();
-                    pill(
-                        ui,
-                        &format!("workspace: {}", trim_middle(&workspace_id, 18)),
-                        theme::tokens().accent.cyan,
-                        true,
-                    );
+                if snapshot.active_buffer_projection.workspace_id.is_some() {
+                    pill(ui, "workspace: current", theme::tokens().accent.cyan, true);
                 }
                 let manifest = &snapshot.context_manifest_projection.manifest;
                 pill(
@@ -5507,9 +5507,12 @@ fn render_fleet_console(
         return;
     } else {
         section_label(ui, "Workflow sessions", Some(theme::tokens().accent.purple));
-        for row in workflows.rows.iter().take(4) {
+        for (index, row) in workflows.rows.iter().take(4).enumerate() {
             theme::small_card_frame().show(ui, |ui| {
-                ui.label(theme::body_strong(&row.session_id.0));
+                ui.label(theme::body_strong(format!(
+                    "Workflow session {}",
+                    index + 1
+                )));
                 ui.horizontal_wrapped(|ui| {
                     ui.label(theme::accent(
                         format!("{:?}", row.lifecycle_state),
@@ -5544,18 +5547,15 @@ fn render_fleet_console(
             section_label(ui, "Permissions", Some(theme::tokens().accent.orange));
             render_legion_workflow_tool_permission_controls(ui, snapshot, actions);
         }
-        section_label(ui, "Stop controls", Some(theme::tokens().accent.red));
-        render_legion_workflow_kill_switch_controls(ui, snapshot, actions);
+        if has_armed_cancellable_legion_workflow(snapshot) {
+            section_label(ui, "Stop controls", Some(theme::tokens().accent.red));
+            render_legion_workflow_kill_switch_controls(ui, snapshot, actions);
+        }
 
         let worker_panel = worker_panel::DesktopWorkerPanelViewModel::from_snapshot(snapshot);
         if !worker_panel.recovery_actions.is_empty() {
             section_label(ui, "Gated recovery", Some(theme::tokens().accent.orange));
-            worker_panel::render_worker_panel(
-                ui,
-                &worker_panel,
-                &proposal_review::DesktopProposalEvidencePanelViewModel::default(),
-                actions,
-            );
+            worker_panel::render_worker_recovery_actions(ui, &worker_panel, actions);
         }
     }
 
@@ -5565,9 +5565,9 @@ fn render_fleet_console(
     }
     if !workflows.risk_monitors.is_empty() {
         section_label(ui, "Risk gate", Some(theme::tokens().accent.red));
-        for monitor in workflows.risk_monitors.iter().take(3) {
+        for (index, monitor) in workflows.risk_monitors.iter().take(3).enumerate() {
             theme::small_card_frame().show(ui, |ui| {
-                ui.label(theme::body_strong(&monitor.session_id.0));
+                ui.label(theme::body_strong(format!("Workflow risk {}", index + 1)));
                 ui.label(theme::accent(
                     format!(
                         "{:?} · score {}/{} · high risk {} · denied {}",
@@ -5610,12 +5610,9 @@ fn render_legion_workflow_budget_rows(
     if rows.is_empty() {
         return;
     }
-    for row in rows.iter().take(6) {
+    for (index, row) in rows.iter().take(6).enumerate() {
         theme::small_card_frame().show(ui, |ui| {
-            ui.label(theme::body_strong(format!(
-                "{} / {}",
-                row.session_id.0, row.worker_id
-            )));
+            ui.label(theme::body_strong(format!("Worker budget {}", index + 1)));
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::muted(&row.budget_label));
                 ui.separator();
@@ -5837,7 +5834,7 @@ fn render_legion_workflow_tool_permission_controls(
         ui.label(theme::muted("No Legion Workflows MCP tool permissions"));
         return;
     }
-    for request in requests.iter().take(6) {
+    for (index, request) in requests.iter().take(6).enumerate() {
         let Some((server_id, tool_name)) = parse_automate_tool_target(request.target_id.as_deref())
         else {
             continue;
@@ -5846,7 +5843,10 @@ fn render_legion_workflow_tool_permission_controls(
             continue;
         };
         theme::small_card_frame().show(ui, |ui| {
-            ui.label(theme::body_strong(trim_middle(&request.request_id, 56)));
+            ui.label(theme::body_strong(format!(
+                "Tool permission request {}",
+                index + 1
+            )));
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::muted(format!("{:?}", request.profile)));
                 ui.separator();
@@ -5901,19 +5901,21 @@ fn render_legion_workflow_kill_switch_controls(
     actions: &mut Vec<DesktopAction>,
 ) {
     for row in snapshot.legion_workflow_projection.rows.iter().take(3) {
-        let triggered = snapshot
-            .legion_workflow_projection
-            .kill_switches
-            .iter()
-            .any(|switch| {
-                switch.session_id == row.session_id
-                    && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Triggered
-            });
+        let armed = legion_workflow_is_cancellable(row.lifecycle_state)
+            && snapshot
+                .legion_workflow_projection
+                .kill_switches
+                .iter()
+                .any(|switch| {
+                    switch.session_id == row.session_id
+                        && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
+                });
+        if !armed {
+            continue;
+        }
         ui.horizontal_wrapped(|ui| {
-            ui.label(theme::muted(format!("kill switch {}", row.session_id.0)));
-            if triggered {
-                ui.label(theme::accent("Triggered", theme::tokens().accent.red));
-            } else if soft_button(ui, "Kill").clicked() {
+            ui.label(theme::muted("Workflow stop"));
+            if soft_button(ui, "Kill").clicked() {
                 actions.push(DesktopAction::TriggerLegionWorkflowKillSwitch {
                     session_id: row.session_id.clone(),
                     reason_label: "user requested hard stop".to_string(),
@@ -5921,6 +5923,29 @@ fn render_legion_workflow_kill_switch_controls(
             }
         });
     }
+}
+
+fn has_armed_cancellable_legion_workflow(snapshot: &ShellProjectionSnapshot) -> bool {
+    snapshot.legion_workflow_projection.rows.iter().any(|row| {
+        legion_workflow_is_cancellable(row.lifecycle_state)
+            && snapshot
+                .legion_workflow_projection
+                .kill_switches
+                .iter()
+                .any(|switch| {
+                    switch.session_id == row.session_id
+                        && switch.state == legion_protocol::LegionWorkflowKillSwitchState::Armed
+                })
+    })
+}
+
+fn legion_workflow_is_cancellable(state: legion_protocol::LegionWorkflowState) -> bool {
+    !matches!(
+        state,
+        legion_protocol::LegionWorkflowState::Completed
+            | legion_protocol::LegionWorkflowState::Failed
+            | legion_protocol::LegionWorkflowState::Cancelled
+    )
 }
 
 fn parse_automate_tool_target(
@@ -7568,9 +7593,6 @@ fn delegated_activity_projected(snapshot: &ShellProjectionSnapshot) -> bool {
         || !delegated.context_citations.is_empty()
         || !delegated.proposal_reviews.is_empty()
         || !delegated.tool_permission_requests.is_empty()
-        || !snapshot.proposal_ledger_projection.rows.is_empty()
-        || !snapshot.artifact_ledger_projection.rows.is_empty()
-        || !snapshot.verification_run_projection.rows.is_empty()
 }
 
 fn delegated_runtime_is_cancellable(

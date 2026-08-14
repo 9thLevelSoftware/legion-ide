@@ -2628,7 +2628,33 @@ fn projection_rendering_blank_delegate_draft_is_semantically_disabled() {
 }
 
 #[test]
-fn projection_rendering_delegate_runtime_proposal_and_evidence_each_activate_real_console() {
+fn projection_rendering_global_ledgers_do_not_activate_delegate_task_surface() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let populated = populated_snapshot();
+    let mut snapshot = Shell::empty("Idle Delegate with global activity").projection_snapshot();
+    snapshot.product_mode = DockMode::Delegate;
+    snapshot.proposal_ledger_projection = populated.proposal_ledger_projection;
+    snapshot.artifact_ledger_projection = populated.artifact_ledger_projection;
+    snapshot.verification_run_projection = populated.verification_run_projection;
+    let state = DesktopProjectionViewState {
+        canonical_workspace_root: Some(CanonicalPath("D:/workspace".to_string())),
+        ..DesktopProjectionViewState::default()
+    };
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+
+    assert!(accesskit_has_label(&full, "Task description"));
+    assert!(accesskit_has_label(&full, "Ready to delegate"));
+    assert!(!accesskit_has_label(&full, "Task is active"));
+    assert!(!accesskit_has_label(&full, "Delegate workbench"));
+    assert!(!accesskit_has_label(&full, "Proposal review"));
+    assert!(!accesskit_has_label(&full, "Task graph and evidence"));
+}
+
+#[test]
+fn projection_rendering_delegate_owned_runtime_and_task_rows_activate_real_console() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
 
@@ -2648,26 +2674,13 @@ fn projection_rendering_delegate_runtime_proposal_and_evidence_each_activate_rea
         click_accessible_control(&ctx, &mut view, &runtime_only, &full, "Cancel task");
     assert_eq!(cancelled.actions, vec![DesktopAction::CancelDelegatedTask]);
 
-    let mut proposal_only = populated_snapshot();
-    proposal_only.product_mode = DockMode::Delegate;
-    proposal_only.delegated_task_projection.plan_count = 0;
-    proposal_only.artifact_ledger_projection.rows.clear();
-    proposal_only.verification_run_projection.rows.clear();
+    let mut task_owned = Shell::empty("Projected Delegate plan").projection_snapshot();
+    task_owned.product_mode = DockMode::Delegate;
+    task_owned.delegated_task_projection.plan_count = 1;
     let mut view = ProjectionView::new();
-    let (_initial, full) = render_projection_frame(&ctx, &mut view, &proposal_only);
-    assert!(accesskit_has_label(&full, "Proposal review"));
-    assert!(!accesskit_has_label(&full, "Task description"));
-
-    let mut evidence_only = populated_snapshot();
-    evidence_only.product_mode = DockMode::Delegate;
-    evidence_only.delegated_task_projection.plan_count = 0;
-    evidence_only.proposal_ledger_projection.rows.clear();
-    evidence_only
-        .proposal_ledger_projection
-        .selected_proposal_id = None;
-    let mut view = ProjectionView::new();
-    let (_initial, full) = render_projection_frame(&ctx, &mut view, &evidence_only);
-    assert!(accesskit_has_label(&full, "Task graph and evidence"));
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &task_owned);
+    assert!(accesskit_has_label(&full, "Task is active"));
+    assert!(accesskit_has_label(&full, "Delegate workbench"));
     assert!(!accesskit_has_label(&full, "Task description"));
 }
 
@@ -3406,6 +3419,17 @@ fn projection_rendering_context_pills_wrap_as_atomic_readable_items() {
     assert_eq!(manifest_node.role(), egui::accesskit::Role::Label);
     assert!(!manifest_node.supports_action(egui::accesskit::Action::Click));
     assert!(!manifest_node.supports_action(egui::accesskit::Action::Focus));
+    assert!(accesskit_has_label(&full, "workspace: current"));
+    assert!(!accesskit_contains_text_in_x_range(
+        &full,
+        &u128::MAX.to_string(),
+        1_115.0..=1_440.0
+    ));
+    assert!(!accesskit_contains_text_in_x_range(
+        &full,
+        "projected",
+        1_115.0..=1_440.0
+    ));
 }
 
 #[test]
