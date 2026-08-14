@@ -2220,7 +2220,7 @@ fn render_left_sidebar(
         ui.allocate_ui_with_layout(
             egui::vec2(geometry.activity_rail_width, ui.available_height()),
             egui::Layout::top_down(egui::Align::Center),
-            |ui| render_activity_rail(ui, snapshot, view, actions),
+            |ui| render_activity_rail(ui, snapshot, geometry, view, actions),
         );
         ui.separator();
         ui.vertical(|ui| {
@@ -2232,6 +2232,7 @@ fn render_left_sidebar(
 fn render_activity_rail(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    geometry: ShellGeometry,
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
@@ -2297,6 +2298,10 @@ fn render_activity_rail(
     });
     if diagnostics.clicked() {
         view.utility_surface = Some(UtilitySurface::Diagnostics);
+        if geometry.ultra_compact {
+            view.compact_drawer = Some(CompactDrawer::BottomPanel);
+            view.compact_drawer_needs_focus = true;
+        }
     }
     for (surface, label, glyph) in [
         (UtilitySurface::Setup, "Setup", "?"),

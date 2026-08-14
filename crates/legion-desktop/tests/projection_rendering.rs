@@ -5284,6 +5284,32 @@ fn projection_rendering_compact_shell_collapses_navigation_and_exposes_inspector
 }
 
 #[test]
+fn projection_rendering_ultra_compact_diagnostics_opens_the_bottom_panel_drawer() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+    let size = egui::vec2(640.0, 720.0);
+
+    let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let (_explorer, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Explorer drawer", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    assert!(accesskit_has_label(&full, "Close Explorer drawer"));
+
+    let (_diagnostics, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Diagnostics", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+
+    assert!(
+        accesskit_has_label(&full, "Close Bottom panel drawer"),
+        "Diagnostics should reveal its only reachable ultra-compact surface"
+    );
+    assert!(accesskit_has_label(&full, "Diagnostics"));
+    assert!(!accesskit_has_label(&full, "Close Explorer drawer"));
+}
+
+#[test]
 fn projection_rendering_compact_drawers_focus_content_and_escape_restores_each_trigger() {
     let snapshot = {
         let mut snapshot = populated_snapshot();
