@@ -10,7 +10,7 @@ use legion_desktop::{
     bridge::DesktopAction,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
-use legion_ui::{PaletteMode, SearchScopeProjection};
+use legion_ui::{PaletteMode, SearchScopeProjection, SearchStatusKindProjection};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -403,6 +403,59 @@ fn search_palette_shell_presents_a_runnable_result() {
             .all(|row| !row.contains("lexical")),
         "Search should use user-recognizable terms"
     );
+
+    app.run_headless_input(press_enter());
+    let search = &app.runtime_snapshot().search_projection;
+    assert_eq!(search.query_label, "needle");
+    assert_eq!(search.scope, SearchScopeProjection::Workspace);
+    assert!(search.query_id.is_some(), "Enter should dispatch RunSearch");
+}
+
+#[test]
+fn search_palette_enter_opens_the_selected_match() {
+    let (workspace, mut app) = app_with_workspace_files(&[("match.txt", "needle here\n")]);
+    let target = workspace.path().join("match.txt");
+    app.handle_action(DesktopAction::OpenPathText(
+        target.to_string_lossy().into_owned(),
+    ))
+    .expect("matching file should open");
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/needle".to_string(),
+        scope: SearchScopeProjection::ActiveFile,
+    })
+    .expect("search palette should open");
+
+    let results = app.run_headless_input(press_enter());
+    assert!(accesskit_has_label(
+        &results,
+        "Enter open result · ↑↓ choose · Esc close"
+    ));
+    let selected = app.runtime_snapshot().palette_projection.results[0].clone();
+
+    app.run_headless_input(press_enter());
+    let snapshot = app.runtime_snapshot();
+    assert!(!snapshot.palette_projection.open);
+    assert!(
+        snapshot
+            .active_buffer_projection
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path.0.ends_with("match.txt"))
+    );
+    let active_buffer_id = snapshot
+        .active_buffer_projection
+        .buffer_id
+        .expect("opened match should have an active buffer");
+    assert_eq!(
+        snapshot
+            .daily_editing_projection
+            .viewport_states
+            .iter()
+            .find(|viewport| viewport.buffer_id == active_buffer_id)
+            .and_then(|viewport| viewport.cursor),
+        selected.position
+    );
 }
 
 #[test]
@@ -474,7 +527,7 @@ fn search_palette_keyboard_navigation_moves_between_matches() {
 }
 
 #[test]
-fn search_palette_renders_no_match_and_error_states_in_place() {
+fn search_palette_retries_no_match_and_validation_states_with_the_same_query() {
     let (_workspace, mut app) = app_with_workspace_files(&[("alpha.txt", "present\n")]);
     app.handle_action(DesktopAction::OpenPalette {
         mode: PaletteMode::Search,
@@ -490,6 +543,30 @@ fn search_palette_renders_no_match_and_error_states_in_place() {
         "No matches. Try another term or search the active file."
     ));
     assert!(!accesskit_has_label(&no_match, "No search results"));
+    assert!(accesskit_has_label(
+        &no_match,
+        "Enter run search again · ↑↓ choose · Esc close"
+    ));
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.results[0].id,
+        "search:retry"
+    );
+    let no_match_query_id = app.runtime_snapshot().search_projection.query_id.clone();
+    app.run_headless_input(press_enter());
+    let retried_no_match = app.runtime_snapshot();
+    assert!(
+        retried_no_match.palette_projection.open,
+        "retry should keep the integrated search result host open"
+    );
+    assert_eq!(retried_no_match.search_projection.query_label, "missing");
+    assert_eq!(
+        retried_no_match.search_projection.scope,
+        SearchScopeProjection::Workspace
+    );
+    assert_ne!(
+        retried_no_match.search_projection.query_id, no_match_query_id,
+        "retry Enter should dispatch a new RunSearch intent"
+    );
 
     app.handle_action(DesktopAction::UpdatePaletteQuery {
         query: "/regex:[".to_string(),
@@ -501,4 +578,106 @@ fn search_palette_renders_no_match_and_error_states_in_place() {
         &error,
         "Check the search term and try again."
     ));
+    assert!(accesskit_has_label(
+        &error,
+        "Enter run search again · ↑↓ choose · Esc close"
+    ));
+    let validation_query_id = app.runtime_snapshot().search_projection.query_id.clone();
+    app.run_headless_input(press_enter());
+    let retried_validation = app.runtime_snapshot();
+    assert!(retried_validation.palette_projection.open);
+    assert_eq!(retried_validation.search_projection.query_label, "regex:[");
+    assert_eq!(
+        retried_validation.search_projection.status.kind,
+        SearchStatusKindProjection::ValidationError
+    );
+    assert_ne!(
+        retried_validation.search_projection.query_id, validation_query_id,
+        "validation retry should dispatch the same query through RunSearch"
+    );
+}
+
+#[test]
+fn search_palette_cancelled_state_retries_with_enter() {
+    let (_workspace, mut app) = app_with_workspace_files(&[("alpha.txt", "present\n")]);
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/missing".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("search palette should open");
+    app.run_headless_input(press_enter());
+    let original_query_id = app
+        .runtime_snapshot()
+        .search_projection
+        .query_id
+        .expect("search should have a query id");
+
+    app.handle_action(DesktopAction::CancelSearch {
+        query_id: original_query_id.clone(),
+    })
+    .expect("search cancellation should route");
+    let cancelled = app.run_headless_input(input(Vec::new()));
+    assert!(accesskit_has_label(
+        &cancelled,
+        "Enter run search again · ↑↓ choose · Esc close"
+    ));
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.results[0].id,
+        "search:retry"
+    );
+
+    app.run_headless_input(press_enter());
+    let retried = app.runtime_snapshot();
+    assert!(retried.palette_projection.open);
+    assert_eq!(retried.search_projection.query_label, "missing");
+    assert_eq!(
+        retried.search_projection.scope,
+        SearchScopeProjection::Workspace
+    );
+    assert_ne!(
+        retried.search_projection.query_id.as_deref(),
+        Some(original_query_id.as_str())
+    );
+}
+
+#[test]
+fn search_palette_degraded_state_defaults_enter_to_retry() {
+    let mut content = String::from("needle visible\n");
+    content.push_str(&"x".repeat(5 * 1024 * 1024));
+    let (workspace, mut app) = app_with_workspace_files(&[("large.txt", &content)]);
+    let target = workspace.path().join("large.txt");
+    app.handle_action(DesktopAction::OpenPathText(
+        target.to_string_lossy().into_owned(),
+    ))
+    .expect("large file should open in degraded mode");
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/needle".to_string(),
+        scope: SearchScopeProjection::ActiveFile,
+    })
+    .expect("search palette should open");
+
+    let degraded = app.run_headless_input(press_enter());
+    let first = app.runtime_snapshot();
+    assert_eq!(
+        first.search_projection.status.kind,
+        SearchStatusKindProjection::DegradedLimited
+    );
+    assert_eq!(first.palette_projection.results[0].id, "search:retry");
+    assert!(accesskit_has_label(
+        &degraded,
+        "Enter run search again · ↑↓ choose · Esc close"
+    ));
+    let first_query_id = first.search_projection.query_id;
+
+    app.run_headless_input(press_enter());
+    let retried = app.runtime_snapshot();
+    assert!(retried.palette_projection.open);
+    assert_eq!(retried.search_projection.query_label, "needle");
+    assert_eq!(
+        retried.search_projection.status.kind,
+        SearchStatusKindProjection::DegradedLimited
+    );
+    assert_ne!(retried.search_projection.query_id, first_query_id);
 }

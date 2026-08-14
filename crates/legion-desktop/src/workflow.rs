@@ -3614,7 +3614,15 @@ impl DesktopEframeApp {
             if input.key_pressed(egui::Key::Escape) {
                 actions.push(DesktopAction::ClosePalette);
             }
-            if input.key_pressed(egui::Key::Enter) {
+            let palette_enter_enabled = snapshot.palette_projection.mode != PaletteMode::Search
+                || !matches!(
+                    search_palette_interaction(
+                        &snapshot.palette_projection,
+                        &snapshot.search_projection,
+                    ),
+                    SearchPaletteInteraction::Running | SearchPaletteInteraction::None
+                );
+            if input.key_pressed(egui::Key::Enter) && palette_enter_enabled {
                 self.request_palette_dispatch();
             }
             if input.key_pressed(egui::Key::ArrowUp) {
@@ -3847,7 +3855,11 @@ impl DesktopEframeApp {
 
         let width = screen.width().clamp(320.0, 760.0);
         let pos = egui::pos2(screen.center().x - width / 2.0, screen.top() + 72.0);
-        let grouped_result_indices = palette_grouped_result_indices(palette);
+        let search_interaction = search_palette_interaction(palette, &snapshot.search_projection);
+        let mut grouped_result_indices = palette_grouped_result_indices(palette);
+        if search_interaction == SearchPaletteInteraction::Running {
+            grouped_result_indices.clear();
+        }
         let search_model = (palette.mode == PaletteMode::Search).then(|| {
             crate::search::DesktopSearchViewModel::from_projection(&snapshot.search_projection)
         });
@@ -4006,7 +4018,10 @@ impl DesktopEframeApp {
                         }
                         ui.add_space(8.0);
                         ui.separator();
-                        ui.label(theme::muted(command_palette_keyboard_help(palette.mode)));
+                        ui.label(theme::muted(command_palette_keyboard_help(
+                            palette,
+                            &snapshot.search_projection,
+                        )));
                     });
             });
         if dispatch_requested {
@@ -4164,9 +4179,57 @@ fn search_palette_empty_state(scope: SearchScopeProjection) -> &'static str {
     }
 }
 
-fn command_palette_keyboard_help(mode: PaletteMode) -> &'static str {
-    match mode {
-        PaletteMode::Search => "Enter run search · ↑↓ choose · Esc close",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPaletteInteraction {
+    Run,
+    Open,
+    Retry,
+    Running,
+    None,
+}
+
+fn search_palette_interaction(
+    palette: &legion_ui::PaletteProjection,
+    search: &legion_ui::SearchProjection,
+) -> SearchPaletteInteraction {
+    if palette.mode != PaletteMode::Search {
+        return SearchPaletteInteraction::None;
+    }
+    if palette_search_projection_is_current(palette, search)
+        && search.status.kind == SearchStatusKindProjection::Running
+    {
+        return SearchPaletteInteraction::Running;
+    }
+    let Some(selected) = palette.results.get(palette.selected_index) else {
+        return SearchPaletteInteraction::None;
+    };
+    if selected.disabled_reason.is_some() {
+        return SearchPaletteInteraction::None;
+    }
+    if selected.id.starts_with("search:match:") {
+        SearchPaletteInteraction::Open
+    } else if selected.id == "search:retry" {
+        SearchPaletteInteraction::Retry
+    } else if selected.id == "search:run" {
+        SearchPaletteInteraction::Run
+    } else {
+        SearchPaletteInteraction::None
+    }
+}
+
+fn command_palette_keyboard_help(
+    palette: &legion_ui::PaletteProjection,
+    search: &legion_ui::SearchProjection,
+) -> &'static str {
+    match palette.mode {
+        PaletteMode::Search => match search_palette_interaction(palette, search) {
+            SearchPaletteInteraction::Open => "Enter open result · ↑↓ choose · Esc close",
+            SearchPaletteInteraction::Retry => "Enter run search again · ↑↓ choose · Esc close",
+            SearchPaletteInteraction::Running => "Search running · Esc close",
+            SearchPaletteInteraction::Run | SearchPaletteInteraction::None => {
+                "Enter run search · ↑↓ choose · Esc close"
+            }
+        },
         _ => "Enter open · ↑↓ choose · Esc close",
     }
 }
@@ -4904,6 +4967,41 @@ mod tests {
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn palette_test_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            focused: true,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_200.0, 900.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        }
+    }
+
+    fn palette_test_enter() -> egui::RawInput {
+        palette_test_input(vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }])
+    }
+
+    fn output_has_label(output: &egui::FullOutput, label: &str) -> bool {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| {
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+            })
+    }
+
     #[test]
     fn running_search_replaces_the_synthetic_run_row_in_the_palette() {
         let palette = legion_ui::PaletteProjection {
@@ -4950,6 +5048,119 @@ mod tests {
         assert_eq!(
             crate::search::DesktopSearchViewModel::from_projection(&search).status_rows,
             vec!["Searching…"]
+        );
+    }
+
+    #[test]
+    fn running_search_footer_disables_enter_dispatch() {
+        let workspace = TempWorkspace::new();
+        let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            None,
+        ))
+        .expect("runtime should open");
+        runtime
+            .handle_action(DesktopAction::OpenPalette {
+                mode: PaletteMode::Search,
+                query: "/needle".to_string(),
+                scope: SearchScopeProjection::Workspace,
+            })
+            .expect("search palette should open");
+        let mut snapshot = runtime.projection_snapshot();
+        snapshot.search_projection = legion_ui::SearchProjection {
+            query_id: Some("search:running".to_string()),
+            scope: SearchScopeProjection::Workspace,
+            query_label: "needle".to_string(),
+            status: legion_ui::SearchStatusProjection {
+                kind: SearchStatusKindProjection::Running,
+                message: "Search running".to_string(),
+            },
+            results: Vec::new(),
+            result_limit: 20,
+            omitted_result_count: 0,
+            omitted_file_count: 0,
+            skipped_binary_count: 0,
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: false,
+            diagnostics: Vec::new(),
+            generated_at: legion_protocol::TimestampMillis(1),
+            schema_version: 1,
+        };
+        runtime.shell.replace_projection_snapshot(snapshot);
+        let mut app = DesktopEframeApp::new(runtime);
+        app.headless_egui_context().enable_accesskit();
+
+        let output = app.run_headless_input(palette_test_input(Vec::new()));
+        assert!(output_has_label(&output, "Search running · Esc close"));
+        assert!(!output_has_label(
+            &output,
+            "Search workspace for \"needle\""
+        ));
+        app.run_headless_input(palette_test_enter());
+
+        assert_eq!(
+            app.runtime
+                .projection_snapshot()
+                .search_projection
+                .status
+                .kind,
+            SearchStatusKindProjection::Running
+        );
+        assert_eq!(app.runtime.last_outcome(), &DesktopWorkflowOutcome::Noop);
+    }
+
+    #[test]
+    fn error_search_footer_and_enter_retry_the_current_query() {
+        let workspace = TempWorkspace::new();
+        fs::write(workspace.path().join("alpha.txt"), "present\n").expect("fixture should write");
+        let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            None,
+        ))
+        .expect("runtime should open");
+        runtime
+            .handle_action(DesktopAction::OpenPalette {
+                mode: PaletteMode::Search,
+                query: "/missing".to_string(),
+                scope: SearchScopeProjection::Workspace,
+            })
+            .expect("search palette should open");
+        runtime
+            .handle_action(DesktopAction::DispatchPaletteSelection)
+            .expect("initial search should run");
+        let original_query_id = runtime
+            .projection_snapshot()
+            .search_projection
+            .query_id
+            .expect("initial search should have an id");
+        let mut snapshot = runtime.projection_snapshot();
+        snapshot.search_projection.status = legion_ui::SearchStatusProjection {
+            kind: SearchStatusKindProjection::Error,
+            message: "Search failed".to_string(),
+        };
+        runtime.shell.replace_projection_snapshot(snapshot);
+        let mut app = DesktopEframeApp::new(runtime);
+        app.headless_egui_context().enable_accesskit();
+
+        let output = app.run_headless_input(palette_test_input(Vec::new()));
+        assert!(output_has_label(
+            &output,
+            "Enter run search again · ↑↓ choose · Esc close"
+        ));
+        app.run_headless_input(palette_test_enter());
+
+        let retried = app.runtime.projection_snapshot().search_projection;
+        assert!(app.runtime.projection_snapshot().palette_projection.open);
+        assert_eq!(retried.query_label, "missing");
+        assert_eq!(retried.scope, SearchScopeProjection::Workspace);
+        assert_ne!(
+            retried.query_id.as_deref(),
+            Some(original_query_id.as_str())
+        );
+        assert_eq!(
+            app.runtime.last_outcome(),
+            &DesktopWorkflowOutcome::SearchUpdated
         );
     }
 

@@ -19340,7 +19340,7 @@ impl AppComposition {
             self.palette_usage.record_usage(workspace_id, &result.id);
         }
 
-        if result.id == "search:run" {
+        if matches!(result.id.as_str(), "search:run" | "search:retry") {
             let outcome = self.dispatch_ui_intent(intent)?;
             self.sync_search_palette_results();
             return Ok(outcome);
@@ -19351,7 +19351,15 @@ impl AppComposition {
     }
 
     fn sync_search_palette_results(&mut self) {
-        self.palette.results = self
+        if !self.palette.open
+            || self.palette.mode != PaletteMode::Search
+            || palette_query_body(PaletteMode::Search, &self.palette.query).trim()
+                != self.search_projection.query_label
+        {
+            return;
+        }
+
+        let mut results = self
             .search_projection
             .results
             .iter()
@@ -19386,7 +19394,35 @@ impl AppComposition {
                     disabled_reason: None,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if matches!(
+            self.search_projection.status.kind,
+            SearchStatusKindProjection::NoResults
+                | SearchStatusKindProjection::ValidationError
+                | SearchStatusKindProjection::Error
+                | SearchStatusKindProjection::Cancelled
+                | SearchStatusKindProjection::DegradedLimited
+        ) {
+            results.insert(
+                0,
+                PaletteResult {
+                    id: "search:retry".to_string(),
+                    kind: PaletteResultKind::Search,
+                    title: format!(
+                        "Run search again for \"{}\"",
+                        self.search_projection.query_label
+                    ),
+                    detail: Some("Retry this search".to_string()),
+                    shortcut_label: Some("Enter".to_string()),
+                    path: None,
+                    buffer_id: None,
+                    position: None,
+                    match_indices: Vec::new(),
+                    disabled_reason: None,
+                },
+            );
+        }
+        self.palette.results = results;
         self.palette.selected_index = 0;
     }
 
@@ -27586,7 +27622,9 @@ impl AppComposition {
             };
             self.search_projection.generated_at = TimestampMillis::now();
         }
-        self.search_projection.clone()
+        let projection = self.search_projection.clone();
+        self.sync_search_palette_results();
+        projection
     }
 
     /// Refresh test explorer discovery (P2.F3.T4 / T4c).
@@ -34788,6 +34826,62 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn retryable_search_palette_rows_dispatch_the_existing_run_search_intent() {
+        for status_kind in [
+            SearchStatusKindProjection::NoResults,
+            SearchStatusKindProjection::ValidationError,
+            SearchStatusKindProjection::Error,
+            SearchStatusKindProjection::Cancelled,
+            SearchStatusKindProjection::DegradedLimited,
+        ] {
+            let mut app = AppComposition::new();
+            app.palette.open = true;
+            app.palette.mode = PaletteMode::Search;
+            app.palette.query = "/needle".to_string();
+            app.palette.scope = SearchScopeProjection::Workspace;
+            app.search_projection = SearchProjection {
+                query_id: Some("search:failed".to_string()),
+                scope: SearchScopeProjection::Workspace,
+                query_label: "needle".to_string(),
+                status: SearchStatusProjection {
+                    kind: status_kind,
+                    message: "Retryable search state".to_string(),
+                },
+                results: Vec::new(),
+                result_limit: 20,
+                omitted_result_count: 0,
+                omitted_file_count: 0,
+                skipped_binary_count: 0,
+                case_sensitive: false,
+                whole_word: false,
+                use_regex: false,
+                diagnostics: Vec::new(),
+                generated_at: TimestampMillis(1),
+                schema_version: 1,
+            };
+
+            app.sync_search_palette_results();
+
+            assert_eq!(app.palette.results.len(), 1, "{status_kind:?}");
+            let retry = &app.palette.results[0];
+            assert_eq!(retry.id, "search:retry", "{status_kind:?}");
+            assert_eq!(retry.disabled_reason, None, "{status_kind:?}");
+            assert_eq!(
+                app.palette_result_intent(retry),
+                Some(CommandDispatchIntent::RunSearch {
+                    scope: SearchScopeProjection::Workspace,
+                    query: "needle".to_string(),
+                    limit: 0,
+                    case_sensitive: None,
+                    whole_word: None,
+                    use_regex: None,
+                }),
+                "{status_kind:?}"
+            );
+        }
+    }
 
     #[cfg(feature = "ai")]
     #[test]
