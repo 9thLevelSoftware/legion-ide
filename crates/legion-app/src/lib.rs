@@ -484,28 +484,39 @@ impl PaletteCommandOperands {
     }
 }
 
-fn argument_command_prefix(command_id: &str) -> Option<&'static str> {
+fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
     match command_id {
-        "git-switch-branch" => Some("git switch branch"),
-        "git-create-branch" => Some("git create branch"),
-        "git-delete-branch" => Some("git delete branch"),
-        "git-remove-worktree" => Some("git remove worktree"),
-        "git-new-worktree" => Some("git new worktree"),
-        "git-commit" => Some("git commit"),
-        "git-stash" => Some("git stash"),
-        _ => None,
+        "git-switch-branch" => &["git switch branch", "git: switch branch"],
+        "git-create-branch" => &["git create branch", "git: create branch"],
+        "git-delete-branch" => &["git delete branch", "git: delete branch"],
+        "git-remove-worktree" => &["git remove worktree", "git: remove worktree"],
+        "git-new-worktree" => &["git new worktree", "git: new worktree"],
+        "git-commit" => &["git commit", "git: commit staged changes"],
+        "git-stash" => &["git stash", "git: stash changes"],
+        _ => &[],
     }
 }
 
-fn strip_argument_command_prefix<'a>(query: &'a str, command_id: &str) -> Option<&'a str> {
-    let prefix = argument_command_prefix(command_id)?;
+fn match_argument_command_prefix<'a>(
+    query: &'a str,
+    command_id: &str,
+) -> Option<(&'static str, &'a str)> {
     let query = query.trim();
-    let head = query.get(..prefix.len())?;
-    if !head.eq_ignore_ascii_case(prefix) {
-        return None;
-    }
-    let remainder = query.get(prefix.len()..)?;
-    (remainder.is_empty() || remainder.starts_with(char::is_whitespace)).then(|| remainder.trim())
+    argument_command_prefixes(command_id)
+        .iter()
+        .find_map(|prefix| {
+            let head = query.get(..prefix.len())?;
+            if !head.eq_ignore_ascii_case(prefix) {
+                return None;
+            }
+            let remainder = query.get(prefix.len()..)?;
+            (remainder.is_empty() || remainder.starts_with(char::is_whitespace))
+                .then(|| (*prefix, remainder.trim()))
+        })
+}
+
+fn strip_argument_command_prefix<'a>(query: &'a str, command_id: &str) -> Option<&'a str> {
+    match_argument_command_prefix(query, command_id).map(|(_, remainder)| remainder)
 }
 
 fn parse_palette_command_operands(
@@ -19927,8 +19938,8 @@ impl AppComposition {
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                let match_query = strip_argument_command_prefix(query, spec.id)
-                    .and_then(|_| argument_command_prefix(spec.id))
+                let match_query = match_argument_command_prefix(query, spec.id)
+                    .map(|(prefix, _)| prefix)
                     .unwrap_or(query);
                 fuzzy_score_tuple(spec.title, match_query).map(|(score, match_indices)| {
                     let (buffer_id, mut disabled_reason) = match spec.id {

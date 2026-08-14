@@ -35,7 +35,12 @@ impl DesktopSearchViewModel {
             }
             SearchStatusKindProjection::Cancelled => "Search stopped.".to_string(),
             SearchStatusKindProjection::ValidationError => {
-                "Check the search term and try again.".to_string()
+                let detail = projection.status.message.trim();
+                if detail.is_empty() {
+                    "Check the search term and try again.".to_string()
+                } else {
+                    format!("Check the search term and try again. {detail}")
+                }
             }
             SearchStatusKindProjection::DegradedLimited => {
                 "Search used the available text and may have missed matches.".to_string()

@@ -3898,7 +3898,9 @@ impl DesktopEframeApp {
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("Files, >commands, /search, #structural search"),
                         );
-                        response.request_focus();
+                        if palette.pending_confirmation.is_none() {
+                            response.request_focus();
+                        }
                         if response.changed() {
                             self.runtime
                                 .dispatch_ui_action(DesktopAction::UpdatePaletteQuery { query });
@@ -4100,19 +4102,46 @@ impl DesktopEframeApp {
                 ui.label(theme::body_strong(detail));
             }
             ui.add_space(8.0);
+            let focused_before_tab = ui.ctx().memory(|memory| memory.focused());
+            let tab_forward =
+                ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+            let tab_backward =
+                ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
             ui.horizontal(|ui| {
                 let minimum = f32::from(theme::tokens().control_height.compact);
-                if ui
-                    .add(egui::Button::new("Confirm").min_size(egui::vec2(minimum, minimum)))
-                    .clicked()
-                {
+                let confirm_response = ui
+                    .push_id("command_palette_confirmation_confirm", |ui| {
+                        ui.add(egui::Button::new("Confirm").min_size(egui::vec2(minimum, minimum)))
+                    })
+                    .inner;
+                if confirm_response.clicked() {
                     confirm = true;
                 }
-                if ui
-                    .add(egui::Button::new("Cancel").min_size(egui::vec2(minimum, minimum)))
-                    .clicked()
-                {
+                let cancel_response = ui
+                    .push_id("command_palette_confirmation_cancel", |ui| {
+                        ui.add(egui::Button::new("Cancel").min_size(egui::vec2(minimum, minimum)))
+                    })
+                    .inner;
+                if cancel_response.clicked() {
                     cancel = true;
+                }
+                if tab_forward || tab_backward {
+                    let next = if tab_backward {
+                        if focused_before_tab == Some(confirm_response.id) {
+                            cancel_response.id
+                        } else {
+                            confirm_response.id
+                        }
+                    } else if focused_before_tab == Some(cancel_response.id) {
+                        confirm_response.id
+                    } else {
+                        cancel_response.id
+                    };
+                    ui.ctx().memory_mut(|memory| memory.request_focus(next));
+                } else if focused_before_tab != Some(confirm_response.id)
+                    && focused_before_tab != Some(cancel_response.id)
+                {
+                    confirm_response.request_focus();
                 }
             });
         });

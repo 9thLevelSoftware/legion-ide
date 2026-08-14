@@ -701,6 +701,41 @@ fn argument_dependent_git_commands_project_only_resolved_operands() {
             "Git: Stash Changes",
             "Stash changes as ‘WIP: preserve → exactly’",
         ),
+        (
+            ">Git: Switch Branch feature/title-switch",
+            "Git: Switch Branch",
+            "Switch to branch ‘feature/title-switch’",
+        ),
+        (
+            ">Git: Create Branch feature/title-create",
+            "Git: Create Branch",
+            "Create and switch to branch ‘feature/title-create’",
+        ),
+        (
+            ">Git: Delete Branch feature/title-delete",
+            "Git: Delete Branch",
+            "Delete branch ‘feature/title-delete’",
+        ),
+        (
+            ">Git: Remove Worktree worktrees/title copy",
+            "Git: Remove Worktree",
+            "Remove worktree ‘worktrees/title copy’",
+        ),
+        (
+            ">Git: New Worktree feature/title-wt worktrees/title new",
+            "Git: New Worktree",
+            "Create worktree ‘worktrees/title new’ from branch ‘feature/title-wt’",
+        ),
+        (
+            ">Git: Commit Staged Changes fix: title spelling",
+            "Git: Commit Staged Changes",
+            "Commit staged changes as ‘fix: title spelling’",
+        ),
+        (
+            ">Git: Stash Changes WIP title spelling",
+            "Git: Stash Changes",
+            "Stash changes as ‘WIP title spelling’",
+        ),
     ] {
         app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
             mode: PaletteMode::Command,

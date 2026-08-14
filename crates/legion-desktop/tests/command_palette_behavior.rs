@@ -263,6 +263,16 @@ fn press_arrow_down() -> egui::RawInput {
     }])
 }
 
+fn press_tab() -> egui::RawInput {
+    input(vec![egui::Event::Key {
+        key: egui::Key::Tab,
+        physical_key: Some(egui::Key::Tab),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }])
+}
+
 fn press_escape() -> egui::RawInput {
     press_escape_at(egui::vec2(1_200.0, 900.0))
 }
@@ -575,6 +585,50 @@ fn destructive_palette_command_requires_confirmation_before_dispatch() {
             .then_some(*id)
         })
         .expect("confirmation should expose a Confirm action");
+    let cancel = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("confirmation should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some("Cancel") && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .expect("confirmation should expose a Cancel action");
+    assert_eq!(
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("confirmation should expose AccessKit")
+            .focus,
+        confirm,
+        "the modal should take initial focus from the palette query"
+    );
+    let tabbed = app.run_headless_input(press_tab());
+    assert_eq!(
+        tabbed
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("tabbed confirmation should expose AccessKit")
+            .focus,
+        cancel,
+        "Tab should stay inside the modal and move to Cancel"
+    );
+    let wrapped = app.run_headless_input(press_tab());
+    assert_eq!(
+        wrapped
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("wrapped confirmation should expose AccessKit")
+            .focus,
+        confirm,
+        "Tab should wrap from Cancel to Confirm"
+    );
     let _confirmed = app.run_headless_input(input(vec![egui::Event::AccessKitActionRequest(
         egui::accesskit::ActionRequest {
             action: egui::accesskit::Action::Click,
@@ -986,10 +1040,23 @@ fn search_palette_retries_no_match_and_validation_states_with_the_same_query() {
     })
     .expect("search query should update");
     let error = app.run_headless_input(press_enter());
-    assert!(app.runtime_snapshot().palette_projection.open);
+    let validation_snapshot = app.runtime_snapshot();
+    assert!(validation_snapshot.palette_projection.open);
+    assert!(
+        !validation_snapshot
+            .search_projection
+            .status
+            .message
+            .trim()
+            .is_empty(),
+        "validation should retain the parser's actionable detail"
+    );
     assert!(accesskit_has_label(
         &error,
-        "Check the search term and try again."
+        &format!(
+            "Check the search term and try again. {}",
+            validation_snapshot.search_projection.status.message.trim()
+        )
     ));
     assert!(accesskit_has_label(
         &error,

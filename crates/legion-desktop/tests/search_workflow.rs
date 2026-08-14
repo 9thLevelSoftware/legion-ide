@@ -273,6 +273,32 @@ fn search_view_model_uses_useful_idle_and_no_match_states() {
         Some("No matches. Try another term or search the active file.")
     );
     assert!(no_matches.diagnostic_rows.is_empty());
+
+    let validation_error = SearchProjection {
+        query_id: Some("search:invalid".to_string()),
+        scope: SearchScopeProjection::Workspace,
+        query_label: "regex:[".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::ValidationError,
+            message: "unclosed character class at position 6".to_string(),
+        },
+        results: Vec::new(),
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: true,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
+    let validation_error = DesktopSearchViewModel::from_projection(&validation_error);
+    assert_eq!(
+        validation_error.status_rows,
+        vec!["Check the search term and try again. unclosed character class at position 6"]
+    );
 }
 
 #[test]
