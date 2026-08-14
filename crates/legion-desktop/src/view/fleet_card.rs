@@ -144,9 +144,22 @@ fn fraction_label(title: &str, value: &str) -> String {
 }
 
 fn sentence_case(raw: &str) -> String {
-    let mut label = raw.replace(['_', '-'], " ").replace('=', ": ");
-    if let Some(first) = label.get_mut(0..1) {
-        first.make_ascii_uppercase();
+    let label = raw.replace(['_', '-'], " ").replace('=', ": ");
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return label;
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sentence_case;
+
+    #[test]
+    fn sentence_case_uppercases_unicode_without_losing_or_splitting_characters() {
+        assert_eq!(sentence_case("über_ready"), "Über ready");
+        assert_eq!(sentence_case("élan-running"), "Élan running");
+        assert_eq!(sentence_case("🦀_ready"), "🦀 ready");
     }
-    label
 }

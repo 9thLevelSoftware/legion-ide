@@ -501,7 +501,7 @@ fn legion_workflow_active_session_separates_board_from_inspector_metadata() {
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
 
     assert!(workflow_has_label(&full, "Workflow board"));
-    assert!(workflow_contains_text(&full, "Workflow task"));
+    assert!(workflow_contains_text(&full, "Workflow 1"));
     assert!(workflow_has_label(&full, "Workflow sessions"));
     assert!(workflow_has_label(&full, "Selected task"));
     assert!(workflow_has_label(&full, "Approvals"));
@@ -766,6 +766,41 @@ fn legion_workflow_board_columns_match_coordinator_state_mapping() {
             );
         }
     }
+}
+
+#[test]
+fn legion_workflow_board_cards_in_the_same_column_have_distinct_safe_ordinals() {
+    let mut projection = legion_projection(LegionWorkflowMergeReadinessState::Ready);
+    let template = projection.rows[0].clone();
+    projection.rows = ["session:private:first", "session:private:second"]
+        .into_iter()
+        .map(|session_id| {
+            let mut row = template.clone();
+            row.session_id = LegionWorkflowSessionId(session_id.to_string());
+            row.lifecycle_state = LegionWorkflowState::Executing;
+            row
+        })
+        .collect();
+    projection.total_session_count = projection.rows.len() as u32;
+
+    let columns = legion_workflow_board_columns(&projection);
+    let view_models = fleet_board::fleet_board_column_view_models(&columns);
+    let in_progress = view_models
+        .iter()
+        .find(|column| column.kind == LegionWorkflowBoardColumnKind::InProgress)
+        .expect("in-progress column should exist");
+
+    assert_eq!(
+        in_progress
+            .rows
+            .iter()
+            .map(|row| row.task_label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Workflow 1", "Workflow 2"]
+    );
+    assert!(in_progress.rows.iter().all(|row| {
+        !row.task_label.contains("session:") && !row.summary_label.contains("session:")
+    }));
 }
 
 #[test]

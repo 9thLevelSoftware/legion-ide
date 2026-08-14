@@ -37,16 +37,22 @@ pub fn fleet_board_column_view_models(
         .map(|column| DesktopFleetBoardColumnViewModel {
             kind: column.kind,
             title: column.title.clone(),
-            rows: column.rows.iter().map(fleet_board_row_view_model).collect(),
+            rows: column
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| fleet_board_row_view_model(row, index.saturating_add(1)))
+                .collect(),
         })
         .collect()
 }
 
 fn fleet_board_row_view_model(
     row: &LegionWorkflowBoardRowProjection,
+    workflow_ordinal: usize,
 ) -> DesktopFleetBoardRowViewModel {
     DesktopFleetBoardRowViewModel {
-        task_label: "Workflow task".to_string(),
+        task_label: format!("Workflow {workflow_ordinal}"),
         state_label: row.state_label.clone(),
         summary_label: "Open the inspector for workflow details.".to_string(),
     }

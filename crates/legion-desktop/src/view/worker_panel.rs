@@ -198,7 +198,10 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
         match row.merge_readiness.state {
             LegionWorkflowMergeReadinessState::Blocked => {
                 actions.push(DesktopWorkerRecoveryAction {
-                    label: "Recheck blocked workflow".to_string(),
+                    label: format!(
+                        "Recheck blocked workflow · Workflow {}",
+                        workflow_index.saturating_add(1)
+                    ),
                     rationale: "Re-evaluate merge readiness.".to_string(),
                     action: DesktopAction::RequestLegionWorkflowMergeReadiness {
                         session_id: row.session_id.clone(),
@@ -210,7 +213,10 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                     first_label_with_prefix(&row.display_safe_labels, "signoff:")
                 {
                     actions.push(DesktopWorkerRecoveryAction {
-                        label: "Request workflow sign-off".to_string(),
+                        label: format!(
+                            "Request workflow sign-off · Workflow {}",
+                            workflow_index.saturating_add(1)
+                        ),
                         rationale: "Approval is required before this workflow can continue."
                             .to_string(),
                         action: DesktopAction::RequestLegionWorkflowSignOff {
@@ -241,7 +247,10 @@ fn recovery_actions(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopWorkerReco
                 || matching_verification_failed
             {
                 actions.push(DesktopWorkerRecoveryAction {
-                    label: "Request workflow verification".to_string(),
+                    label: format!(
+                        "Request workflow verification · Workflow {}",
+                        workflow_index.saturating_add(1)
+                    ),
                     rationale: "Verification must pass before this workflow can continue."
                         .to_string(),
                     action: DesktopAction::RequestLegionWorkflowVerification {
@@ -429,14 +438,14 @@ mod tests {
         let model = DesktopWorkerPanelViewModel::from_snapshot(&snapshot);
 
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Recheck blocked workflow"
+            action.label == "Recheck blocked workflow · Workflow 1"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowMergeReadiness {
                         session_id: LegionWorkflowSessionId("session:blocked".to_string()),
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Request workflow sign-off"
+            action.label == "Request workflow sign-off · Workflow 2"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowSignOff {
                         session_id: LegionWorkflowSessionId("session:approval".to_string()),
@@ -444,7 +453,7 @@ mod tests {
                     }
         }));
         assert!(model.recovery_actions.iter().any(|action| {
-            action.label == "Request workflow verification"
+            action.label == "Request workflow verification · Workflow 3"
                 && action.action
                     == DesktopAction::RequestLegionWorkflowVerification {
                         session_id: LegionWorkflowSessionId("session:validation".to_string()),
@@ -502,6 +511,51 @@ mod tests {
             vec![
                 "Resolve conflict · Workflow 1",
                 "Resolve conflict · Workflow 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn blocked_recovery_actions_use_distinct_display_safe_workflow_ordinals() {
+        let mut snapshot = recovery_snapshot();
+        snapshot.legion_workflow_projection.rows = vec![
+            workflow_row(
+                "session:first-blocked",
+                LegionWorkflowMergeReadinessState::Blocked,
+                0,
+                0,
+                0,
+                Vec::new(),
+            ),
+            workflow_row(
+                "session:second-blocked",
+                LegionWorkflowMergeReadinessState::Blocked,
+                0,
+                0,
+                0,
+                Vec::new(),
+            ),
+        ];
+        snapshot.legion_workflow_projection.total_session_count = 2;
+
+        let model = DesktopWorkerPanelViewModel::from_snapshot(&snapshot);
+        let labels = model
+            .recovery_actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action.action,
+                    DesktopAction::RequestLegionWorkflowMergeReadiness { .. }
+                )
+            })
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "Recheck blocked workflow · Workflow 1",
+                "Recheck blocked workflow · Workflow 2",
             ]
         );
     }
