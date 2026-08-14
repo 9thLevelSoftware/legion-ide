@@ -261,6 +261,7 @@ fn command_palette_coverage_report_resolves_catalog_commands() {
         GitUpdated,
         PaletteClosed,
         SettingsUpdated,
+        ConfirmedSettingsUpdated,
     }
 
     struct CommandCase {
@@ -346,7 +347,7 @@ fn command_palette_coverage_report_resolves_catalog_commands() {
         CommandCase {
             query: ">preferences reset settings",
             expected_title: "Preferences: Reset Settings",
-            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            expected_outcome: ExpectedOutcome::ConfirmedSettingsUpdated,
             dirty_before_save: false,
         },
     ];
@@ -409,6 +410,22 @@ fn command_palette_coverage_report_resolves_catalog_commands() {
             },
             ExpectedOutcome::SettingsUpdated => {
                 assert!(matches!(outcome, AppCommandOutcome::SettingsUpdated(_)))
+            }
+            ExpectedOutcome::ConfirmedSettingsUpdated => {
+                let AppCommandOutcome::PaletteUpdated(projection) = outcome else {
+                    panic!("destructive command must project app-owned confirmation")
+                };
+                let pending = projection
+                    .pending_confirmation
+                    .expect("destructive command should wait for explicit confirmation");
+                let confirmed = app
+                    .dispatch_ui_intent(legion_ui::CommandDispatchIntent::ConfirmPaletteSelection {
+                        token: pending.token,
+                        command_id: pending.command_id,
+                        operands: pending.operands,
+                    })
+                    .expect("confirmed command should dispatch");
+                assert!(matches!(confirmed, AppCommandOutcome::SettingsUpdated(_)));
             }
         }
 

@@ -1,4 +1,146 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use xtask::claim_audit::{ClaimViolation, audit_text};
+
+static TEMP_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct TempWorkspace {
+    root: PathBuf,
+}
+
+impl TempWorkspace {
+    fn new(label: &str) -> Self {
+        let sequence = TEMP_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "legion-claim-audit-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("plans")).expect("create claim-audit fixture");
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn claim_audit_succeeds_without_retired_hermesgoal_document() {
+    let workspace = TempWorkspace::new("without-hermesgoal");
+    fs::create_dir_all(workspace.path().join("docs")).expect("create public docs fixture");
+    fs::write(
+        workspace.path().join("docs").join("overview.md"),
+        "Legion development remains in progress.\n",
+    )
+    .expect("write clean public docs fixture");
+    fs::write(
+        workspace.path().join("README.md"),
+        "Legion is not yet a general-availability desktop product.\n",
+    )
+    .expect("write README fixture");
+    fs::write(
+        workspace
+            .path()
+            .join("plans")
+            .join("product-readiness-ledger.md"),
+        "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
+         | --- | --- | --- | --- | --- |\n\
+         | Core | PR-CORE-001 | criteria | Product workflow validated | tests |\n",
+    )
+    .expect("write readiness ledger fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(
+        output.status.success(),
+        "claim-audit should not require the retired HERMESGOAL.md document\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn claim_audit_rejects_forbidden_claim_in_top_level_public_doc() {
+    let workspace = TempWorkspace::new("forbidden-public-doc");
+    fs::create_dir_all(workspace.path().join("docs")).expect("create public docs fixture");
+    fs::write(
+        workspace.path().join("README.md"),
+        "Legion is not yet a general-availability desktop product.\n",
+    )
+    .expect("write README fixture");
+    fs::write(
+        workspace
+            .path()
+            .join("plans")
+            .join("product-readiness-ledger.md"),
+        "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
+         | --- | --- | --- | --- | --- |\n\
+         | Core | PR-CORE-001 | criteria | Product workflow validated | tests |\n",
+    )
+    .expect("write readiness ledger fixture");
+    fs::write(
+        workspace.path().join("docs").join("public.md"),
+        "Legion is production-ready today.\n",
+    )
+    .expect("write forbidden public docs fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("docs/public.md"));
+}
+
+#[test]
+fn claim_audit_fails_closed_when_public_docs_directory_cannot_be_read() {
+    let workspace = TempWorkspace::new("missing-public-docs");
+    fs::write(
+        workspace.path().join("README.md"),
+        "Legion is not yet a general-availability desktop product.\n",
+    )
+    .expect("write README fixture");
+    fs::write(
+        workspace
+            .path()
+            .join("plans")
+            .join("product-readiness-ledger.md"),
+        "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
+         | --- | --- | --- | --- | --- |\n\
+         | Core | PR-CORE-001 | criteria | Product workflow validated | tests |\n",
+    )
+    .expect("write readiness ledger fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unable to scan public docs"),
+        "missing or unreadable public docs must fail the audit closed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn forbidden_claim_is_flagged() {

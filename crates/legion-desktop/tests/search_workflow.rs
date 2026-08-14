@@ -236,6 +236,120 @@ fn search_workflow_projects_no_results_and_empty_query_errors() {
 }
 
 #[test]
+fn search_view_model_uses_useful_idle_and_no_match_states() {
+    let idle = DesktopSearchViewModel::from_projection(&SearchProjection::idle());
+    assert_eq!(idle.header, "Search the active file");
+    assert_eq!(
+        idle.status_rows,
+        vec!["Enter a search term to find text in the active file."]
+    );
+    assert_eq!(idle.empty_state, None);
+
+    let no_matches = SearchProjection {
+        query_id: Some("search:none".to_string()),
+        scope: SearchScopeProjection::Workspace,
+        query_label: "missing".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::NoResults,
+            message: "No results".to_string(),
+        },
+        results: Vec::new(),
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: false,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
+    let no_matches = DesktopSearchViewModel::from_projection(&no_matches);
+    assert_eq!(no_matches.header, "Search the workspace for \"missing\"");
+    assert_eq!(no_matches.status_rows, vec!["Search finished."]);
+    assert_eq!(
+        no_matches.empty_state.as_deref(),
+        Some("No matches. Try another term or search the active file.")
+    );
+    assert!(no_matches.diagnostic_rows.is_empty());
+
+    let validation_error = SearchProjection {
+        query_id: Some("search:invalid".to_string()),
+        scope: SearchScopeProjection::Workspace,
+        query_label: "regex:[".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::ValidationError,
+            message: "unclosed character class at position 6".to_string(),
+        },
+        results: Vec::new(),
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: true,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
+    let validation_error = DesktopSearchViewModel::from_projection(&validation_error);
+    assert_eq!(
+        validation_error.status_rows,
+        vec!["Check the search term and try again. unclosed character class at position 6"]
+    );
+}
+
+#[test]
+fn search_view_model_summarizes_completed_results_without_protocol_terms() {
+    let projection = SearchProjection {
+        query_id: Some("search:done".to_string()),
+        scope: SearchScopeProjection::ActiveFile,
+        query_label: "needle".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::Completed,
+            message: "Search completed".to_string(),
+        },
+        results: vec![legion_ui::SearchResultProjection {
+            query_id: "search:done".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+            workspace_id: None,
+            buffer_id: None,
+            file_id: None,
+            file_path: None,
+            line_number: 2,
+            range: range(1, 7),
+            snippet: "needle here".to_string(),
+            snippet_truncated: false,
+            stale: false,
+        }],
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: false,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
+
+    let model = DesktopSearchViewModel::from_projection(&projection);
+    assert_eq!(model.header, "1 match in the active file for \"needle\"");
+    assert_eq!(model.status_rows, vec!["Search finished."]);
+    assert_eq!(model.empty_state, None);
+    assert_eq!(model.result_rows, vec!["Current file:3:2 needle here"]);
+    assert!(
+        model
+            .status_rows
+            .iter()
+            .all(|row| !row.contains("Completed") && !row.contains("projection"))
+    );
+}
+
+#[test]
 fn search_workflow_cancels_current_query_by_id() {
     let workspace = TempWorkspace::new();
     let target = workspace.write("cancel.txt", "needle");
@@ -635,7 +749,7 @@ fn search_workflow_displays_degraded_limited_projection() {
         model
             .status_rows
             .iter()
-            .any(|row| row.contains("DegradedLimited"))
+            .any(|row| row == "Search used the available text and may have missed matches.")
     );
     assert!(
         model

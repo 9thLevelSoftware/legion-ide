@@ -1,10 +1,10 @@
 //! Coordinator-state projections for UI surfaces.
 
 use legion_protocol::{
-    LegionWorkflowProjection, LegionWorkflowProjectionRow, LegionWorkflowSessionId,
-    LegionWorkflowState, ProposalDiffSummaryKind, ProposalId, ProposalLedgerProjection,
-    ProposalLedgerRow, ProposalRiskLabel, VerificationRunProjection, VerificationRunRow,
-    VerificationRunState,
+    LegionWorkflowMergeReadinessState, LegionWorkflowProjection, LegionWorkflowProjectionRow,
+    LegionWorkflowSessionId, LegionWorkflowState, ProposalDiffSummaryKind, ProposalId,
+    ProposalLedgerProjection, ProposalLedgerRow, ProposalRiskLabel, VerificationRunProjection,
+    VerificationRunRow, VerificationRunState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,25 +174,55 @@ fn workflow_state_label(state: LegionWorkflowState) -> &'static str {
 }
 
 fn workflow_board_row_summary(row: &LegionWorkflowProjectionRow) -> String {
-    let mut parts = vec![
-        row.session_id.0.clone(),
-        workflow_state_label(row.lifecycle_state).to_string(),
-        format!("workers={}", row.worker_count),
-        format!("deps={}", row.dependency_count),
-        format!("conflicts={}", row.unresolved_conflict_count),
+    let workers = count_label(row.worker_count, "worker", "workers");
+    let dependencies = if row.dependency_count == 0 {
+        "No dependencies".to_string()
+    } else {
+        count_label(row.dependency_count, "dependency", "dependencies")
+    };
+    let conflicts = if row.unresolved_conflict_count == 0 {
+        "No open conflicts".to_string()
+    } else {
         format!(
-            "verify={}/{}",
+            "{} open",
+            count_label(row.unresolved_conflict_count, "conflict", "conflicts")
+        )
+    };
+    let verification = if row.verification_gate_count == 0 {
+        "No checks required".to_string()
+    } else {
+        format!(
+            "{} of {} checks passed",
             row.passed_verification_count, row.verification_gate_count
-        ),
-        format!("signoff={}/{}", row.signed_off_count, row.sign_off_count),
-        format!("merge={:?}", row.merge_readiness.state),
-    ];
+        )
+    };
+    let approvals = if row.sign_off_count == 0 {
+        "No approvals required".to_string()
+    } else {
+        format!(
+            "{} of {} approvals received",
+            row.signed_off_count, row.sign_off_count
+        )
+    };
+    let readiness = match row.merge_readiness.state {
+        LegionWorkflowMergeReadinessState::Ready => "Ready for review",
+        LegionWorkflowMergeReadinessState::WaitingForApproval => "Approval required",
+        LegionWorkflowMergeReadinessState::Blocked => "Review blocked",
+    };
 
-    if !row.display_safe_labels.is_empty() {
-        parts.push(row.display_safe_labels.join(" | "));
-    }
+    [
+        workers,
+        dependencies,
+        conflicts,
+        verification,
+        approvals,
+        readiness.to_string(),
+    ]
+    .join(" · ")
+}
 
-    parts.join(" · ")
+fn count_label(count: u32, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 /// Structured fleet-card projection for proposal-ledger cards rendered in the desktop UI.

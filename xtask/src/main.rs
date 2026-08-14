@@ -1005,27 +1005,47 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         .iter()
         .all(|row| row.status == "Product workflow validated");
 
-    // Canonical public-doc scan set: README.md, HERMESGOAL.md, and
-    // top-level docs/*.md only. docs/releases/ (forward templates),
+    // Canonical public-doc scan set: README.md and top-level docs/*.md only.
+    // docs/releases/ (forward templates),
     // docs/superpowers/ (plans quote forbidden phrases as code literals),
     // and plans/evidence/ (historical) are intentionally excluded, matching
     // how docs-hygiene allowlists archived material.
-    let mut scan_files: Vec<String> = vec!["README.md".to_string(), "HERMESGOAL.md".to_string()];
+    let mut scan_files: Vec<String> = vec!["README.md".to_string()];
     let docs_dir = workspace_root.join("docs");
-    if let Ok(entries) = fs::read_dir(&docs_dir) {
-        let mut docs_files: Vec<String> = entries
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
-            .filter_map(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| format!("docs/{name}"))
-            })
-            .collect();
-        docs_files.sort();
-        scan_files.extend(docs_files);
+    let entries = match fs::read_dir(&docs_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!(
+                "claim audit failed: unable to scan public docs `{}`: {err}",
+                docs_dir.display()
+            );
+            return 1;
+        }
+    };
+    let mut docs_files: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!(
+                    "claim audit failed: unable to scan public docs `{}`: {err}",
+                    docs_dir.display()
+                );
+                return 1;
+            }
+        };
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            eprintln!("claim audit failed: public docs contains a non-Unicode Markdown filename");
+            return 1;
+        };
+        docs_files.push(format!("docs/{name}"));
     }
+    docs_files.sort();
+    scan_files.extend(docs_files);
 
     let mut violations: Vec<xtask::claim_audit::ClaimViolation> = Vec::new();
     let mut readme_text = String::new();

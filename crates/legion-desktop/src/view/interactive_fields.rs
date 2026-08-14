@@ -18,7 +18,7 @@ pub(crate) fn render_preferred_provider_picker(
 ) {
     ui.add_space(4.0);
     ui.label(theme::muted(format!(
-        "Preferred route: {active_preference} (Auto tries Ollama loopback first, then Anthropic BYOK)"
+        "Preferred AI provider: {active_preference}. Auto tries providers available on this computer before remote providers."
     )));
     ui.horizontal_wrapped(|ui| {
         for (label, id) in [
@@ -32,7 +32,10 @@ pub(crate) fn render_preferred_provider_picker(
                 .add(
                     egui::Button::new(theme::label(label))
                         .selected(selected)
-                        .min_size(egui::vec2(24.0, 24.0)),
+                        .min_size(egui::vec2(
+                            f32::from(theme::tokens().control_height.compact),
+                            f32::from(theme::tokens().control_height.compact),
+                        )),
                 )
                 .on_hover_text(format!("Set preferred AI provider to {id}"))
                 .clicked()
@@ -49,7 +52,7 @@ pub(crate) fn render_preferred_provider_picker(
 pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
     ui.add_space(6.0);
     ui.label(theme::muted(
-        "Anthropic BYOK — key is stored in the OS keyring only (never written to disk)",
+        "Anthropic API key — stored securely in the operating system keyring and never in workspace files.",
     ));
     let draft_id = egui::Id::new("legion-byok-anthropic-draft");
     let mut draft = ui.ctx().data_mut(|data| {
@@ -60,7 +63,12 @@ pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<De
         egui::TextEdit::singleline(&mut draft)
             .password(true)
             .hint_text("sk-ant-…")
-            .desired_width(220.0),
+            .desired_width(220.0)
+            .min_size(egui::vec2(
+                f32::from(theme::tokens().control_height.compact),
+                f32::from(theme::tokens().control_height.compact),
+            ))
+            .margin(egui::Margin::symmetric(4, 8)),
     );
     if response.changed() {
         ui.ctx().data_mut(|data| {
@@ -208,7 +216,12 @@ pub(crate) fn render_terminal_input_line(
             egui::TextEdit::singleline(&mut draft)
                 .id(terminal_input_widget_id())
                 .desired_width((ui.available_width() - 80.0).max(40.0))
-                .hint_text("type and press Enter to send to the PTY"),
+                .hint_text("type and press Enter to send to the PTY")
+                .min_size(egui::vec2(
+                    f32::from(theme::tokens().control_height.compact),
+                    f32::from(theme::tokens().control_height.compact),
+                ))
+                .margin(egui::Margin::symmetric(4, 8)),
         );
         // Intercept special keys when the text field has focus.
         if response.has_focus() {
@@ -294,6 +307,11 @@ pub(crate) fn find_bar_text_edit<'a>(
         .desired_width(180.0)
         .hint_text(hint)
         .id(id)
+        .min_size(egui::vec2(
+            f32::from(theme::tokens().control_height.compact),
+            f32::from(theme::tokens().control_height.compact),
+        ))
+        .margin(egui::Margin::symmetric(4, 8))
 }
 
 /// Render the adapter-local, unsent Delegate task draft.
@@ -321,7 +339,12 @@ pub(crate) fn render_delegate_task_draft(
             .char_limit(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
             .desired_rows(3)
             .desired_width(ui.available_width())
-            .hint_text("Describe a bounded task for Delegate"),
+            .hint_text("Describe a bounded task for Delegate")
+            .min_size(egui::vec2(
+                f32::from(theme::tokens().control_height.compact),
+                f32::from(theme::tokens().control_height.compact),
+            ))
+            .margin(egui::Margin::symmetric(4, 8)),
     );
     response.labelled_by(label.id);
     draft = bounded_delegate_task_draft(&draft).into_owned();
@@ -334,6 +357,9 @@ pub(crate) fn render_delegate_task_draft(
         })
         .inner;
     let task = (submitted && ready).then(|| draft.trim().to_string());
+    if canonical_scope_available && draft.trim().is_empty() {
+        ui.label(theme::muted("Describe a task to start Delegate."));
+    }
     if task.is_some() {
         draft.clear();
     }

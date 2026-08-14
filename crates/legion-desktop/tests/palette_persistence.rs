@@ -106,7 +106,7 @@ fn dispatch_command_usage(runtime: &mut DesktopRuntime, query: &str, command_id:
 ///
 /// If `DesktopRuntime::open` does NOT call `set_palette_usage_repository()`,
 /// the ranking in session 2 will revert to the alphabetical default
-/// ("Refresh Explorer" < "Refresh Git") and the assertion will fail.
+/// ("Theme Dark" < "Theme Light") and the assertion will fail.
 #[test]
 fn palette_usage_persists_ranking_boost_across_desktop_runtime_restart() {
     let workspace = TempWorkspace::new("ranking");
@@ -114,36 +114,35 @@ fn palette_usage_persists_ranking_boost_across_desktop_runtime_restart() {
 
     let palette_usage_path = workspace.path().join(".legion").join("palette_usage.json");
 
-    // ---- Session 1: record 20 usages of "command:refresh-git" ----
+    // ---- Session 1: record 20 usages of Theme Light within the View group ----
     {
         let mut runtime = open_runtime(workspace.path());
 
-        // Verify baseline: with no usage history "Refresh Explorer" ranks
-        // above "Refresh Git" due to alphabetical tiebreaking ("E" < "G").
+        // Verify the alphabetical baseline before any usage is recorded.
         runtime
             .handle_action(DesktopAction::OpenPalette {
                 mode: PaletteMode::Command,
-                query: "refresh".to_string(),
+                query: "preferences theme".to_string(),
                 scope: SearchScopeProjection::Workspace,
             })
             .expect("open palette");
         let baseline = runtime.projection_snapshot();
-        let git_pos_base = baseline
+        let light_pos_base = baseline
             .palette_projection
             .results
             .iter()
-            .position(|r| r.id == "command:refresh-git")
-            .expect("refresh-git should appear in baseline results");
-        let explorer_pos_base = baseline
+            .position(|r| r.id == "command:preferences-theme-light")
+            .expect("Theme Light should appear in baseline results");
+        let dark_pos_base = baseline
             .palette_projection
             .results
             .iter()
-            .position(|r| r.id == "command:refresh-explorer")
-            .expect("refresh-explorer should appear in baseline results");
+            .position(|r| r.id == "command:preferences-theme-dark")
+            .expect("Theme Dark should appear in baseline results");
         assert!(
-            explorer_pos_base < git_pos_base,
-            "baseline: Refresh Explorer (pos {explorer_pos_base}) should rank before \
-             Refresh Git (pos {git_pos_base}) before any usage is recorded"
+            dark_pos_base < light_pos_base,
+            "baseline: Theme Dark (pos {dark_pos_base}) should rank before \
+             Theme Light (pos {light_pos_base}) before any usage is recorded"
         );
         runtime
             .handle_action(DesktopAction::ClosePalette)
@@ -152,7 +151,11 @@ fn palette_usage_persists_ranking_boost_across_desktop_runtime_restart() {
         // Record 20 usages — each dispatch flushes the usage file to disk
         // via FilePaletteUsageRepository::record_usage.
         for _ in 0..20 {
-            dispatch_command_usage(&mut runtime, "refresh", "command:refresh-git");
+            dispatch_command_usage(
+                &mut runtime,
+                "preferences theme",
+                "command:preferences-theme-light",
+            );
         }
     }
     // runtime dropped; .legion/palette_usage.json was written on each dispatch.
@@ -168,33 +171,33 @@ fn palette_usage_persists_ranking_boost_across_desktop_runtime_restart() {
     {
         let mut runtime = open_runtime(workspace.path());
 
-        // Open palette with same "refresh" query.
+        // Open the palette with the same query after restoring persisted usage.
         runtime
             .handle_action(DesktopAction::OpenPalette {
                 mode: PaletteMode::Command,
-                query: "refresh".to_string(),
+                query: "preferences theme".to_string(),
                 scope: SearchScopeProjection::Workspace,
             })
             .expect("open palette in session 2");
 
         let snapshot = runtime.projection_snapshot();
-        let git_pos_boosted = snapshot
+        let light_pos_boosted = snapshot
             .palette_projection
             .results
             .iter()
-            .position(|r| r.id == "command:refresh-git")
-            .expect("refresh-git should appear in session-2 results");
-        let explorer_pos_boosted = snapshot
+            .position(|r| r.id == "command:preferences-theme-light")
+            .expect("Theme Light should appear in session-2 results");
+        let dark_pos_boosted = snapshot
             .palette_projection
             .results
             .iter()
-            .position(|r| r.id == "command:refresh-explorer")
-            .expect("refresh-explorer should appear in session-2 results");
+            .position(|r| r.id == "command:preferences-theme-dark")
+            .expect("Theme Dark should appear in session-2 results");
 
         assert!(
-            git_pos_boosted < explorer_pos_boosted,
-            "after 20 usages persisted to disk and reloaded, Refresh Git (pos {git_pos_boosted}) \
-             should rank above Refresh Explorer (pos {explorer_pos_boosted})"
+            light_pos_boosted < dark_pos_boosted,
+            "after 20 usages persisted and reloaded, Theme Light (pos {light_pos_boosted}) \
+             should rank above Theme Dark (pos {dark_pos_boosted}) within View"
         );
     }
 }

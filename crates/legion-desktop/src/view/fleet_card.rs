@@ -56,7 +56,7 @@ pub fn fleet_card_view_models(
 pub fn render_fleet_cards(ui: &mut egui::Ui, cards: &[LegionWorkflowFleetCardProjection]) {
     let cards = fleet_card_view_models(cards);
     if cards.is_empty() {
-        ui.label(theme::muted("No fleet cards projected"));
+        ui.label(theme::muted("No task details available"));
         return;
     }
 
@@ -64,21 +64,102 @@ pub fn render_fleet_cards(ui: &mut egui::Ui, cards: &[LegionWorkflowFleetCardPro
         theme::small_card_frame().show(ui, |ui| {
             ui.label(theme::body_strong(trim_middle(&card.title, 48)));
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::muted(format!("owner={}", card.owner_label)));
+                ui.label(theme::muted(format!("Owner: {}", card.owner_label)));
                 ui.separator();
-                ui.label(theme::muted(format!("model={}", card.model_label)));
+                ui.label(theme::muted(format!("Model: {}", card.model_label)));
                 ui.separator();
                 ui.label(theme::accent(
-                    format!("{:?} risk", card.risk_label),
+                    format!("Risk: {}", proposal_risk_label(card.risk_label)),
                     risk_color(card.risk_label),
                 ));
             });
-            ui.label(theme::muted(format!("status={}", card.status_label)));
-            ui.label(theme::muted(&card.progress_label));
-            ui.label(theme::muted(&card.files_label));
-            ui.label(theme::muted(&card.test_status_label));
-            ui.label(theme::muted(&card.mini_diff_label));
-            ui.label(theme::muted(&card.last_activity_label));
+            ui.label(theme::muted(format!(
+                "Status: {}",
+                sentence_case(&card.status_label)
+            )));
+            ui.label(theme::muted(card_detail_label(&card.progress_label)));
+            ui.label(theme::muted(card_detail_label(&card.files_label)));
+            ui.label(theme::muted(format!(
+                "Verification: {}",
+                sentence_case(&card.test_status_label)
+            )));
+            ui.label(theme::muted(card_detail_label(&card.mini_diff_label)));
+            ui.label(theme::muted(card_detail_label(&card.last_activity_label)));
         });
+    }
+}
+
+fn proposal_risk_label(risk: ProposalRiskLabel) -> &'static str {
+    match risk {
+        ProposalRiskLabel::Informational => "Informational",
+        ProposalRiskLabel::Low => "Low",
+        ProposalRiskLabel::Medium => "Medium",
+        ProposalRiskLabel::High => "High",
+        ProposalRiskLabel::Unknown => "Unknown",
+    }
+}
+
+fn card_detail_label(raw: &str) -> String {
+    raw.split(" · ")
+        .filter_map(|segment| {
+            if segment.starts_with("manifest:") {
+                return None;
+            }
+            let translated = if let Some(value) = segment.strip_prefix("targets=") {
+                fraction_label("Targets", value)
+            } else if let Some(value) = segment.strip_prefix("hunks=") {
+                format!("Hunks: {value}")
+            } else if let Some(value) = segment.strip_prefix("files=") {
+                format!("Context: {value}")
+            } else if let Some(value) = segment.strip_prefix("passed=") {
+                format!("Passed: {value}")
+            } else if let Some(value) = segment.strip_prefix("failed=") {
+                format!("Failed: {value}")
+            } else if let Some(value) = segment.strip_prefix("blocked=") {
+                format!("Blocked: {value}")
+            } else if let Some(value) = segment.strip_prefix("running=") {
+                format!("Running: {value}")
+            } else if let Some(value) = segment.strip_prefix("planned=") {
+                format!("Planned: {value}")
+            } else if let Some(value) = segment.strip_prefix("cancelled=") {
+                format!("Cancelled: {value}")
+            } else if let Some(value) = segment.strip_prefix("updated_at=") {
+                format!("Last updated: {value}")
+            } else if segment.contains('=') {
+                segment.replace('=', ": ")
+            } else {
+                sentence_case(segment)
+            };
+            Some(translated)
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn fraction_label(title: &str, value: &str) -> String {
+    value.split_once('/').map_or_else(
+        || format!("{title}: {value}"),
+        |(current, total)| format!("{title}: {current} of {total}"),
+    )
+}
+
+fn sentence_case(raw: &str) -> String {
+    let label = raw.replace(['_', '-'], " ").replace('=', ": ");
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return label;
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sentence_case;
+
+    #[test]
+    fn sentence_case_uppercases_unicode_without_losing_or_splitting_characters() {
+        assert_eq!(sentence_case("über_ready"), "Über ready");
+        assert_eq!(sentence_case("élan-running"), "Élan running");
+        assert_eq!(sentence_case("🦀_ready"), "🦀 ready");
     }
 }

@@ -127,6 +127,20 @@ pub enum DesktopAction {
     CompletePaletteSelection,
     /// Dispatch command palette selection.
     DispatchPaletteSelection,
+    /// Confirm an app-owned pending palette selection.
+    ConfirmPaletteSelection {
+        /// App-issued confirmation token.
+        token: u64,
+        /// Stable pending command identifier.
+        command_id: String,
+        /// Canonical parsed operands.
+        operands: Vec<String>,
+    },
+    /// Cancel an app-owned pending palette confirmation.
+    CancelPaletteConfirmation {
+        /// App-issued confirmation token.
+        token: u64,
+    },
     /// Dismiss a foreground toast in adapter-local view state.
     DismissToast {
         /// Projected toast identifier.
@@ -1429,6 +1443,20 @@ impl DesktopCommandBridge {
             }
             DesktopAction::DispatchPaletteSelection => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::DispatchPaletteSelection)
+            }
+            DesktopAction::ConfirmPaletteSelection {
+                token,
+                command_id,
+                operands,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::ConfirmPaletteSelection {
+                token,
+                command_id,
+                operands,
+            }),
+            DesktopAction::CancelPaletteConfirmation { token } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelPaletteConfirmation {
+                    token,
+                })
             }
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissOnboarding => DesktopBridgeOutput::Noop,

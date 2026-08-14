@@ -355,6 +355,70 @@ fn workflow_button_bounds(output: &egui::FullOutput, label: &str) -> egui::acces
         .unwrap_or_else(|| panic!("workflow button `{label}` should be allocated"))
 }
 
+fn workflow_has_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update
+                .nodes
+                .iter()
+                .any(|(_id, node)| node.label() == Some(label) || node.value() == Some(label))
+        })
+}
+
+fn workflow_has_clickable_label(output: &egui::FullOutput, label: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click)
+            })
+        })
+}
+
+fn workflow_contains_text(output: &egui::FullOutput, text: &str) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label().is_some_and(|label| label.contains(text))
+                    || node.value().is_some_and(|value| value.contains(text))
+            })
+        })
+}
+
+fn workflow_text_containing_in_x_range(
+    output: &egui::FullOutput,
+    text: &str,
+    x_range: std::ops::RangeInclusive<f32>,
+) -> Vec<String> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map_or_else(Vec::new, |update| {
+            update
+                .nodes
+                .iter()
+                .filter(|(_id, node)| {
+                    node.bounds().is_some_and(|bounds| {
+                        x_range.contains(&(((bounds.x0 + bounds.x1) * 0.5) as f32))
+                    })
+                })
+                .flat_map(|(_id, node)| [node.label(), node.value()])
+                .flatten()
+                .filter(|value| value.contains(text))
+                .map(str::to_string)
+                .collect()
+        })
+}
+
 fn click_workflow_button(
     ctx: &egui::Context,
     view: &mut ProjectionView,
@@ -362,34 +426,28 @@ fn click_workflow_button(
     primed: &egui::FullOutput,
     label: &str,
 ) -> Vec<DesktopAction> {
-    let bounds = workflow_button_bounds(primed, label);
-    let pos = egui::pos2(
-        ((bounds.x0 + bounds.x1) * 0.5) as f32,
-        ((bounds.y0 + bounds.y1) * 0.5) as f32,
-    );
-    let press = workflow_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
+    let target = primed
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("AccessKit update should be enabled")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("workflow button `{label}` should be actionable"));
+    let click = workflow_raw_input(vec![egui::Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Click,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
         },
-    ]);
-    let _ = ctx.run_ui(press, |ui| {
-        let _ = view.render(ui, snapshot);
-    });
-    let release = workflow_raw_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]);
+    )]);
     let mut actions = None;
-    let _ = ctx.run_ui(release, |ui| {
+    let _ = ctx.run_ui(click, |ui| {
         actions = Some(view.render(ui, snapshot).actions);
     });
     actions.expect("workflow click frame should render")
@@ -399,11 +457,18 @@ fn click_workflow_button(
 fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_kill() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
     let mut view = ProjectionView::new();
     let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
 
-    for label in ["Approve", "Review", "Reject", "Cancel proposal", "Kill"] {
+    for label in [
+        "Approve",
+        "Review",
+        "Reject",
+        "Cancel proposal",
+        "Stop workflow session 1",
+    ] {
         let _ = workflow_button_bounds(&full, label);
     }
     let cancelled = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Cancel proposal");
@@ -416,7 +481,8 @@ fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_
     );
 
     let (_next, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
-    let killed = click_workflow_button(&ctx, &mut view, &snapshot, &full, "Kill");
+    let killed =
+        click_workflow_button(&ctx, &mut view, &snapshot, &full, "Stop workflow session 1");
     assert_eq!(
         killed,
         vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
@@ -424,6 +490,294 @@ fn legion_workflow_rendered_proposals_offer_graceful_cancel_without_losing_hard_
             reason_label: "user requested hard stop".to_string(),
         }]
     );
+}
+
+#[test]
+fn legion_workflow_active_session_separates_board_from_inspector_metadata() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Workflow board"));
+    assert!(workflow_contains_text(&full, "Workflow 1"));
+    assert!(workflow_has_label(&full, "Workflow sessions"));
+    assert!(workflow_has_label(&full, "Selected task"));
+    assert!(workflow_has_label(&full, "Approvals"));
+    assert!(!workflow_has_label(&full, "Force Review"));
+    assert!(!workflow_has_label(&full, "Pause Workflow"));
+    assert!(!workflow_has_label(&full, "Add Constraint"));
+    assert!(!workflow_has_label(&full, "No budget rows projected"));
+    assert!(!workflow_has_label(&full, "No risk gate projected"));
+}
+
+#[test]
+fn legion_workflow_kill_requires_an_armed_nonterminal_session() {
+    for lifecycle in [
+        LegionWorkflowState::Completed,
+        LegionWorkflowState::Failed,
+        LegionWorkflowState::Cancelled,
+    ] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+        snapshot.legion_workflow_projection.rows[0].lifecycle_state = lifecycle;
+        add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+        let mut view = ProjectionView::new();
+        let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+        assert!(
+            !workflow_has_clickable_label(&full, "Stop workflow session 1"),
+            "{lifecycle:?} workflow must not expose Kill"
+        );
+    }
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+    assert!(
+        !workflow_has_clickable_label(&full, "Stop workflow session 1"),
+        "a workflow without a projected kill switch must not expose Kill"
+    );
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut triggered = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut triggered.legion_workflow_projection);
+    triggered.legion_workflow_projection.kill_switches[0].state =
+        LegionWorkflowKillSwitchState::Triggered;
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &triggered);
+    assert!(
+        !workflow_has_clickable_label(&full, "Stop workflow session 1"),
+        "a triggered kill switch must not expose Kill again"
+    );
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut armed = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut armed.legion_workflow_projection);
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &armed);
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 1"
+    ));
+    let killed = click_workflow_button(&ctx, &mut view, &armed, &full, "Stop workflow session 1");
+    assert_eq!(
+        killed,
+        vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
+            session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+            reason_label: "user requested hard stop".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn legion_workflow_stop_controls_show_the_target_workflow_visibly() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    let mut second_row = snapshot.legion_workflow_projection.rows[0].clone();
+    second_row.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.rows.push(second_row);
+    let mut second_switch = snapshot.legion_workflow_projection.kill_switches[0].clone();
+    second_switch.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot
+        .legion_workflow_projection
+        .kill_switches
+        .push(second_switch);
+    snapshot.legion_workflow_projection.total_session_count = 2;
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Workflow 1 stop"));
+    assert!(workflow_has_label(&full, "Workflow 2 stop"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 1"
+    ));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 2"
+    ));
+}
+
+#[test]
+fn legion_workflow_permission_card_shows_the_authorized_server_and_tool() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_contains_text(
+        &full,
+        "Target: Test MCP · write_file"
+    ));
+    assert!(workflow_contains_text(
+        &full,
+        "Workflow 1 · Tool permission request 1"
+    ));
+}
+
+#[test]
+fn legion_workflow_risk_cards_follow_session_identity_not_monitor_order() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    let mut second_row = snapshot.legion_workflow_projection.rows[0].clone();
+    second_row.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.rows.push(second_row);
+    snapshot.legion_workflow_projection.total_session_count = 2;
+
+    let first_monitor = snapshot.legion_workflow_projection.risk_monitors[0].clone();
+    let mut second_monitor = first_monitor.clone();
+    second_monitor.monitor_id = LegionWorkflowRiskMonitorId("risk:beta".to_string());
+    second_monitor.session_id = LegionWorkflowSessionId("session:legion:beta".to_string());
+    snapshot.legion_workflow_projection.risk_monitors = vec![second_monitor, first_monitor];
+    snapshot.legion_workflow_projection.risk_monitor_count = 2;
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    assert!(workflow_has_label(&full, "Workflow 2 risk"));
+    assert!(workflow_has_label(&full, "Workflow 1 risk"));
+    assert!(!workflow_has_label(&full, "Workflow risk 1"));
+    assert!(!workflow_has_label(&full, "Workflow risk 2"));
+}
+
+#[test]
+fn legion_workflow_live_surfaces_hide_projection_copy_and_raw_identifiers() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::WaitingForApproval);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    snapshot.legion_workflow_budget_rows = vec![LegionWorkflowBudgetUsageRowProjection {
+        session_id: LegionWorkflowSessionId("session:legion:alpha".to_string()),
+        worker_id: "worker:console".to_string(),
+        budget_label: "delegated-loop".to_string(),
+        model_turns_label: "model_turns=1/5".to_string(),
+        tool_calls_label: "tool_calls=2/8".to_string(),
+        retry_label: "retries=0/3".to_string(),
+        output_bytes_label: "output_bytes=128/4096".to_string(),
+        wall_clock_label: "wall_clock=10/1000ms".to_string(),
+        status_label: "within-budget".to_string(),
+        schema_version: 1,
+    }];
+    let mut view = ProjectionView::new();
+
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+
+    for expected in [
+        "Waiting for approval",
+        "Work stopped · Risk score 3 of 3 · High-risk actions 3 · Denied tools 0",
+        "Changes workspace",
+        "Uses a local tool",
+        "Waiting for confirmation",
+        "Delegated loop",
+        "Within budget",
+        "Model turns 1 of 5",
+        "Tool calls 2 of 8",
+        "Retries 0 of 3",
+        "Output 128 of 4096 bytes",
+        "Time 10 of 1000 ms",
+        "Owner: legion-reviewer",
+        "Model: legion.proposal.review",
+        "Risk: Medium",
+        "Status: Created",
+    ] {
+        assert!(
+            workflow_contains_text(&full, expected),
+            "live workflow surfaces should expose `{expected}`"
+        );
+    }
+    for forbidden in [
+        "projected",
+        "No fleet cards projected",
+        "session:legion:alpha",
+        "worker:console",
+        "automate:permission:test",
+        "kill:test",
+        "WaitingForApproval",
+        "Halted",
+        "InvokeLocalTool",
+        "WaitingForConfirmation",
+        "delegated-loop",
+        "within-budget",
+        "Medium risk",
+    ] {
+        assert!(
+            !workflow_contains_text(&full, forbidden),
+            "live workflow surfaces must not expose `{forbidden}`"
+        );
+    }
+    let raw_key_value_copy = workflow_text_containing_in_x_range(&full, "=", 1_115.0..=1_440.0);
+    assert!(
+        raw_key_value_copy.is_empty(),
+        "populated workflow, card, and budget surfaces must not expose raw key=value copy: {raw_key_value_copy:?}"
+    );
+}
+
+#[test]
+fn legion_workflow_stop_section_uses_the_same_visible_rows_as_kill_actions() {
+    let mut snapshot = legion_snapshot(LegionWorkflowMergeReadinessState::Blocked);
+    add_automate_sidecars(&mut snapshot.legion_workflow_projection);
+    let template = snapshot.legion_workflow_projection.rows[0].clone();
+    snapshot.legion_workflow_projection.rows = (0..4)
+        .map(|index| {
+            let mut row = template.clone();
+            row.session_id = LegionWorkflowSessionId(format!("session:legion:{index}"));
+            row
+        })
+        .collect();
+    snapshot.legion_workflow_projection.total_session_count = 4;
+    snapshot.legion_workflow_projection.kill_switches[0].session_id =
+        snapshot.legion_workflow_projection.rows[3]
+            .session_id
+            .clone();
+    snapshot.legion_workflow_board_columns =
+        legion_workflow_board_columns(&snapshot.legion_workflow_projection);
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+    assert!(workflow_has_label(&full, "Stop controls"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 4"
+    ));
+    let stopped =
+        click_workflow_button(&ctx, &mut view, &snapshot, &full, "Stop workflow session 4");
+    assert_eq!(
+        stopped,
+        vec![DesktopAction::TriggerLegionWorkflowKillSwitch {
+            session_id: LegionWorkflowSessionId("session:legion:3".to_string()),
+            reason_label: "user requested hard stop".to_string(),
+        }]
+    );
+
+    snapshot.legion_workflow_projection.kill_switches[0].session_id =
+        snapshot.legion_workflow_projection.rows[2]
+            .session_id
+            .clone();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let (_initial, full) = render_workflow_frame(&ctx, &mut view, &snapshot);
+    assert!(workflow_has_label(&full, "Stop controls"));
+    assert!(workflow_has_clickable_label(
+        &full,
+        "Stop workflow session 3"
+    ));
 }
 
 #[test]
@@ -491,6 +845,60 @@ fn legion_workflow_board_columns_match_coordinator_state_mapping() {
             );
         }
     }
+}
+
+#[test]
+fn legion_workflow_board_cards_in_the_same_column_have_distinct_safe_ordinals() {
+    let mut projection = legion_projection(LegionWorkflowMergeReadinessState::Ready);
+    let template = projection.rows[0].clone();
+    projection.rows = ["session:private:first", "session:private:second"]
+        .into_iter()
+        .map(|session_id| {
+            let mut row = template.clone();
+            row.session_id = LegionWorkflowSessionId(session_id.to_string());
+            row.lifecycle_state = LegionWorkflowState::Executing;
+            row
+        })
+        .collect();
+    projection.total_session_count = projection.rows.len() as u32;
+
+    let columns = legion_workflow_board_columns(&projection);
+    let view_models = fleet_board::fleet_board_column_view_models(&columns);
+    let in_progress = view_models
+        .iter()
+        .find(|column| column.kind == LegionWorkflowBoardColumnKind::InProgress)
+        .expect("in-progress column should exist");
+
+    assert_eq!(
+        in_progress
+            .rows
+            .iter()
+            .map(|row| row.task_label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Workflow 1", "Workflow 2"]
+    );
+    let projected_in_progress = columns
+        .iter()
+        .find(|column| column.kind == LegionWorkflowBoardColumnKind::InProgress)
+        .expect("projected in-progress column should exist");
+    assert_eq!(
+        in_progress
+            .rows
+            .iter()
+            .map(|row| row.summary_label.as_str())
+            .collect::<Vec<_>>(),
+        projected_in_progress
+            .rows
+            .iter()
+            .map(|row| row.summary_label.as_str())
+            .collect::<Vec<_>>(),
+        "the board card body should remain projection-driven"
+    );
+    assert!(in_progress.rows.iter().all(|row| {
+        !row.task_label.contains("session:")
+            && !row.summary_label.contains("session:")
+            && !row.summary_label.contains('=')
+    }));
 }
 
 #[test]

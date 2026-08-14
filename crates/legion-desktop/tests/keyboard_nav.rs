@@ -157,12 +157,13 @@ fn open_runtime(root: &Path) -> DesktopRuntime {
 }
 
 fn full_frame_pointer_input(events: Vec<egui::Event>) -> egui::RawInput {
+    full_frame_pointer_input_at(egui::vec2(1_440.0, 900.0), events)
+}
+
+fn full_frame_pointer_input_at(size: egui::Vec2, events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
         focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
         events,
         ..egui::RawInput::default()
     }
@@ -213,30 +214,40 @@ fn accessible_top_button_id(output: &egui::FullOutput, label: &str) -> egui::acc
 }
 
 fn full_frame_key_input(key: egui::Key) -> egui::RawInput {
+    full_frame_key_input_at(egui::vec2(1_440.0, 900.0), key, egui::Modifiers::default())
+}
+
+fn full_frame_key_input_at(
+    size: egui::Vec2,
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> egui::RawInput {
     egui::RawInput {
         focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        modifiers,
         events: vec![egui::Event::Key {
             key,
             physical_key: Some(key),
             pressed: true,
             repeat: false,
-            modifiers: egui::Modifiers::default(),
+            modifiers,
         }],
         ..egui::RawInput::default()
     }
 }
 
 fn accesskit_focus_input(target_node: egui::accesskit::NodeId) -> egui::RawInput {
+    accesskit_focus_input_at(egui::vec2(1_440.0, 900.0), target_node)
+}
+
+fn accesskit_focus_input_at(
+    size: egui::Vec2,
+    target_node: egui::accesskit::NodeId,
+) -> egui::RawInput {
     egui::RawInput {
         focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
         events: vec![egui::Event::AccessKitActionRequest(
             egui::accesskit::ActionRequest {
                 action: egui::accesskit::Action::Focus,
@@ -328,6 +339,117 @@ fn product_mode_switch_accepts_keyboard_activation() {
 }
 
 #[test]
+fn product_mode_switch_traverses_all_modes_in_both_directions_without_activation() {
+    for (layout, size) in [
+        ("standard", egui::vec2(1_440.0, 900.0)),
+        ("compact", egui::vec2(960.0, 720.0)),
+    ] {
+        let workspace = TempWorkspace::new();
+        let runtime = open_runtime(workspace.path());
+        let mut app = DesktopEframeApp::new(runtime);
+        let primed = app.run_headless_full_frame(full_frame_pointer_input_at(size, Vec::new()));
+        let modes = ["Manual", "Assist", "Delegate", "Legion Workflows"];
+        let ids = modes.map(|label| accessible_top_button_id(&primed, label));
+        let _focused = app.run_headless_full_frame(accesskit_focus_input_at(size, ids[0]));
+        let _focus_stabilized =
+            app.run_headless_full_frame(full_frame_pointer_input_at(size, Vec::new()));
+
+        for index in 1..ids.len() {
+            let moved = app.run_headless_full_frame(full_frame_key_input_at(
+                size,
+                egui::Key::ArrowRight,
+                egui::Modifiers::default(),
+            ));
+            assert_eq!(
+                moved
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("arrow navigation should expose AccessKit")
+                    .focus,
+                ids[index],
+                "{layout} ArrowRight should traverse to {} without activation",
+                modes[index]
+            );
+            assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+            let _focus_stabilized =
+                app.run_headless_full_frame(full_frame_pointer_input_at(size, Vec::new()));
+        }
+        let right_boundary = app.run_headless_full_frame(full_frame_key_input_at(
+            size,
+            egui::Key::ArrowRight,
+            egui::Modifiers::default(),
+        ));
+        assert_eq!(
+            right_boundary
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("boundary frame should expose AccessKit")
+                .focus,
+            ids[3],
+            "{layout} ArrowRight should hold at the Workflows boundary"
+        );
+        let _focus_stabilized =
+            app.run_headless_full_frame(full_frame_pointer_input_at(size, Vec::new()));
+
+        for index in (0..ids.len() - 1).rev() {
+            let moved = app.run_headless_full_frame(full_frame_key_input_at(
+                size,
+                egui::Key::ArrowLeft,
+                egui::Modifiers::default(),
+            ));
+            assert_eq!(
+                moved
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("reverse arrow navigation should expose AccessKit")
+                    .focus,
+                ids[index],
+                "{layout} ArrowLeft should traverse to {} without activation",
+                modes[index]
+            );
+            assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+            let _focus_stabilized =
+                app.run_headless_full_frame(full_frame_pointer_input_at(size, Vec::new()));
+        }
+        let left_boundary = app.run_headless_full_frame(full_frame_key_input_at(
+            size,
+            egui::Key::ArrowLeft,
+            egui::Modifiers::default(),
+        ));
+        assert_eq!(
+            left_boundary
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("reverse boundary frame should expose AccessKit")
+                .focus,
+            ids[0],
+            "{layout} ArrowLeft should hold at the Manual boundary"
+        );
+        assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
+
+        let modified_arrow = app.run_headless_full_frame(full_frame_key_input_at(
+            size,
+            egui::Key::ArrowRight,
+            egui::Modifiers::ALT,
+        ));
+        let modified_focus = modified_arrow
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("modified-arrow frame should expose AccessKit")
+            .focus;
+        assert!(
+            !ids[1..].contains(&modified_focus),
+            "{layout} mode navigation must not consume a modified arrow as a mode step; focus={modified_focus:?} ids={ids:?}"
+        );
+    }
+}
+
+#[test]
 fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoration() {
     let workspace = TempWorkspace::new();
     let runtime = open_runtime(workspace.path());
@@ -398,7 +520,29 @@ fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoratio
             .expect("tabbed dialog should expose AccessKit")
             .focus,
         cancel_id,
-        "Tab should advance from Confirm to Cancel without trapping focus"
+        "Tab should advance from Confirm to Cancel inside the modal"
+    );
+    let wrapped = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        wrapped
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("wrapped dialog should expose AccessKit")
+            .focus,
+        confirm_id,
+        "Tab must wrap inside the modal instead of moving focus behind it"
+    );
+    let returned_to_cancel = app.run_headless_full_frame(full_frame_key_input(egui::Key::Tab));
+    assert_eq!(
+        returned_to_cancel
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("cycled dialog should expose AccessKit")
+            .focus,
+        cancel_id,
+        "a second modal cycle should return focus to Cancel"
     );
     let _cancelled = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
     assert_eq!(app.runtime_snapshot().product_mode, DockMode::Manual);
@@ -417,6 +561,36 @@ fn product_mode_escalation_supports_keyboard_confirm_escape_and_focus_restoratio
 
     let reopened = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
     assert!(accesskit_has_dialog(&reopened));
+    let reverse_to_cancel = app.run_headless_full_frame(full_frame_key_input_at(
+        egui::vec2(1_440.0, 900.0),
+        egui::Key::Tab,
+        egui::Modifiers::SHIFT,
+    ));
+    assert_eq!(
+        reverse_to_cancel
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("reverse tabbed dialog should expose AccessKit")
+            .focus,
+        cancel_id,
+        "Shift+Tab from Confirm must wrap backward to Cancel"
+    );
+    let reverse_to_confirm = app.run_headless_full_frame(full_frame_key_input_at(
+        egui::vec2(1_440.0, 900.0),
+        egui::Key::Tab,
+        egui::Modifiers::SHIFT,
+    ));
+    assert_eq!(
+        reverse_to_confirm
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("reverse-cycled dialog should expose AccessKit")
+            .focus,
+        confirm_id,
+        "Shift+Tab from Cancel must return focus to Confirm"
+    );
     let _confirmed = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
     assert_eq!(
         app.runtime_snapshot().product_mode,

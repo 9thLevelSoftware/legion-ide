@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -8,8 +9,8 @@ use std::{
 use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{PrincipalId, TextCoordinate, WorkspaceTrustState};
 use legion_ui::{
-    CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection,
-    SearchStatusKindProjection, ShellLayoutProjection,
+    CommandDispatchIntent, PaletteConfirmationProjection, PaletteMode, PaletteResultKind,
+    SearchScopeProjection, SearchStatusKindProjection, ShellLayoutProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -87,6 +88,188 @@ fn projected_path_eq(actual: Option<&str>, expected: &Path) -> bool {
         return false;
     };
     actual == expected
+}
+
+fn run_git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn palette_direct_destructive_dispatch_waits_for_app_owned_confirmation() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 135 })
+        .expect("custom zoom should be applied before reset is requested");
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">preferences reset settings".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("reset command should be searchable");
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("initial destructive dispatch should request confirmation");
+
+    let AppCommandOutcome::PaletteUpdated(palette) = outcome else {
+        panic!("destructive dispatch must remain in the palette until confirmed");
+    };
+    assert!(
+        palette.open,
+        "the palette must remain open for confirmation"
+    );
+    let pending = palette
+        .pending_confirmation
+        .expect("the app must project the pending confirmation");
+    assert_eq!(pending.command_id, "command:preferences-settings-reset");
+    assert!(pending.operands.is_empty());
+    let settings = app
+        .shell_projection_snapshot("palette")
+        .expect("settings should remain projectable")
+        .settings_projection;
+    assert_eq!(
+        settings.zoom_percent, 135,
+        "a direct dispatch must not bypass app-owned confirmation"
+    );
+}
+
+fn request_reset_confirmation(app: &mut AppComposition) -> PaletteConfirmationProjection {
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">preferences reset settings".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("reset command should be searchable");
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("reset dispatch should request confirmation");
+    let AppCommandOutcome::PaletteUpdated(palette) = outcome else {
+        panic!("reset dispatch must not execute before confirmation");
+    };
+    palette
+        .pending_confirmation
+        .expect("app should project a pending confirmation")
+}
+
+#[test]
+fn palette_stale_confirmation_token_cannot_mutate_settings() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 135 })
+        .expect("custom zoom should be applied");
+    let pending = request_reset_confirmation(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::UpdatePaletteQuery {
+        query: ">save all".to_string(),
+    })
+    .expect("changing the query should invalidate the confirmation");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::ConfirmPaletteSelection {
+        token: pending.token,
+        command_id: pending.command_id,
+        operands: pending.operands,
+    })
+    .expect("stale confirmation should fail closed");
+
+    let snapshot = app
+        .shell_projection_snapshot("stale confirmation")
+        .expect("projection should build");
+    assert_eq!(snapshot.settings_projection.zoom_percent, 135);
+    assert!(snapshot.palette_projection.pending_confirmation.is_none());
+}
+
+#[test]
+fn palette_mismatched_command_or_operands_cannot_mutate_settings() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 135 })
+        .expect("custom zoom should be applied");
+    let pending = request_reset_confirmation(&mut app);
+
+    for (command_id, operands) in [
+        ("command:git-delete-branch".to_string(), Vec::new()),
+        (pending.command_id.clone(), vec!["unexpected".to_string()]),
+    ] {
+        app.dispatch_ui_intent(CommandDispatchIntent::ConfirmPaletteSelection {
+            token: pending.token,
+            command_id,
+            operands,
+        })
+        .expect("mismatched confirmation should fail closed");
+        let snapshot = app
+            .shell_projection_snapshot("mismatched confirmation")
+            .expect("projection should build");
+        assert_eq!(snapshot.settings_projection.zoom_percent, 135);
+        assert_eq!(
+            snapshot.palette_projection.pending_confirmation.as_ref(),
+            Some(&pending),
+            "a mismatched request must not consume the valid pending confirmation"
+        );
+    }
+}
+
+#[test]
+fn palette_confirmation_cancellation_clears_pending_without_mutation() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 135 })
+        .expect("custom zoom should be applied");
+    let pending = request_reset_confirmation(&mut app);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::CancelPaletteConfirmation {
+        token: pending.token,
+    })
+    .expect("cancellation should dispatch");
+
+    let snapshot = app
+        .shell_projection_snapshot("cancelled confirmation")
+        .expect("projection should build");
+    assert_eq!(snapshot.settings_projection.zoom_percent, 135);
+    assert!(snapshot.palette_projection.pending_confirmation.is_none());
+}
+
+#[test]
+fn palette_matching_confirmation_executes_once_and_consumes_token() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 135 })
+        .expect("custom zoom should be applied");
+    let pending = request_reset_confirmation(&mut app);
+    let confirmation = CommandDispatchIntent::ConfirmPaletteSelection {
+        token: pending.token,
+        command_id: pending.command_id,
+        operands: pending.operands,
+    };
+
+    let outcome = app
+        .dispatch_ui_intent(confirmation.clone())
+        .expect("matching confirmation should execute");
+    assert!(matches!(outcome, AppCommandOutcome::SettingsUpdated(_)));
+    let snapshot = app
+        .shell_projection_snapshot("confirmed reset")
+        .expect("projection should build");
+    assert_eq!(snapshot.settings_projection.zoom_percent, 100);
+    assert!(!snapshot.palette_projection.open);
+    assert!(snapshot.palette_projection.pending_confirmation.is_none());
+
+    app.dispatch_ui_intent(CommandDispatchIntent::SetZoomPercent { zoom_percent: 140 })
+        .expect("zoom should remain mutable after reset");
+    app.dispatch_ui_intent(confirmation)
+        .expect("replayed confirmation should fail closed");
+    let snapshot = app
+        .shell_projection_snapshot("replayed confirmation")
+        .expect("projection should build");
+    assert_eq!(snapshot.settings_projection.zoom_percent, 140);
 }
 
 #[test]
@@ -292,6 +475,352 @@ fn palette_selection_movement_is_clamped_to_projected_results() {
 }
 
 #[test]
+fn command_palette_ranks_available_commands_before_unavailable_commands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">save".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("command palette should open without an active tab");
+
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+    let save_all = palette
+        .results
+        .iter()
+        .position(|result| result.title == "Save All")
+        .expect("available Save All command should remain searchable");
+    let save_active = palette
+        .results
+        .iter()
+        .position(|result| result.title == "Save Active Buffer")
+        .expect("unavailable Save Active Buffer command should remain searchable");
+
+    assert!(palette.results[save_all].disabled_reason.is_none());
+    assert!(palette.results[save_active].disabled_reason.is_some());
+    assert!(
+        save_all < save_active,
+        "available commands must rank before unavailable commands: {:?}",
+        palette.results
+    );
+    assert_eq!(palette.selected_index, save_all);
+}
+
+#[test]
+fn command_palette_never_selects_or_dispatches_an_unavailable_only_result() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">save active buffer".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("unavailable commands should remain searchable");
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+    assert_eq!(palette.results.len(), 1);
+    assert_eq!(
+        palette.results[0].disabled_reason.as_deref(),
+        Some("Open a tab first")
+    );
+    assert_eq!(
+        palette.selected_index,
+        palette.results.len(),
+        "an unavailable-only result set must have no default selection"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::MovePaletteSelection { delta: 1 })
+        .expect("selection movement should remain a no-op");
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("dispatching no available selection should be a no-op");
+    let AppCommandOutcome::PaletteUpdated(palette) = outcome else {
+        panic!("unavailable dispatch must leave the palette open");
+    };
+    assert!(palette.open);
+    assert_eq!(palette.selected_index, palette.results.len());
+}
+
+#[test]
+fn argument_dependent_git_commands_require_explicit_operands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    for (query, title, reason) in [
+        (
+            ">git switch branch",
+            "Git: Switch Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git create branch",
+            "Git: Create Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git delete branch",
+            "Git: Delete Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git remove worktree",
+            "Git: Remove Worktree",
+            "Enter a worktree path",
+        ),
+        (
+            ">git new worktree",
+            "Git: New Worktree",
+            "Enter a branch and worktree path",
+        ),
+        (
+            ">git commit",
+            "Git: Commit Staged Changes",
+            "Enter a commit message",
+        ),
+    ] {
+        app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: query.to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("command palette should open");
+
+        let palette = app
+            .shell_projection_snapshot("git operands")
+            .expect("projection should build")
+            .palette_projection;
+        let result = palette
+            .results
+            .iter()
+            .find(|result| result.title == title)
+            .unwrap_or_else(|| panic!("{title} should remain searchable for `{query}`"));
+        assert_eq!(result.disabled_reason.as_deref(), Some(reason), "{query}");
+        assert_ne!(palette.selected_index, 0, "{query} must not be selected");
+    }
+}
+
+#[test]
+fn palette_git_stash_allows_omitting_the_optional_message() {
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("src/lib.rs", "pub fn value() -> u8 { 1 }\n");
+    run_git(workspace.path(), &["init"]);
+    run_git(
+        workspace.path(),
+        &["config", "user.email", "palette@example.test"],
+    );
+    run_git(workspace.path(), &["config", "user.name", "Palette Test"]);
+    run_git(workspace.path(), &["add", "."]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    let mut app = open_app(workspace.path(), Some(&source));
+
+    workspace.write("src/lib.rs", "pub fn value() -> u8 { 2 }\n");
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git stash".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("stash command should open");
+
+    let palette = app
+        .shell_projection_snapshot("optional stash message")
+        .expect("projection should build")
+        .palette_projection;
+    let stash = palette
+        .results
+        .iter()
+        .find(|result| result.title == "Git: Stash Changes")
+        .expect("stash command should remain searchable");
+    assert_eq!(stash.disabled_reason, None);
+    assert_eq!(
+        palette
+            .results
+            .get(palette.selected_index)
+            .map(|result| &result.id),
+        Some(&stash.id),
+        "bare git stash should be the available selection"
+    );
+    assert!(matches!(
+        app.dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+            .expect("stash command should dispatch"),
+        AppCommandOutcome::GitUpdated(_)
+    ));
+
+    let stash_subject = run_git(workspace.path(), &["stash", "list", "--format=%gs"]);
+    assert!(
+        stash_subject.trim_start().starts_with("WIP on "),
+        "omitting the message should use Git's default stash subject: {stash_subject:?}"
+    );
+}
+
+#[test]
+fn argument_dependent_git_commands_project_only_resolved_operands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    for (query, title, detail) in [
+        (
+            ">git switch branch feature/palette",
+            "Git: Switch Branch",
+            "Switch to branch ‘feature/palette’",
+        ),
+        (
+            ">git create branch feature/new",
+            "Git: Create Branch",
+            "Create and switch to branch ‘feature/new’",
+        ),
+        (
+            ">git delete branch feature/old",
+            "Git: Delete Branch",
+            "Delete branch ‘feature/old’",
+        ),
+        (
+            ">git remove worktree worktrees/old copy",
+            "Git: Remove Worktree",
+            "Remove worktree ‘worktrees/old copy’",
+        ),
+        (
+            ">git new worktree feature/wt worktrees/new copy",
+            "Git: New Worktree",
+            "Create worktree ‘worktrees/new copy’ from branch ‘feature/wt’",
+        ),
+        (
+            ">git commit fix(parser): preserve café exactly",
+            "Git: Commit Staged Changes",
+            "Commit staged changes as ‘fix(parser): preserve café exactly’",
+        ),
+        (
+            ">git stash WIP: preserve → exactly",
+            "Git: Stash Changes",
+            "Stash changes as ‘WIP: preserve → exactly’",
+        ),
+        (
+            ">Git: Switch Branch feature/title-switch",
+            "Git: Switch Branch",
+            "Switch to branch ‘feature/title-switch’",
+        ),
+        (
+            ">Git: Create Branch feature/title-create",
+            "Git: Create Branch",
+            "Create and switch to branch ‘feature/title-create’",
+        ),
+        (
+            ">Git: Delete Branch feature/title-delete",
+            "Git: Delete Branch",
+            "Delete branch ‘feature/title-delete’",
+        ),
+        (
+            ">Git: Remove Worktree worktrees/title copy",
+            "Git: Remove Worktree",
+            "Remove worktree ‘worktrees/title copy’",
+        ),
+        (
+            ">Git: New Worktree feature/title-wt worktrees/title new",
+            "Git: New Worktree",
+            "Create worktree ‘worktrees/title new’ from branch ‘feature/title-wt’",
+        ),
+        (
+            ">Git: Commit Staged Changes fix: title spelling",
+            "Git: Commit Staged Changes",
+            "Commit staged changes as ‘fix: title spelling’",
+        ),
+        (
+            ">Git: Stash Changes WIP title spelling",
+            "Git: Stash Changes",
+            "Stash changes as ‘WIP title spelling’",
+        ),
+    ] {
+        app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: query.to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("command palette should open");
+
+        let palette = app
+            .shell_projection_snapshot("git operands")
+            .expect("projection should build")
+            .palette_projection;
+        let result = palette
+            .results
+            .iter()
+            .find(|result| result.title == title)
+            .unwrap_or_else(|| panic!("{title} should match `{query}`"));
+        assert_eq!(result.disabled_reason, None, "{query}");
+        assert_eq!(result.detail.as_deref(), Some(detail), "{query}");
+        assert_eq!(
+            palette
+                .results
+                .get(palette.selected_index)
+                .map(|row| &row.id),
+            Some(&result.id),
+            "the resolved command should be the available selection"
+        );
+    }
+}
+
+#[test]
+fn palette_git_commit_and_stash_use_only_exact_parsed_messages() {
+    let workspace = TempWorkspace::new();
+    let source = workspace.write("src/lib.rs", "pub fn value() -> u8 { 1 }\n");
+    run_git(workspace.path(), &["init"]);
+    run_git(
+        workspace.path(),
+        &["config", "user.email", "palette@example.test"],
+    );
+    run_git(workspace.path(), &["config", "user.name", "Palette Test"]);
+    run_git(workspace.path(), &["add", "."]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    let mut app = open_app(workspace.path(), Some(&source));
+
+    workspace.write("src/lib.rs", "pub fn value() -> u8 { 2 }\n");
+    run_git(workspace.path(), &["add", "src/lib.rs"]);
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git commit fix(parser): preserve café exactly".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("commit command should open");
+    assert!(matches!(
+        app.dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+            .expect("commit command should dispatch"),
+        AppCommandOutcome::GitUpdated(_)
+    ));
+    assert_eq!(
+        run_git(workspace.path(), &["log", "-1", "--pretty=%s"]).trim(),
+        "fix(parser): preserve café exactly"
+    );
+
+    workspace.write("src/lib.rs", "pub fn value() -> u8 { 3 }\n");
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git stash WIP: preserve → exactly".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("stash command should open");
+    assert!(matches!(
+        app.dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+            .expect("stash command should dispatch"),
+        AppCommandOutcome::GitUpdated(_)
+    ));
+    let stash_subject = run_git(workspace.path(), &["stash", "list", "--format=%gs"]);
+    assert!(
+        stash_subject
+            .trim_end()
+            .ends_with("WIP: preserve → exactly"),
+        "stash subject must contain only the parsed message: {stash_subject:?}"
+    );
+    assert!(!stash_subject.contains("git stash"));
+}
+
+#[test]
 fn palette_dispatches_file_search_structural_and_command_results() {
     let workspace = TempWorkspace::new();
     let target = workspace.write("src/main.rs", "fn main() {\n    let needle = 1;\n}\n");
@@ -367,6 +896,7 @@ fn palette_command_mode_covers_registered_command_catalog() {
         GitUpdated,
         PaletteClosed,
         SettingsUpdated,
+        PendingConfirmation,
         /// Command that returns `AppCommandOutcome::Noop` (e.g. LSP lifecycle).
         Noop,
     }
@@ -454,7 +984,7 @@ fn palette_command_mode_covers_registered_command_catalog() {
         CommandCase {
             query: ">preferences reset settings",
             expected_title: "Preferences: Reset Settings",
-            expected_outcome: ExpectedOutcome::SettingsUpdated,
+            expected_outcome: ExpectedOutcome::PendingConfirmation,
             dirty_before_save: false,
         },
         // PKT-LSP-C T1: lazy session start / restart palette commands.
@@ -535,6 +1065,13 @@ fn palette_command_mode_covers_registered_command_catalog() {
             ExpectedOutcome::SettingsUpdated => {
                 assert!(matches!(outcome, AppCommandOutcome::SettingsUpdated(_)))
             }
+            ExpectedOutcome::PendingConfirmation => match outcome {
+                AppCommandOutcome::PaletteUpdated(projection) => {
+                    assert!(projection.open);
+                    assert!(projection.pending_confirmation.is_some());
+                }
+                other => panic!("expected pending confirmation, got {other:?}"),
+            },
             ExpectedOutcome::Noop => {
                 assert!(
                     matches!(outcome, AppCommandOutcome::Noop),

@@ -4,13 +4,13 @@ use legion_ui::{
     LegionWorkflowBoardRowProjection,
 };
 
-use super::{avatar, pill, status_dot, theme, trim_middle};
+use super::{avatar, pill, status_dot, theme};
 
 /// Renderer-ready workflow board row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopFleetBoardRowViewModel {
-    /// Workflow session label.
-    pub session_id: String,
+    /// Qualitative workflow task label.
+    pub task_label: String,
     /// Coordinator state label.
     pub state_label: String,
     /// Display-safe row summary.
@@ -37,16 +37,22 @@ pub fn fleet_board_column_view_models(
         .map(|column| DesktopFleetBoardColumnViewModel {
             kind: column.kind,
             title: column.title.clone(),
-            rows: column.rows.iter().map(fleet_board_row_view_model).collect(),
+            rows: column
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| fleet_board_row_view_model(row, index.saturating_add(1)))
+                .collect(),
         })
         .collect()
 }
 
 fn fleet_board_row_view_model(
     row: &LegionWorkflowBoardRowProjection,
+    workflow_ordinal: usize,
 ) -> DesktopFleetBoardRowViewModel {
     DesktopFleetBoardRowViewModel {
-        session_id: row.session_id.0.clone(),
+        task_label: format!("Workflow {workflow_ordinal}"),
         state_label: row.state_label.clone(),
         summary_label: row.summary_label.clone(),
     }
@@ -87,12 +93,12 @@ fn render_fleet_board_column(ui: &mut egui::Ui, column: &DesktopFleetBoardColumn
             });
             ui.separator();
             if column.rows.is_empty() {
-                ui.label(theme::muted("No projected rows"));
+                ui.label(theme::muted("No tasks"));
             }
             for row in column.rows.iter().take(5) {
                 theme::small_card_frame().show(ui, |ui| {
-                    ui.label(theme::body_strong(trim_middle(&row.session_id, 38)));
-                    ui.label(theme::muted(trim_middle(&row.summary_label, 64)));
+                    ui.label(theme::body_strong(&row.task_label));
+                    ui.label(theme::muted(&row.summary_label));
                     ui.horizontal(|ui| {
                         avatar(ui, state_initial(&row.state_label), color);
                         ui.label(theme::muted(&row.state_label));

@@ -71,7 +71,7 @@ mod tests {
     fn theme_code_canvas_tokens_use_slate_amber_editor_roles() {
         let tokens = theme::Theme::dark().code_canvas;
 
-        assert_eq!(tokens.background, egui::Color32::from_rgb(0x12, 0x1a, 0x23));
+        assert_eq!(tokens.background, egui::Color32::from_rgb(0x0b, 0x12, 0x19));
         assert_eq!(
             tokens.current_line,
             egui::Color32::from_rgba_unmultiplied(0xcf, 0x81, 0x36, 28)

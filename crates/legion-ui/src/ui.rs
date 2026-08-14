@@ -2334,6 +2334,67 @@ pub enum PaletteResultKind {
     StructuralSearch,
 }
 
+/// Stable product group used to order and label command-palette results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PaletteCommandGroup {
+    /// Frequently useful workspace-level commands.
+    Suggested,
+    /// File and buffer commands.
+    Files,
+    /// View and preference commands.
+    View,
+    /// Run and language-tool commands.
+    Run,
+    /// Source-control commands.
+    Git,
+    /// Destructive commands that require confirmation.
+    Destructive,
+}
+
+impl PaletteCommandGroup {
+    /// User-facing heading for this product group.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Suggested => "Suggested",
+            Self::Files => "Files",
+            Self::View => "View",
+            Self::Run => "Run",
+            Self::Git => "Git",
+            Self::Destructive => "Destructive",
+        }
+    }
+}
+
+/// Classify a palette result into Legion's canonical command group.
+pub fn palette_command_group(result_id: &str) -> PaletteCommandGroup {
+    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
+    if matches!(
+        command_id,
+        "git-delete-branch"
+            | "git-prune-worktrees"
+            | "git-remove-worktree"
+            | "preferences-settings-reset"
+    ) {
+        return PaletteCommandGroup::Destructive;
+    }
+    if command_id.starts_with("git-") || command_id == "refresh-git" {
+        return PaletteCommandGroup::Git;
+    }
+    if command_id.starts_with("lsp-") {
+        return PaletteCommandGroup::Run;
+    }
+    if command_id.starts_with("preferences-") || command_id == "close-palette" {
+        return PaletteCommandGroup::View;
+    }
+    if matches!(
+        command_id,
+        "save-all" | "save-active-buffer" | "close-active-tab" | "reveal-active-file"
+    ) {
+        return PaletteCommandGroup::Files;
+    }
+    PaletteCommandGroup::Suggested
+}
+
 /// One app-ranked result in the command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteResult {
@@ -2359,6 +2420,22 @@ pub struct PaletteResult {
     pub disabled_reason: Option<String>,
 }
 
+/// App-owned confirmation request for a palette command that can change
+/// authority or destroy state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteConfirmationProjection {
+    /// Monotonic app-issued token identifying this exact pending request.
+    pub token: u64,
+    /// Stable command identifier selected when the request was created.
+    pub command_id: String,
+    /// Canonical parsed operands, excluding the command title or query prefix.
+    pub operands: Vec<String>,
+    /// User-facing command title.
+    pub title: String,
+    /// User-facing description of the exact target, when available.
+    pub detail: Option<String>,
+}
+
 /// App-owned command palette projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteProjection {
@@ -2370,10 +2447,12 @@ pub struct PaletteProjection {
     pub query: String,
     /// Search scope used by search and structural-search modes.
     pub scope: SearchScopeProjection,
-    /// Selected result index, clamped to `results`.
+    /// Selected result index, or `results.len()` when no result can be selected.
     pub selected_index: usize,
     /// Ranked palette results.
     pub results: Vec<PaletteResult>,
+    /// Pending confirmation owned by the application authority boundary.
+    pub pending_confirmation: Option<PaletteConfirmationProjection>,
 }
 
 impl PaletteProjection {
@@ -2386,6 +2465,7 @@ impl PaletteProjection {
             scope: SearchScopeProjection::ActiveFile,
             selected_index: 0,
             results: Vec::new(),
+            pending_confirmation: None,
         }
     }
 }
@@ -2774,6 +2854,20 @@ pub enum CommandDispatchIntent {
     CompletePaletteSelection,
     /// Dispatch the currently selected palette result through app authority.
     DispatchPaletteSelection,
+    /// Confirm an app-owned pending palette command after revalidating its identity.
+    ConfirmPaletteSelection {
+        /// App-issued confirmation token.
+        token: u64,
+        /// Stable pending command identifier.
+        command_id: String,
+        /// Canonical parsed operands projected for this exact command.
+        operands: Vec<String>,
+    },
+    /// Cancel an app-owned pending palette confirmation.
+    CancelPaletteConfirmation {
+        /// App-issued confirmation token to cancel.
+        token: u64,
+    },
     /// Open the projected Settings surface.
     OpenSettings,
     /// Update the app-owned theme preference.

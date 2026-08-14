@@ -8,7 +8,7 @@ use std::{
 use legion_desktop::{
     bridge::DesktopAction,
     session::{DesktopSessionError, DesktopSessionStore},
-    workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
+    workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_protocol::{
     CanonicalPath, SessionPanelState, TimestampMillis, WorkbenchSettingsRecord,
@@ -325,6 +325,111 @@ fn session_restore_persists_workbench_settings_projection() {
     assert!(!settings.editor.smooth_scrolling_enabled);
     assert!(settings.telemetry.crash_reports_enabled);
     assert_eq!(settings.telemetry.consent_label, "crash-reports");
+}
+
+#[test]
+fn setup_dismissal_persists_through_the_existing_session_action() {
+    let workspace = TempWorkspace::new("legion_desktop_setup_dismissal");
+    let session_state = workspace.path().join("session.json");
+    let mut runtime = open_runtime(workspace.path(), None, &session_state);
+
+    assert!(!session_state.exists());
+    assert_eq!(
+        runtime
+            .handle_action(DesktopAction::DismissOnboarding)
+            .expect("setup dismissal should remain a normal desktop action"),
+        DesktopWorkflowOutcome::Noop
+    );
+
+    let saved = DesktopSessionStore::load(&session_state)
+        .expect("setup dismissal should write a valid session")
+        .expect("setup dismissal should persist a session record");
+    assert_ne!(saved.schema_version, 0);
+
+    drop(runtime);
+    let restored = open_runtime(workspace.path(), None, &session_state);
+    let mut restored = DesktopEframeApp::new(restored);
+    restored.headless_egui_context().enable_accesskit();
+    let output = restored.run_headless_input(egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_200.0, 900.0),
+        )),
+        ..egui::RawInput::default()
+    });
+    assert!(
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().all(|(_id, node)| {
+                node.label() != Some("Welcome to Legion")
+                    && node.value() != Some("Welcome to Legion")
+            })),
+        "a restored session should keep Setup dismissed"
+    );
+}
+
+#[test]
+fn setup_persistence_failure_uses_concise_repair_guidance() {
+    let workspace = TempWorkspace::new("legion_desktop_setup_persistence_error");
+    let blocked_parent = workspace.write("not-a-directory", "blocked");
+    let session_state = blocked_parent.join("session.json");
+    let mut runtime = open_runtime(workspace.path(), None, &session_state);
+
+    runtime
+        .handle_action(DesktopAction::DismissOnboarding)
+        .expect("a persistence failure should not crash setup dismissal");
+
+    let snapshot = runtime.projection_snapshot();
+    assert!(snapshot.status_messages.iter().any(|status| {
+        status.message
+            == "Could not save setup progress. Check the session file location and try again."
+    }));
+    for leaked in [
+        "session IO failed",
+        "invalid session record",
+        "not-a-directory",
+    ] {
+        assert!(
+            snapshot
+                .status_messages
+                .iter()
+                .all(|status| !status.message.contains(leaked)),
+            "setup errors must not expose `{leaked}`: {:?}",
+            snapshot.status_messages
+        );
+    }
+}
+
+#[test]
+fn setup_workspace_persistence_warning_hides_storage_details() {
+    let workspace = TempWorkspace::new("legion_desktop_workspace_persistence_error");
+    workspace.write(".legion", "blocks the persistence directory");
+    let session_state = workspace.path().join("session.json");
+
+    let runtime = open_runtime(workspace.path(), None, &session_state);
+    let snapshot = runtime.projection_snapshot();
+    assert!(snapshot.status_messages.iter().any(|status| {
+        status.message
+            == "Could not save workspace state. Make sure the workspace is writable; Legion will keep working in this session."
+    }));
+    for leaked in [
+        "persistence unavailable",
+        "continuing in memory",
+        "Storage",
+        ".legion",
+    ] {
+        assert!(
+            snapshot
+                .status_messages
+                .iter()
+                .all(|status| !status.message.contains(leaked)),
+            "workspace persistence errors must not expose `{leaked}`: {:?}",
+            snapshot.status_messages
+        );
+    }
 }
 
 #[test]
