@@ -2370,7 +2370,7 @@ pub struct PaletteProjection {
     pub query: String,
     /// Search scope used by search and structural-search modes.
     pub scope: SearchScopeProjection,
-    /// Selected result index, clamped to `results`.
+    /// Selected result index, or `results.len()` when no result can be selected.
     pub selected_index: usize,
     /// Ranked palette results.
     pub results: Vec<PaletteResult>,

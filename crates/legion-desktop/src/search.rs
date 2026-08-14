@@ -11,6 +11,8 @@ pub struct DesktopSearchViewModel {
     pub status_rows: Vec<String>,
     /// Bounded result rows.
     pub result_rows: Vec<String>,
+    /// Helpful empty-result guidance when a search completed without matches.
+    pub empty_state: Option<String>,
     /// Diagnostic rows for skipped or limited files/results.
     pub diagnostic_rows: Vec<String>,
 }
@@ -22,15 +24,24 @@ impl DesktopSearchViewModel {
             SearchScopeProjection::ActiveFile => "active file",
             SearchScopeProjection::Workspace => "workspace",
         };
-        let query = if projection.query_label.is_empty() {
-            "<empty>"
-        } else {
-            projection.query_label.as_str()
-        };
-        let mut status_rows = vec![format!(
-            "{:?}: {}",
-            projection.status.kind, projection.status.message
-        )];
+        let query = projection.query_label.trim();
+        let mut status_rows = vec![match projection.status.kind {
+            SearchStatusKindProjection::Idle => {
+                format!("Enter a search term to find text in the {scope}.")
+            }
+            SearchStatusKindProjection::Running => "Searching…".to_string(),
+            SearchStatusKindProjection::Completed | SearchStatusKindProjection::NoResults => {
+                "Search finished.".to_string()
+            }
+            SearchStatusKindProjection::Cancelled => "Search stopped.".to_string(),
+            SearchStatusKindProjection::ValidationError => {
+                "Check the search term and try again.".to_string()
+            }
+            SearchStatusKindProjection::DegradedLimited => {
+                "Search used the available text and may have missed matches.".to_string()
+            }
+            SearchStatusKindProjection::Error => "Search could not finish. Try again.".to_string(),
+        }];
         if projection.omitted_result_count > 0 {
             status_rows.push(format!(
                 "{} results omitted by limit {}",
@@ -46,10 +57,6 @@ impl DesktopSearchViewModel {
                 projection.skipped_binary_count
             ));
         }
-        if projection.status.kind == SearchStatusKindProjection::Idle {
-            status_rows.push("Search idle".to_string());
-        }
-
         let result_rows = projection
             .results
             .iter()
@@ -60,13 +67,13 @@ impl DesktopSearchViewModel {
                     .map(|path| path.0.as_str())
                     .unwrap_or("<active buffer>");
                 let truncated = if row.snippet_truncated {
-                    " truncated"
+                    " preview shortened"
                 } else {
                     ""
                 };
                 // Stale results (superseded by a newer query) are tagged so
                 // the renderer can apply a de-emphasised visual treatment.
-                let stale_tag = if row.stale { " [stale]" } else { "" };
+                let stale_tag = if row.stale { " [outdated]" } else { "" };
                 format!(
                     "{}:{}:{}{}{} {}",
                     path,
@@ -79,12 +86,18 @@ impl DesktopSearchViewModel {
             })
             .collect::<Vec<_>>();
 
-        let mut diagnostic_rows = projection.diagnostics.clone();
-        if projection.status.kind == SearchStatusKindProjection::NoResults
-            && projection.diagnostics.is_empty()
-        {
-            diagnostic_rows.push("No results".to_string());
-        }
+        let diagnostic_rows = projection.diagnostics.clone();
+        let empty_state =
+            (projection.status.kind == SearchStatusKindProjection::NoResults).then(|| {
+                match projection.scope {
+                    SearchScopeProjection::ActiveFile => {
+                        "No matches. Try another term or search the workspace.".to_string()
+                    }
+                    SearchScopeProjection::Workspace => {
+                        "No matches. Try another term or search the active file.".to_string()
+                    }
+                }
+            });
 
         // Build a compact option tag reflecting *non-default* active toggles.
         // Only emit a tag for options that deviate from the plain default:
@@ -94,25 +107,37 @@ impl DesktopSearchViewModel {
         // Case-insensitive (the plain user default) produces no tag so that
         // ordinary searches keep a clean header.
         let mut option_tags = String::new();
-        if projection.case_sensitive {
+        if !query.is_empty() && projection.case_sensitive {
             option_tags.push_str("[Cc]");
         }
-        if projection.whole_word {
+        if !query.is_empty() && projection.whole_word {
             option_tags.push_str("[W]");
         }
-        if projection.use_regex {
+        if !query.is_empty() && projection.use_regex {
             option_tags.push_str("[.*]");
         }
-        let header = if option_tags.is_empty() {
-            format!("Search {scope}: {query}")
+        let base_header = if query.is_empty() {
+            format!("Search the {scope}")
+        } else if projection.status.kind == SearchStatusKindProjection::Completed {
+            let count = projection.results.len();
+            format!(
+                "{count} match{} in the {scope} for \"{query}\"",
+                if count == 1 { "" } else { "es" }
+            )
         } else {
-            format!("Search {scope}: {query} {option_tags}")
+            format!("Search the {scope} for \"{query}\"")
+        };
+        let header = if option_tags.is_empty() {
+            base_header
+        } else {
+            format!("{base_header} {option_tags}")
         };
 
         Self {
             header,
             status_rows,
             result_rows,
+            empty_state,
             diagnostic_rows,
         }
     }

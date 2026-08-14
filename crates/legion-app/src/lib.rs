@@ -366,6 +366,14 @@ impl PaletteState {
             self.selected_index = self.selected_index.min(self.results.len() - 1);
         }
     }
+
+    fn select_first_available_command(&mut self) {
+        self.selected_index = self
+            .results
+            .iter()
+            .position(|result| result.disabled_reason.is_none())
+            .unwrap_or(self.results.len());
+    }
 }
 
 impl Default for PaletteState {
@@ -15587,19 +15595,19 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "save-all",
             title: "Save All",
-            detail: "Save every open tab through app authority",
+            detail: "Save every open tab",
             shortcut_label: Some("Ctrl+Shift+S"),
         },
         PaletteCommandSpec {
             id: "save-active-buffer",
             title: "Save Active Buffer",
-            detail: "Save the active tab through app authority",
+            detail: "Save the active tab",
             shortcut_label: Some("⌘S"),
         },
         PaletteCommandSpec {
             id: "close-active-tab",
             title: "Close Active Tab",
-            detail: "Close the active tab through app authority",
+            detail: "Close the active tab",
             shortcut_label: Some("⌘W"),
         },
         PaletteCommandSpec {
@@ -15611,55 +15619,55 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "refresh-explorer",
             title: "Refresh Explorer",
-            detail: "Reload the workspace tree projection",
+            detail: "Reload workspace files",
             shortcut_label: Some("F5"),
         },
         PaletteCommandSpec {
             id: "refresh-git",
             title: "Refresh Git",
-            detail: "Refresh git status and diff projections",
+            detail: "Refresh Git changes",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-switch-branch",
             title: "Git: Switch Branch",
-            detail: "Use the palette query as the target branch",
+            detail: "Switch to another Git branch",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-create-branch",
             title: "Git: Create Branch",
-            detail: "Create and switch to the palette query branch",
+            detail: "Create and switch to a Git branch",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-delete-branch",
             title: "Git: Delete Branch",
-            detail: "Delete the palette query branch",
+            detail: "Delete a Git branch after confirmation",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-stash",
             title: "Git: Stash Changes",
-            detail: "Stash local changes using the palette query as the message",
+            detail: "Stash local changes with an optional message",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-prune-worktrees",
             title: "Git: Prune Worktrees",
-            detail: "Remove orphaned worktree metadata",
+            detail: "Clean up orphaned Git worktree records",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-remove-worktree",
             title: "Git: Remove Worktree",
-            detail: "Remove the palette query worktree path",
+            detail: "Remove a Git worktree after confirmation",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-new-worktree",
             title: "Git: New Worktree",
-            detail: "Create a git worktree; query: <branch> <path>",
+            detail: "Create a Git worktree for a branch and path",
             shortcut_label: None,
         },
         PaletteCommandSpec {
@@ -15671,37 +15679,37 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "git-export-evidence",
             title: "Git: Export Worktree Evidence",
-            detail: "Export metadata-only worktree state to .legion/evidence/",
+            detail: "Export worktree details to .legion/evidence/",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "git-commit",
             title: "Git: Commit Staged Changes",
-            detail: "Use the palette query as the commit message",
+            detail: "Commit staged changes with a message",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "close-palette",
             title: "Close Command Palette",
-            detail: "Dismiss the foreground command palette",
+            detail: "Close the command palette",
             shortcut_label: Some("Esc"),
         },
         PaletteCommandSpec {
             id: "preferences-open",
             title: "Preferences: Open Settings",
-            detail: "Focus the workbench settings surface",
+            detail: "Open Settings",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "preferences-theme-dark",
             title: "Preferences: Theme Dark",
-            detail: "Use the dark workbench theme",
+            detail: "Switch to the dark theme",
             shortcut_label: None,
         },
         PaletteCommandSpec {
             id: "preferences-theme-light",
             title: "Preferences: Theme Light",
-            detail: "Use the light workbench theme",
+            detail: "Switch to the light theme",
             shortcut_label: None,
         },
         PaletteCommandSpec {
@@ -15719,7 +15727,7 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "preferences-settings-reset",
             title: "Preferences: Reset Settings",
-            detail: "Restore default workbench settings",
+            detail: "Restore default settings after confirmation",
             shortcut_label: None,
         },
         // PKT-LSP-C T1: language server lifecycle commands.
@@ -15732,7 +15740,7 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "lsp-restart-session",
             title: "Language Server: Restart",
-            detail: "Restart the language server, resetting the circuit breaker",
+            detail: "Restart the language server",
             shortcut_label: None,
         },
     ]
@@ -15784,9 +15792,11 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
 
 fn sort_palette_results(results: &mut [PaletteScoredResult]) {
     results.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
+        left.result
+            .disabled_reason
+            .is_some()
+            .cmp(&right.result.disabled_reason.is_some())
+            .then_with(|| right.score.cmp(&left.score))
             .then_with(|| left.result.title.cmp(&right.result.title))
             .then_with(|| left.result.id.cmp(&right.result.id))
     });
@@ -19156,6 +19166,27 @@ impl AppComposition {
             return self.palette.projection();
         }
 
+        if self.palette.mode == PaletteMode::Command {
+            let available = self
+                .palette
+                .results
+                .iter()
+                .enumerate()
+                .filter_map(|(index, result)| result.disabled_reason.is_none().then_some(index))
+                .collect::<Vec<_>>();
+            if available.is_empty() {
+                self.palette.selected_index = self.palette.results.len();
+                return self.palette.projection();
+            }
+            let current = available
+                .iter()
+                .position(|index| *index == self.palette.selected_index)
+                .unwrap_or(0) as i32;
+            let next = (current + delta).clamp(0, available.len() as i32 - 1) as usize;
+            self.palette.selected_index = available[next];
+            return self.palette.projection();
+        }
+
         let max_index = self.palette.results.len() as i32 - 1;
         let next = (self.palette.selected_index as i32 + delta).clamp(0, max_index);
         self.palette.selected_index = next as usize;
@@ -19345,7 +19376,11 @@ impl AppComposition {
 
         self.palette.mode = mode;
         self.palette.results = results;
-        self.palette.clamp_selection();
+        if mode == PaletteMode::Command {
+            self.palette.select_first_available_command();
+        } else {
+            self.palette.clamp_selection();
+        }
         Ok(())
     }
 
@@ -19594,7 +19629,7 @@ impl AppComposition {
             } else {
                 format!("Search {scope} for \"{trimmed}\"")
             },
-            detail: Some("Run lexical search".to_string()),
+            detail: Some("Find matching text".to_string()),
             shortcut_label: Some("Enter".to_string()),
             path: None,
             buffer_id: None,

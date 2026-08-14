@@ -292,6 +292,81 @@ fn palette_selection_movement_is_clamped_to_projected_results() {
 }
 
 #[test]
+fn command_palette_ranks_available_commands_before_unavailable_commands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">save".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("command palette should open without an active tab");
+
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+    let save_all = palette
+        .results
+        .iter()
+        .position(|result| result.title == "Save All")
+        .expect("available Save All command should remain searchable");
+    let save_active = palette
+        .results
+        .iter()
+        .position(|result| result.title == "Save Active Buffer")
+        .expect("unavailable Save Active Buffer command should remain searchable");
+
+    assert!(palette.results[save_all].disabled_reason.is_none());
+    assert!(palette.results[save_active].disabled_reason.is_some());
+    assert!(
+        save_all < save_active,
+        "available commands must rank before unavailable commands: {:?}",
+        palette.results
+    );
+    assert_eq!(palette.selected_index, save_all);
+}
+
+#[test]
+fn command_palette_never_selects_or_dispatches_an_unavailable_only_result() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">save active buffer".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("unavailable commands should remain searchable");
+    let palette = app
+        .shell_projection_snapshot("palette")
+        .expect("projection should build")
+        .palette_projection;
+    assert_eq!(palette.results.len(), 1);
+    assert_eq!(
+        palette.results[0].disabled_reason.as_deref(),
+        Some("Open a tab first")
+    );
+    assert_eq!(
+        palette.selected_index,
+        palette.results.len(),
+        "an unavailable-only result set must have no default selection"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::MovePaletteSelection { delta: 1 })
+        .expect("selection movement should remain a no-op");
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::DispatchPaletteSelection)
+        .expect("dispatching no available selection should be a no-op");
+    let AppCommandOutcome::PaletteUpdated(palette) = outcome else {
+        panic!("unavailable dispatch must leave the palette open");
+    };
+    assert!(palette.open);
+    assert_eq!(palette.selected_index, palette.results.len());
+}
+
+#[test]
 fn palette_dispatches_file_search_structural_and_command_results() {
     let workspace = TempWorkspace::new();
     let target = workspace.write("src/main.rs", "fn main() {\n    let needle = 1;\n}\n");

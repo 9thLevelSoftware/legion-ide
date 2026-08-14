@@ -489,6 +489,8 @@ pub struct DesktopCommandPaletteOverlayViewModel {
 pub struct DesktopCommandPaletteResultViewModel {
     /// Stable result identifier.
     pub id: String,
+    /// Product-facing command group.
+    pub group_label: String,
     /// Human-readable result kind.
     pub kind_label: String,
     /// Result title.
@@ -1147,27 +1149,30 @@ enum SettingsSection {
     #[default]
     Appearance,
     Editor,
+    AiProviders,
     Notifications,
-    Models,
     Privacy,
+    Advanced,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Appearance,
         Self::Editor,
+        Self::AiProviders,
         Self::Notifications,
-        Self::Models,
         Self::Privacy,
+        Self::Advanced,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Editor => "Editor",
+            Self::AiProviders => "AI Providers",
             Self::Notifications => "Notifications",
-            Self::Models => "Models",
             Self::Privacy => "Privacy",
+            Self::Advanced => "Advanced",
         }
     }
 }
@@ -2965,8 +2970,14 @@ fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapsho
     section_label(ui, "Search", None);
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body(search.header));
-        render_compact_rows(ui, &search.status_rows, "Search idle", 2);
-        render_compact_rows(ui, &search.result_rows, "No search results", 5);
+        render_compact_rows(ui, &search.status_rows, "Ready to search", 2);
+        if search.result_rows.is_empty() {
+            if let Some(empty_state) = &search.empty_state {
+                ui.label(theme::muted(empty_state));
+            }
+        } else {
+            render_compact_rows(ui, &search.result_rows, "", 5);
+        }
         for row in &search.diagnostic_rows {
             ui.label(theme::muted(row));
         }
@@ -4902,8 +4913,8 @@ fn render_utility_overlay(
         UtilitySurface::Diagnostics => unreachable!(),
     };
     let content_rect = ctx.content_rect();
-    let overlay_width = (content_rect.width() - 48.0).clamp(360.0, 720.0);
-    let overlay_height = (content_rect.height() - 72.0).clamp(320.0, 620.0);
+    let overlay_width = (content_rect.width() - 48.0).clamp(360.0, 920.0);
+    let overlay_height = (content_rect.height() - 72.0).clamp(320.0, 720.0);
     let offset = egui::vec2(
         (content_rect.width() - overlay_width) * 0.5,
         (content_rect.height() - overlay_height) * 0.5,
@@ -4967,24 +4978,34 @@ fn render_setup_panel(
     close: &mut bool,
 ) {
     ui.label(theme::body(
-        "Set workspace trust, privacy choices, providers, and shortcuts once, then reopen this guide whenever you need it.",
+        "Use this checklist to finish the essentials. You can reopen Setup at any time.",
     ));
-    section_label(ui, "Workspace", Some(theme::tokens().accent.green));
+    section_label(ui, "Setup checklist", Some(theme::tokens().accent.green));
     theme::small_card_frame().show(ui, |ui| {
-        ui.label(theme::body_strong("Review workspace trust"));
+        ui.label(theme::body_strong("Step 1 · Open and trust a workspace"));
         ui.label(theme::muted(format!(
-            "Current product mode: {}. Higher-autonomy modes remain separately confirmation-gated.",
+            "This workspace is open. Review its trust before running workspace tools. Current mode: {}.",
             projected_product_mode(snapshot).label()
         )));
-    });
-    section_label(
-        ui,
-        "Privacy and providers",
-        Some(theme::tokens().accent.orange),
-    );
-    theme::small_card_frame().show(ui, |ui| {
-        ui.label(theme::body(format!(
-            "Crash reports: {} · Telemetry: {}",
+        ui.add_space(8.0);
+        ui.label(theme::body_strong(
+            "Step 2 · Optionally configure an AI provider",
+        ));
+        ui.label(theme::muted(format!(
+            "{} AI provider{} available. Credentials stay in the system keyring.",
+            snapshot.assisted_ai_projection.provider_count,
+            if snapshot.assisted_ai_projection.provider_count == 1 {
+                " is"
+            } else {
+                "s are"
+            }
+        )));
+        ui.add_space(8.0);
+        ui.label(theme::body_strong(
+            "Step 3 · Review privacy and reporting",
+        ));
+        ui.label(theme::muted(format!(
+            "Crash reporting is {}. Data sharing is {}.",
             if model.settings.crash_reports_enabled {
                 "enabled"
             } else {
@@ -4992,20 +5013,14 @@ fn render_setup_panel(
             },
             model.settings.telemetry_label
         )));
-        ui.label(theme::muted(format!(
-            "{} model provider{} available. Credentials stay securely stored in the system keyring.",
-            snapshot.assisted_ai_projection.provider_count,
-            if snapshot.assisted_ai_projection.provider_count == 1 {
-                ""
-            } else {
-                "s"
-            }
-        )));
+        ui.add_space(8.0);
+        ui.label(theme::body_strong(
+            "Step 4 · Learn Manual, Assist, Delegate, and Legion Workflows",
+        ));
+        ui.label(theme::muted(
+            "Use the mode switch at the top. Legion confirms higher-authority modes before opening them.",
+        ));
     });
-    section_label(ui, "Keyboard and modes", Some(theme::tokens().accent.cyan));
-    ui.label(theme::muted(
-        "Use the top mode switch for Manual, Assist, Delegate, and Legion Workflows. Command opens the keyboard-first command surface.",
-    ));
     ui.add_space(12.0);
     let focus_finish = view.utility_overlay_needs_focus;
     if focus_finish {
@@ -5151,7 +5166,7 @@ fn render_settings_panel(
                 }
             });
         }
-        if view.settings_section == SettingsSection::Models {
+        if view.settings_section == SettingsSection::AiProviders {
             if snapshot.assisted_ai_projection.providers.is_empty() {
                 ui.label(theme::body_strong("No model provider configured"));
                 ui.label(theme::muted(
@@ -5274,9 +5289,27 @@ fn render_settings_panel(
                 });
             }
             ui.label(theme::muted(format!(
-                "Telemetry consent: {}",
+                "Data sharing: {}",
                 model.settings.telemetry_label
             )));
+        }
+        if view.settings_section == SettingsSection::Advanced {
+            let mut indexed_workspace_search_enabled =
+                model.settings.indexed_workspace_search_enabled;
+            if ui
+                .checkbox(
+                    &mut indexed_workspace_search_enabled,
+                    "Indexed workspace search",
+                )
+                .changed()
+            {
+                actions.push(DesktopAction::SetIndexedWorkspaceSearchEnabled {
+                    enabled: indexed_workspace_search_enabled,
+                });
+            }
+            ui.label(theme::muted(
+                "Use the workspace index to speed up searches in larger projects.",
+            ));
         }
         ui.horizontal(|ui| {
             ui.label(theme::muted(format!(
@@ -5306,7 +5339,7 @@ fn render_assist_rail(
             if soft_button(ui, resolution).clicked() {
                 actions.push(DesktopAction::OpenSettings);
                 view.utility_surface = Some(UtilitySurface::Settings);
-                view.settings_section = SettingsSection::Models;
+                view.settings_section = SettingsSection::AiProviders;
                 view.utility_overlay_needs_focus = true;
             }
         });
@@ -7602,6 +7635,7 @@ fn command_palette_result_rows(
             let index = visible_start + offset;
             DesktopCommandPaletteResultViewModel {
                 id: result.id.clone(),
+                group_label: command_palette_group_label(&result.id).to_string(),
                 kind_label: match result.kind {
                     PaletteResultKind::File => "File",
                     PaletteResultKind::Symbol => "Symbol",
@@ -7615,11 +7649,40 @@ fn command_palette_result_rows(
                 detail: result.detail.clone(),
                 shortcut_label: result.shortcut_label.clone(),
                 match_indices: result.match_indices.clone(),
-                selected: index == palette.selected_index,
+                selected: index == palette.selected_index && result.disabled_reason.is_none(),
                 disabled_reason: result.disabled_reason.clone(),
             }
         })
         .collect()
+}
+
+pub(crate) fn command_palette_group_label(result_id: &str) -> &'static str {
+    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
+    if matches!(
+        command_id,
+        "git-delete-branch"
+            | "git-prune-worktrees"
+            | "git-remove-worktree"
+            | "preferences-settings-reset"
+    ) {
+        return "Destructive";
+    }
+    if command_id.starts_with("git-") || command_id == "refresh-git" {
+        return "Git";
+    }
+    if command_id.starts_with("lsp-") {
+        return "Run";
+    }
+    if command_id.starts_with("preferences-") || command_id == "close-palette" {
+        return "View";
+    }
+    if matches!(
+        command_id,
+        "save-all" | "save-active-buffer" | "close-active-tab" | "reveal-active-file"
+    ) {
+        return "Files";
+    }
+    "Suggested"
 }
 
 fn command_palette_visible_result_start(total: usize, selected_index: usize) -> usize {

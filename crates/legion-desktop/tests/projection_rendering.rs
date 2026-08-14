@@ -41,8 +41,9 @@ use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,
     AssistInlinePredictionRowProjection, AssistInlinePredictionStatusProjection, DockMode,
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection, PaletteMode,
-    PaletteProjection, PaletteResult, PaletteResultKind, SearchScopeProjection, SettingsProjection,
-    Shell, StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
+    PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection, SearchScopeProjection,
+    SearchStatusKindProjection, SearchStatusProjection, SettingsProjection, Shell,
+    StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
     ToastVerbosityProjection,
 };
 
@@ -1176,6 +1177,61 @@ fn projection_rendering_keeps_selected_palette_result_visible_in_overlay_window(
             .command_palette_rows
             .iter()
             .any(|row| row.contains("selected=12") && row.contains("results=15"))
+    );
+}
+
+#[test]
+fn projection_rendering_groups_command_palette_results_in_the_product_hierarchy() {
+    let mut snapshot = Shell::empty("Command groups").projection_snapshot();
+    snapshot.palette_projection = PaletteProjection {
+        open: true,
+        mode: PaletteMode::Command,
+        query: ">".to_string(),
+        scope: SearchScopeProjection::Workspace,
+        selected_index: 5,
+        results: [
+            ("refresh-explorer", "Refresh Explorer", None),
+            ("save-all", "Save All", None),
+            ("preferences-open", "Open Settings", None),
+            ("lsp-start-session", "Start Language Server", None),
+            ("refresh-git", "Refresh Git", None),
+            (
+                "git-delete-branch",
+                "Delete Git Branch",
+                Some("Enter a branch name"),
+            ),
+        ]
+        .into_iter()
+        .map(|(id, title, disabled_reason)| PaletteResult {
+            id: format!("command:{id}"),
+            kind: PaletteResultKind::Command,
+            title: title.to_string(),
+            detail: None,
+            shortcut_label: None,
+            path: None,
+            buffer_id: None,
+            position: None,
+            match_indices: Vec::new(),
+            disabled_reason: disabled_reason.map(str::to_string),
+        })
+        .collect(),
+    };
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+    let rows = &model.command_palette_overlay.result_rows;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.group_label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Suggested", "Files", "View", "Run", "Git", "Destructive"]
+    );
+    assert!(
+        !rows[5].selected,
+        "a malformed projection must not visually select an unavailable command"
+    );
+    assert_eq!(
+        rows[5].disabled_reason.as_deref(),
+        Some("Enter a branch name")
     );
 }
 
@@ -2928,14 +2984,143 @@ fn projection_rendering_settings_selectors_emit_real_actions() {
 }
 
 #[test]
-fn projection_rendering_provider_credentials_live_in_settings_models_section() {
+fn projection_rendering_settings_uses_the_bounded_six_section_product_structure() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+    let size = egui::vec2(1_440.0, 1_000.0);
+
+    let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let (_opened, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Settings", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+
+    let update = full
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("Settings should expose AccessKit");
+    let dialog = update
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.role() == egui::accesskit::Role::Dialog && node.label() == Some("Settings"))
+                .then_some(node)
+        })
+        .expect("Settings dialog should be present");
+    let mut pending = dialog.children().to_vec();
+    let mut dialog_bounds: Option<egui::accesskit::Rect> = None;
+    while let Some(id) = pending.pop() {
+        let node = update
+            .nodes
+            .iter()
+            .find_map(|(candidate, node)| (*candidate == id).then_some(node))
+            .expect("Settings dialog descendants should be present");
+        if let Some(bounds) = node.bounds() {
+            dialog_bounds = Some(match dialog_bounds {
+                Some(accumulated) => egui::accesskit::Rect {
+                    x0: accumulated.x0.min(bounds.x0),
+                    y0: accumulated.y0.min(bounds.y0),
+                    x1: accumulated.x1.max(bounds.x1),
+                    y1: accumulated.y1.max(bounds.y1),
+                },
+                None => bounds,
+            });
+        }
+        pending.extend(node.children().iter().copied());
+    }
+    let dialog_bounds = dialog_bounds.expect("Settings content should expose bounds");
+    assert!(
+        dialog_bounds.x1 - dialog_bounds.x0 <= 920.0,
+        "Settings must remain within its 920px width bound: {dialog_bounds:?}"
+    );
+    assert!(
+        dialog_bounds.y1 - dialog_bounds.y0 <= 720.0,
+        "Settings must remain within its 720px height bound: {dialog_bounds:?}"
+    );
+
+    for section in [
+        "Appearance",
+        "Editor",
+        "AI Providers",
+        "Notifications",
+        "Privacy",
+        "Advanced",
+    ] {
+        assert!(
+            accesskit_has_clickable_label(&full, section),
+            "Settings must expose the {section} section"
+        );
+    }
+    assert!(!accesskit_has_label(&full, "Models"));
+
+    let (_advanced, _full) =
+        click_accessible_control_at(&ctx, &mut view, &snapshot, &full, "Advanced", size);
+    let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+    let (indexed, _) = click_accessible_control_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        &full,
+        "Indexed workspace search",
+        size,
+    );
+    assert_eq!(
+        indexed.actions,
+        vec![DesktopAction::SetIndexedWorkspaceSearchEnabled { enabled: true }]
+    );
+}
+
+#[test]
+fn projection_rendering_setup_is_one_four_item_checklist() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Setup");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let setup_text = accesskit_dialog_text(&full, "Welcome to Legion");
+
+    assert_eq!(
+        setup_text
+            .iter()
+            .filter(|row| row.starts_with("Step "))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        4,
+        "Setup should present exactly one four-item checklist: {setup_text:?}"
+    );
+    for item in [
+        "Step 1 · Open and trust a workspace",
+        "Step 2 · Optionally configure an AI provider",
+        "Step 3 · Review privacy and reporting",
+        "Step 4 · Learn Manual, Assist, Delegate, and Legion Workflows",
+    ] {
+        assert!(
+            setup_text.iter().any(|row| row == item),
+            "Setup checklist is missing `{item}`: {setup_text:?}"
+        );
+    }
+    for old_section in ["Workspace", "Privacy and providers", "Keyboard and modes"] {
+        assert!(
+            !setup_text.iter().any(|row| row == old_section),
+            "Setup must not split the checklist into the old `{old_section}` section"
+        );
+    }
+}
+
+#[test]
+fn projection_rendering_provider_credentials_live_in_settings_ai_providers_section() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let snapshot = assist_inline_prediction_snapshot();
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(!accesskit_has_label(&full, "Models"));
+    assert!(!accesskit_has_label(&full, "AI Providers"));
     assert!(!accesskit_contains_text_in_x_range(
         &full,
         "Anthropic BYOK",
@@ -2944,14 +3129,41 @@ fn projection_rendering_provider_credentials_live_in_settings_models_section() {
 
     let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(&full, "Models"));
-    let (_models, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Models");
+    assert!(accesskit_has_label(&full, "AI Providers"));
+    let (_providers, _full) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "AI Providers");
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_contains_text_in_x_range(
+    assert!(accesskit_has_label(
         &full,
-        "Anthropic BYOK",
-        360.0..=1_080.0
+        "Preferred AI provider: auto. Auto tries providers available on this computer before remote providers."
     ));
+    assert!(accesskit_has_label(
+        &full,
+        "Anthropic API key — stored securely in the operating system keyring and never in workspace files."
+    ));
+    let settings_text = accesskit_dialog_text(&full, "Settings");
+    for internal in ["BYOK", "loopback", "Preferred route"] {
+        assert!(
+            settings_text.iter().all(|row| !row.contains(internal)),
+            "AI Providers should not expose `{internal}`: {settings_text:?}"
+        );
+    }
+    let (provider, _) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Ollama");
+    assert_eq!(
+        provider.actions,
+        vec![DesktopAction::SetPreferredAiProvider {
+            provider_id: "ollama".to_string(),
+        }]
+    );
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (clear_key, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Clear Anthropic key");
+    assert_eq!(
+        clear_key.actions,
+        vec![DesktopAction::DeleteProviderApiKey {
+            provider_id: "anthropic".to_string(),
+        }]
+    );
 }
 
 #[test]
@@ -3277,7 +3489,7 @@ fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
     let (opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
     assert_eq!(opened.actions, vec![DesktopAction::OpenSettings]);
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(&full, "Models"));
+    assert!(accesskit_has_label(&full, "AI Providers"));
 }
 
 #[test]
@@ -3994,6 +4206,61 @@ fn projection_rendering_activity_copy_and_raw_diagnostics_are_separate_destinati
     snapshot.product_mode = DockMode::Manual;
     let (_manual, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(&full, "ACTIVITY"));
+}
+
+#[test]
+fn projection_rendering_search_surface_uses_useful_idle_and_no_match_states() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let mut snapshot = populated_snapshot();
+    snapshot.search_projection = SearchProjection::idle();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let search_bounds = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
+    let (_selected, _full) = click_projection_at(
+        &ctx,
+        &mut view,
+        &snapshot,
+        egui::pos2(
+            ((search_bounds.x0 + search_bounds.x1) * 0.5) as f32,
+            ((search_bounds.y0 + search_bounds.y1) * 0.5) as f32,
+        ),
+        egui::vec2(1_440.0, 900.0),
+    );
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(
+        &full,
+        "Enter a search term to find text in the active file."
+    ));
+    assert!(!accesskit_has_label(&full, "No search results"));
+
+    snapshot.search_projection = SearchProjection {
+        query_id: Some("search:none".to_string()),
+        scope: SearchScopeProjection::Workspace,
+        query_label: "missing".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::NoResults,
+            message: "No results".to_string(),
+        },
+        results: Vec::new(),
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: false,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
+    let (_no_matches, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(
+        &full,
+        "No matches. Try another term or search the active file."
+    ));
+    assert!(!accesskit_has_label(&full, "No search results"));
 }
 
 #[test]

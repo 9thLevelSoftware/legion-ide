@@ -18,7 +18,7 @@ pub(crate) fn render_preferred_provider_picker(
 ) {
     ui.add_space(4.0);
     ui.label(theme::muted(format!(
-        "Preferred route: {active_preference} (Auto tries Ollama loopback first, then Anthropic BYOK)"
+        "Preferred AI provider: {active_preference}. Auto tries providers available on this computer before remote providers."
     )));
     ui.horizontal_wrapped(|ui| {
         for (label, id) in [
@@ -49,7 +49,7 @@ pub(crate) fn render_preferred_provider_picker(
 pub(crate) fn render_anthropic_byok_form(ui: &mut egui::Ui, actions: &mut Vec<DesktopAction>) {
     ui.add_space(6.0);
     ui.label(theme::muted(
-        "Anthropic BYOK — key is stored in the OS keyring only (never written to disk)",
+        "Anthropic API key — stored securely in the operating system keyring and never in workspace files.",
     ));
     let draft_id = egui::Id::new("legion-byok-anthropic-draft");
     let mut draft = ui.ctx().data_mut(|data| {

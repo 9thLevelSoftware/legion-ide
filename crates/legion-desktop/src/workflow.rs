@@ -629,12 +629,10 @@ impl DesktopRuntime {
         let persistence_warning = app
             .enable_workspace_state_persistence(&config.workspace_root)
             .err()
-            .map(|error| {
+            .map(|_error| {
                 status_message(
                     StatusSeverity::Warning,
-                    format!(
-                        "Workspace state persistence unavailable; continuing in memory: {error}"
-                    ),
+                    "Could not save workspace state. Make sure the workspace is writable; Legion will keep working in this session.",
                 )
             });
 
@@ -729,6 +727,12 @@ impl DesktopRuntime {
             }
             DesktopAction::DismissOnboarding => {
                 self.onboarding_visible = false;
+                if self.save_session_state().is_err() {
+                    self.set_status(
+                        StatusSeverity::Warning,
+                        "Could not save setup progress. Check the session file location and try again.",
+                    );
+                }
                 self.refresh_projection()?;
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 self.persist_diagnostics_if_configured();
@@ -3391,6 +3395,13 @@ pub struct DesktopEframeApp {
     /// state (focus, modifiers, active widgets) survives between calls. A
     /// fresh context per frame would silently drop that state.
     ctx: egui::Context,
+    pending_palette_confirmation: Option<PendingPaletteConfirmation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPaletteConfirmation {
+    result_id: String,
+    title: String,
 }
 
 impl DesktopEframeApp {
@@ -3399,6 +3410,7 @@ impl DesktopEframeApp {
         Self {
             runtime,
             ctx: egui::Context::default(),
+            pending_palette_confirmation: None,
         }
     }
 
@@ -3593,12 +3605,16 @@ impl DesktopEframeApp {
         let input = ui.input(|input| input.clone());
         let command = input.modifiers.command;
 
-        if snapshot.palette_projection.open {
+        if self.pending_palette_confirmation.is_some() {
+            if input.key_pressed(egui::Key::Escape) {
+                self.pending_palette_confirmation = None;
+            }
+        } else if snapshot.palette_projection.open {
             if input.key_pressed(egui::Key::Escape) {
                 actions.push(DesktopAction::ClosePalette);
             }
             if input.key_pressed(egui::Key::Enter) {
-                actions.push(DesktopAction::DispatchPaletteSelection);
+                self.request_palette_dispatch();
             }
             if input.key_pressed(egui::Key::ArrowUp) {
                 actions.push(DesktopAction::MovePaletteSelection { delta: -1 });
@@ -3830,6 +3846,8 @@ impl DesktopEframeApp {
 
         let width = screen.width().clamp(320.0, 760.0);
         let pos = egui::pos2(screen.center().x - width / 2.0, screen.top() + 72.0);
+        let grouped_result_indices = palette_grouped_result_indices(palette);
+        let mut dispatch_requested = false;
         egui::Area::new("command_palette_overlay".into())
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -3870,76 +3888,228 @@ impl DesktopEframeApp {
                         }
 
                         ui.add_space(10.0);
-                        if palette.results.is_empty() {
-                            ui.label(theme::muted("No results"));
-                        } else {
-                            let row_height = 34.0;
-                            let visible_start = palette_visible_result_start(
-                                palette.results.len(),
-                                palette.selected_index,
-                            );
-                            for (offset, result) in palette
+                        let empty_search = palette.mode == PaletteMode::Search
+                            && palette
                                 .results
                                 .iter()
-                                .skip(visible_start)
-                                .take(COMMAND_PALETTE_VISIBLE_RESULT_ROWS)
-                                .enumerate()
-                            {
-                                let index = visible_start + offset;
-                                let selected = index == palette.selected_index;
-                                let (row_rect, row_response) = ui.allocate_exact_size(
-                                    egui::vec2(width - 28.0, row_height),
-                                    egui::Sense::click(),
-                                );
-                                let row_response =
-                                    row_response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if selected {
-                                    ui.painter().rect_filled(
-                                        row_rect,
-                                        egui::CornerRadius::same(6),
-                                        tokens.bg.active,
-                                    );
-                                }
-                                let mut row_ui = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(row_rect)
-                                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                                );
-                                row_ui.add_space(8.0);
-                                row_ui.vertical(|ui| {
-                                    ui.label(theme::body_strong(&result.title));
-                                    let detail = result
-                                        .disabled_reason
-                                        .as_deref()
-                                        .or(result.detail.as_deref())
-                                        .unwrap_or("");
-                                    if !detail.is_empty() {
-                                        ui.label(theme::muted(detail));
+                                .all(|result| result.disabled_reason.is_some());
+                        if empty_search {
+                            ui.label(theme::muted(search_palette_empty_state(palette.scope)));
+                        } else if palette.results.is_empty() {
+                            ui.label(theme::muted(command_palette_empty_state(palette)));
+                        } else {
+                            let row_height = 34.0;
+                            egui::ScrollArea::vertical()
+                                .id_salt("command_palette_results")
+                                .max_height(420.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    let mut previous_group = None;
+                                    for index in grouped_result_indices.iter().copied() {
+                                        let result = &palette.results[index];
+                                        let group =
+                                            crate::view::command_palette_group_label(&result.id);
+                                        if palette.mode == PaletteMode::Command
+                                            && previous_group != Some(group)
+                                        {
+                                            ui.add_space(4.0);
+                                            ui.label(theme::label(group));
+                                            previous_group = Some(group);
+                                        }
+                                        let selected = index == palette.selected_index;
+                                        let (row_rect, row_response) = ui.allocate_exact_size(
+                                            egui::vec2(width - 28.0, row_height),
+                                            if result.disabled_reason.is_some() {
+                                                egui::Sense::hover()
+                                            } else {
+                                                egui::Sense::click()
+                                            },
+                                        );
+                                        let row_response = if result.disabled_reason.is_some() {
+                                            row_response
+                                        } else {
+                                            row_response
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        };
+                                        if selected && result.disabled_reason.is_none() {
+                                            ui.painter().rect_filled(
+                                                row_rect,
+                                                egui::CornerRadius::same(6),
+                                                tokens.bg.active,
+                                            );
+                                        }
+                                        let mut row_ui = ui.new_child(
+                                            egui::UiBuilder::new().max_rect(row_rect).layout(
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                            ),
+                                        );
+                                        row_ui.add_space(8.0);
+                                        row_ui.vertical(|ui| {
+                                            ui.label(theme::body_strong(&result.title));
+                                            let detail = result
+                                                .disabled_reason
+                                                .as_deref()
+                                                .or(result.detail.as_deref())
+                                                .unwrap_or("");
+                                            if !detail.is_empty() {
+                                                ui.label(theme::muted(detail));
+                                            }
+                                        });
+                                        row_ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if let Some(shortcut) = &result.shortcut_label {
+                                                    ui.label(theme::muted(shortcut));
+                                                }
+                                            },
+                                        );
+                                        if row_response.clicked()
+                                            && result.disabled_reason.is_none()
+                                        {
+                                            let delta =
+                                                index as i32 - palette.selected_index as i32;
+                                            if delta != 0 {
+                                                self.runtime.dispatch_ui_action(
+                                                    DesktopAction::MovePaletteSelection { delta },
+                                                );
+                                            }
+                                            dispatch_requested = true;
+                                        }
                                     }
                                 });
-                                row_ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if let Some(shortcut) = &result.shortcut_label {
-                                            ui.label(theme::muted(shortcut));
-                                        }
-                                    },
-                                );
-                                if row_response.clicked() {
-                                    let delta = index as i32 - palette.selected_index as i32;
-                                    if delta != 0 {
-                                        self.runtime.dispatch_ui_action(
-                                            DesktopAction::MovePaletteSelection { delta },
-                                        );
-                                    }
-                                    self.runtime.dispatch_ui_action(
-                                        DesktopAction::DispatchPaletteSelection,
-                                    );
-                                }
-                            }
                         }
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.label(theme::muted(command_palette_keyboard_help(palette.mode)));
                     });
             });
+        if dispatch_requested {
+            self.request_palette_dispatch();
+        }
+        self.render_palette_confirmation(ctx);
+    }
+
+    fn request_palette_dispatch(&mut self) {
+        let snapshot = self.runtime.projection_snapshot();
+        let palette = &snapshot.palette_projection;
+        let Some(result) = palette.results.get(palette.selected_index) else {
+            return;
+        };
+        if result.disabled_reason.is_some() {
+            return;
+        }
+        if palette_command_requires_confirmation(&result.id) {
+            self.pending_palette_confirmation = Some(PendingPaletteConfirmation {
+                result_id: result.id.clone(),
+                title: result.title.clone(),
+            });
+            return;
+        }
+        self.runtime
+            .dispatch_ui_action(DesktopAction::DispatchPaletteSelection);
+    }
+
+    fn render_palette_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_palette_confirmation.clone() else {
+            return;
+        };
+        let title = format!("Confirm {}", pending.title);
+        let mut confirm = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new("command_palette_confirmation".into()).show(ctx, |ui| {
+            ctx.accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::Dialog);
+                node.set_label(title.clone());
+                node.set_modal();
+            });
+            ui.label(theme::title(&title));
+            ui.label(theme::muted(
+                "Review this command before it changes workspace or application state.",
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Confirm").clicked() {
+                    confirm = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            cancel = true;
+        }
+        if confirm {
+            let snapshot = self.runtime.projection_snapshot();
+            let selected_still_matches = snapshot
+                .palette_projection
+                .results
+                .get(snapshot.palette_projection.selected_index)
+                .is_some_and(|result| {
+                    result.id == pending.result_id && result.disabled_reason.is_none()
+                });
+            self.pending_palette_confirmation = None;
+            if selected_still_matches {
+                self.runtime
+                    .dispatch_ui_action(DesktopAction::DispatchPaletteSelection);
+            }
+        } else if cancel {
+            self.pending_palette_confirmation = None;
+        }
+    }
+}
+
+fn palette_grouped_result_indices(palette: &legion_ui::PaletteProjection) -> Vec<usize> {
+    if palette.mode != PaletteMode::Command {
+        let visible_start =
+            palette_visible_result_start(palette.results.len(), palette.selected_index);
+        return (visible_start
+            ..(visible_start + COMMAND_PALETTE_VISIBLE_RESULT_ROWS).min(palette.results.len()))
+            .collect();
+    }
+
+    ["Suggested", "Files", "View", "Run", "Git", "Destructive"]
+        .into_iter()
+        .flat_map(|group| {
+            palette
+                .results
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, result)| {
+                    (crate::view::command_palette_group_label(&result.id) == group).then_some(index)
+                })
+        })
+        .collect()
+}
+
+fn palette_command_requires_confirmation(result_id: &str) -> bool {
+    let command_id = result_id.strip_prefix("command:").unwrap_or(result_id);
+    crate::view::command_palette_group_label(result_id) == "Destructive"
+        || matches!(
+            command_id,
+            "git-switch-branch" | "git-create-branch" | "git-new-worktree"
+        )
+}
+
+fn command_palette_empty_state(palette: &legion_ui::PaletteProjection) -> &'static str {
+    match palette.mode {
+        PaletteMode::Search => "No matches. Try a broader search or switch scope.",
+        PaletteMode::Command => "No commands match. Try a command name or category.",
+        _ => "No results. Try a broader query.",
+    }
+}
+
+fn search_palette_empty_state(scope: SearchScopeProjection) -> &'static str {
+    match scope {
+        SearchScopeProjection::ActiveFile => "Type a search term to find text in the active file.",
+        SearchScopeProjection::Workspace => "Type a search term to find text in the workspace.",
+    }
+}
+
+fn command_palette_keyboard_help(mode: PaletteMode) -> &'static str {
+    match mode {
+        PaletteMode::Search => "Enter run search · ↑↓ choose · Esc close",
+        _ => "Enter open · ↑↓ choose · Esc close",
     }
 }
 
