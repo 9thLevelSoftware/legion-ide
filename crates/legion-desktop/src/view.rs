@@ -627,6 +627,61 @@ impl DesktopSettingsViewModel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopSetupChecklistItem {
+    title: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopSetupChecklistViewModel {
+    items: [DesktopSetupChecklistItem; 4],
+}
+
+impl DesktopSetupChecklistViewModel {
+    fn from_snapshot(
+        snapshot: &ShellProjectionSnapshot,
+        settings: &DesktopSettingsViewModel,
+    ) -> Self {
+        let provider_count = snapshot.assisted_ai_projection.provider_count;
+        Self {
+            items: [
+                DesktopSetupChecklistItem {
+                    title: "Step 1 · Open and trust a workspace",
+                    detail: format!(
+                        "This workspace is open. Review its trust before running workspace tools. Current mode: {}.",
+                        projected_product_mode(snapshot).label()
+                    ),
+                },
+                DesktopSetupChecklistItem {
+                    title: "Step 2 · Optionally configure an AI provider",
+                    detail: format!(
+                        "{provider_count} AI provider{} available. Credentials stay in the system keyring.",
+                        if provider_count == 1 { " is" } else { "s are" }
+                    ),
+                },
+                DesktopSetupChecklistItem {
+                    title: "Step 3 · Review privacy and reporting",
+                    detail: format!(
+                        "Crash reporting is {}. Data sharing is {}.",
+                        if settings.crash_reports_enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        settings.telemetry_label
+                    ),
+                },
+                DesktopSetupChecklistItem {
+                    title: "Step 4 · Learn Manual, Assist, Delegate, and Legion Workflows",
+                    detail: "Use the mode switch at the top. Legion confirms higher-authority modes before opening them."
+                        .to_string(),
+                },
+            ],
+        }
+    }
+}
+
 fn font_fallback_rows(projection: &SettingsProjection) -> Vec<String> {
     if projection.font_fallback_diagnostics.is_empty() {
         return vec![format!(
@@ -736,7 +791,7 @@ impl ModeSurfaceModel {
             DesktopProductMode::Assist => {
                 let inspector = if snapshot.assisted_ai_projection.providers.is_empty() {
                     SurfaceAvailability::Blocked {
-                        reason: "Choose a model provider to enable predictions.".to_string(),
+                        reason: "Choose an AI provider to enable predictions.".to_string(),
                         resolution: "Settings".to_string(),
                     }
                 } else if snapshot
@@ -750,7 +805,7 @@ impl ModeSurfaceModel {
                     SurfaceAvailability::Ready
                 } else {
                     SurfaceAvailability::Blocked {
-                        reason: "No model provider is ready for predictions.".to_string(),
+                        reason: "No AI provider is ready for predictions.".to_string(),
                         resolution: "Settings".to_string(),
                     }
                 };
@@ -2101,7 +2156,7 @@ fn render_activity_sidebar(
         }
         ActivitySurface::Search => {
             sidebar_header(ui, "SEARCH", model.layout_title.clone());
-            render_search_projection(ui, snapshot);
+            ui.label(theme::muted("Search results appear in the search palette."));
         }
         ActivitySurface::Symbols => {
             sidebar_header(ui, "SYMBOLS", model.layout_title.clone());
@@ -2965,25 +3020,6 @@ fn toast_accent_color(severity: StatusSeverity) -> egui::Color32 {
     }
 }
 
-fn render_search_projection(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
-    let search = DesktopSearchViewModel::from_projection(&snapshot.search_projection);
-    section_label(ui, "Search", None);
-    theme::small_card_frame().show(ui, |ui| {
-        ui.label(theme::body(search.header));
-        render_compact_rows(ui, &search.status_rows, "Ready to search", 2);
-        if search.result_rows.is_empty() {
-            if let Some(empty_state) = &search.empty_state {
-                ui.label(theme::muted(empty_state));
-            }
-        } else {
-            render_compact_rows(ui, &search.result_rows, "", 5);
-        }
-        for row in &search.diagnostic_rows {
-            ui.label(theme::muted(row));
-        }
-    });
-}
-
 fn render_excerpt_surface(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -3152,7 +3188,6 @@ fn render_editor_canvas(
         .response
         .rect;
     render_excerpt_surface(ui, snapshot, actions);
-    render_search_projection(ui, snapshot);
     render_close_dirty_prompt_controls(ui, snapshot, actions);
     editor_rect
 }
@@ -4977,49 +5012,19 @@ fn render_setup_panel(
     actions: &mut Vec<DesktopAction>,
     close: &mut bool,
 ) {
+    let checklist = DesktopSetupChecklistViewModel::from_snapshot(snapshot, &model.settings);
     ui.label(theme::body(
         "Use this checklist to finish the essentials. You can reopen Setup at any time.",
     ));
     section_label(ui, "Setup checklist", Some(theme::tokens().accent.green));
     theme::small_card_frame().show(ui, |ui| {
-        ui.label(theme::body_strong("Step 1 · Open and trust a workspace"));
-        ui.label(theme::muted(format!(
-            "This workspace is open. Review its trust before running workspace tools. Current mode: {}.",
-            projected_product_mode(snapshot).label()
-        )));
-        ui.add_space(8.0);
-        ui.label(theme::body_strong(
-            "Step 2 · Optionally configure an AI provider",
-        ));
-        ui.label(theme::muted(format!(
-            "{} AI provider{} available. Credentials stay in the system keyring.",
-            snapshot.assisted_ai_projection.provider_count,
-            if snapshot.assisted_ai_projection.provider_count == 1 {
-                " is"
-            } else {
-                "s are"
+        for (index, item) in checklist.items.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(8.0);
             }
-        )));
-        ui.add_space(8.0);
-        ui.label(theme::body_strong(
-            "Step 3 · Review privacy and reporting",
-        ));
-        ui.label(theme::muted(format!(
-            "Crash reporting is {}. Data sharing is {}.",
-            if model.settings.crash_reports_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            model.settings.telemetry_label
-        )));
-        ui.add_space(8.0);
-        ui.label(theme::body_strong(
-            "Step 4 · Learn Manual, Assist, Delegate, and Legion Workflows",
-        ));
-        ui.label(theme::muted(
-            "Use the mode switch at the top. Legion confirms higher-authority modes before opening them.",
-        ));
+            ui.label(theme::body_strong(item.title));
+            ui.label(theme::muted(&item.detail));
+        }
     });
     ui.add_space(12.0);
     let focus_finish = view.utility_overlay_needs_focus;
@@ -5168,9 +5173,9 @@ fn render_settings_panel(
         }
         if view.settings_section == SettingsSection::AiProviders {
             if snapshot.assisted_ai_projection.providers.is_empty() {
-                ui.label(theme::body_strong("No model provider configured"));
+                ui.label(theme::body_strong("No AI provider configured"));
                 ui.label(theme::muted(
-                    "Choose a local route or add a bring-your-own-key provider.",
+                    "Choose an AI provider available on this computer or add an Anthropic API key.",
                 ));
             } else {
                 for provider in snapshot.assisted_ai_projection.providers.iter().take(6) {
@@ -6040,7 +6045,7 @@ fn workflow_permission_action_label(
         Action::ReadContext => "Reads task context",
         Action::ReadSemanticMetadata => "Reads code metadata",
         Action::InvokeLocalTool => "Uses a local tool",
-        Action::InvokeProvider => "Uses a model provider",
+        Action::InvokeProvider => "Uses an AI provider",
         Action::ProposeEdits => "Proposes edits",
         Action::ApplyApprovedProposal => "Applies an approved proposal",
         Action::AccessNetwork => "Uses the network",
@@ -9650,38 +9655,11 @@ fn onboarding_rows(
     }
 
     let settings = DesktopSettingsViewModel::from_projection(&snapshot.settings_projection);
-    let assisted = &snapshot.assisted_ai_projection;
-    let level = projected_product_mode(snapshot);
-    let mut rows = vec![
-        format!(
-            "workspace trust: review the workspace prompt before enabling remote or delegated flows; current mode is {}",
-            level.label()
-        ),
-        format!(
-            "telemetry and crash consent: crash_reports={} telemetry={}",
-            settings.crash_reports_enabled, settings.telemetry_label
-        ),
-        format!(
-            "provider setup: {} model providers available; choose a local route or add a bring-your-own-key provider in Settings",
-            assisted.provider_count
-        ),
-        format!(
-            "keybinding scheme: keep the keyboard reference handy and pick the shortcut workflow that matches your muscle memory"
-        ),
-        format!(
-            "mode switch tour: Manual -> Assist -> Delegate -> Legion Workflows; active mode is {}",
-            level.label()
-        ),
-    ];
-
-    if assisted.provider_count == 0 {
-        rows.push(
-            "model provider: choose a provider in Settings before using Assist or Delegate"
-                .to_string(),
-        );
-    }
-
-    rows
+    DesktopSetupChecklistViewModel::from_snapshot(snapshot, &settings)
+        .items
+        .into_iter()
+        .map(|item| format!("{} — {}", item.title, item.detail))
+        .collect()
 }
 
 fn manual_control_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
@@ -10613,6 +10591,14 @@ mod tests {
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
     use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, Shell};
+
+    #[test]
+    fn provider_permission_uses_plain_ai_copy() {
+        assert_eq!(
+            workflow_permission_action_label(PermissionBudgetActionClass::InvokeProvider),
+            "Uses an AI provider"
+        );
+    }
 
     #[test]
     fn tab_drop_target_accounts_for_source_removal() {

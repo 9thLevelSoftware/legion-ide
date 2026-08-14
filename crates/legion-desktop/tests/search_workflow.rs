@@ -314,6 +314,7 @@ fn search_view_model_summarizes_completed_results_without_protocol_terms() {
     assert_eq!(model.header, "1 match in the active file for \"needle\"");
     assert_eq!(model.status_rows, vec!["Search finished."]);
     assert_eq!(model.empty_state, None);
+    assert_eq!(model.result_rows, vec!["Current file:3:2 needle here"]);
     assert!(
         model
             .status_rows

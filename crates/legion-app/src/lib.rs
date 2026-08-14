@@ -403,6 +403,106 @@ struct PaletteCommandSpec {
     shortcut_label: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaletteCommandOperands {
+    Branch(String),
+    WorktreePath(String),
+    NewWorktree {
+        branch: String,
+        worktree_path: String,
+    },
+}
+
+impl PaletteCommandOperands {
+    fn detail(&self, command_id: &str) -> String {
+        match (command_id, self) {
+            ("git-switch-branch", Self::Branch(branch)) => {
+                format!("Switch to branch ‘{branch}’")
+            }
+            ("git-create-branch", Self::Branch(branch)) => {
+                format!("Create and switch to branch ‘{branch}’")
+            }
+            ("git-delete-branch", Self::Branch(branch)) => {
+                format!("Delete branch ‘{branch}’")
+            }
+            ("git-remove-worktree", Self::WorktreePath(path)) => {
+                format!("Remove worktree ‘{path}’")
+            }
+            (
+                "git-new-worktree",
+                Self::NewWorktree {
+                    branch,
+                    worktree_path,
+                },
+            ) => format!("Create worktree ‘{worktree_path}’ from branch ‘{branch}’"),
+            _ => String::new(),
+        }
+    }
+}
+
+fn argument_command_prefix(command_id: &str) -> Option<&'static str> {
+    match command_id {
+        "git-switch-branch" => Some("git switch branch"),
+        "git-create-branch" => Some("git create branch"),
+        "git-delete-branch" => Some("git delete branch"),
+        "git-remove-worktree" => Some("git remove worktree"),
+        "git-new-worktree" => Some("git new worktree"),
+        _ => None,
+    }
+}
+
+fn strip_argument_command_prefix<'a>(query: &'a str, command_id: &str) -> Option<&'a str> {
+    let prefix = argument_command_prefix(command_id)?;
+    let query = query.trim();
+    let head = query.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let remainder = query.get(prefix.len()..)?;
+    (remainder.is_empty() || remainder.starts_with(char::is_whitespace)).then(|| remainder.trim())
+}
+
+fn parse_palette_command_operands(
+    command_id: &str,
+    query: &str,
+) -> Option<Result<PaletteCommandOperands, &'static str>> {
+    let missing = match command_id {
+        "git-switch-branch" | "git-create-branch" | "git-delete-branch" => "Enter a branch name",
+        "git-remove-worktree" => "Enter a worktree path",
+        "git-new-worktree" => "Enter a branch and worktree path",
+        _ => return None,
+    };
+    let Some(operands) = strip_argument_command_prefix(query, command_id) else {
+        return Some(Err(missing));
+    };
+    if operands.is_empty() {
+        return Some(Err(missing));
+    }
+    Some(match command_id {
+        "git-switch-branch" | "git-create-branch" | "git-delete-branch" => {
+            Ok(PaletteCommandOperands::Branch(operands.to_string()))
+        }
+        "git-remove-worktree" => Ok(PaletteCommandOperands::WorktreePath(operands.to_string())),
+        "git-new-worktree" => {
+            let split = operands.find(char::is_whitespace);
+            let Some(split) = split else {
+                return Some(Err(missing));
+            };
+            let branch = operands[..split].trim();
+            let worktree_path = operands[split..].trim();
+            if branch.is_empty() || worktree_path.is_empty() {
+                Err(missing)
+            } else {
+                Ok(PaletteCommandOperands::NewWorktree {
+                    branch: branch.to_string(),
+                    worktree_path: worktree_path.to_string(),
+                })
+            }
+        }
+        _ => unreachable!("argument commands are matched above"),
+    })
+}
+
 /// App-level composition errors.
 #[derive(Debug, Error)]
 pub enum AppCompositionError {
@@ -19240,8 +19340,54 @@ impl AppComposition {
             self.palette_usage.record_usage(workspace_id, &result.id);
         }
 
+        if result.id == "search:run" {
+            let outcome = self.dispatch_ui_intent(intent)?;
+            self.sync_search_palette_results();
+            return Ok(outcome);
+        }
+
         self.palette.close();
         self.dispatch_ui_intent(intent)
+    }
+
+    fn sync_search_palette_results(&mut self) {
+        self.palette.results = self
+            .search_projection
+            .results
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let location = row
+                    .file_path
+                    .as_ref()
+                    .map(|path| path.0.as_str())
+                    .unwrap_or("Current file");
+                let mut detail = row.snippet.clone();
+                if row.snippet_truncated {
+                    detail.push_str(" · preview shortened");
+                }
+                if row.stale {
+                    detail.push_str(" · outdated");
+                }
+                PaletteResult {
+                    id: format!("search:match:{}:{index}", row.query_id),
+                    kind: PaletteResultKind::Search,
+                    title: format!(
+                        "{location}:{}:{}",
+                        row.line_number.saturating_add(1),
+                        row.range.start.character.saturating_add(1)
+                    ),
+                    detail: Some(detail),
+                    shortcut_label: Some("Enter".to_string()),
+                    path: row.file_path.as_ref().map(|path| path.0.clone()),
+                    buffer_id: row.buffer_id,
+                    position: Some(row.range.start),
+                    match_indices: Vec::new(),
+                    disabled_reason: None,
+                }
+            })
+            .collect();
+        self.palette.selected_index = 0;
     }
 
     fn settings_projection(&self) -> SettingsProjection {
@@ -19562,8 +19708,11 @@ impl AppComposition {
         let mut scored = palette_command_specs()
             .into_iter()
             .filter_map(|spec| {
-                fuzzy_score_tuple(spec.title, query).map(|(score, match_indices)| {
-                    let (buffer_id, disabled_reason) = match spec.id {
+                let match_query = strip_argument_command_prefix(query, spec.id)
+                    .and_then(|_| argument_command_prefix(spec.id))
+                    .unwrap_or(query);
+                fuzzy_score_tuple(spec.title, match_query).map(|(score, match_indices)| {
+                    let (buffer_id, mut disabled_reason) = match spec.id {
                         "save-active-buffer" | "close-active-tab" => (
                             active_buffer_id,
                             active_buffer_id
@@ -19581,6 +19730,13 @@ impl AppComposition {
                         }
                         _ => (None, None),
                     };
+                    let mut detail = spec.detail.to_string();
+                    if let Some(operands) = parse_palette_command_operands(spec.id, query) {
+                        match operands {
+                            Ok(operands) => detail = operands.detail(spec.id),
+                            Err(reason) => disabled_reason = Some(reason.to_string()),
+                        }
+                    }
                     // Frequency bonus: frequently-used commands score a little
                     // higher. Cap at 20 uses × 5 pts = +100 so fuzzy quality
                     // still dominates the ranking.
@@ -19598,7 +19754,7 @@ impl AppComposition {
                             id: format!("command:{}", spec.id),
                             kind: PaletteResultKind::Command,
                             title: spec.title.to_string(),
-                            detail: Some(spec.detail.to_string()),
+                            detail: Some(detail),
                             shortcut_label: spec.shortcut_label.map(str::to_string),
                             path: None,
                             buffer_id,
@@ -19713,28 +19869,37 @@ impl AppComposition {
                                 .then_some(CommandDispatchIntent::CommitGitChanges { message })
                         }
                         "git-switch-branch" => {
-                            let branch =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            (!branch.is_empty())
-                                .then_some(CommandDispatchIntent::SwitchGitBranch { branch })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::Branch(branch))) => {
+                                    Some(CommandDispatchIntent::SwitchGitBranch { branch })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-create-branch" => {
-                            let branch =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            (!branch.is_empty())
-                                .then_some(CommandDispatchIntent::CreateGitBranch { branch })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::Branch(branch))) => {
+                                    Some(CommandDispatchIntent::CreateGitBranch { branch })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-delete-branch" => {
-                            let branch =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            (!branch.is_empty())
-                                .then_some(CommandDispatchIntent::DeleteGitBranch { branch })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::Branch(branch))) => {
+                                    Some(CommandDispatchIntent::DeleteGitBranch { branch })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-stash" => {
                             let message =
@@ -19747,27 +19912,30 @@ impl AppComposition {
                         }
                         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
                         "git-remove-worktree" => {
-                            let path =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            (!path.is_empty())
-                                .then_some(CommandDispatchIntent::RemoveGitWorktree { path })
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::WorktreePath(path))) => {
+                                    Some(CommandDispatchIntent::RemoveGitWorktree { path })
+                                }
+                                _ => None,
+                            }
                         }
                         "git-new-worktree" => {
-                            let body =
-                                palette_query_body(PaletteMode::Command, &self.palette.query)
-                                    .trim()
-                                    .to_string();
-                            let mut parts = body.splitn(2, ' ');
-                            let branch = parts.next().unwrap_or("").trim().to_string();
-                            let worktree_path = parts.next().unwrap_or("").trim().to_string();
-                            (!branch.is_empty() && !worktree_path.is_empty()).then_some(
-                                CommandDispatchIntent::CreateGitWorktree {
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::NewWorktree {
                                     branch,
                                     worktree_path,
-                                },
-                            )
+                                })) => Some(CommandDispatchIntent::CreateGitWorktree {
+                                    branch,
+                                    worktree_path,
+                                }),
+                                _ => None,
+                            }
                         }
                         "git-local-history" => {
                             let path = self
@@ -19783,6 +19951,17 @@ impl AppComposition {
                     })
             }
             PaletteResultKind::Search => {
+                if result.id.starts_with("search:match:") {
+                    return match (result.path.as_ref(), result.position) {
+                        (Some(path), Some(position)) => {
+                            Some(CommandDispatchIntent::OpenPathAtPosition {
+                                path: path.clone(),
+                                position,
+                            })
+                        }
+                        _ => None,
+                    };
+                }
                 let query = palette_query_body(PaletteMode::Search, &self.palette.query)
                     .trim()
                     .to_string();

@@ -65,7 +65,7 @@ impl DesktopSearchViewModel {
                     .file_path
                     .as_ref()
                     .map(|path| path.0.as_str())
-                    .unwrap_or("<active buffer>");
+                    .unwrap_or("Current file");
                 let truncated = if row.snippet_truncated {
                     " preview shortened"
                 } else {

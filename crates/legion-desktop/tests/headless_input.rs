@@ -314,7 +314,10 @@ fn headless_input_cmd_f_runs_search_through_real_egui_context() {
     open_search_via_palette(&mut app, "needle");
 
     let snapshot = app.runtime_snapshot();
-    assert!(!snapshot.palette_projection.open);
+    assert!(
+        snapshot.palette_projection.open,
+        "the search palette should stay open to host the result list"
+    );
     assert_eq!(
         snapshot.search_projection.status.kind,
         SearchStatusKindProjection::Completed,
@@ -324,6 +327,18 @@ fn headless_input_cmd_f_runs_search_through_real_egui_context() {
         snapshot.search_projection.results.len(),
         2,
         "the active-file search should return both matching rows"
+    );
+    assert_eq!(
+        snapshot.palette_projection.results.len(),
+        2,
+        "the completed matches should replace the synthetic Run row in the palette"
+    );
+    assert!(
+        snapshot
+            .palette_projection
+            .results
+            .iter()
+            .all(|result| result.id.starts_with("search:match:"))
     );
 }
 

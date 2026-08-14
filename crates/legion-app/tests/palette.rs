@@ -367,6 +367,120 @@ fn command_palette_never_selects_or_dispatches_an_unavailable_only_result() {
 }
 
 #[test]
+fn argument_dependent_git_commands_require_explicit_operands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    for (query, title, reason) in [
+        (
+            ">git switch branch",
+            "Git: Switch Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git create branch",
+            "Git: Create Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git delete branch",
+            "Git: Delete Branch",
+            "Enter a branch name",
+        ),
+        (
+            ">git remove worktree",
+            "Git: Remove Worktree",
+            "Enter a worktree path",
+        ),
+        (
+            ">git new worktree",
+            "Git: New Worktree",
+            "Enter a branch and worktree path",
+        ),
+    ] {
+        app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: query.to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("command palette should open");
+
+        let palette = app
+            .shell_projection_snapshot("git operands")
+            .expect("projection should build")
+            .palette_projection;
+        let result = palette
+            .results
+            .iter()
+            .find(|result| result.title == title)
+            .unwrap_or_else(|| panic!("{title} should remain searchable for `{query}`"));
+        assert_eq!(result.disabled_reason.as_deref(), Some(reason), "{query}");
+        assert_ne!(palette.selected_index, 0, "{query} must not be selected");
+    }
+}
+
+#[test]
+fn argument_dependent_git_commands_project_only_resolved_operands() {
+    let workspace = TempWorkspace::new();
+    let mut app = open_app(workspace.path(), None);
+
+    for (query, title, detail) in [
+        (
+            ">git switch branch feature/palette",
+            "Git: Switch Branch",
+            "Switch to branch ‘feature/palette’",
+        ),
+        (
+            ">git create branch feature/new",
+            "Git: Create Branch",
+            "Create and switch to branch ‘feature/new’",
+        ),
+        (
+            ">git delete branch feature/old",
+            "Git: Delete Branch",
+            "Delete branch ‘feature/old’",
+        ),
+        (
+            ">git remove worktree worktrees/old copy",
+            "Git: Remove Worktree",
+            "Remove worktree ‘worktrees/old copy’",
+        ),
+        (
+            ">git new worktree feature/wt worktrees/new copy",
+            "Git: New Worktree",
+            "Create worktree ‘worktrees/new copy’ from branch ‘feature/wt’",
+        ),
+    ] {
+        app.dispatch_ui_intent(CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: query.to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("command palette should open");
+
+        let palette = app
+            .shell_projection_snapshot("git operands")
+            .expect("projection should build")
+            .palette_projection;
+        let result = palette
+            .results
+            .iter()
+            .find(|result| result.title == title)
+            .unwrap_or_else(|| panic!("{title} should match `{query}`"));
+        assert_eq!(result.disabled_reason, None, "{query}");
+        assert_eq!(result.detail.as_deref(), Some(detail), "{query}");
+        assert_eq!(
+            palette
+                .results
+                .get(palette.selected_index)
+                .map(|row| &row.id),
+            Some(&result.id),
+            "the resolved command should be the available selection"
+        );
+    }
+}
+
+#[test]
 fn palette_dispatches_file_search_structural_and_command_results() {
     let workspace = TempWorkspace::new();
     let target = workspace.write("src/main.rs", "fn main() {\n    let needle = 1;\n}\n");

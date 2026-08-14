@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +38,15 @@ impl TempWorkspace {
     fn path(&self) -> &Path {
         &self.root
     }
+
+    fn write(&self, relative: &str, content: &str) -> PathBuf {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("temp parent should be created");
+        }
+        fs::write(&path, content).expect("temp file should be written");
+        path
+    }
 }
 
 impl Drop for TempWorkspace {
@@ -57,6 +67,58 @@ fn app() -> (TempWorkspace, DesktopEframeApp) {
     let app = DesktopEframeApp::new(runtime);
     app.headless_egui_context().enable_accesskit();
     (workspace, app)
+}
+
+fn app_with_workspace_files(files: &[(&str, &str)]) -> (TempWorkspace, DesktopEframeApp) {
+    let workspace = TempWorkspace::new();
+    for (path, content) in files {
+        workspace.write(path, content);
+    }
+    let runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        workspace.path().to_path_buf(),
+        None,
+    ))
+    .expect("desktop runtime should open workspace files");
+    let app = DesktopEframeApp::new(runtime);
+    app.headless_egui_context().enable_accesskit();
+    (workspace, app)
+}
+
+fn git_app() -> (TempWorkspace, DesktopEframeApp) {
+    let workspace = TempWorkspace::new();
+    run_git(workspace.path(), &["init"]);
+    run_git(workspace.path(), &["branch", "-M", "main"]);
+    run_git(
+        workspace.path(),
+        &["config", "user.email", "legion@example.test"],
+    );
+    run_git(workspace.path(), &["config", "user.name", "Legion Test"]);
+    workspace.write("README.md", "palette confirmation\n");
+    run_git(workspace.path(), &["add", "."]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    let runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        workspace.path().to_path_buf(),
+        None,
+    ))
+    .expect("desktop runtime should open git workspace");
+    let app = DesktopEframeApp::new(runtime);
+    app.headless_egui_context().enable_accesskit();
+    (workspace, app)
+}
+
+fn run_git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn input(events: Vec<egui::Event>) -> egui::RawInput {
@@ -109,6 +171,43 @@ fn press_enter() -> egui::RawInput {
         repeat: false,
         modifiers: egui::Modifiers::default(),
     }])
+}
+
+fn press_arrow_down() -> egui::RawInput {
+    input(vec![egui::Event::Key {
+        key: egui::Key::ArrowDown,
+        physical_key: Some(egui::Key::ArrowDown),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }])
+}
+
+fn click_accessible_control(
+    app: &mut DesktopEframeApp,
+    output: &egui::FullOutput,
+    label: &str,
+) -> egui::FullOutput {
+    let target = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("frame should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("frame should expose clickable `{label}`"));
+    app.run_headless_input(input(vec![egui::Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Click,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
+        },
+    )]))
 }
 
 #[test]
@@ -198,6 +297,57 @@ fn destructive_palette_command_requires_confirmation_before_dispatch() {
 }
 
 #[test]
+fn git_command_confirmation_shows_resolved_target_and_cancel_does_not_dispatch() {
+    let (workspace, mut app) = git_app();
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git create branch feature/cancelled".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("Git command should remain searchable with an operand");
+
+    let output = app.run_headless_input(press_enter());
+    assert!(accesskit_has_label(
+        &output,
+        "Create and switch to branch ‘feature/cancelled’"
+    ));
+    let _cancelled = click_accessible_control(&mut app, &output, "Cancel");
+
+    assert!(app.runtime_snapshot().palette_projection.open);
+    assert_eq!(
+        run_git(workspace.path(), &["branch", "--show-current"]),
+        "main"
+    );
+    assert!(run_git(workspace.path(), &["branch", "--list", "feature/cancelled"]).is_empty());
+}
+
+#[test]
+fn git_command_confirmation_dispatches_the_resolved_operand() {
+    let (workspace, mut app) = git_app();
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: ">git create branch feature/confirmed".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("Git command should remain searchable with an operand");
+
+    let output = app.run_headless_input(press_enter());
+    assert!(accesskit_has_label(
+        &output,
+        "Create and switch to branch ‘feature/confirmed’"
+    ));
+    let _confirmed = click_accessible_control(&mut app, &output, "Confirm");
+
+    assert_eq!(
+        run_git(workspace.path(), &["branch", "--show-current"]),
+        "feature/confirmed",
+        "confirmation status: {:?}",
+        app.runtime_snapshot().status_messages
+    );
+    assert!(!app.runtime_snapshot().palette_projection.open);
+}
+
+#[test]
 fn search_palette_shell_explains_empty_query_and_keyboard_controls() {
     let (_workspace, mut app) = app();
     app.handle_action(DesktopAction::OpenPalette {
@@ -253,4 +403,102 @@ fn search_palette_shell_presents_a_runnable_result() {
             .all(|row| !row.contains("lexical")),
         "Search should use user-recognizable terms"
     );
+}
+
+#[test]
+fn search_palette_keeps_all_matches_in_one_scrollable_result_list() {
+    let files = [
+        ("result-0.txt", "needle-0\n"),
+        ("result-1.txt", "needle-1\n"),
+        ("result-2.txt", "needle-2\n"),
+        ("result-3.txt", "needle-3\n"),
+        ("result-4.txt", "needle-4\n"),
+        ("result-5.txt", "needle-5\n"),
+        ("result-6.txt", "needle-6\n"),
+        ("result-7.txt", "needle-7\n"),
+        ("result-8.txt", "needle-8\n"),
+        ("result-9.txt", "needle-9\n"),
+        ("result-10.txt", "needle-10\n"),
+        ("result-11.txt", "needle-11\n"),
+    ];
+    let (_workspace, mut app) = app_with_workspace_files(&files);
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/needle".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("search palette should open");
+
+    let output = app.run_headless_input(press_enter());
+    let snapshot = app.runtime_snapshot();
+    assert!(snapshot.palette_projection.open);
+    assert_eq!(snapshot.palette_projection.results.len(), 12);
+    assert_eq!(snapshot.palette_projection.selected_index, 0);
+    let text = accesskit_text(&output);
+    assert!(
+        accesskit_has_label(&output, "12 matches in the workspace for \"needle\" [Cc]"),
+        "palette text: {text:?}"
+    );
+    for index in 0..12 {
+        let snippet = format!("needle-{index}\n");
+        assert_eq!(
+            text.iter().filter(|row| row.contains(&snippet)).count(),
+            1,
+            "{snippet} must appear once in the palette and nowhere in a second results panel: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn search_palette_keyboard_navigation_moves_between_matches() {
+    let files = [
+        ("alpha.txt", "needle alpha\n"),
+        ("beta.txt", "needle beta\n"),
+        ("gamma.txt", "needle gamma\n"),
+    ];
+    let (_workspace, mut app) = app_with_workspace_files(&files);
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/needle".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("search palette should open");
+    app.run_headless_input(press_enter());
+
+    let output = app.run_headless_input(press_arrow_down());
+    let snapshot = app.runtime_snapshot();
+    assert_eq!(snapshot.palette_projection.selected_index, 1);
+    let selected_title = snapshot.palette_projection.results[1].title.clone();
+    assert!(accesskit_has_label(&output, &selected_title));
+    assert!(snapshot.palette_projection.open);
+}
+
+#[test]
+fn search_palette_renders_no_match_and_error_states_in_place() {
+    let (_workspace, mut app) = app_with_workspace_files(&[("alpha.txt", "present\n")]);
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Search,
+        query: "/missing".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("search palette should open");
+
+    let no_match = app.run_headless_input(press_enter());
+    assert!(app.runtime_snapshot().palette_projection.open);
+    assert!(accesskit_has_label(
+        &no_match,
+        "No matches. Try another term or search the active file."
+    ));
+    assert!(!accesskit_has_label(&no_match, "No search results"));
+
+    app.handle_action(DesktopAction::UpdatePaletteQuery {
+        query: "/regex:[".to_string(),
+    })
+    .expect("search query should update");
+    let error = app.run_headless_input(press_enter());
+    assert!(app.runtime_snapshot().palette_projection.open);
+    assert!(accesskit_has_label(
+        &error,
+        "Check the search term and try again."
+    ));
 }

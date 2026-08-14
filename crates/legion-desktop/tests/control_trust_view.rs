@@ -207,7 +207,7 @@ fn trust_details_render_privacy_egress_redaction_and_consent_rows() {
 }
 
 #[test]
-fn onboarding_rows_render_first_run_guidance_and_mode_tour() {
+fn onboarding_rows_use_the_same_single_four_item_setup_checklist() {
     let (_workspace, mut app) = app_with_open_file(WorkspaceTrustState::Trusted, "onboarding.rs");
     start_proposal(&mut app);
 
@@ -220,36 +220,44 @@ fn onboarding_rows_render_first_run_guidance_and_mode_tour() {
     };
     let model = DesktopProjectionViewModel::from_snapshot_with_state(&snapshot, &state);
 
-    assert!(
-        model
-            .onboarding_rows
-            .iter()
-            .any(|row| row.contains("workspace trust"))
+    assert_eq!(
+        model.onboarding_rows.len(),
+        4,
+        "{:?}",
+        model.onboarding_rows
     );
-    assert!(
-        model
-            .onboarding_rows
-            .iter()
-            .any(|row| row.contains("telemetry and crash consent"))
-    );
-    assert!(
-        model
-            .onboarding_rows
-            .iter()
-            .any(|row| row.contains("provider setup"))
-    );
-    assert!(
-        model
-            .onboarding_rows
-            .iter()
-            .any(|row| row.contains("keybinding scheme"))
-    );
-    assert!(
-        model
-            .onboarding_rows
-            .iter()
-            .any(|row| row.contains("mode switch tour"))
-    );
+    for item in [
+        "Step 1 · Open and trust a workspace",
+        "Step 2 · Optionally configure an AI provider",
+        "Step 3 · Review privacy and reporting",
+        "Step 4 · Learn Manual, Assist, Delegate, and Legion Workflows",
+    ] {
+        assert!(
+            model
+                .onboarding_rows
+                .iter()
+                .any(|row| row.starts_with(item)),
+            "onboarding projection is missing `{item}`: {:?}",
+            model.onboarding_rows
+        );
+    }
+    for obsolete in [
+        "telemetry",
+        "keybinding scheme",
+        "mode switch tour",
+        "model provider",
+        "local route",
+        "bring-your-own-key provider",
+    ] {
+        assert!(
+            model
+                .onboarding_rows
+                .iter()
+                .all(|row| !row.contains(obsolete)),
+            "onboarding projection must not expose `{obsolete}`: {:?}",
+            model.onboarding_rows
+        );
+    }
 }
 
 #[test]

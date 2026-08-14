@@ -41,9 +41,9 @@ use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,
     AssistInlinePredictionRowProjection, AssistInlinePredictionStatusProjection, DockMode,
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection, PaletteMode,
-    PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection, SearchScopeProjection,
-    SearchStatusKindProjection, SearchStatusProjection, SettingsProjection, Shell,
-    StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
+    PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection, SearchResultProjection,
+    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
+    Shell, StatusMessageProjection, StatusSeverity, TOAST_VISIBLE_LIMIT, ThemePreferenceProjection,
     ToastVerbosityProjection,
 };
 
@@ -3167,6 +3167,38 @@ fn projection_rendering_provider_credentials_live_in_settings_ai_providers_secti
 }
 
 #[test]
+fn projection_rendering_empty_ai_providers_uses_plain_product_copy() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = Shell::empty("AI provider setup").projection_snapshot();
+
+    let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    let (_providers, _full) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "AI Providers");
+    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+
+    assert!(accesskit_has_label(&full, "No AI provider configured"));
+    assert!(accesskit_has_label(
+        &full,
+        "Choose an AI provider available on this computer or add an Anthropic API key."
+    ));
+    let settings_text = accesskit_dialog_text(&full, "Settings");
+    for internal in [
+        "model provider",
+        "local route",
+        "bring-your-own-key provider",
+    ] {
+        assert!(
+            settings_text.iter().all(|row| !row.contains(internal)),
+            "AI Providers must not expose `{internal}`: {settings_text:?}"
+        );
+    }
+}
+
+#[test]
 fn projection_rendering_delegate_feedback_does_not_send_unentered_copy() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
@@ -3476,7 +3508,7 @@ fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
     let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
     assert_eq!(
-        accesskit_label_count(&full, "Choose a model provider to enable predictions."),
+        accesskit_label_count(&full, "Choose an AI provider to enable predictions."),
         1
     );
     assert!(accesskit_has_clickable_label(&full, "Settings"));
@@ -4209,12 +4241,56 @@ fn projection_rendering_activity_copy_and_raw_diagnostics_are_separate_destinati
 }
 
 #[test]
-fn projection_rendering_search_surface_uses_useful_idle_and_no_match_states() {
+fn projection_rendering_does_not_duplicate_palette_search_results_in_fixed_panels() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let mut snapshot = populated_snapshot();
-    snapshot.search_projection = SearchProjection::idle();
+    snapshot.search_projection = SearchProjection {
+        query_id: Some("search:needle".to_string()),
+        scope: SearchScopeProjection::Workspace,
+        query_label: "needle".to_string(),
+        status: SearchStatusProjection {
+            kind: SearchStatusKindProjection::Completed,
+            message: "Search completed".to_string(),
+        },
+        results: vec![SearchResultProjection {
+            query_id: "search:needle".to_string(),
+            scope: SearchScopeProjection::Workspace,
+            workspace_id: None,
+            buffer_id: None,
+            file_id: None,
+            file_path: Some(CanonicalPath("src/search-only.txt".to_string())),
+            line_number: 0,
+            range: ProtocolTextRange {
+                start: TextCoordinate {
+                    line: 0,
+                    character: 0,
+                    byte_offset: Some(0),
+                    utf16_offset: Some(0),
+                },
+                end: TextCoordinate {
+                    line: 0,
+                    character: 6,
+                    byte_offset: Some(6),
+                    utf16_offset: Some(6),
+                },
+            },
+            snippet: "needle appears only in the palette".to_string(),
+            snippet_truncated: false,
+            stale: false,
+        }],
+        result_limit: 20,
+        omitted_result_count: 0,
+        omitted_file_count: 0,
+        skipped_binary_count: 0,
+        case_sensitive: false,
+        whole_word: false,
+        use_regex: false,
+        diagnostics: Vec::new(),
+        generated_at: TimestampMillis(1),
+        schema_version: 1,
+    };
 
     let (_initial, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     let search_bounds = accesskit_button_bounds_in_x_range(&full, "Search", 0.0..=46.0);
@@ -4229,38 +4305,18 @@ fn projection_rendering_search_surface_uses_useful_idle_and_no_match_states() {
         egui::vec2(1_440.0, 900.0),
     );
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(
-        &full,
-        "Enter a search term to find text in the active file."
-    ));
-    assert!(!accesskit_has_label(&full, "No search results"));
-
-    snapshot.search_projection = SearchProjection {
-        query_id: Some("search:none".to_string()),
-        scope: SearchScopeProjection::Workspace,
-        query_label: "missing".to_string(),
-        status: SearchStatusProjection {
-            kind: SearchStatusKindProjection::NoResults,
-            message: "No results".to_string(),
-        },
-        results: Vec::new(),
-        result_limit: 20,
-        omitted_result_count: 0,
-        omitted_file_count: 0,
-        skipped_binary_count: 0,
-        case_sensitive: false,
-        whole_word: false,
-        use_regex: false,
-        diagnostics: Vec::new(),
-        generated_at: TimestampMillis(1),
-        schema_version: 1,
-    };
-    let (_no_matches, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(
-        &full,
-        "No matches. Try another term or search the active file."
-    ));
-    assert!(!accesskit_has_label(&full, "No search results"));
+    assert!(
+        !accesskit_contains_text_in_x_range(
+            &full,
+            "needle appears only in the palette",
+            0.0..=1_440.0,
+        ),
+        "fixed editor/sidebar panels must not duplicate palette results"
+    );
+    assert!(
+        !accesskit_has_label(&full, "Search finished."),
+        "search status belongs in the palette shell"
+    );
 }
 
 #[test]

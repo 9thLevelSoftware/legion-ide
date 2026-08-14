@@ -34,8 +34,8 @@ use legion_storage::{
 };
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
-    SearchScopeProjection, SettingsProjection, Shell, ShellProjectionSnapshot,
-    StatusMessageProjection, StatusSeverity,
+    SearchScopeProjection, SearchStatusKindProjection, SettingsProjection, Shell,
+    ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -3402,6 +3402,7 @@ pub struct DesktopEframeApp {
 struct PendingPaletteConfirmation {
     result_id: String,
     title: String,
+    target_detail: String,
 }
 
 impl DesktopEframeApp {
@@ -3847,6 +3848,12 @@ impl DesktopEframeApp {
         let width = screen.width().clamp(320.0, 760.0);
         let pos = egui::pos2(screen.center().x - width / 2.0, screen.top() + 72.0);
         let grouped_result_indices = palette_grouped_result_indices(palette);
+        let search_model = (palette.mode == PaletteMode::Search).then(|| {
+            crate::search::DesktopSearchViewModel::from_projection(&snapshot.search_projection)
+        });
+        let current_search = search_model.as_ref().is_some_and(|_| {
+            palette_search_projection_is_current(palette, &snapshot.search_projection)
+        });
         let mut dispatch_requested = false;
         egui::Area::new("command_palette_overlay".into())
             .order(egui::Order::Foreground)
@@ -3888,14 +3895,15 @@ impl DesktopEframeApp {
                         }
 
                         ui.add_space(10.0);
+                        if current_search && let Some(search) = &search_model {
+                            ui.label(theme::body_strong(&search.header));
+                            ui.add_space(4.0);
+                        }
                         let empty_search = palette.mode == PaletteMode::Search
-                            && palette
-                                .results
-                                .iter()
-                                .all(|result| result.disabled_reason.is_some());
+                            && palette_search_query(palette).is_empty();
                         if empty_search {
                             ui.label(theme::muted(search_palette_empty_state(palette.scope)));
-                        } else if palette.results.is_empty() {
+                        } else if palette.results.is_empty() && !current_search {
                             ui.label(theme::muted(command_palette_empty_state(palette)));
                         } else {
                             let row_height = 34.0;
@@ -3904,6 +3912,23 @@ impl DesktopEframeApp {
                                 .max_height(420.0)
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
+                                    if current_search && let Some(search) = &search_model {
+                                        for status in &search.status_rows {
+                                            ui.label(theme::muted(status));
+                                        }
+                                        if let Some(empty_state) = &search.empty_state {
+                                            ui.label(theme::muted(empty_state));
+                                        }
+                                        for diagnostic in &search.diagnostic_rows {
+                                            ui.label(theme::muted(diagnostic));
+                                        }
+                                        if !search.status_rows.is_empty()
+                                            || search.empty_state.is_some()
+                                            || !search.diagnostic_rows.is_empty()
+                                        {
+                                            ui.add_space(4.0);
+                                        }
+                                    }
                                     let mut previous_group = None;
                                     for index in grouped_result_indices.iter().copied() {
                                         let result = &palette.results[index];
@@ -3937,6 +3962,7 @@ impl DesktopEframeApp {
                                                 egui::CornerRadius::same(6),
                                                 tokens.bg.active,
                                             );
+                                            row_response.scroll_to_me(Some(egui::Align::Center));
                                         }
                                         let mut row_ui = ui.new_child(
                                             egui::UiBuilder::new().max_rect(row_rect).layout(
@@ -4002,6 +4028,7 @@ impl DesktopEframeApp {
             self.pending_palette_confirmation = Some(PendingPaletteConfirmation {
                 result_id: result.id.clone(),
                 title: result.title.clone(),
+                target_detail: result.detail.clone().unwrap_or_default(),
             });
             return;
         }
@@ -4023,9 +4050,13 @@ impl DesktopEframeApp {
                 node.set_modal();
             });
             ui.label(theme::title(&title));
-            ui.label(theme::muted(
-                "Review this command before it changes workspace or application state.",
-            ));
+            if pending.target_detail.is_empty() {
+                ui.label(theme::muted(
+                    "Review this command before it changes workspace or application state.",
+                ));
+            } else {
+                ui.label(theme::body_strong(&pending.target_detail));
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Confirm").clicked() {
@@ -4046,7 +4077,9 @@ impl DesktopEframeApp {
                 .results
                 .get(snapshot.palette_projection.selected_index)
                 .is_some_and(|result| {
-                    result.id == pending.result_id && result.disabled_reason.is_none()
+                    result.id == pending.result_id
+                        && result.detail.as_deref() == Some(pending.target_detail.as_str())
+                        && result.disabled_reason.is_none()
                 });
             self.pending_palette_confirmation = None;
             if selected_still_matches {
@@ -4060,6 +4093,9 @@ impl DesktopEframeApp {
 }
 
 fn palette_grouped_result_indices(palette: &legion_ui::PaletteProjection) -> Vec<usize> {
+    if palette.mode == PaletteMode::Search {
+        return (0..palette.results.len()).collect();
+    }
     if palette.mode != PaletteMode::Command {
         let visible_start =
             palette_visible_result_start(palette.results.len(), palette.selected_index);
@@ -4080,6 +4116,28 @@ fn palette_grouped_result_indices(palette: &legion_ui::PaletteProjection) -> Vec
                 })
         })
         .collect()
+}
+
+fn palette_search_query(palette: &legion_ui::PaletteProjection) -> &str {
+    palette
+        .query
+        .strip_prefix(PaletteMode::Search.prefix().unwrap_or('/'))
+        .unwrap_or(&palette.query)
+        .trim()
+}
+
+fn palette_search_projection_is_current(
+    palette: &legion_ui::PaletteProjection,
+    search: &legion_ui::SearchProjection,
+) -> bool {
+    palette.mode == PaletteMode::Search
+        && !palette_search_query(palette).is_empty()
+        && palette_search_query(palette) == search.query_label
+        && (search.status.kind == SearchStatusKindProjection::Running
+            || palette
+                .results
+                .first()
+                .is_none_or(|result| result.id != "search:run"))
 }
 
 fn palette_command_requires_confirmation(result_id: &str) -> bool {
@@ -4845,6 +4903,55 @@ mod tests {
     use super::*;
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn running_search_replaces_the_synthetic_run_row_in_the_palette() {
+        let palette = legion_ui::PaletteProjection {
+            open: true,
+            mode: PaletteMode::Search,
+            query: "/needle".to_string(),
+            scope: SearchScopeProjection::Workspace,
+            selected_index: 0,
+            results: vec![legion_ui::PaletteResult {
+                id: "search:run".to_string(),
+                kind: legion_ui::PaletteResultKind::Search,
+                title: "Search workspace for \"needle\"".to_string(),
+                detail: Some("Find matching text".to_string()),
+                shortcut_label: Some("Enter".to_string()),
+                path: None,
+                buffer_id: None,
+                position: None,
+                match_indices: Vec::new(),
+                disabled_reason: None,
+            }],
+        };
+        let search = legion_ui::SearchProjection {
+            query_id: Some("search:running".to_string()),
+            scope: SearchScopeProjection::Workspace,
+            query_label: "needle".to_string(),
+            status: legion_ui::SearchStatusProjection {
+                kind: SearchStatusKindProjection::Running,
+                message: "Search running".to_string(),
+            },
+            results: Vec::new(),
+            result_limit: 20,
+            omitted_result_count: 0,
+            omitted_file_count: 0,
+            skipped_binary_count: 0,
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: false,
+            diagnostics: Vec::new(),
+            generated_at: legion_protocol::TimestampMillis(1),
+            schema_version: 1,
+        };
+
+        assert!(palette_search_projection_is_current(&palette, &search));
+        assert_eq!(
+            crate::search::DesktopSearchViewModel::from_projection(&search).status_rows,
+            vec!["Searching…"]
+        );
+    }
 
     #[test]
     fn repeated_single_definition_responses_are_distinguished_by_operation() {
