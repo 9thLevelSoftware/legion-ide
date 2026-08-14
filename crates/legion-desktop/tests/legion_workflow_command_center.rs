@@ -798,8 +798,27 @@ fn legion_workflow_board_cards_in_the_same_column_have_distinct_safe_ordinals() 
             .collect::<Vec<_>>(),
         vec!["Workflow 1", "Workflow 2"]
     );
+    let projected_in_progress = columns
+        .iter()
+        .find(|column| column.kind == LegionWorkflowBoardColumnKind::InProgress)
+        .expect("projected in-progress column should exist");
+    assert_eq!(
+        in_progress
+            .rows
+            .iter()
+            .map(|row| row.summary_label.as_str())
+            .collect::<Vec<_>>(),
+        projected_in_progress
+            .rows
+            .iter()
+            .map(|row| row.summary_label.as_str())
+            .collect::<Vec<_>>(),
+        "the board card body should remain projection-driven"
+    );
     assert!(in_progress.rows.iter().all(|row| {
-        !row.task_label.contains("session:") && !row.summary_label.contains("session:")
+        !row.task_label.contains("session:")
+            && !row.summary_label.contains("session:")
+            && !row.summary_label.contains('=')
     }));
 }
 

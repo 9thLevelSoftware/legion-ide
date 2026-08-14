@@ -4512,6 +4512,8 @@ fn projection_rendering_bottom_tabs_are_state_authoritative_and_activity_is_mode
     );
 
     snapshot.product_mode = DockMode::Assist;
+    state.product_ai_stream_label = "assistant/review".to_string();
+    state.product_ai_stream_chunks = vec!["PRIVATE_ASSISTANT_RESPONSE".to_string()];
     let (assist, next) = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
     full = next;
     assert_eq!(
@@ -4529,6 +4531,11 @@ fn projection_rendering_bottom_tabs_are_state_authoritative_and_activity_is_mode
     );
     state.selected_bottom_panel = agent_click_frame.selected_bottom_panel;
     assert!(accesskit_has_label(&full, "Activity"));
+    assert!(accesskit_contains_text_in_x_range(
+        &full,
+        "PRIVATE_ASSISTANT_RESPONSE",
+        294.0..=1_115.0
+    ));
     assert!(
         agent_click_frame
             .bottom_tab_rows
@@ -4552,6 +4559,10 @@ fn projection_rendering_bottom_tabs_are_state_authoritative_and_activity_is_mode
     );
     assert!(accesskit_has_label(&full, "ACTIVITY"));
     assert!(accesskit_has_label(&full, "Activity"));
+    assert!(
+        !accesskit_contains_text_in_x_range(&full, "PRIVATE_ASSISTANT_RESPONSE", 294.0..=1_115.0),
+        "Manual Activity must not reveal prior assistant response bodies"
+    );
     assert!(!accesskit_has_label(&full, "Terminal / Runtime"));
     assert!(
         manual_frame

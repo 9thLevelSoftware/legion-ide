@@ -6856,7 +6856,9 @@ fn render_activity_stream(
 ) {
     section_label(ui, "Activity", Some(theme::tokens().accent.violet));
     theme::code_frame().show(ui, |ui| {
-        if !model.product_ai_stream_label.is_empty() {
+        if projected_product_mode(snapshot) != DesktopProductMode::Manual
+            && !model.product_ai_stream_label.is_empty()
+        {
             ui.label(theme::code_muted(format!(
                 "Assistant response · {}{}{}",
                 model.product_ai_stream_label,

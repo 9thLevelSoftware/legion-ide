@@ -115,4 +115,9 @@ fn workflow_board_columns_are_grouped_by_coordinator_state() {
             | LegionWorkflowState::Failed
             | LegionWorkflowState::Cancelled
     )));
+    assert!(columns.iter().flat_map(|column| &column.rows).all(|row| {
+        row.summary_label.contains("worker")
+            && !row.summary_label.contains("session:")
+            && !row.summary_label.contains('=')
+    }));
 }

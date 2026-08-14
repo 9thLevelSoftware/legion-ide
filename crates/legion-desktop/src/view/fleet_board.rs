@@ -54,7 +54,7 @@ fn fleet_board_row_view_model(
     DesktopFleetBoardRowViewModel {
         task_label: format!("Workflow {workflow_ordinal}"),
         state_label: row.state_label.clone(),
-        summary_label: "Open the inspector for workflow details.".to_string(),
+        summary_label: row.summary_label.clone(),
     }
 }
 
