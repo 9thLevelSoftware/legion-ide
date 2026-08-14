@@ -353,19 +353,14 @@ struct EditorBufferState {
 }
 
 impl EditorBufferState {
-    fn new(
+    fn build(
         workspace_id: WorkspaceId,
         buffer_id: BufferId,
         file_id: FileId,
         file_path: impl Into<String>,
-        initial_text: impl Into<String>,
+        mut buffer: TextBuffer,
         mode: BufferMode,
     ) -> Result<Self, EditorError> {
-        let mut buffer = TextBuffer::try_with_version_and_cache_policy(
-            initial_text.into(),
-            BufferVersion(0),
-            matches!(mode, BufferMode::Normal),
-        )?;
         buffer.set_version(BufferVersion(0));
         let current_snapshot =
             buffer.try_snapshot_with_retention(RetentionPinReason::CurrentBuffer)?;
@@ -633,12 +628,104 @@ impl EditorEngine {
             });
         }
         let mode = self.mode_for_byte_len(initial_text.len());
-        let state = EditorBufferState::new(
+        let buffer = TextBuffer::try_with_version_and_cache_policy(
+            initial_text,
+            BufferVersion(0),
+            matches!(mode, BufferMode::Normal),
+        )?;
+        let state =
+            EditorBufferState::build(workspace_id, buffer_id, file_id, file_path, buffer, mode)?;
+        self.retain_snapshot_descriptor(buffer_id, state.current_snapshot.descriptor());
+        self.file_to_buffer
+            .insert((workspace_id, file_id), buffer_id);
+        self.buffers.insert(buffer_id, state);
+        Ok(buffer_id)
+    }
+
+    /// Open a buffer by streaming from a file path, avoiding a full `String` intermediate.
+    ///
+    /// This is the preferred open path for large files. The rope is built incrementally via
+    /// [`Rope::from_reader`](ropey::Rope::from_reader) which reads through a
+    /// [`BufReader`](std::io::BufReader) without ever allocating the entire file as a
+    /// contiguous `String`. Binary detection is performed by reading the first 8 KiB of the
+    /// file before building the rope, consistent with the NUL-byte heuristic used by `git`.
+    pub fn open_buffer_streaming(
+        &mut self,
+        workspace_id: WorkspaceId,
+        file_id: FileId,
+        file_path: impl Into<String>,
+        disk_path: &std::path::Path,
+    ) -> Result<BufferId, EditorError> {
+        if self.file_to_buffer.contains_key(&(workspace_id, file_id)) {
+            return Err(EditorError::FileAlreadyOpen(file_id));
+        }
+        let file_path_str = file_path.into();
+
+        // Open the file once and reuse the handle for header, metadata, and rope building.
+        let mut file = std::fs::File::open(disk_path).map_err(|e| {
+            EditorError::Text(legion_text::TextError::Io {
+                kind: e.kind(),
+                message: e.to_string(),
+            })
+        })?;
+
+        // Read the first 8 KiB for binary detection.
+        let header = {
+            let mut buf = vec![0u8; legion_text::binary::BINARY_DETECTION_WINDOW_BYTES];
+            let n = std::io::Read::read(&mut file, &mut buf).map_err(|e| {
+                EditorError::Text(legion_text::TextError::Io {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                })
+            })?;
+            buf.truncate(n);
+            buf
+        };
+
+        if let legion_text::BinaryDetectionResult::Binary { first_nul_offset } =
+            legion_text::detect_binary(&header)
+        {
+            return Err(EditorError::BinaryFileRefused {
+                path: file_path_str,
+                nul_offset: first_nul_offset,
+            });
+        }
+
+        // Get byte length from the same file handle's metadata.
+        let byte_len = file
+            .metadata()
+            .map_err(|e| {
+                EditorError::Text(legion_text::TextError::Io {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                })
+            })?
+            .len() as usize;
+        let mode = self.mode_for_byte_len(byte_len);
+
+        // Seek back to start and build the rope from the same handle.
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(0)).map_err(|e| {
+            EditorError::Text(legion_text::TextError::Io {
+                kind: e.kind(),
+                message: e.to_string(),
+            })
+        })?;
+        let reader = std::io::BufReader::new(file);
+        let buffer = TextBuffer::from_reader_with_version_and_cache_policy(
+            reader,
+            BufferVersion(0),
+            matches!(mode, BufferMode::Normal),
+        )?;
+
+        let buffer_id = BufferId(self.next_buffer_id);
+        self.next_buffer_id += 1;
+
+        let state = EditorBufferState::build(
             workspace_id,
             buffer_id,
             file_id,
-            file_path,
-            initial_text,
+            file_path_str,
+            buffer,
             mode,
         )?;
         self.retain_snapshot_descriptor(buffer_id, state.current_snapshot.descriptor());

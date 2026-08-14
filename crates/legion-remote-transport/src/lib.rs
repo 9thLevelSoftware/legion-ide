@@ -1,3 +1,4 @@
+//! Substrate complete; product activation gated on PR-UI-001 (see ADR-0046).
 //! Deterministic and production-gated Phase 8 remote transport carriers.
 
 #![warn(missing_docs)]

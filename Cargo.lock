@@ -3987,6 +3987,7 @@ dependencies = [
  "legion-text",
  "quickcheck",
  "regex",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -4214,6 +4215,7 @@ dependencies = [
  "quickcheck",
  "ropey",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

@@ -998,6 +998,196 @@ pub fn apply_fail_on_budget_value_to_manual_measurement(
     }
 }
 
+/// Spawn the `legion-desktop --manual-perf` subprocess and collect a
+/// renderer-backed input-to-paint measurement.
+///
+/// 1. Clears any stale report file in `out_dir`.
+/// 2. Spawns `cargo run -p legion-desktop --release --no-default-features
+///    --features offline` with `--manual-perf` arguments.
+/// 3. Reads and parses the resulting `manual_renderer_perf.toml`.
+/// 4. Returns the parsed report as a [`SkeletonMeasurement`].
+///
+/// Errors are returned as a [`SkeletonMeasurement`] with `Skipped` or
+/// `Failed` status and a diagnostic message, never as a Rust `Err`.
+pub fn run_renderer_backed_manual_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+) -> SkeletonMeasurement {
+    let budgets = manual_renderer_budgets();
+    let manual_report_path = out_dir.join(MANUAL_RENDERER_PERF_REPORT_FILE);
+
+    // Clear stale report so a leftover from a previous run cannot be
+    // mistaken for this run's output.
+    match fs::remove_file(&manual_report_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return placeholder_manual_measurement(
+                SkeletonStatus::Failed,
+                format!(
+                    "renderer-backed Manual measurement failed: unable to clear stale report `{}`: {err}",
+                    manual_report_path.display()
+                ),
+            );
+        }
+    }
+
+    let sample_count = budgets.sample_count.to_string();
+    let output = std::process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "legion-desktop",
+            "--no-default-features",
+            "--features",
+            "offline",
+            "--",
+            "--manual-perf",
+            "--workspace",
+            ".",
+            "--file",
+            "Cargo.toml",
+            "--perf-report",
+        ])
+        .arg(&manual_report_path)
+        .args(["--perf-samples", &sample_count])
+        .output();
+
+    match output {
+        Err(err) => placeholder_manual_measurement(
+            SkeletonStatus::Skipped,
+            format!(
+                "renderer-backed Manual measurement blocked: unable to spawn cargo release/offline desktop subprocess: {err}"
+            ),
+        ),
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "perf harness: Manual renderer subprocess exited with status {}",
+                    output.status
+                );
+            }
+            match read_manual_renderer_perf_report(&manual_report_path) {
+                Ok(manual_report) => manual_renderer_perf_measurement(&manual_report),
+                Err(read_err) => {
+                    eprintln!("perf harness: {read_err}");
+                    let output_text = subprocess_output_text(&output);
+                    if !output.status.success() && manual_renderer_environment_blocked(&output_text)
+                    {
+                        placeholder_manual_measurement(
+                            SkeletonStatus::Skipped,
+                            format!(
+                                "renderer-backed Manual measurement blocked: {}",
+                                truncate_report_message(&output_text)
+                            ),
+                        )
+                    } else if !output.status.success() && manual_renderer_build_failed(&output_text)
+                    {
+                        placeholder_manual_measurement(
+                            SkeletonStatus::Skipped,
+                            format!(
+                                "renderer-backed Manual measurement skipped: desktop build failed{}",
+                                command_output_suffix(&output_text)
+                            ),
+                        )
+                    } else {
+                        placeholder_manual_measurement(
+                            SkeletonStatus::Failed,
+                            format!(
+                                "renderer-backed Manual measurement failed: {read_err}{}",
+                                command_output_suffix(&output_text)
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build a placeholder measurement for the renderer-backed manual skeleton
+/// when the subprocess cannot run or its report cannot be read.
+pub fn placeholder_manual_measurement(
+    status: SkeletonStatus,
+    message: String,
+) -> SkeletonMeasurement {
+    let budgets = manual_renderer_budgets();
+    SkeletonMeasurement {
+        name: "manual.renderer_input_to_paint".to_string(),
+        kind: SkeletonKind::RendererBackedManualInputToPaint,
+        fixture_bytes: 0,
+        sample_count: budgets.sample_count,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: budgets.keypress_p95_millis.max(budgets.scroll_p95_millis),
+        status,
+        message,
+    }
+}
+
+fn subprocess_output_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("stdout:\n{stdout}\nstderr:\n{stderr}")
+}
+
+fn truncate_report_message(message: &str) -> String {
+    let normalized = message.replace("\r\n", "\n");
+    let trimmed = normalized.trim();
+    const LIMIT: usize = 800;
+    if trimmed.chars().count() <= LIMIT {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(LIMIT).collect::<String>())
+    }
+}
+
+fn command_output_suffix(output_text: &str) -> String {
+    let output_text = truncate_report_message(output_text);
+    if output_text.is_empty() {
+        String::new()
+    } else {
+        format!("; subprocess output: {output_text}")
+    }
+}
+
+/// Returns `true` when `output_text` contains patterns characteristic of a
+/// Rust/Cargo build failure. A build failure means the renderer binary could
+/// not be compiled at all and the measurement should be classified as
+/// `Skipped` rather than `Failed`.
+pub fn manual_renderer_build_failed(output_text: &str) -> bool {
+    let lower = output_text.to_ascii_lowercase();
+    lower.contains("could not compile")
+        || lower.contains("error[e")
+        || lower.contains("aborting due to")
+}
+
+/// Returns `true` when the subprocess output suggests that the host
+/// environment lacks a renderer/display/GPU, making the manual measurement
+/// impossible (headless CI, remote runner without a display server, etc.).
+pub fn manual_renderer_environment_blocked(output_text: &str) -> bool {
+    let lower = output_text.to_ascii_lowercase();
+    let renderer_context = lower.contains("renderer")
+        || lower.contains("native")
+        || lower.contains("window")
+        || lower.contains("display")
+        || lower.contains("gpu");
+    let blocked_context = lower.contains("blocked")
+        || lower.contains("unavailable")
+        || lower.contains("not available")
+        || lower.contains("headless")
+        || lower.contains("display not set")
+        || lower.contains("no display")
+        || lower.contains("no available display")
+        || lower.contains("renderer unavailable")
+        || lower.contains("native window unavailable")
+        || lower.contains("gpu unavailable");
+    renderer_context && blocked_context
+}
+
 fn current_utc_rfc3339() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

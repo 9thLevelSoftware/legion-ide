@@ -6115,6 +6115,32 @@ pub struct CheckpointRollbackProjection {
 }
 
 // -----------------------------------------------------------------------------
+// Vim modal editing projection
+// -----------------------------------------------------------------------------
+
+/// Projection-only Vim editing mode state for status-bar rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VimModeProjection {
+    /// Whether Vim modal editing is enabled.
+    pub enabled: bool,
+    /// Current mode label (`"NORMAL"`, `"INSERT"`, `"VISUAL"`, `"V-LINE"`).
+    pub mode: String,
+    /// Display-safe pending key sequence (e.g. `"d"` when waiting for a motion).
+    pub pending_keys: String,
+}
+
+impl VimModeProjection {
+    /// Construct a disabled Vim mode projection.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            mode: String::new(),
+            pending_keys: String::new(),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Assisted-AI boundary contracts
 // -----------------------------------------------------------------------------
 
@@ -18000,6 +18026,43 @@ pub struct LspCodeActionResponse {
     pub correlation_id: CorrelationId,
     /// Actions.
     pub actions: Vec<LspCodeAction>,
+}
+
+/// Call-hierarchy item projected from an LSP `textDocument/prepareCallHierarchy` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspCallHierarchyItem {
+    /// Symbol name.
+    pub name: String,
+    /// LSP `SymbolKind` numeric value.
+    pub kind: u32,
+    /// Document URI containing this symbol.
+    pub uri: String,
+    /// Full range of the symbol.
+    pub range: ProtocolTextRange,
+    /// Selection range highlighting the symbol name.
+    pub selection_range: ProtocolTextRange,
+    /// Optional detail string (e.g. type signature or container name).
+    pub detail: Option<String>,
+    /// Opaque data preserved from the LSP server for subsequent requests.
+    pub data: Option<serde_json::Value>,
+}
+
+/// Incoming call projected from an LSP `callHierarchy/incomingCalls` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspCallHierarchyIncomingCall {
+    /// The caller item.
+    pub from: LspCallHierarchyItem,
+    /// Ranges within the caller where this symbol is called.
+    pub from_ranges: Vec<ProtocolTextRange>,
+}
+
+/// Outgoing call projected from an LSP `callHierarchy/outgoingCalls` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LspCallHierarchyOutgoingCall {
+    /// The callee item.
+    pub to: LspCallHierarchyItem,
+    /// Ranges within the current symbol where the callee is invoked.
+    pub from_ranges: Vec<ProtocolTextRange>,
 }
 
 // -----------------------------------------------------------------------------

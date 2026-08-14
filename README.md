@@ -2,7 +2,9 @@
 
 > **License notice:** This codebase is proprietary software. All rights reserved. The source in this repository is provided for internal development and review only; it is not open source, not OSI-licensed, and the workspace `publish` flag is `false` (see `Cargo.toml` `[workspace.package]`). Do not redistribute, sublicense, or treat the contents as permissively licensed. The governing terms are the repository's internal distribution agreement.
 
-Legion IDE is a control-first, AI-native Rust IDE substrate that keeps human authority, proposal review, and metadata-only evidence at the center of local and delegated development workflows.
+Legion IDE is a control-first, privacy-first native Rust IDE that keeps human authority at the center of every workflow — no forced AI, no hidden egress, no phone-home.
+
+**Privacy posture.** In Manual mode (the default), Legion makes zero network calls. AI features — Assist, Delegate, and Legion Workflows — are opt-in layers that each require explicit user activation. No feature re-enables itself after being disabled. When AI features are active, all workspace mutation is proposal-mediated: AI can suggest changes, but nothing is written without your approval.
 
 The current codebase is a Rust workspace that validates the core architecture for editor state, workspace mutation, projection-only UI, desktop rendering, local/hosted AI boundaries, workflow orchestration, and evidence gates.
 

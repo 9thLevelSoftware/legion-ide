@@ -202,6 +202,121 @@ fn scale_100mb_memory_ceiling() {
 }
 
 #[test]
+fn streaming_from_reader_matches_string_path_10mb() {
+    // Non-ignored smaller-scale test that validates the streaming constructor
+    // produces identical results to the String-based constructor.
+    let target_bytes = 10 * 1024 * 1024; // 10 MB
+    let text = {
+        let line_len = LINE_PATTERN.len();
+        let line_count = target_bytes / line_len;
+        let mut s = String::with_capacity(line_count * line_len);
+        for _ in 0..line_count {
+            s.push_str(LINE_PATTERN);
+        }
+        s
+    };
+    let text_len = text.len();
+
+    let t0 = Instant::now();
+    let string_buf =
+        TextBuffer::try_with_version(text.clone(), BufferVersion(0)).expect("string buffer");
+    let string_elapsed = t0.elapsed();
+
+    let t1 = Instant::now();
+    let reader_buf = TextBuffer::from_reader_with_version(
+        std::io::Cursor::new(text.as_bytes()),
+        BufferVersion(0),
+    )
+    .expect("reader buffer");
+    let reader_elapsed = t1.elapsed();
+
+    eprintln!(
+        "10MB text ({} bytes): string path {:?}, reader path {:?}",
+        text_len, string_elapsed, reader_elapsed
+    );
+
+    // Structural equivalence: identical line count, byte length, and chunk hashes.
+    assert_eq!(reader_buf.len(), string_buf.len());
+    assert_eq!(reader_buf.line_count(), string_buf.line_count());
+    assert_eq!(
+        reader_buf.chunk_descriptors().len(),
+        string_buf.chunk_descriptors().len(),
+        "chunk count mismatch"
+    );
+    for (r, s) in reader_buf
+        .chunk_descriptors()
+        .iter()
+        .zip(string_buf.chunk_descriptors().iter())
+    {
+        assert_eq!(
+            r.hash, s.hash,
+            "chunk hash mismatch at ordinal {}",
+            r.ordinal
+        );
+    }
+
+    // Both must be above the full-cache budget.
+    assert!(text_len > DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES);
+    assert!(matches!(
+        reader_buf.try_full_text(),
+        Err(TextError::FullCacheBudgetExceeded { .. })
+    ));
+}
+
+#[test]
+fn streaming_from_file_matches_string_path() {
+    let text = "hello\nworld\nstreaming from file\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("test_stream.txt");
+    std::fs::write(&file_path, text).expect("write test file");
+
+    let string_buf = TextBuffer::new(text);
+    let file_buf = TextBuffer::from_file(&file_path).expect("from_file");
+
+    assert_eq!(file_buf.text(), string_buf.text());
+    assert_eq!(file_buf.len(), string_buf.len());
+    assert_eq!(file_buf.line_count(), string_buf.line_count());
+    for (r, s) in file_buf
+        .chunk_descriptors()
+        .iter()
+        .zip(string_buf.chunk_descriptors().iter())
+    {
+        assert_eq!(r.hash, s.hash);
+    }
+}
+
+#[test]
+#[ignore = "100MB scale test - run with: cargo test -p legion-text --test large_scale_100mb -- --ignored"]
+fn scale_100mb_streaming_from_reader() {
+    let text = generate_100mb_text();
+    let text_len = text.len();
+
+    let t0 = Instant::now();
+    let buf = TextBuffer::from_reader_with_version(
+        std::io::Cursor::new(text.as_bytes()),
+        BufferVersion(0),
+    )
+    .expect("streaming buffer creation should succeed");
+    let elapsed = t0.elapsed();
+    eprintln!(
+        "Streaming 100MB buffer creation: {:?} for {} bytes",
+        elapsed, text_len
+    );
+
+    assert!(
+        elapsed.as_secs() < 10,
+        "streaming buffer creation took {:?}, expected < 10s",
+        elapsed
+    );
+    assert_eq!(buf.len(), text_len);
+    assert!(buf.line_count() > 2_000_000);
+    assert!(matches!(
+        buf.try_full_text(),
+        Err(TextError::FullCacheBudgetExceeded { .. })
+    ));
+}
+
+#[test]
 #[ignore = "100MB scale test - run with: cargo test -p legion-text --test large_scale_100mb -- --ignored"]
 fn scale_100mb_snapshot_creation_and_chunk_iteration() {
     let text = generate_100mb_text();

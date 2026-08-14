@@ -578,6 +578,14 @@ pub enum TextError {
         /// Actual materialized text length in bytes.
         actual: usize,
     },
+    /// I/O error during text buffer operations, preserving the error kind.
+    #[error("text I/O error ({kind:?}): {message}")]
+    Io {
+        /// The category of I/O error.
+        kind: std::io::ErrorKind,
+        /// Human-readable error description.
+        message: String,
+    },
 }
 
 /// Result type for text model operations.
@@ -1100,6 +1108,69 @@ impl TextBuffer {
         allow_full_cache: bool,
     ) -> TextResult<Self> {
         Self::try_from_rope_with_cache_policy_and_text(rope, version, allow_full_cache, None)
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a reader, avoiding full-text `String` allocation.
+    ///
+    /// Uses [`Rope::from_reader`] to build the rope incrementally. This is the preferred
+    /// constructor for large files because the entire file is never materialized as a single
+    /// contiguous `String`.
+    pub fn from_reader<R: std::io::Read>(reader: R) -> TextResult<Self> {
+        Self::from_reader_with_version(reader, BufferVersion(0))
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a reader with an explicit buffer version.
+    pub fn from_reader_with_version<R: std::io::Read>(
+        reader: R,
+        version: BufferVersion,
+    ) -> TextResult<Self> {
+        Self::from_reader_with_version_and_cache_policy(reader, version, true)
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a reader with an explicit version and cache
+    /// policy.
+    pub fn from_reader_with_version_and_cache_policy<R: std::io::Read>(
+        reader: R,
+        version: BufferVersion,
+        allow_full_cache: bool,
+    ) -> TextResult<Self> {
+        let rope = Rope::from_reader(reader).map_err(|e| TextError::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        })?;
+        Self::try_from_rope_with_cache_policy(rope, version, allow_full_cache)
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a file path.
+    ///
+    /// Opens the file, wraps it in a [`std::io::BufReader`], and builds the rope incrementally
+    /// via [`Rope::from_reader`]. This eliminates the ~2x peak memory spike that occurs when
+    /// the entire file is first read into a `String` and then copied into a `Rope`.
+    pub fn from_file(path: &std::path::Path) -> TextResult<Self> {
+        Self::from_file_with_version(path, BufferVersion(0))
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a file path with an explicit buffer version.
+    pub fn from_file_with_version(
+        path: &std::path::Path,
+        version: BufferVersion,
+    ) -> TextResult<Self> {
+        Self::from_file_with_version_and_cache_policy(path, version, true)
+    }
+
+    /// Create a [`TextBuffer`] by streaming from a file path with an explicit version and cache
+    /// policy.
+    pub fn from_file_with_version_and_cache_policy(
+        path: &std::path::Path,
+        version: BufferVersion,
+        allow_full_cache: bool,
+    ) -> TextResult<Self> {
+        let file = std::fs::File::open(path).map_err(|e| TextError::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        })?;
+        let reader = std::io::BufReader::new(file);
+        Self::from_reader_with_version_and_cache_policy(reader, version, allow_full_cache)
     }
 
     fn try_from_rope_with_cache_policy_and_text(
@@ -2386,5 +2457,81 @@ mod tests {
     #[test]
     fn content_hash_has_expected_prefix() {
         assert!(content_hash("hello").starts_with("sha256:"));
+    }
+
+    #[test]
+    fn from_reader_matches_string_path_for_small_text() {
+        let text = "hello\nworld\n🦀 crabs\r\n";
+        let string_buf = TextBuffer::new(text);
+        let reader_buf = TextBuffer::from_reader(std::io::Cursor::new(text.as_bytes())).unwrap();
+
+        assert_eq!(reader_buf.text(), string_buf.text());
+        assert_eq!(reader_buf.len(), string_buf.len());
+        assert_eq!(reader_buf.line_count(), string_buf.line_count());
+        assert_eq!(
+            reader_buf.chunk_descriptors().len(),
+            string_buf.chunk_descriptors().len()
+        );
+        for (r, s) in reader_buf
+            .chunk_descriptors()
+            .iter()
+            .zip(string_buf.chunk_descriptors().iter())
+        {
+            assert_eq!(
+                r.hash, s.hash,
+                "chunk hash mismatch at ordinal {}",
+                r.ordinal
+            );
+        }
+    }
+
+    #[test]
+    fn from_reader_matches_string_path_for_over_budget_text() {
+        let text = "line\n".repeat(DEFAULT_FULL_CACHE_BYTE_BUDGET_BYTES / 4);
+        let string_buf = TextBuffer::new(text.clone());
+        let reader_buf = TextBuffer::from_reader(std::io::Cursor::new(text.as_bytes())).unwrap();
+
+        assert_eq!(reader_buf.len(), string_buf.len());
+        assert_eq!(reader_buf.line_count(), string_buf.line_count());
+        assert!(
+            matches!(
+                reader_buf.try_full_text(),
+                Err(TextError::FullCacheBudgetExceeded { .. })
+            ),
+            "streaming buffer must also exceed the full-cache budget"
+        );
+        assert_eq!(
+            reader_buf.chunk_descriptors().len(),
+            string_buf.chunk_descriptors().len()
+        );
+        for (r, s) in reader_buf
+            .chunk_descriptors()
+            .iter()
+            .zip(string_buf.chunk_descriptors().iter())
+        {
+            assert_eq!(
+                r.hash, s.hash,
+                "chunk hash mismatch at ordinal {}",
+                r.ordinal
+            );
+        }
+    }
+
+    #[test]
+    fn from_reader_io_error_propagates() {
+        struct FailReader;
+        impl std::io::Read for FailReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "test error",
+                ))
+            }
+        }
+        let result = TextBuffer::from_reader(FailReader);
+        assert!(
+            matches!(result, Err(TextError::Io { .. })),
+            "expected Io error, got: {result:?}"
+        );
     }
 }

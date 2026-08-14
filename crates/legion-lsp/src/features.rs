@@ -196,103 +196,6 @@ mod tests {
     }
 }
 
-/// Build a JSON-RPC `textDocument/rename` request.
-pub fn rename_request(
-    id: u64,
-    text_document_uri: &str,
-    position: &TextCoordinate,
-    new_name: &str,
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/rename",
-        "params": {
-            "textDocument": { "uri": text_document_uri },
-            "position": { "line": position.line, "character": position.character },
-            "newName": new_name
-        }
-    })
-}
-
-/// Build a JSON-RPC `textDocument/formatting` request.
-pub fn formatting_request(
-    id: u64,
-    text_document_uri: &str,
-    tab_size: u32,
-    insert_spaces: bool,
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/formatting",
-        "params": {
-            "textDocument": { "uri": text_document_uri },
-            "options": { "tabSize": tab_size, "insertSpaces": insert_spaces }
-        }
-    })
-}
-
-/// Build a JSON-RPC `textDocument/rangeFormatting` request.
-pub fn range_formatting_request(
-    id: u64,
-    text_document_uri: &str,
-    start: &TextCoordinate,
-    end: &TextCoordinate,
-    tab_size: u32,
-    insert_spaces: bool,
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/rangeFormatting",
-        "params": {
-            "textDocument": { "uri": text_document_uri },
-            "range": {
-                "start": { "line": start.line, "character": start.character },
-                "end": { "line": end.line, "character": end.character }
-            },
-            "options": { "tabSize": tab_size, "insertSpaces": insert_spaces }
-        }
-    })
-}
-
-/// Build a JSON-RPC `textDocument/codeAction` request.
-pub fn code_action_request(
-    id: u64,
-    text_document_uri: &str,
-    start: &TextCoordinate,
-    end: &TextCoordinate,
-    diagnostics: &[Value],
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/codeAction",
-        "params": {
-            "textDocument": { "uri": text_document_uri },
-            "range": {
-                "start": { "line": start.line, "character": start.character },
-                "end": { "line": end.line, "character": end.character }
-            },
-            "context": { "diagnostics": diagnostics }
-        }
-    })
-}
-
-/// Build a JSON-RPC `workspace/executeCommand` request for organize imports.
-pub fn organize_imports_request(id: u64, text_document_uri: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "workspace/executeCommand",
-        "params": {
-            "command": "organizeImports",
-            "arguments": [{ "uri": text_document_uri }]
-        }
-    })
-}
-
 /// Represents a workspace edit from an LSP response that should become a proposal.
 ///
 /// This is the bridge between LSP write-side responses and Legion's proposal
@@ -329,27 +232,65 @@ impl LspWorkspaceEditProposal {
     ///
     /// Returns `None` if the response doesn't contain a valid workspace edit.
     pub fn from_workspace_edit_json(edit: &Value, label: String) -> Option<Self> {
-        let changes = edit.get("changes")?;
         let mut file_edits = Vec::new();
-        for (uri, edits_json) in changes.as_object()? {
-            let edits = edits_json
-                .as_array()?
-                .iter()
-                .filter_map(|edit_json| {
-                    let range = edit_json.get("range")?;
-                    let new_text = edit_json.get("newText")?.as_str()?;
-                    Some(LspTextEdit {
-                        range: super::diagnostics::protocol_range_from_lsp_json(range)?,
-                        new_text: new_text.to_string(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            file_edits.push(LspFileEdit {
-                uri: uri.clone(),
-                edits,
-            });
+
+        // Try the `changes` field first (Map<URI, TextEdit[]>).
+        if let Some(changes) = edit.get("changes").and_then(Value::as_object) {
+            for (uri, edits_json) in changes {
+                if let Some(edits_arr) = edits_json.as_array() {
+                    let edits: Vec<LspTextEdit> = edits_arr
+                        .iter()
+                        .filter_map(Self::text_edit_from_json)
+                        .collect();
+                    if !edits.is_empty() {
+                        file_edits.push(LspFileEdit {
+                            uri: uri.clone(),
+                            edits,
+                        });
+                    }
+                }
+            }
         }
+
+        // Try documentChanges (TextDocumentEdit[]) when changes is absent or empty.
+        if file_edits.is_empty()
+            && let Some(doc_changes) = edit.get("documentChanges").and_then(Value::as_array)
+        {
+            for doc_change in doc_changes {
+                let uri = doc_change
+                    .get("textDocument")
+                    .and_then(|td| td.get("uri"))
+                    .and_then(Value::as_str);
+                let edits_array = doc_change.get("edits").and_then(Value::as_array);
+                if let (Some(uri), Some(edits_arr)) = (uri, edits_array) {
+                    let edits: Vec<LspTextEdit> = edits_arr
+                        .iter()
+                        .filter_map(Self::text_edit_from_json)
+                        .collect();
+                    if !edits.is_empty() {
+                        file_edits.push(LspFileEdit {
+                            uri: uri.to_string(),
+                            edits,
+                        });
+                    }
+                }
+            }
+        }
+
+        if file_edits.is_empty() {
+            return None;
+        }
+
         Some(LspWorkspaceEditProposal { label, file_edits })
+    }
+
+    fn text_edit_from_json(edit_json: &Value) -> Option<LspTextEdit> {
+        let range = edit_json.get("range")?;
+        let new_text = edit_json.get("newText")?.as_str()?;
+        Some(LspTextEdit {
+            range: super::diagnostics::protocol_range_from_lsp_json(range)?,
+            new_text: new_text.to_string(),
+        })
     }
 
     /// Returns the total number of edits across all files.
@@ -367,54 +308,6 @@ impl LspWorkspaceEditProposal {
 mod write_side_tests {
     use super::*;
     use serde_json::json;
-
-    fn coord(line: u32, character: u32) -> TextCoordinate {
-        TextCoordinate {
-            line,
-            character,
-            byte_offset: None,
-            utf16_offset: None,
-        }
-    }
-
-    #[test]
-    fn rename_request_has_correct_method_and_params() {
-        let request = rename_request(10, "file:///test.rs", &coord(5, 10), "new_name");
-        assert_eq!(request["method"], "textDocument/rename");
-        assert_eq!(request["id"], 10);
-        assert_eq!(request["params"]["newName"], "new_name");
-        assert_eq!(request["params"]["position"]["line"], 5);
-    }
-
-    #[test]
-    fn formatting_request_has_options() {
-        let request = formatting_request(11, "file:///test.rs", 4, true);
-        assert_eq!(request["method"], "textDocument/formatting");
-        assert_eq!(request["params"]["options"]["tabSize"], 4);
-        assert_eq!(request["params"]["options"]["insertSpaces"], true);
-    }
-
-    #[test]
-    fn code_action_request_includes_diagnostics() {
-        let diags = vec![json!({"severity": 1, "message": "error"})];
-        let request =
-            code_action_request(12, "file:///test.rs", &coord(0, 0), &coord(0, 10), &diags);
-        assert_eq!(request["method"], "textDocument/codeAction");
-        assert_eq!(
-            request["params"]["context"]["diagnostics"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn organize_imports_request_uses_execute_command() {
-        let request = organize_imports_request(13, "file:///test.rs");
-        assert_eq!(request["method"], "workspace/executeCommand");
-        assert_eq!(request["params"]["command"], "organizeImports");
-    }
 
     #[test]
     fn workspace_edit_proposal_parses_changes() {

@@ -1425,101 +1425,8 @@ fn append_manual_renderer_measurement(
     out_dir: &Path,
     report: &mut xtask::perf_harness::PerfReport,
 ) {
-    let manual_report_path = out_dir.join(xtask::perf_harness::MANUAL_RENDERER_PERF_REPORT_FILE);
-    match fs::remove_file(&manual_report_path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            report.skeletons.push(manual_renderer_placeholder_measurement(
-                xtask::perf_harness::SkeletonStatus::Failed,
-                format!(
-                    "renderer-backed Manual measurement failed: unable to clear stale report `{}`: {err}",
-                    manual_report_path.display()
-                ),
-            ));
-            report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
-            return;
-        }
-    }
-
-    let budgets = xtask::perf_harness::manual_renderer_budgets();
-    let sample_count = budgets.sample_count.to_string();
-    let output = process::Command::new("cargo")
-        .current_dir(workspace_root)
-        .args([
-            "run",
-            "--release",
-            "-p",
-            "legion-desktop",
-            "--no-default-features",
-            "--features",
-            "offline",
-            "--",
-            "--manual-perf",
-            "--workspace",
-            ".",
-            "--file",
-            "Cargo.toml",
-            "--perf-report",
-        ])
-        .arg(&manual_report_path)
-        .args(["--perf-samples", &sample_count])
-        .output();
-
-    let measurement = match output {
-        Err(err) => manual_renderer_placeholder_measurement(
-            xtask::perf_harness::SkeletonStatus::Skipped,
-            format!(
-                "renderer-backed Manual measurement blocked: unable to spawn cargo release/offline desktop subprocess: {err}"
-            ),
-        ),
-        Ok(output) => {
-            if !output.status.success() {
-                eprintln!(
-                    "perf harness: Manual renderer subprocess exited with status {}",
-                    output.status
-                );
-            }
-            match xtask::perf_harness::read_manual_renderer_perf_report(&manual_report_path) {
-                Ok(manual_report) => {
-                    xtask::perf_harness::manual_renderer_perf_measurement(&manual_report)
-                }
-                Err(read_err) => {
-                    eprintln!("perf harness: {read_err}");
-                    let output_text = process_output_text(&output);
-                    if !output.status.success() && manual_renderer_environment_blocked(&output_text)
-                    {
-                        manual_renderer_placeholder_measurement(
-                            xtask::perf_harness::SkeletonStatus::Skipped,
-                            format!(
-                                "renderer-backed Manual measurement blocked: {}",
-                                truncate_report_message(&output_text)
-                            ),
-                        )
-                    } else if !output.status.success() && manual_renderer_build_failed(&output_text)
-                    {
-                        manual_renderer_placeholder_measurement(
-                            xtask::perf_harness::SkeletonStatus::Skipped,
-                            format!(
-                                "renderer-backed Manual measurement skipped: desktop build failed{}",
-                                command_output_suffix(&output_text)
-                            ),
-                        )
-                    } else {
-                        manual_renderer_placeholder_measurement(
-                            xtask::perf_harness::SkeletonStatus::Failed,
-                            format!(
-                                "renderer-backed Manual measurement failed: {read_err}{}",
-                                command_output_suffix(&output_text)
-                            ),
-                        )
-                    }
-                }
-            }
-        }
-    };
-
-    let mut measurement = measurement;
+    let mut measurement =
+        xtask::perf_harness::run_renderer_backed_manual_measurement(workspace_root, out_dir);
     // The renderer measurement carries the desktop manual-perf report's own
     // budget verdict; apply the LEGION_PERF_FAIL_ON_BUDGET_MS override so
     // report-only CI legs (override 0) do not fail on shared-runner timing
@@ -1527,82 +1434,6 @@ fn append_manual_renderer_measurement(
     xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
     report.skeletons.push(measurement);
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
-}
-
-fn manual_renderer_placeholder_measurement(
-    status: xtask::perf_harness::SkeletonStatus,
-    message: String,
-) -> xtask::perf_harness::SkeletonMeasurement {
-    let budgets = xtask::perf_harness::manual_renderer_budgets();
-    xtask::perf_harness::SkeletonMeasurement {
-        name: "manual.renderer_input_to_paint".to_string(),
-        kind: xtask::perf_harness::SkeletonKind::RendererBackedManualInputToPaint,
-        fixture_bytes: 0,
-        sample_count: budgets.sample_count,
-        total_micros: 0,
-        p50_micros: 0,
-        p95_micros: 0,
-        budget_millis: budgets.keypress_p95_millis.max(budgets.scroll_p95_millis),
-        status,
-        message,
-    }
-}
-
-fn process_output_text(output: &process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    format!("stdout:\n{stdout}\nstderr:\n{stderr}")
-}
-
-fn command_output_suffix(output_text: &str) -> String {
-    let output_text = truncate_report_message(output_text);
-    if output_text.is_empty() {
-        String::new()
-    } else {
-        format!("; subprocess output: {output_text}")
-    }
-}
-
-fn truncate_report_message(message: &str) -> String {
-    let normalized = message.replace("\r\n", "\n");
-    let trimmed = normalized.trim();
-    const LIMIT: usize = 800;
-    if trimmed.chars().count() <= LIMIT {
-        trimmed.to_string()
-    } else {
-        format!("{}...", trimmed.chars().take(LIMIT).collect::<String>())
-    }
-}
-
-/// Returns `true` when `output_text` contains patterns that are characteristic
-/// of a Rust/Cargo build failure.  A build failure means the renderer binary
-/// could not be compiled at all — the measurement pre-condition was not met —
-/// and should be classified as `Skipped` rather than `Failed`.
-fn manual_renderer_build_failed(output_text: &str) -> bool {
-    let lower = output_text.to_ascii_lowercase();
-    lower.contains("could not compile")
-        || lower.contains("error[e")
-        || lower.contains("aborting due to")
-}
-
-fn manual_renderer_environment_blocked(output_text: &str) -> bool {
-    let lower = output_text.to_ascii_lowercase();
-    let renderer_context = lower.contains("renderer")
-        || lower.contains("native")
-        || lower.contains("window")
-        || lower.contains("display")
-        || lower.contains("gpu");
-    let blocked_context = lower.contains("blocked")
-        || lower.contains("unavailable")
-        || lower.contains("not available")
-        || lower.contains("headless")
-        || lower.contains("display not set")
-        || lower.contains("no display")
-        || lower.contains("no available display")
-        || lower.contains("renderer unavailable")
-        || lower.contains("native window unavailable")
-        || lower.contains("gpu unavailable");
-    renderer_context && blocked_context
 }
 
 fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
@@ -5571,28 +5402,30 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     fn manual_renderer_build_failed_detects_cargo_build_errors() {
         // "could not compile" — standard Cargo build-failure trailer
         assert!(
-            manual_renderer_build_failed(
+            xtask::perf_harness::manual_renderer_build_failed(
                 "error[E0599]: no method `foo`\ncould not compile `legion-desktop`"
             ),
             "must detect 'could not compile'"
         );
         // "error[E" — standard Rust compiler diagnostic code prefix
         assert!(
-            manual_renderer_build_failed("error[E0308]: mismatched types"),
+            xtask::perf_harness::manual_renderer_build_failed("error[E0308]: mismatched types"),
             "must detect 'error[E'"
         );
         // "aborting due to" — Rust compiler summary line
         assert!(
-            manual_renderer_build_failed("aborting due to 3 previous errors"),
+            xtask::perf_harness::manual_renderer_build_failed("aborting due to 3 previous errors"),
             "must detect 'aborting due to'"
         );
         // none of the above — should NOT be classified as a build failure
         assert!(
-            !manual_renderer_build_failed("Display not found: no display server available"),
+            !xtask::perf_harness::manual_renderer_build_failed(
+                "Display not found: no display server available"
+            ),
             "must not misclassify renderer-blocked output as a build failure"
         );
         assert!(
-            !manual_renderer_build_failed(""),
+            !xtask::perf_harness::manual_renderer_build_failed(""),
             "must not classify empty output as a build failure"
         );
     }
