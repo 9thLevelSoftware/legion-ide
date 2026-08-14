@@ -24,6 +24,7 @@ use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, ExplorerNodeProjection,
     ExplorerProjection, ExplorerSelectionProjection, SearchProjection, SearchResultProjection,
     SearchStatusProjection, Shell, StatusMessageProjection, StatusSeverity,
+    ThemePreferenceProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -106,6 +107,438 @@ fn render_projection(
     ctx.run_ui(desktop_raw_input(size, Vec::new()), |ui| {
         let _ = view.render(ui, snapshot);
     })
+}
+
+fn render_projection_input(
+    ctx: &egui::Context,
+    view: &mut ProjectionView,
+    snapshot: &legion_ui::ShellProjectionSnapshot,
+    size: egui::Vec2,
+    events: Vec<egui::Event>,
+    enabled: bool,
+) -> egui::FullOutput {
+    ctx.run_ui(desktop_raw_input(size, events), |ui| {
+        ui.add_enabled_ui(enabled, |ui| {
+            let _ = view.render(ui, snapshot);
+        });
+    })
+}
+
+fn accessible_button_bounds(output: &egui::FullOutput, label: &str) -> egui::Rect {
+    let bounds = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("rendered controls should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label) && node.role() == egui::accesskit::Role::Button)
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("rendered control `{label}` should have semantic bounds"));
+    egui::Rect::from_min_max(
+        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlPaintSignature {
+    rectangles: Vec<([u8; 4], [u8; 4], u32)>,
+}
+
+fn control_paint_signature(output: &egui::FullOutput, bounds: egui::Rect) -> ControlPaintSignature {
+    fn collect(
+        shape: &egui::Shape,
+        bounds: egui::Rect,
+        rectangles: &mut Vec<([u8; 4], [u8; 4], u32)>,
+    ) {
+        match shape {
+            egui::Shape::Rect(rect)
+                if rect.rect.center().distance(bounds.center()) <= 2.0
+                    && (rect.rect.width() - bounds.width()).abs() <= 8.0
+                    && (rect.rect.height() - bounds.height()).abs() <= 8.0 =>
+            {
+                rectangles.push((
+                    rect.fill.to_array(),
+                    rect.stroke.color.to_array(),
+                    rect.stroke.width.to_bits(),
+                ));
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, bounds, rectangles);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut rectangles = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, bounds, &mut rectangles);
+    }
+    assert!(
+        !rectangles.is_empty(),
+        "control at {bounds:?} should paint at least one frame rectangle"
+    );
+    rectangles.sort_unstable();
+    ControlPaintSignature { rectangles }
+}
+
+fn rendered_mode_control_signatures(
+    preference: ThemePreferenceProjection,
+) -> Vec<(&'static str, ControlPaintSignature)> {
+    let size = egui::vec2(1_440.0, 900.0);
+    let snapshot_for = |mode| {
+        let mut snapshot = Shell::empty("Control paint states").projection_snapshot();
+        snapshot.product_mode = mode;
+        snapshot.settings_projection.theme_preference = preference;
+        snapshot
+    };
+    let pointer_events = |pos, pressed| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    };
+
+    let mut signatures = Vec::new();
+
+    let snapshot = snapshot_for(legion_ui::DockMode::Manual);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let standard = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    let standard_bounds = accessible_button_bounds(&standard, "Assist");
+    signatures.push((
+        "standard",
+        control_paint_signature(&standard, standard_bounds),
+    ));
+
+    let selected_snapshot = snapshot_for(legion_ui::DockMode::Assist);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let selected =
+        render_projection_input(&ctx, &mut view, &selected_snapshot, size, Vec::new(), true);
+    signatures.push((
+        "selected",
+        control_paint_signature(&selected, accessible_button_bounds(&selected, "Assist")),
+    ));
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let primed = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    let assist_id = primed
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("mode switch should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| (node.label() == Some("Assist")).then_some(*id))
+        .expect("Assist should have an AccessKit id");
+    let _focused = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::AccessKitActionRequest(
+            egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Focus,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: assist_id,
+                data: None,
+            },
+        )],
+        true,
+    );
+    let focused = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    signatures.push((
+        "keyboard-focused",
+        control_paint_signature(&focused, accessible_button_bounds(&focused, "Assist")),
+    ));
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let primed = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    let pos = accessible_button_bounds(&primed, "Assist").center();
+    let _hover_started = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    let hovered = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    signatures.push((
+        "hovered",
+        control_paint_signature(&hovered, accessible_button_bounds(&hovered, "Assist")),
+    ));
+
+    let _press_started = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        pointer_events(pos, true),
+        true,
+    );
+    let pressed = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    signatures.push((
+        "pressed",
+        control_paint_signature(&pressed, accessible_button_bounds(&pressed, "Assist")),
+    ));
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let disabled = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), false);
+    signatures.push((
+        "disabled",
+        control_paint_signature(&disabled, accessible_button_bounds(&disabled, "Assist")),
+    ));
+
+    signatures
+}
+
+fn accesskit_button_id(output: &egui::FullOutput, label: &str) -> egui::accesskit::NodeId {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("rendered controls should expose AccessKit")
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.label() == Some(label) && node.role() == egui::accesskit::Role::Button)
+                .then_some(*id)
+        })
+        .unwrap_or_else(|| panic!("rendered control `{label}` should have an AccessKit id"))
+}
+
+fn focus_control_events(target_node: egui::accesskit::NodeId) -> Vec<egui::Event> {
+    vec![egui::Event::AccessKitActionRequest(
+        egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Focus,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node,
+            data: None,
+        },
+    )]
+}
+
+fn opened_mode_confirmation(
+    preference: ThemePreferenceProjection,
+) -> (
+    egui::Context,
+    ProjectionView,
+    legion_ui::ShellProjectionSnapshot,
+    egui::FullOutput,
+) {
+    let size = egui::vec2(1_440.0, 900.0);
+    let mut snapshot = Shell::empty("Confirmation paint states").projection_snapshot();
+    snapshot.settings_projection.theme_preference = preference;
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let primed = render_projection(&ctx, &mut view, &snapshot, size);
+    let opened = click_projection_control(&ctx, &mut view, &snapshot, &primed, "Delegate", size);
+    (ctx, view, snapshot, opened)
+}
+
+fn rendered_confirmation_control_signatures(
+    preference: ThemePreferenceProjection,
+) -> Vec<(&'static str, ControlPaintSignature)> {
+    let size = egui::vec2(1_440.0, 900.0);
+    let pointer_events = |pos, pressed| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    };
+    let mut signatures = Vec::new();
+
+    let (ctx, mut view, snapshot, opened) = opened_mode_confirmation(preference);
+    let cancel_id = accesskit_button_id(&opened, "Cancel");
+    let _cancel_focused = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        focus_control_events(cancel_id),
+        true,
+    );
+    let standard = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    signatures.push((
+        "standard",
+        control_paint_signature(&standard, accessible_button_bounds(&standard, "Confirm")),
+    ));
+
+    let confirm_id = accesskit_button_id(&standard, "Confirm");
+    let _confirm_focused = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        focus_control_events(confirm_id),
+        true,
+    );
+    let focused = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    signatures.push((
+        "keyboard-focused",
+        control_paint_signature(&focused, accessible_button_bounds(&focused, "Confirm")),
+    ));
+
+    let cancel_id = accesskit_button_id(&focused, "Cancel");
+    let _cancel_focused = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        focus_control_events(cancel_id),
+        true,
+    );
+    let unfocused = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), true);
+    let pos = accessible_button_bounds(&unfocused, "Confirm").center();
+    let _hover_started = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    let hovered = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    signatures.push((
+        "hovered",
+        control_paint_signature(&hovered, accessible_button_bounds(&hovered, "Confirm")),
+    ));
+
+    let _press_started = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        pointer_events(pos, true),
+        true,
+    );
+    let pressed = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        true,
+    );
+    signatures.push((
+        "pressed",
+        control_paint_signature(&pressed, accessible_button_bounds(&pressed, "Confirm")),
+    ));
+
+    let (ctx, mut view, snapshot, opened) = opened_mode_confirmation(preference);
+    let cancel_id = accesskit_button_id(&opened, "Cancel");
+    let _cancel_focused = render_projection_input(
+        &ctx,
+        &mut view,
+        &snapshot,
+        size,
+        focus_control_events(cancel_id),
+        true,
+    );
+    let _disabled_started =
+        render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), false);
+    let disabled = render_projection_input(&ctx, &mut view, &snapshot, size, Vec::new(), false);
+    assert!(
+        disabled
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("disabled modal should expose AccessKit")
+            .nodes
+            .iter()
+            .any(|(_id, node)| node.label() == Some("Confirm") && node.is_disabled()),
+        "a disabled host must project Confirm as disabled"
+    );
+    signatures.push((
+        "disabled",
+        control_paint_signature(&disabled, accessible_button_bounds(&disabled, "Confirm")),
+    ));
+
+    signatures
+}
+
+#[test]
+fn rendered_mode_controls_paint_distinct_interaction_states_in_both_themes() {
+    for preference in [
+        ThemePreferenceProjection::Dark,
+        ThemePreferenceProjection::Light,
+    ] {
+        let signatures = rendered_mode_control_signatures(preference);
+        for (index, (state, signature)) in signatures.iter().enumerate() {
+            for (other_state, other_signature) in &signatures[index + 1..] {
+                assert_ne!(
+                    signature, other_signature,
+                    "{preference:?} rendered mode control must distinguish {state} from {other_state}: {signature:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rendered_confirmation_controls_paint_distinct_interaction_states_in_both_themes() {
+    for preference in [
+        ThemePreferenceProjection::Dark,
+        ThemePreferenceProjection::Light,
+    ] {
+        let signatures = rendered_confirmation_control_signatures(preference);
+        for (index, (state, signature)) in signatures.iter().enumerate() {
+            for (other_state, other_signature) in &signatures[index + 1..] {
+                assert_ne!(
+                    signature, other_signature,
+                    "{preference:?} rendered Confirm control must distinguish {state} from {other_state}: {signature:?}"
+                );
+            }
+        }
+    }
 }
 
 fn logical_viewport_for_physical_size(physical_size: egui::Vec2, zoom_percent: u16) -> egui::Vec2 {

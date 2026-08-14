@@ -680,6 +680,20 @@ enum UiStateMatrixState {
     Active,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiStateMatrixExpectation {
+    Text(&'static str),
+    Clickable(&'static str),
+    Disabled {
+        label: &'static str,
+        explanation: &'static str,
+    },
+    DirtyEditor {
+        tab_label: &'static str,
+        description: &'static str,
+    },
+}
+
 fn state_matrix_active_buffer(snapshot: &mut legion_ui::ShellProjectionSnapshot, dirty: bool) {
     snapshot.active_buffer_projection = ActiveBufferProjection {
         state: ActiveBufferProjectionState::Full,
@@ -691,6 +705,19 @@ fn state_matrix_active_buffer(snapshot: &mut legion_ui::ShellProjectionSnapshot,
         degraded: false,
         small_buffer_preview: Some("fn state_matrix() {}".to_string()),
         dirty,
+    };
+    snapshot.daily_editing_projection.tabs = EditorTabsProjection {
+        tabs: vec![EditorTabProjection {
+            buffer_id: BufferId(3),
+            file_id: Some(FileId(2)),
+            file_path: Some(CanonicalPath("src/lib.rs".to_string())),
+            title: "src/lib.rs".to_string(),
+            active: true,
+            dirty,
+            pinned: false,
+            preview: false,
+        }],
+        active_buffer_id: Some(BufferId(3)),
     };
 }
 
@@ -740,76 +767,78 @@ fn state_matrix_case(
 ) -> (
     legion_ui::ShellProjectionSnapshot,
     DesktopProjectionViewState,
-    &'static str,
-    bool,
+    UiStateMatrixExpectation,
 ) {
     let mut snapshot = Shell::empty("State matrix").projection_snapshot();
     snapshot.product_mode = mode;
     let mut view_state = DesktopProjectionViewState::default();
-    let (expected_label, expected_clickable) = match (mode, matrix_state) {
-        (DockMode::Manual, UiStateMatrixState::Empty) => ("<no active buffer>", false),
+    let expectation = match (mode, matrix_state) {
+        (DockMode::Manual, UiStateMatrixState::Empty) => {
+            UiStateMatrixExpectation::Text("<no active buffer>")
+        }
         (DockMode::Manual, UiStateMatrixState::Blocked) => {
-            snapshot.status_messages = vec![StatusMessageProjection {
-                severity: StatusSeverity::Error,
-                message: "Manual action blocked by workspace trust.".to_string(),
-            }];
-            ("Manual action blocked by workspace trust.", false)
+            snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(1));
+            UiStateMatrixExpectation::Disabled {
+                label: "Save active file",
+                explanation: "Open a file to enable saving.",
+            }
         }
         (DockMode::Manual, UiStateMatrixState::Ready) => {
             state_matrix_active_buffer(&mut snapshot, false);
-            ("fn state_matrix() {}", false)
+            UiStateMatrixExpectation::Text("fn state_matrix() {}")
         }
         (DockMode::Manual, UiStateMatrixState::Active) => {
             state_matrix_active_buffer(&mut snapshot, true);
-            snapshot.status_messages = vec![StatusMessageProjection {
-                severity: StatusSeverity::Warning,
-                message: "Manual edit in progress.".to_string(),
-            }];
-            ("Manual edit in progress.", false)
+            UiStateMatrixExpectation::DirtyEditor {
+                tab_label: "src/lib.rs",
+                description: "Unsaved changes",
+            }
         }
         (DockMode::Assist, UiStateMatrixState::Empty) => {
             snapshot.assisted_ai_projection.provider_count = 1;
             snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
-            ("No predictions yet", false)
+            UiStateMatrixExpectation::Text("No predictions yet")
         }
         (DockMode::Assist, UiStateMatrixState::Blocked) => {
-            ("Choose an AI provider to enable predictions.", false)
+            UiStateMatrixExpectation::Text("Choose an AI provider to enable predictions.")
         }
         (DockMode::Assist, UiStateMatrixState::Ready) => {
             state_matrix_active_buffer(&mut snapshot, false);
             snapshot.assisted_ai_projection.provider_count = 1;
             snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
-            ("Predict", true)
+            UiStateMatrixExpectation::Clickable("Predict")
         }
         (DockMode::Assist, UiStateMatrixState::Active) => {
             snapshot = assist_inline_prediction_snapshot();
-            (".await", false)
+            UiStateMatrixExpectation::Text(".await")
         }
         (DockMode::Delegate, UiStateMatrixState::Empty) => {
             view_state.canonical_workspace_root =
                 Some(CanonicalPath("D:/state-matrix".to_string()));
-            ("Describe a task to start Delegate.", false)
+            UiStateMatrixExpectation::Text("Describe a task to start Delegate.")
         }
         (DockMode::Delegate, UiStateMatrixState::Blocked) => {
-            ("Open a workspace to define Delegate scope.", false)
+            UiStateMatrixExpectation::Text("Open a workspace to define Delegate scope.")
         }
         (DockMode::Delegate, UiStateMatrixState::Ready) => {
             view_state.canonical_workspace_root =
                 Some(CanonicalPath("D:/state-matrix".to_string()));
-            ("Delegate task", true)
+            UiStateMatrixExpectation::Clickable("Delegate task")
         }
         (DockMode::Delegate, UiStateMatrixState::Active) => {
             snapshot.delegated_task_projection.plan_count = 1;
-            ("Task is active", false)
+            UiStateMatrixExpectation::Text("Task is active")
         }
-        (DockMode::Automate, UiStateMatrixState::Empty) => ("No workflow sessions yet", false),
+        (DockMode::Automate, UiStateMatrixState::Empty) => {
+            UiStateMatrixExpectation::Text("No workflow sessions yet")
+        }
         (DockMode::Automate, UiStateMatrixState::Blocked) => {
             snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
                 LegionWorkflowState::Blocked,
                 LegionWorkflowMergeReadinessState::Blocked,
             )];
             snapshot.legion_workflow_projection.total_session_count = 1;
-            ("Blocked", false)
+            UiStateMatrixExpectation::Text("Blocked")
         }
         (DockMode::Automate, UiStateMatrixState::Ready) => {
             snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
@@ -817,7 +846,7 @@ fn state_matrix_case(
                 LegionWorkflowMergeReadinessState::Ready,
             )];
             snapshot.legion_workflow_projection.total_session_count = 1;
-            ("Ready for review", false)
+            UiStateMatrixExpectation::Text("Ready for review")
         }
         (DockMode::Automate, UiStateMatrixState::Active) => {
             snapshot.legion_workflow_projection.rows = vec![state_matrix_workflow_row(
@@ -825,10 +854,10 @@ fn state_matrix_case(
                 LegionWorkflowMergeReadinessState::WaitingForApproval,
             )];
             snapshot.legion_workflow_projection.total_session_count = 1;
-            ("Running", false)
+            UiStateMatrixExpectation::Text("Running")
         }
     };
-    (snapshot, view_state, expected_label, expected_clickable)
+    (snapshot, view_state, expectation)
 }
 
 #[test]
@@ -2126,6 +2155,96 @@ fn accesskit_contains_text(output: &egui::FullOutput, text: &str) -> bool {
             update.nodes.iter().any(|(_id, node)| {
                 node.label().is_some_and(|label| label.contains(text))
                     || node.value().is_some_and(|value| value.contains(text))
+            })
+        })
+}
+
+fn accesskit_contains_text_in_bounds(
+    output: &egui::FullOutput,
+    text: &str,
+    scope: egui::accesskit::Rect,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = (bounds.x0 + bounds.x1) * 0.5;
+                let center_y = (bounds.y0 + bounds.y1) * 0.5;
+                center_x >= scope.x0
+                    && center_x <= scope.x1
+                    && center_y >= scope.y0
+                    && center_y <= scope.y1
+                    && (node.label().is_some_and(|label| label.contains(text))
+                        || node.value().is_some_and(|value| value.contains(text)))
+            })
+        })
+}
+
+fn accesskit_clickable_label_in_bounds(
+    output: &egui::FullOutput,
+    label: &str,
+    scope: egui::accesskit::Rect,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                let Some(bounds) = node.bounds() else {
+                    return false;
+                };
+                let center_x = (bounds.x0 + bounds.x1) * 0.5;
+                let center_y = (bounds.y0 + bounds.y1) * 0.5;
+                center_x >= scope.x0
+                    && center_x <= scope.x1
+                    && center_y >= scope.y0
+                    && center_y <= scope.y1
+                    && node.label() == Some(label)
+                    && node.supports_action(egui::accesskit::Action::Click)
+            })
+        })
+}
+
+fn accesskit_largest_label_bounds(
+    output: &egui::FullOutput,
+    label: &str,
+) -> Option<egui::accesskit::Rect> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .filter_map(|(_id, node)| {
+            (node.label() == Some(label))
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .max_by(|left, right| {
+            let left_area = (left.x1 - left.x0) * (left.y1 - left.y0);
+            let right_area = (right.x1 - right.x0) * (right.y1 - right.y0);
+            left_area.total_cmp(&right_area)
+        })
+}
+
+fn accesskit_label_has_description(
+    output: &egui::FullOutput,
+    label: &str,
+    description: &str,
+) -> bool {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|update| {
+            update.nodes.iter().any(|(_id, node)| {
+                node.label() == Some(label) && node.description() == Some(description)
             })
         })
 }
@@ -5173,8 +5292,7 @@ fn projection_rendering_covers_the_four_mode_state_matrix_at_standard_and_compac
     for mode in modes {
         for matrix_state in states {
             for (layout, size) in layouts {
-                let (snapshot, view_state, expected_label, expected_clickable) =
-                    state_matrix_case(mode, matrix_state);
+                let (snapshot, view_state, expectation) = state_matrix_case(mode, matrix_state);
                 let ctx = egui::Context::default();
                 ctx.enable_accesskit();
                 if mode == DockMode::Delegate && matrix_state == UiStateMatrixState::Ready {
@@ -5222,7 +5340,8 @@ fn projection_rendering_covers_the_four_mode_state_matrix_at_standard_and_compac
                     "{mode:?}/{matrix_state:?}/{layout} must preserve a usable editor; editor={editor:?}"
                 );
 
-                let visible = if layout == "compact" && mode != DockMode::Manual {
+                let (visible, inspector_bounds) = if layout == "compact" && mode != DockMode::Manual
+                {
                     assert!(
                         accesskit_has_clickable_label(&full, "Inspector drawer"),
                         "{mode:?}/{matrix_state:?} must keep its compact inspector reachable"
@@ -5236,27 +5355,77 @@ fn projection_rendering_covers_the_four_mode_state_matrix_at_standard_and_compac
                         "Inspector drawer",
                         size,
                     );
-                    render_projection_frame_with_state_at(
+                    let visible = render_projection_frame_with_state_at(
                         &ctx,
                         &mut view,
                         &snapshot,
                         &view_state,
                         size,
                     )
-                    .1
+                    .1;
+                    let inspector_bounds = accesskit_largest_label_bounds(&visible, "Inspector")
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{mode:?}/{matrix_state:?} compact drawer must expose Inspector bounds"
+                            )
+                        });
+                    (visible, Some(inspector_bounds))
                 } else {
-                    full
+                    (full, None)
                 };
-                if expected_clickable {
-                    assert!(
-                        accesskit_has_clickable_label(&visible, expected_label),
-                        "{mode:?}/{matrix_state:?}/{layout} ready action `{expected_label}` must be operable"
-                    );
-                } else {
-                    assert!(
-                        accesskit_contains_text(&visible, expected_label),
-                        "{mode:?}/{matrix_state:?}/{layout} must expose `{expected_label}`"
-                    );
+                match expectation {
+                    UiStateMatrixExpectation::Text(expected_label) => {
+                        let present = inspector_bounds.map_or_else(
+                            || accesskit_contains_text(&visible, expected_label),
+                            |bounds| {
+                                accesskit_contains_text_in_bounds(&visible, expected_label, bounds)
+                            },
+                        );
+                        assert!(
+                            present,
+                            "{mode:?}/{matrix_state:?}/{layout} must expose `{expected_label}` in its state surface"
+                        );
+                    }
+                    UiStateMatrixExpectation::Clickable(expected_label) => {
+                        let operable = inspector_bounds.map_or_else(
+                            || accesskit_has_clickable_label(&visible, expected_label),
+                            |bounds| {
+                                accesskit_clickable_label_in_bounds(
+                                    &visible,
+                                    expected_label,
+                                    bounds,
+                                )
+                            },
+                        );
+                        assert!(
+                            operable,
+                            "{mode:?}/{matrix_state:?}/{layout} ready action `{expected_label}` must be operable in its state surface"
+                        );
+                    }
+                    UiStateMatrixExpectation::Disabled { label, explanation } => {
+                        assert!(
+                            accesskit_label_is_disabled(&visible, label),
+                            "{mode:?}/{matrix_state:?}/{layout} must expose disabled `{label}`"
+                        );
+                        assert!(
+                            accesskit_label_has_description(&visible, label, explanation)
+                                || accesskit_contains_text(&visible, explanation),
+                            "{mode:?}/{matrix_state:?}/{layout} must explain why `{label}` is disabled"
+                        );
+                    }
+                    UiStateMatrixExpectation::DirtyEditor {
+                        tab_label,
+                        description,
+                    } => {
+                        assert!(
+                            snapshot.active_buffer_projection.dirty,
+                            "Manual Active must be backed by a genuinely dirty buffer projection"
+                        );
+                        assert!(
+                            accesskit_label_has_description(&visible, tab_label, description),
+                            "{mode:?}/{matrix_state:?}/{layout} must expose the dirty editor state semantically"
+                        );
+                    }
                 }
             }
         }

@@ -1578,7 +1578,7 @@ impl ProjectionView {
         if let Some(origin) = self.mode_confirmation_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
-        render_mode_confirmation_dialog(ui.ctx(), self, &mut actions);
+        render_mode_confirmation_dialog(ui.ctx(), ui.is_enabled(), self, &mut actions);
         model.bottom_tab_rows = bottom_tab_rows(
             snapshot,
             selected_bottom_panel,
@@ -1808,6 +1808,17 @@ fn render_product_mode_switch(
         + ui.spacing().item_spacing.x * 3.0
         + 8.0;
     let leading_space = ((ui.available_width() - switch_width) * 0.5).max(0.0);
+    let focused_before_arrow = ui.ctx().memory(|memory| memory.focused());
+    let (move_left, move_right) = ui.input(|input| {
+        if input.modifiers.any() {
+            (false, false)
+        } else {
+            (
+                input.key_pressed(egui::Key::ArrowLeft),
+                input.key_pressed(egui::Key::ArrowRight),
+            )
+        }
+    });
     egui::ScrollArea::horizontal()
         .id_salt("legion_desktop_product_mode_scroll")
         .show(ui, |ui| {
@@ -1819,6 +1830,7 @@ fn render_product_mode_switch(
                 .inner_margin(egui::Margin::symmetric(4, 1))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        let mut mode_ids = Vec::with_capacity(4);
                         for spec in product_mode_switch_specs() {
                             let canonical = canonical_mode_entry(spec.mode);
                             let active = spec.mode == active_level;
@@ -1832,15 +1844,26 @@ fn render_product_mode_switch(
                                             f32::from(tokens.control_height.standard),
                                         ],
                                         egui::Button::new(theme::accent(label, color))
-                                            .selected(active)
-                                            .fill(if active {
-                                                theme::dim(color, 28)
-                                            } else {
-                                                theme::tokens().surfaces.input
-                                            }),
+                                            .selected(active),
                                     )
                                 })
                                 .inner;
+                            mode_ids.push(response.id);
+                            paint_control_focus_ring(ui, &response);
+                            if response.has_focus() {
+                                ui.ctx().memory_mut(|memory| {
+                                    memory.set_focus_lock_filter(
+                                        response.id,
+                                        egui::EventFilter {
+                                            horizontal_arrows: true,
+                                            ..egui::EventFilter::default()
+                                        },
+                                    );
+                                });
+                            }
+                            if response.gained_focus() {
+                                ui.ctx().request_repaint();
+                            }
                             ui.ctx().accesskit_node_builder(response.id, |node| {
                                 node.set_label(canonical.label);
                                 node.set_selected(active);
@@ -1859,9 +1882,34 @@ fn render_product_mode_switch(
                                 );
                             }
                         }
+                        if (move_left || move_right)
+                            && let Some(index) = mode_ids
+                                .iter()
+                                .position(|id| Some(*id) == focused_before_arrow)
+                        {
+                            let next_index = if move_left {
+                                index.saturating_sub(1)
+                            } else {
+                                (index + 1).min(mode_ids.len() - 1)
+                            };
+                            ui.ctx()
+                                .memory_mut(|memory| memory.request_focus(mode_ids[next_index]));
+                            ui.ctx().request_repaint();
+                        }
                     });
                 });
         });
+}
+
+fn paint_control_focus_ring(ui: &egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            egui::CornerRadius::same(theme::tokens().radius.md),
+            egui::Stroke::new(2.0_f32, theme::tokens().focus.ring),
+            egui::epaint::StrokeKind::Inside,
+        );
+    }
 }
 
 fn product_mode_button_label(
@@ -1937,6 +1985,7 @@ enum ModeConfirmationDecision {
 
 fn render_mode_confirmation_dialog(
     ctx: &egui::Context,
+    controls_enabled: bool,
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
@@ -1961,6 +2010,9 @@ fn render_mode_confirmation_dialog(
         )
         .frame(theme::pane_frame(theme::tokens().bg.panel))
         .show(ctx, |ui| {
+            if !controls_enabled {
+                ui.disable();
+            }
             ui.set_min_width(dialog_width);
             ctx.accesskit_node_builder(ui.unique_id(), |node| {
                 node.set_role(egui::accesskit::Role::Dialog);
@@ -1988,16 +2040,15 @@ fn render_mode_confirmation_dialog(
                 let confirm = ui
                     .push_id("legion_desktop_mode_confirmation_confirm", |ui| {
                         ui.add(
-                            egui::Button::new("Confirm")
-                                .min_size(egui::vec2(112.0, 28.0))
-                                .fill(theme::tokens().accent.amber)
-                                .stroke(egui::Stroke::new(
-                                    1.0_f32,
-                                    theme::tokens().border.focus,
-                                )),
+                            egui::Button::new(theme::accent(
+                                "Confirm",
+                                theme::tokens().accent.amber,
+                            ))
+                            .min_size(egui::vec2(112.0, 28.0)),
                         )
                     })
                     .inner;
+                paint_control_focus_ring(ui, &confirm);
                 if view.pending_mode_confirmation_needs_focus {
                     confirm.request_focus();
                     view.pending_mode_confirmation_needs_focus = false;
@@ -2011,6 +2062,7 @@ fn render_mode_confirmation_dialog(
                         ui.add(egui::Button::new("Cancel").min_size(egui::vec2(112.0, 28.0)))
                     })
                     .inner;
+                paint_control_focus_ring(ui, &cancel);
                 if cancel.clicked() {
                     decision = Some(ModeConfirmationDecision::Cancel);
                 }
@@ -3438,6 +3490,11 @@ fn render_tab_strip(
                             node.set_role(egui::accesskit::Role::Tab);
                             node.set_label(tab.title.as_str());
                             node.set_selected(tab.active);
+                            if tab.dirty {
+                                node.set_description("Unsaved changes");
+                            } else {
+                                node.clear_description();
+                            }
                             if tab.active {
                                 node.set_aria_current(egui::accesskit::AriaCurrent::True);
                             } else {
@@ -3617,8 +3674,25 @@ fn render_code_lines(
     model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
-    if model.active_buffer_code_lines.is_empty() && model.active_buffer_lines.is_empty() {
+    if snapshot.active_buffer_projection.buffer_id.is_none() {
         ui.label(theme::muted("<no active buffer>"));
+        if snapshot.active_buffer_projection.workspace_id.is_some() {
+            let blocked_save = ui.add_enabled(
+                false,
+                egui::Button::new("Save active file").min_size(egui::vec2(
+                    128.0,
+                    f32::from(theme::tokens().control_height.standard),
+                )),
+            );
+            ui.ctx().accesskit_node_builder(blocked_save.id, |node| {
+                node.set_description("Open a file to enable saving.");
+            });
+            ui.label(theme::muted("Open a file to enable saving."));
+        }
+        return;
+    }
+    if model.active_buffer_code_lines.is_empty() && model.active_buffer_lines.is_empty() {
+        ui.label(theme::muted("<active buffer has no visible text>"));
         return;
     }
     if !model.active_buffer_code_lines.is_empty() {
