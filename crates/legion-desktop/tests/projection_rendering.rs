@@ -5222,6 +5222,109 @@ fn projection_rendering_escape_closes_utility_overlay_and_restores_trigger_focus
 }
 
 #[test]
+fn projection_rendering_utility_overlays_trap_forward_and_reverse_tab_focus() {
+    let size = egui::vec2(1_440.0, 900.0);
+    let snapshot = populated_snapshot();
+
+    for (trigger, first_control, last_control) in [
+        ("Settings", "Close Settings", "Defaults"),
+        ("Setup", "Close Setup", "Finish setup"),
+    ] {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        let (_initial, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        let (_opened, _full) =
+            click_accessible_control_at(&ctx, &mut view, &snapshot, &full, trigger, size);
+        let (_settled, full) = render_projection_frame_at(&ctx, &mut view, &snapshot, size);
+        let update = full
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("utility overlay should expose AccessKit");
+        let control_id = |label: &str| {
+            update
+                .nodes
+                .iter()
+                .find_map(|(id, node)| {
+                    (node.label() == Some(label)
+                        && node.supports_action(egui::accesskit::Action::Focus))
+                    .then_some(*id)
+                })
+                .unwrap_or_else(|| panic!("utility overlay should expose `{label}`"))
+        };
+        let first_id = control_id(first_control);
+        let last_id = control_id(last_control);
+
+        let focus_last = desktop_raw_input_at(
+            size,
+            vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Focus,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: last_id,
+                    data: None,
+                },
+            )],
+        );
+        let _ = ctx.run_ui(focus_last, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        let tab_forward = desktop_raw_input_at(
+            size,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: Some(egui::Key::Tab),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let full = ctx.run_ui(tab_forward, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        assert_eq!(
+            accesskit_focused_label(&full),
+            Some(first_control),
+            "Tab from the final {trigger} control must wrap inside the modal"
+        );
+
+        let focus_first = desktop_raw_input_at(
+            size,
+            vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Focus,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: first_id,
+                    data: None,
+                },
+            )],
+        );
+        let _ = ctx.run_ui(focus_first, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        let tab_backward = desktop_raw_input_at(
+            size,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: Some(egui::Key::Tab),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+        );
+        let full = ctx.run_ui(tab_backward, |ui| {
+            let _ = view.render(ui, &snapshot);
+        });
+        assert_eq!(
+            accesskit_focused_label(&full),
+            Some(last_control),
+            "Shift+Tab from the first {trigger} control must wrap inside the modal"
+        );
+    }
+}
+
+#[test]
 fn projection_rendering_manual_reclaims_inspector_and_standard_inspector_resizes_within_bounds() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();

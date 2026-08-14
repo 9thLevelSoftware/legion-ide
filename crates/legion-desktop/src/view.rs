@@ -1214,6 +1214,7 @@ pub struct ProjectionView {
     settings_section: SettingsSection,
     utility_overlay_origin: Option<egui::Id>,
     utility_overlay_needs_focus: bool,
+    utility_overlay_focus_bounds: Option<(egui::Id, egui::Id)>,
     utility_restore_focus: Option<egui::Id>,
     command_palette_origin: Option<egui::Id>,
     compact_drawer: Option<CompactDrawer>,
@@ -1327,6 +1328,7 @@ impl ProjectionView {
             settings_section: SettingsSection::Appearance,
             utility_overlay_origin: None,
             utility_overlay_needs_focus: false,
+            utility_overlay_focus_bounds: None,
             utility_restore_focus: None,
             command_palette_origin: None,
             compact_drawer: None,
@@ -1401,6 +1403,7 @@ impl ProjectionView {
         self.utility_surface = Some(surface);
         self.utility_overlay_origin = Some(origin);
         self.utility_overlay_needs_focus = true;
+        self.utility_overlay_focus_bounds = None;
     }
 
     fn close_utility_overlay(&mut self, restore_focus: bool) {
@@ -1412,6 +1415,7 @@ impl ProjectionView {
         }
         self.utility_surface = None;
         self.utility_overlay_needs_focus = false;
+        self.utility_overlay_focus_bounds = None;
         let origin = self.utility_overlay_origin.take();
         self.utility_restore_focus = if restore_focus { origin } else { None };
     }
@@ -5206,6 +5210,19 @@ fn render_utility_overlay(
     );
     let modal_id = egui::Id::new(("legion_desktop_utility_overlay", title));
     let mut close = false;
+    let focused_before_tab = ctx.memory(|memory| memory.focused());
+    let (wrap_forward, wrap_backward) = view
+        .utility_overlay_focus_bounds
+        .map(|(first, last)| {
+            let forward = focused_before_tab == Some(last)
+                && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+            let backward = focused_before_tab == Some(first)
+                && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+            (forward, backward)
+        })
+        .unwrap_or((false, false));
+    let mut first_focus = None;
+    let mut last_focus = None;
     let modal = egui::Modal::new(modal_id)
         .area(
             egui::Modal::default_area(modal_id)
@@ -5230,7 +5247,9 @@ fn render_utility_overlay(
                         UtilitySurface::Setup => "Close Setup",
                         UtilitySurface::Diagnostics => unreachable!(),
                     };
-                    if soft_button(ui, close_label).clicked() {
+                    let close_response = soft_button(ui, close_label);
+                    first_focus = Some(close_response.id);
+                    if close_response.clicked() {
                         close = true;
                     }
                 });
@@ -5241,14 +5260,25 @@ fn render_utility_overlay(
                 .auto_shrink([false, false])
                 .show(ui, |ui| match surface {
                     UtilitySurface::Settings => {
-                        render_settings_panel(ui, snapshot, model, view, actions);
+                        last_focus =
+                            Some(render_settings_panel(ui, snapshot, model, view, actions));
                     }
                     UtilitySurface::Setup => {
-                        render_setup_panel(ui, snapshot, model, view, actions, &mut close);
+                        last_focus = Some(render_setup_panel(
+                            ui, snapshot, model, view, actions, &mut close,
+                        ));
                     }
                     UtilitySurface::Diagnostics => unreachable!(),
                 });
         });
+    if let (Some(first), Some(last)) = (first_focus, last_focus) {
+        view.utility_overlay_focus_bounds = Some((first, last));
+        if wrap_forward {
+            ctx.memory_mut(|memory| memory.request_focus(first));
+        } else if wrap_backward {
+            ctx.memory_mut(|memory| memory.request_focus(last));
+        }
+    }
     if close || modal.should_close() {
         view.close_utility_overlay(true);
     }
@@ -5261,7 +5291,7 @@ fn render_setup_panel(
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
     close: &mut bool,
-) {
+) -> egui::Id {
     let checklist = DesktopSetupChecklistViewModel::from_snapshot(snapshot, &model.settings);
     ui.label(theme::body(
         "Use this checklist to finish the essentials. You can reopen Setup at any time.",
@@ -5288,6 +5318,7 @@ fn render_setup_panel(
             view.utility_surface = Some(UtilitySurface::Settings);
             view.settings_section = SettingsSection::Privacy;
             view.utility_overlay_needs_focus = true;
+            view.utility_overlay_focus_bounds = None;
         }
         let finish = primary_button(ui, "Finish setup", theme::tokens().accent.blue);
         if focus_finish {
@@ -5297,7 +5328,9 @@ fn render_setup_panel(
             actions.push(DesktopAction::DismissOnboarding);
             *close = true;
         }
-    });
+        finish.id
+    })
+    .inner
 }
 
 fn render_settings_panel(
@@ -5306,7 +5339,8 @@ fn render_settings_panel(
     model: &DesktopProjectionViewModel,
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
-) {
+) -> egui::Id {
+    let mut last_focus = None;
     ui.horizontal_wrapped(|ui| {
         for section in SettingsSection::ALL {
             let selected = section == view.settings_section;
@@ -5572,12 +5606,15 @@ fn render_settings_panel(
                 model.settings.theme_label, model.settings.toast_verbosity_label
             )));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if soft_button(ui, "Defaults").clicked() {
+                let defaults = soft_button(ui, "Defaults");
+                last_focus = Some(defaults.id);
+                if defaults.clicked() {
                     actions.push(DesktopAction::ResetSettings);
                 }
             });
         });
     });
+    last_focus.expect("Settings always renders the Defaults action")
 }
 
 fn render_assist_rail(
@@ -5603,6 +5640,7 @@ fn render_assist_rail(
                     view.utility_surface = Some(UtilitySurface::Settings);
                     view.settings_section = SettingsSection::AiProviders;
                     view.utility_overlay_needs_focus = true;
+                    view.utility_overlay_focus_bounds = None;
                 }
             }
         });
