@@ -1,4 +1,72 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use xtask::claim_audit::{ClaimViolation, audit_text};
+
+static TEMP_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct TempWorkspace {
+    root: PathBuf,
+}
+
+impl TempWorkspace {
+    fn new(label: &str) -> Self {
+        let sequence = TEMP_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "legion-claim-audit-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("plans")).expect("create claim-audit fixture");
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn claim_audit_succeeds_without_retired_hermesgoal_document() {
+    let workspace = TempWorkspace::new("without-hermesgoal");
+    fs::write(
+        workspace.path().join("README.md"),
+        "Legion is not yet a general-availability desktop product.\n",
+    )
+    .expect("write README fixture");
+    fs::write(
+        workspace
+            .path()
+            .join("plans")
+            .join("product-readiness-ledger.md"),
+        "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
+         | --- | --- | --- | --- | --- |\n\
+         | Core | PR-CORE-001 | criteria | Product workflow validated | tests |\n",
+    )
+    .expect("write readiness ledger fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(
+        output.status.success(),
+        "claim-audit should not require the retired HERMESGOAL.md document\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn forbidden_claim_is_flagged() {

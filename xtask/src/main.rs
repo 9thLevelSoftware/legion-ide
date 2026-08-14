@@ -1005,12 +1005,12 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         .iter()
         .all(|row| row.status == "Product workflow validated");
 
-    // Canonical public-doc scan set: README.md, HERMESGOAL.md, and
-    // top-level docs/*.md only. docs/releases/ (forward templates),
+    // Canonical public-doc scan set: README.md and top-level docs/*.md only.
+    // docs/releases/ (forward templates),
     // docs/superpowers/ (plans quote forbidden phrases as code literals),
     // and plans/evidence/ (historical) are intentionally excluded, matching
     // how docs-hygiene allowlists archived material.
-    let mut scan_files: Vec<String> = vec!["README.md".to_string(), "HERMESGOAL.md".to_string()];
+    let mut scan_files: Vec<String> = vec!["README.md".to_string()];
     let docs_dir = workspace_root.join("docs");
     if let Ok(entries) = fs::read_dir(&docs_dir) {
         let mut docs_files: Vec<String> = entries
