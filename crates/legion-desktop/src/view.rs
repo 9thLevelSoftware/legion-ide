@@ -4933,6 +4933,16 @@ fn render_delegated_canvas(
     actions: &mut Vec<DesktopAction>,
 ) {
     if let Some(proposal_id) = first_delegate_owned_proposal_id(snapshot) {
+        let lifecycle = delegate_owned_proposal_lifecycle(snapshot, proposal_id);
+        let awaiting_decision = lifecycle.is_some_and(|state| {
+            matches!(
+                state,
+                ProposalLifecycleState::Created
+                    | ProposalLifecycleState::Validated
+                    | ProposalLifecycleState::Previewed
+            )
+        });
+        let approved = lifecycle == Some(ProposalLifecycleState::Approved);
         theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
             ui.set_height(220.0);
             ui.horizontal(|ui| {
@@ -4942,10 +4952,21 @@ fn render_delegated_canvas(
                     Some(theme::tokens().accent.violet),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if primary_button(ui, "Approve", theme::tokens().accent.blue).clicked() {
+                    if approved
+                        && primary_button(
+                            ui,
+                            "Apply approved changes",
+                            theme::tokens().accent.green,
+                        )
+                        .clicked()
+                    {
+                        actions.push(DesktopAction::ApplyProposal { proposal_id });
+                    } else if awaiting_decision
+                        && primary_button(ui, "Approve", theme::tokens().accent.blue).clicked()
+                    {
                         actions.push(DesktopAction::ApproveProposal { proposal_id });
                     }
-                    if soft_button(ui, "Request Changes").clicked() {
+                    if awaiting_decision && soft_button(ui, "Request Changes").clicked() {
                         actions.push(DesktopAction::RejectProposal {
                             proposal_id,
                             reason: ProposalRejectionReason::UserRejected,
@@ -7231,6 +7252,26 @@ fn first_delegate_owned_proposal_id(snapshot: &ShellProjectionSnapshot) -> Optio
                 .then_some(review.proposal_id)
         })
         .or_else(|| owned.first().copied())
+}
+
+fn delegate_owned_proposal_lifecycle(
+    snapshot: &ShellProjectionSnapshot,
+    proposal_id: ProposalId,
+) -> Option<ProposalLifecycleState> {
+    snapshot
+        .proposal_ledger_projection
+        .rows
+        .iter()
+        .find(|row| row.proposal_id == proposal_id)
+        .map(|row| row.lifecycle.state)
+        .or_else(|| {
+            snapshot
+                .delegated_task_projection
+                .proposal_preview_links
+                .iter()
+                .find(|link| link.proposal_id == proposal_id)
+                .map(|link| link.lifecycle_state)
+        })
 }
 
 fn delegated_plan_rows(

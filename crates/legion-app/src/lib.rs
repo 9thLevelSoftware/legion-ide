@@ -19535,6 +19535,7 @@ impl AppComposition {
     fn sync_search_palette_results(&mut self) {
         if !self.palette.open
             || self.palette.mode != PaletteMode::Search
+            || self.palette.scope != self.search_projection.scope
             || palette_query_body(PaletteMode::Search, &self.palette.query).trim()
                 != self.search_projection.query_label
         {
@@ -35082,6 +35083,47 @@ mod tests {
                 "{status_kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn search_palette_does_not_restore_results_from_a_different_scope() {
+        let mut app = AppComposition::new();
+        app.search_projection = SearchProjection {
+            query_id: Some("search:workspace".to_string()),
+            scope: SearchScopeProjection::Workspace,
+            query_label: "needle".to_string(),
+            status: SearchStatusProjection {
+                kind: SearchStatusKindProjection::NoResults,
+                message: "No workspace matches".to_string(),
+            },
+            results: Vec::new(),
+            result_limit: 20,
+            omitted_result_count: 0,
+            omitted_file_count: 0,
+            skipped_binary_count: 0,
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: false,
+            diagnostics: Vec::new(),
+            generated_at: TimestampMillis(1),
+            schema_version: 1,
+        };
+
+        let palette = app
+            .open_palette(
+                PaletteMode::Search,
+                "needle".to_string(),
+                SearchScopeProjection::ActiveFile,
+            )
+            .expect("active-file Search should open");
+
+        assert_eq!(palette.scope, SearchScopeProjection::ActiveFile);
+        assert_eq!(palette.results.len(), 1);
+        assert_eq!(palette.results[0].id, "search:run");
+        assert_eq!(
+            palette.results[0].title,
+            "Search active file for \"needle\""
+        );
     }
 
     #[cfg(feature = "ai")]

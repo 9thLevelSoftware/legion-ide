@@ -3258,6 +3258,19 @@ fn projection_rendering_delegate_review_targets_owned_proposal_in_one_home() {
             proposal_id: ProposalId(701)
         }]
     );
+
+    snapshot.delegated_task_projection.proposal_preview_links[0].lifecycle_state =
+        ProposalLifecycleState::Approved;
+    let (_approved_state, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(!accesskit_has_clickable_label(&full, "Approve"));
+    let (applied, _) =
+        click_accessible_control(&ctx, &mut view, &snapshot, &full, "Apply approved changes");
+    assert_eq!(
+        applied.actions,
+        vec![DesktopAction::ApplyProposal {
+            proposal_id: ProposalId(701)
+        }]
+    );
 }
 
 #[test]
