@@ -343,9 +343,8 @@ fn streaming_open_matches_string_open() {
     const THRESHOLD: usize = 512;
 
     let text = large_text(THRESHOLD + 128);
-    let dir = std::env::temp_dir().join("legion_editor_streaming_test");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file_path = dir.join("streaming_match.rs");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("streaming_match.rs");
     std::fs::write(&file_path, &text).expect("write test file");
 
     // String-based open.
@@ -415,18 +414,13 @@ fn streaming_open_matches_string_open() {
     {
         assert_eq!(s.visible_text, r.visible_text);
     }
-
-    // Cleanup.
-    let _ = std::fs::remove_file(&file_path);
-    let _ = std::fs::remove_dir(&dir);
 }
 
 /// Streaming open detects binary files and refuses them.
 #[test]
 fn streaming_open_detects_binary() {
-    let dir = std::env::temp_dir().join("legion_editor_streaming_binary_test");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file_path = dir.join("binary.bin");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("binary.bin");
     std::fs::write(&file_path, b"hello\x00world binary").expect("write binary file");
 
     let mut engine = EditorEngine::new();
@@ -438,18 +432,13 @@ fn streaming_open_detects_binary() {
         err_msg.contains("binary"),
         "error should mention binary: {err_msg}"
     );
-
-    // Cleanup.
-    let _ = std::fs::remove_file(&file_path);
-    let _ = std::fs::remove_dir(&dir);
 }
 
 /// Streaming open of a small (normal-mode) file works correctly.
 #[test]
 fn streaming_open_small_file_is_normal_mode() {
-    let dir = std::env::temp_dir().join("legion_editor_streaming_small_test");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file_path = dir.join("small.rs");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("small.rs");
     let text = "fn main() {\n    println!(\"hello\");\n}\n";
     std::fs::write(&file_path, text).expect("write test file");
 
@@ -468,8 +457,4 @@ fn streaming_open_small_file_is_normal_mode() {
         text,
         "text must match for small file opened via streaming"
     );
-
-    // Cleanup.
-    let _ = std::fs::remove_file(&file_path);
-    let _ = std::fs::remove_dir(&dir);
 }

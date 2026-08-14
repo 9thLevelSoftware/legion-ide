@@ -58,6 +58,7 @@ fn sample_call_hierarchy_item() -> LspCallHierarchyItem {
             },
         },
         detail: Some("fn main()".to_string()),
+        data: None,
     }
 }
 

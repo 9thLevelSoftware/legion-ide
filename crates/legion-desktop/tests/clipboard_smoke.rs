@@ -187,14 +187,6 @@ fn copy_events_input() -> egui::RawInput {
     }
 }
 
-fn cut_events_input() -> egui::RawInput {
-    egui::RawInput {
-        focused: true,
-        events: vec![egui::Event::Cut],
-        ..egui::RawInput::default()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Bridge-level tests (DesktopRuntime::handle_action)
 // ---------------------------------------------------------------------------
@@ -399,39 +391,6 @@ fn headless_copy_event_does_not_dirty_buffer() {
         !app.runtime_snapshot().active_buffer_projection.dirty,
         "copy must not dirty the buffer"
     );
-}
-
-/// Headless cut event on a buffer with a selection dirties the buffer.
-///
-/// This exercises the `egui::Event::Cut` path through the keyboard handler.
-/// The buffer should become dirty because cut removes selected text.
-#[test]
-fn headless_cut_event_dirties_buffer_with_selection() {
-    let _guard = clipboard_smoke_test_guard();
-    let workspace = TempWorkspace::new();
-    let file = workspace.write("cut_headless.txt", "removable");
-    let mut runtime = open_runtime_with_file(workspace.path(), &file);
-    let buffer_id = tab_buffers(&runtime)[0];
-
-    // Set a selection so cut has text to remove.
-    runtime
-        .handle_action(DesktopAction::SetSelection {
-            buffer_id: Some(buffer_id),
-            range: range(0, 4),
-        })
-        .expect("selection should be set");
-
-    let mut app = DesktopEframeApp::new(runtime);
-
-    let _ = app.run_headless_input(cut_events_input());
-
-    let snapshot = app.runtime_snapshot();
-    // If cut was dispatched successfully on the selected region, the buffer
-    // should be dirty. If no selection was active in the headless context
-    // (egui may not persist selection state across the boundary), the buffer
-    // may stay clean, which is still valid adapter behaviour.  We accept both
-    // outcomes rather than asserting a fragile invariant.
-    let _ = snapshot.active_buffer_projection.dirty;
 }
 
 /// Empty paste text is a no-op.

@@ -18043,6 +18043,8 @@ pub struct LspCallHierarchyItem {
     pub selection_range: ProtocolTextRange,
     /// Optional detail string (e.g. type signature or container name).
     pub detail: Option<String>,
+    /// Opaque data preserved from the LSP server for subsequent requests.
+    pub data: Option<serde_json::Value>,
 }
 
 /// Incoming call projected from an LSP `callHierarchy/incomingCalls` response.

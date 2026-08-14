@@ -67,7 +67,7 @@ identical — GPU-backed tessellation replaces OpenGL.
 Build a custom retained-mode renderer on winit + wgpu + AccessKit, or adopt
 GPUI directly once it reaches cross-platform maturity.
 
-- **Risk**: 6-12 month migration; GPUI is pre-1.0 and macOS-only today; must
+- **Risk**: 6-12 month migration; GPUI is pre-1.0 and macOS/Linux-only (no Windows support); must
   rebuild text shaping, selection, IME, clipboard, focus traversal, and
   accessibility from scratch; no guarantee that the resulting renderer meets
   budgets faster than optimized egui.
@@ -91,7 +91,7 @@ desktop adapter. Option B (egui-wgpu) is the first escalation step because it
 preserves the egui API while changing the GPU backend.
 
 Option C is premature. It is a 6-12 month migration with compounding risk:
-GPUI lacks Windows/Linux parity, and building a custom retained-mode renderer
+GPUI lacks Windows parity, and building a custom retained-mode renderer
 requires reimplementing text infrastructure that egui already provides. This
 option remains a live fallback per ADR-0032's semi-annual re-evaluation, not a
 planned commitment.
@@ -102,7 +102,7 @@ planned commitment.
   optimization work is complete.
 - egui upstream drops support for a required platform or enters maintenance-only
   status.
-- GPUI reaches 1.0 with Windows and Linux parity.
+- GPUI reaches 1.0 with Windows parity.
 - A competitive threat (e.g., user-visible latency gap in direct comparison
   testing) makes the egui ceiling a product-blocking concern.
 

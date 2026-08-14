@@ -1514,20 +1514,22 @@ fn call_hierarchy_item_to_json(item: &LspCallHierarchyItem) -> Value {
         "name": item.name,
         "kind": item.kind,
         "uri": item.uri,
-        "range": protocol_range_to_lsp_json(&item.range),
-        "selectionRange": protocol_range_to_lsp_json(&item.selection_range),
+        "range": {
+            "start": {"line": item.range.start.line, "character": item.range.start.character},
+            "end": {"line": item.range.end.line, "character": item.range.end.character},
+        },
+        "selectionRange": {
+            "start": {"line": item.selection_range.start.line, "character": item.selection_range.start.character},
+            "end": {"line": item.selection_range.end.line, "character": item.selection_range.end.character},
+        },
     });
     if let Some(detail) = &item.detail {
         obj["detail"] = json!(detail);
     }
+    if let Some(data) = &item.data {
+        obj["data"] = data.clone();
+    }
     obj
-}
-
-fn protocol_range_to_lsp_json(range: &ProtocolTextRange) -> Value {
-    json!({
-        "start": {"line": range.start.line, "character": range.start.character},
-        "end": {"line": range.end.line, "character": range.end.character},
-    })
 }
 
 /// Converts an LSP `textDocument/prepareCallHierarchy` response into call hierarchy items.
@@ -1609,6 +1611,7 @@ fn call_hierarchy_item_from_json(value: &Value) -> Option<LspCallHierarchyItem> 
         .get("detail")
         .and_then(Value::as_str)
         .map(|s| bounded_lsp_label(s, 160));
+    let data = value.get("data").cloned();
     Some(LspCallHierarchyItem {
         name: bounded_lsp_label(name, 120),
         kind,
@@ -1616,6 +1619,7 @@ fn call_hierarchy_item_from_json(value: &Value) -> Option<LspCallHierarchyItem> 
         range,
         selection_range,
         detail,
+        data,
     })
 }
 

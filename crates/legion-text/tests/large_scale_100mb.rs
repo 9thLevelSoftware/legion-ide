@@ -265,11 +265,9 @@ fn streaming_from_reader_matches_string_path_10mb() {
 
 #[test]
 fn streaming_from_file_matches_string_path() {
-    // Write a test file, build TextBuffer via from_file, and verify equivalence.
     let text = "hello\nworld\nstreaming from file\n";
-    let dir = std::env::temp_dir().join("legion_text_streaming_test");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file_path = dir.join("test_stream.txt");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("test_stream.txt");
     std::fs::write(&file_path, text).expect("write test file");
 
     let string_buf = TextBuffer::new(text);
@@ -285,10 +283,6 @@ fn streaming_from_file_matches_string_path() {
     {
         assert_eq!(r.hash, s.hash);
     }
-
-    // Cleanup.
-    let _ = std::fs::remove_file(&file_path);
-    let _ = std::fs::remove_dir(&dir);
 }
 
 #[test]

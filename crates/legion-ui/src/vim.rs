@@ -124,8 +124,6 @@ pub enum VimAction {
     Redo,
     /// `/` — begin forward search.
     SearchForward,
-    /// `.` — repeat the last change.
-    Repeat,
     /// `x` — delete the character under the cursor.
     DeleteChar,
     /// The key sequence is not yet complete (e.g. pending operator or `g`).
@@ -210,19 +208,19 @@ impl VimState {
     /// Process a single keystroke and return the resolved action.
     ///
     /// `key` is the character produced by the key (case-sensitive).
-    /// `ctrl` and `shift` indicate modifier state.
-    pub fn process_key(&mut self, key: char, ctrl: bool, _shift: bool) -> VimAction {
+    /// `ctrl` indicates modifier state.
+    pub fn process_key(&mut self, key: char, ctrl: bool) -> VimAction {
         match self.mode {
             EditorInputMode::Normal | EditorInputMode::Visual | EditorInputMode::VisualLine => {
                 self.process_normal_visual(key, ctrl)
             }
-            EditorInputMode::Insert => self.process_insert(key, ctrl),
+            EditorInputMode::Insert => self.process_insert(key),
         }
     }
 
     // -- Insert mode --------------------------------------------------------
 
-    fn process_insert(&mut self, key: char, _ctrl: bool) -> VimAction {
+    fn process_insert(&mut self, key: char) -> VimAction {
         if key == '\x1b' {
             // Escape
             self.mode = EditorInputMode::Normal;
@@ -237,7 +235,7 @@ impl VimState {
     fn process_normal_visual(&mut self, key: char, ctrl: bool) -> VimAction {
         // Handle pending multi-key sequences first.
         if let Some(pending) = self.pending.take() {
-            return self.resolve_pending(pending, key, ctrl);
+            return self.resolve_pending(pending, key);
         }
 
         // Count prefix accumulation (digits 1-9 start a count, 0 is LineStart
@@ -255,7 +253,11 @@ impl VimState {
         // Ctrl-modified keys.
         if ctrl {
             return match key {
-                'r' | 'R' => self.emit(VimAction::Redo, true),
+                'r' | 'R' => {
+                    let action = VimAction::Redo;
+                    self.last_action = Some(action.clone());
+                    action
+                }
                 _ => {
                     // Not a recognized ctrl combo — unknown.
                     VimAction::Unknown
@@ -266,17 +268,50 @@ impl VimState {
         // Unmodified keys.
         match key {
             // -- Motions ----------------------------------------------------
-            'h' => self.emit_motion(VimMotionKind::Left, count),
-            'j' => self.emit_motion(VimMotionKind::Down, count),
-            'k' => self.emit_motion(VimMotionKind::Up, count),
-            'l' => self.emit_motion(VimMotionKind::Right, count),
-            'w' => self.emit_motion(VimMotionKind::WordForward, count),
-            'b' => self.emit_motion(VimMotionKind::WordBackward, count),
-            'e' => self.emit_motion(VimMotionKind::WordEnd, count),
-            '0' => self.emit_motion(VimMotionKind::LineStart, count),
-            '$' => self.emit_motion(VimMotionKind::LineEnd, count),
-            '^' => self.emit_motion(VimMotionKind::FirstNonBlank, count),
-            'G' => self.emit_motion(VimMotionKind::FileEnd, count),
+            'h' => VimAction::Motion {
+                motion: VimMotionKind::Left,
+                count,
+            },
+            'j' => VimAction::Motion {
+                motion: VimMotionKind::Down,
+                count,
+            },
+            'k' => VimAction::Motion {
+                motion: VimMotionKind::Up,
+                count,
+            },
+            'l' => VimAction::Motion {
+                motion: VimMotionKind::Right,
+                count,
+            },
+            'w' => VimAction::Motion {
+                motion: VimMotionKind::WordForward,
+                count,
+            },
+            'b' => VimAction::Motion {
+                motion: VimMotionKind::WordBackward,
+                count,
+            },
+            'e' => VimAction::Motion {
+                motion: VimMotionKind::WordEnd,
+                count,
+            },
+            '0' => VimAction::Motion {
+                motion: VimMotionKind::LineStart,
+                count,
+            },
+            '$' => VimAction::Motion {
+                motion: VimMotionKind::LineEnd,
+                count,
+            },
+            '^' => VimAction::Motion {
+                motion: VimMotionKind::FirstNonBlank,
+                count,
+            },
+            'G' => VimAction::Motion {
+                motion: VimMotionKind::FileEnd,
+                count,
+            },
 
             // `g` starts a multi-key sequence (gg).
             'g' => {
@@ -317,36 +352,44 @@ impl VimState {
             // -- Mode changes -----------------------------------------------
             'i' => {
                 self.mode = EditorInputMode::Insert;
-                self.emit(VimAction::InsertBefore, true)
+                let action = VimAction::InsertBefore;
+                self.last_action = Some(action.clone());
+                action
             }
             'a' => {
                 self.mode = EditorInputMode::Insert;
-                self.emit(VimAction::InsertAfter, true)
+                let action = VimAction::InsertAfter;
+                self.last_action = Some(action.clone());
+                action
             }
             'o' => {
                 self.mode = EditorInputMode::Insert;
-                self.emit(VimAction::InsertLineBelow, true)
+                let action = VimAction::InsertLineBelow;
+                self.last_action = Some(action.clone());
+                action
             }
             'O' => {
                 self.mode = EditorInputMode::Insert;
-                self.emit(VimAction::InsertLineAbove, true)
+                let action = VimAction::InsertLineAbove;
+                self.last_action = Some(action.clone());
+                action
             }
             'v' => {
                 if self.mode == EditorInputMode::Visual {
                     self.mode = EditorInputMode::Normal;
-                    self.emit(VimAction::ChangeMode(EditorInputMode::Normal), false)
+                    VimAction::ChangeMode(EditorInputMode::Normal)
                 } else {
                     self.mode = EditorInputMode::Visual;
-                    self.emit(VimAction::ChangeMode(EditorInputMode::Visual), false)
+                    VimAction::ChangeMode(EditorInputMode::Visual)
                 }
             }
             'V' => {
                 if self.mode == EditorInputMode::VisualLine {
                     self.mode = EditorInputMode::Normal;
-                    self.emit(VimAction::ChangeMode(EditorInputMode::Normal), false)
+                    VimAction::ChangeMode(EditorInputMode::Normal)
                 } else {
                     self.mode = EditorInputMode::VisualLine;
-                    self.emit(VimAction::ChangeMode(EditorInputMode::VisualLine), false)
+                    VimAction::ChangeMode(EditorInputMode::VisualLine)
                 }
             }
             '\x1b' => {
@@ -357,10 +400,22 @@ impl VimState {
             }
 
             // -- Single-key actions -----------------------------------------
-            'x' => self.emit(VimAction::DeleteChar, true),
-            'p' => self.emit(VimAction::Put, true),
-            'u' => self.emit(VimAction::Undo, true),
-            '/' => self.emit(VimAction::SearchForward, false),
+            'x' => {
+                let action = VimAction::DeleteChar;
+                self.last_action = Some(action.clone());
+                action
+            }
+            'p' => {
+                let action = VimAction::Put;
+                self.last_action = Some(action.clone());
+                action
+            }
+            'u' => {
+                let action = VimAction::Undo;
+                self.last_action = Some(action.clone());
+                action
+            }
+            '/' => VimAction::SearchForward,
             '.' => {
                 if let Some(ref last) = self.last_action {
                     last.clone()
@@ -375,19 +430,28 @@ impl VimState {
 
     // -- Pending sequence resolution ----------------------------------------
 
-    fn resolve_pending(&mut self, pending: PendingSequence, key: char, _ctrl: bool) -> VimAction {
+    fn resolve_pending(&mut self, pending: PendingSequence, key: char) -> VimAction {
         let count = self.take_count();
 
         match pending {
             PendingSequence::G => {
                 if key == 'g' {
-                    self.emit_motion(VimMotionKind::FileStart, count)
+                    VimAction::Motion {
+                        motion: VimMotionKind::FileStart,
+                        count,
+                    }
                 } else {
                     VimAction::Unknown
                 }
             }
-            PendingSequence::FindChar => self.emit_motion(VimMotionKind::FindChar(key), count),
-            PendingSequence::TillChar => self.emit_motion(VimMotionKind::TillChar(key), count),
+            PendingSequence::FindChar => VimAction::Motion {
+                motion: VimMotionKind::FindChar(key),
+                count,
+            },
+            PendingSequence::TillChar => VimAction::Motion {
+                motion: VimMotionKind::TillChar(key),
+                count,
+            },
             PendingSequence::Operator(op) => {
                 // Line-doubled operator: dd, cc, yy.
                 let doubled = matches!(
@@ -404,7 +468,8 @@ impl VimState {
                     if matches!(op, VimOperatorKind::Change) {
                         self.mode = EditorInputMode::Insert;
                     }
-                    self.emit(action, true)
+                    self.last_action = Some(action.clone());
+                    action
                 } else if let Some(motion) = Self::char_to_motion(key) {
                     let action = VimAction::OperatorMotion {
                         operator: op,
@@ -414,7 +479,8 @@ impl VimState {
                     if matches!(op, VimOperatorKind::Change) {
                         self.mode = EditorInputMode::Insert;
                     }
-                    self.emit(action, true)
+                    self.last_action = Some(action.clone());
+                    action
                 } else {
                     VimAction::Unknown
                 }
@@ -445,19 +511,6 @@ impl VimState {
             _ => None,
         }
     }
-
-    fn emit_motion(&mut self, motion: VimMotionKind, count: usize) -> VimAction {
-        let action = VimAction::Motion { motion, count };
-        // Motions are not recorded as repeatable last actions.
-        action
-    }
-
-    fn emit(&mut self, action: VimAction, record: bool) -> VimAction {
-        if record {
-            self.last_action = Some(action.clone());
-        }
-        action
-    }
 }
 
 impl Default for VimState {
@@ -481,15 +534,15 @@ mod tests {
     }
 
     fn key(state: &mut VimState, ch: char) -> VimAction {
-        state.process_key(ch, false, false)
+        state.process_key(ch, false)
     }
 
     fn ctrl_key(state: &mut VimState, ch: char) -> VimAction {
-        state.process_key(ch, true, false)
+        state.process_key(ch, true)
     }
 
     fn esc(state: &mut VimState) -> VimAction {
-        state.process_key('\x1b', false, false)
+        state.process_key('\x1b', false)
     }
 
     // -- Mode transitions ---------------------------------------------------

@@ -578,12 +578,14 @@ pub enum TextError {
         /// Actual materialized text length in bytes.
         actual: usize,
     },
-    /// An I/O error occurred during streaming file operations.
-    #[error("I/O error: {0}")]
-    IoError(
-        /// Human-readable I/O error description.
-        String,
-    ),
+    /// I/O error during text buffer operations, preserving the error kind.
+    #[error("text I/O error ({kind:?}): {message}")]
+    Io {
+        /// The category of I/O error.
+        kind: std::io::ErrorKind,
+        /// Human-readable error description.
+        message: String,
+    },
 }
 
 /// Result type for text model operations.
@@ -1132,7 +1134,10 @@ impl TextBuffer {
         version: BufferVersion,
         allow_full_cache: bool,
     ) -> TextResult<Self> {
-        let rope = Rope::from_reader(reader).map_err(|e| TextError::IoError(e.to_string()))?;
+        let rope = Rope::from_reader(reader).map_err(|e| TextError::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        })?;
         Self::try_from_rope_with_cache_policy(rope, version, allow_full_cache)
     }
 
@@ -1160,7 +1165,10 @@ impl TextBuffer {
         version: BufferVersion,
         allow_full_cache: bool,
     ) -> TextResult<Self> {
-        let file = std::fs::File::open(path).map_err(|e| TextError::IoError(e.to_string()))?;
+        let file = std::fs::File::open(path).map_err(|e| TextError::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        })?;
         let reader = std::io::BufReader::new(file);
         Self::from_reader_with_version_and_cache_policy(reader, version, allow_full_cache)
     }
@@ -2522,8 +2530,8 @@ mod tests {
         }
         let result = TextBuffer::from_reader(FailReader);
         assert!(
-            matches!(result, Err(TextError::IoError(_))),
-            "expected IoError, got: {result:?}"
+            matches!(result, Err(TextError::Io { .. })),
+            "expected Io error, got: {result:?}"
         );
     }
 }

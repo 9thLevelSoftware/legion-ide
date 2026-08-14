@@ -1072,6 +1072,7 @@ pub fn run_renderer_backed_manual_measurement(
             match read_manual_renderer_perf_report(&manual_report_path) {
                 Ok(manual_report) => manual_renderer_perf_measurement(&manual_report),
                 Err(read_err) => {
+                    eprintln!("perf harness: {read_err}");
                     let output_text = subprocess_output_text(&output);
                     if !output.status.success() && manual_renderer_environment_blocked(&output_text)
                     {

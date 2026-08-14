@@ -12478,8 +12478,9 @@ impl CommandDispatcher {
             | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
                 Ok(AppCommandRequest::Noop)
             }
-            // Vim modal editing intents are resolved by the desktop keyboard
-            // handler before reaching this router; satisfy exhaustiveness.
+            // Vim modal editing intents: VimState parser exists in legion-ui
+            // but is not yet wired to the desktop keyboard handler. These arms
+            // satisfy exhaustiveness until integration lands.
             CommandDispatchIntent::SetVimModeEnabled { .. }
             | CommandDispatchIntent::VimMotion { .. }
             | CommandDispatchIntent::VimOperatorMotion { .. }
@@ -19187,7 +19188,13 @@ impl AppComposition {
         // workspace-provided `String` into a second allocation for the rope builder.
         let threshold = self.editor.thresholds().large_file_threshold_bytes;
         let disk_path = std::path::Path::new(&identity.canonical_path.0);
-        let use_streaming = opened.text.len() > threshold && disk_path.exists();
+        // Use the workspace-captured file length for the streaming decision instead of
+        // `text.len()`, which may differ from the on-disk size after encoding or truncation.
+        // TODO: push streaming into the workspace layer so the String is never materialized
+        // for files above the threshold. For now, the streaming path at least avoids a second
+        // String->Rope copy by reading directly from disk.
+        let file_byte_len = opened.file_length.unwrap_or(opened.text.len() as u64) as usize;
+        let use_streaming = file_byte_len > threshold && disk_path.exists();
 
         let buffer_id = self
             .editor
