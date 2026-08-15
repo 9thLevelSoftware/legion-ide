@@ -918,7 +918,16 @@ fn run_one_task(
 }
 
 fn finalize_completed_task_success(result: &mut LiveRunTaskResult, expected_files_ok: bool) {
-    result.task_success = expected_files_ok && result.proposals_applied == result.proposals_total;
+    // A run that proposed nothing did not do the task, whatever the file
+    // checks say. Every corpus task asks for a change, and `expected_files`
+    // mostly names files that already exist, so without this a model that
+    // replies with prose and edits nothing scores a success — and on a task
+    // whose tests already pass at rest, a full pass. That silently inflates
+    // the baseline the governed arm is measured against.
+    let proposed_something = result.proposals_applied > 0;
+    result.task_success = proposed_something
+        && expected_files_ok
+        && result.proposals_applied == result.proposals_total;
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1237,6 +1246,25 @@ mod tests {
         finalize_completed_task_success(&mut result, true);
 
         assert!(result.task_success);
+    }
+
+    /// A run that proposed nothing did not do the task. Without this, a model
+    /// that replies with prose and edits nothing scores a success on any task
+    /// whose expected files already exist — inflating the baseline that the
+    /// governed arm is measured against.
+    #[test]
+    fn a_run_that_proposed_nothing_is_never_a_success() {
+        let mut result = LiveRunTaskResult::new("did-nothing");
+        result.tests_passed = true;
+        result.proposals_total = 0;
+        result.proposals_applied = 0;
+
+        finalize_completed_task_success(&mut result, true);
+
+        assert!(
+            !result.task_success,
+            "zero proposals must not score as task success"
+        );
     }
 
     #[test]

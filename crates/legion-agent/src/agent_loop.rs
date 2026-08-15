@@ -773,7 +773,18 @@ fn resolve_fragment_edit(
         )
     };
 
-    if input.get("old_str").is_none() && input.get("old_string").is_none() {
+    if !legion_ai::small_model_governors_enabled() {
+        // Measurement arm: reproduce the pre-port contract, where an edit had
+        // to supply the file's complete content.
+        return Err(invalid(
+            "required field 'replacement' is missing or not a string".to_string(),
+        ));
+    }
+
+    if input.get("old_str").is_none()
+        && input.get("old_string").is_none()
+        && input.get("search").is_none()
+    {
         return Err(invalid(
             "provide either `replacement` (the file's complete new content) or \
              `old_str` and `new_str` (an exact fragment to replace)"
@@ -1089,7 +1100,14 @@ fn validate_and_execute(
         LegionToolKind::TerminalCommand | LegionToolKind::McpPassthrough => None,
     };
 
-    // Step 4: scope validation
+    // Step 4: scope validation.
+    //
+    // Both halves are terminal on purpose: a tool outside the granted set and
+    // a target outside the scope each end the run. Making the tool half
+    // retryable was tried, to stop a model's wrong guess from discarding a
+    // benchmark task, and reverted — it turned the exfiltration hostile-eval
+    // into a completed run that handed the attacker the list of tools it could
+    // use instead. See `LegionToolCallFeedbackKind::retryable`.
     validate_delegated_task_tool_call(&config.scope, tool, path_opt.as_deref()).map_err(|e| {
         crate::scope::tool_call_feedback_for_scope_denial(&e).unwrap_or_else(|| {
             LegionToolCallFeedback::new(

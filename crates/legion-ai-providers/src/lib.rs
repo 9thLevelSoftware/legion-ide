@@ -1157,12 +1157,18 @@ where
         // Skipped entirely when the provider already returned structured
         // calls, so a call is never counted twice (ADR-0049).
         let known_tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
-        let recovered = extract_tool_calls(&ExtractionInput {
-            content,
-            reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
-            has_existing_tool_calls: has_structured_calls,
-            known_tools: &known_tools,
-        });
+        let recovered = if legion_ai::small_model_governors_enabled() {
+            extract_tool_calls(&ExtractionInput {
+                content,
+                reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
+                has_existing_tool_calls: has_structured_calls,
+                known_tools: &known_tools,
+            })
+        } else {
+            // Measurement arm: behave as before the port — a call written as
+            // prose is prose.
+            Default::default()
+        };
 
         // Keep the prose the model actually meant as prose: when a call was
         // lifted out of the text, the remaining content is what is left.

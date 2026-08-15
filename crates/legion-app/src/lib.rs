@@ -1537,11 +1537,27 @@ impl ProductAiProviderPreference {
     }
 
     /// Default preference from `LEGION_AI_PROVIDER` when set.
+    ///
+    /// Test builds default to [`Self::Deterministic`] rather than `Auto`.
+    /// `Auto` probes loopback for a local model server, so with `Auto` the
+    /// outcome of a test depends on whether the developer happens to have
+    /// Ollama running — six tests in this workspace silently took the live
+    /// path and failed the moment a model server was installed, which the
+    /// roadmap actively asks developers to do. A test that wants a live
+    /// provider must now say so explicitly via
+    /// [`AppComposition::set_preferred_ai_provider`].
     pub fn from_env() -> Self {
-        std::env::var("LEGION_AI_PROVIDER")
-            .ok()
-            .map(|v| Self::parse(&v))
-            .unwrap_or_default()
+        if let Ok(configured) = std::env::var("LEGION_AI_PROVIDER") {
+            return Self::parse(&configured);
+        }
+        #[cfg(feature = "test-helpers")]
+        {
+            Self::Deterministic
+        }
+        #[cfg(not(feature = "test-helpers"))]
+        {
+            Self::default()
+        }
     }
 }
 

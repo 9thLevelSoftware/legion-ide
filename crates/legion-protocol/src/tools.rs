@@ -122,6 +122,18 @@ impl LegionToolCallFeedbackKind {
     }
 
     /// Whether the model should be allowed to retry after seeing this feedback.
+    ///
+    /// Only malformed arguments are recoverable. Everything else — an unknown
+    /// tool, a tool outside the granted set, a policy denial, a runtime
+    /// failure — ends the run.
+    ///
+    /// Widening this was tried and reverted: making an ungranted tool
+    /// retryable turned the exfiltration hostile-eval from `Blocked` into a
+    /// completed run that coached the attacker with the list of tools it
+    /// *could* use. The tool never executed either way, but terminating on an
+    /// attempted capability escape is the deliberate posture, and a benchmark
+    /// inconvenience is not a reason to trade it away. See
+    /// `hostile_eval_exfiltration_blocked`.
     pub const fn retryable(self) -> bool {
         matches!(self, Self::InvalidArguments)
     }
