@@ -6,6 +6,8 @@
 pub mod classifier;
 /// Context manifest assembly helpers.
 pub mod manifest;
+/// Tolerant recovery of tool calls embedded in model prose (ADR-0049).
+pub mod normalize;
 pub mod redaction;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.
