@@ -1424,6 +1424,38 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     status = "done"
     evidence = "plans/evidence/production/M10/PKT-LOOP-evidence.md"
 
+  # Added 2026-08-15 by production roadmap v1.0 Phase 2 (AI control plane).
+  # SmallCode behavioral port governed by ADR-0049.
+  [[epics.features]]
+  id = "P5.F4"
+  title = "Small-model tool-call reliability (SmallCode port)"
+
+    [[epics.features.tasks]]
+    id = "P5.F4.T1"
+    title = "Recover tool calls embedded in model prose (tagged, Liquid, fenced, bare)"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/normalize.rs", "crates/legion-ai/tests/tool_call_corpus.rs"]
+    dependencies = ["P0.F5.T3"]
+    verification = ["cargo test -p legion-ai --test tool_call_corpus", "cargo test -p legion-ai"]
+    acceptance = ["Every vector in the frozen SmallCode corpus is either recovered exactly or safely rejected; unrepairable inputs never yield a fabricated call; recovery never panics on truncated or adversarial input."]
+    stop_condition = "Stop if repair widens to inputs whose intent must be guessed (single-quoted keys, Python literals, truncated JSON)."
+    status = "done"
+    evidence = "plans/evidence/production/WS-AICP-01/tool-normalizer-evidence.md"
+
+    [[epics.features.tasks]]
+    id = "P5.F4.T2"
+    title = "Surface unparseable tool arguments as a non-dispatchable typed block"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/tool_calls.rs", "crates/legion-ai-providers/src/lib.rs", "crates/legion-agent/src/agent_loop.rs"]
+    dependencies = ["P5.F4.T1", "P5.F1.T3"]
+    verification = ["cargo test -p legion-ai-providers", "cargo test -p legion-agent --test agent_loop_integration"]
+    acceptance = ["A malformed tool call cannot be dispatched (no input field exists on the variant); the loop reports the diagnostic back, counts it against the retry budget, and audits it as malformed_tool_arguments; transport-shape failures remain hard provider errors."]
+    stop_condition = "Stop if a malformed call is ever replayed to a provider as a tool_use, or if retries are unbounded."
+    status = "done"
+    evidence = "plans/evidence/production/WS-AICP-01/tool-normalizer-evidence.md"
+
   [[epics.features]]
   id = "P5.F2"
   title = "Sandbox and worktree isolation"

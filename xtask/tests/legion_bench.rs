@@ -515,3 +515,35 @@ fn tempfile_dir(name: &str) -> std::path::PathBuf {
     fs::create_dir_all(&root).expect("create temp dir");
     root
 }
+
+/// A task that opts out of `require_tests_pass` must still be able to pass
+/// when verification fails — otherwise the budget flag is decorative.
+///
+/// This guards two halves that have to agree: the runner keeps `task_success`
+/// independent of verification, and the scorer applies the flag.
+#[test]
+fn live_scoring_honors_require_tests_pass_opt_out() {
+    let opt_out =
+        CORPUS_TASK_FULL.replace("require_tests_pass = true", "require_tests_pass = false");
+    let corpus_task = parse_corpus_task(&opt_out, "test").expect("parse corpus task");
+
+    let mut verification_failed = sample_raw_result("bench-live-77");
+    verification_failed.tests_passed = false;
+    verification_failed.verification_exit = Some(101);
+    // The loop and proposals succeeded; only the optional verification did not.
+    verification_failed.task_success = true;
+
+    let score = score_live_task(&corpus_task, &verification_failed);
+    assert_eq!(
+        score.status,
+        LegionBenchTaskStatus::Passed,
+        "require_tests_pass = false must let a task pass despite failing verification"
+    );
+
+    // With the flag on, the same result fails — proving the flag is what moved it.
+    let required = parse_corpus_task(CORPUS_TASK_FULL, "test").expect("parse corpus task");
+    assert_eq!(
+        score_live_task(&required, &verification_failed).status,
+        LegionBenchTaskStatus::Failed
+    );
+}

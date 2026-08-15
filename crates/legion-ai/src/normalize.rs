@@ -31,12 +31,19 @@ use serde_json::{Map, Value};
 /// One tool call recovered from model output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedToolCall {
-    /// Tool name exactly as the model wrote it. Canonicalization is a separate
-    /// stage — see [`normalize_alias`].
+    /// Tool name. Left exactly as the model wrote it unless it had to be
+    /// canonicalized to match an offered tool — see [`normalize_alias`].
     pub name: String,
-    /// Arguments object. `Value::Null` when the model supplied arguments that
-    /// could not be parsed — the call is reported but is not dispatchable.
+    /// Parsed arguments, or `Value::Null` when the model supplied none.
     pub arguments: Value,
+    /// Raw argument text when the model *did* supply arguments but they could
+    /// not be parsed.
+    ///
+    /// Distinguishing this from "no arguments" matters: a call with absent
+    /// arguments may be perfectly valid, whereas one with unparseable
+    /// arguments must never be dispatched. Callers turn this into a
+    /// non-dispatchable malformed block.
+    pub arguments_unparsed: Option<String>,
 }
 
 /// Result of scanning one assistant message for embedded tool calls.
@@ -99,7 +106,7 @@ pub fn extract_tool_calls(input: &ExtractionInput<'_>) -> ToolCallExtraction {
     let calls = scan
         .calls
         .into_iter()
-        .filter(|call| is_known_tool(&call.name, input.known_tools))
+        .filter_map(|call| resolve_against_known(call, input.known_tools))
         .collect();
 
     ToolCallExtraction {
@@ -124,8 +131,134 @@ impl ScanResult {
     }
 }
 
-fn is_known_tool(name: &str, known_tools: &[String]) -> bool {
-    known_tools.is_empty() || known_tools.iter().any(|known| known == name)
+/// Match a recovered call against the tools the model was actually offered.
+///
+/// Candidates are tried in order and the first one the registry offers wins:
+///
+/// 1. **The name as written.** A literal match always wins, so a registry
+///    exposing `shell` keeps receiving `shell` rather than being rewritten to
+///    `bash`.
+/// 2. **The SmallCode canonical name** ([`normalize_alias`]) — for registries
+///    that use that vocabulary.
+/// 3. **Legion's own registry name** ([`legion_registry_name`]) — the case
+///    that actually matters in a delegated run, where the offered tools are
+///    `read`, `grep`, `glob`, `outline`, `edit-as-proposal`,
+///    `terminal-command`.
+///
+/// Without step 3 the alias layer is inert in production: a model writing
+/// `Read` canonicalizes to SmallCode's `read_file`, which Legion does not
+/// offer, and the call is dropped — precisely the near-miss this exists to
+/// rescue. A call matching no candidate is dropped rather than forwarded.
+fn resolve_against_known(
+    call: ExtractedToolCall,
+    known_tools: &[String],
+) -> Option<ExtractedToolCall> {
+    if known_tools.is_empty() || known_tools.contains(&call.name) {
+        return Some(call);
+    }
+    let (canonical, canonical_arguments) = normalize_alias(&call.name, &call.arguments);
+    if known_tools.contains(&canonical) {
+        return Some(ExtractedToolCall {
+            name: canonical,
+            arguments: canonical_arguments,
+            arguments_unparsed: call.arguments_unparsed,
+        });
+    }
+    let native = legion_registry_name(&call.name)?;
+    if !known_tools.iter().any(|known| known == native) {
+        return None;
+    }
+    // Refuse a whole-file write that is really a substring edit, whatever the
+    // model called the tool: `replacement` is the file's complete new content,
+    // so forwarding the fragment would propose deleting everything else.
+    if native == "edit-as-proposal" && describes_substring_edit(&call.arguments) {
+        return None;
+    }
+    Some(ExtractedToolCall {
+        name: native.to_string(),
+        // Start from the canonical arguments, not the raw ones: canonical
+        // renaming already covers pairs the native table does not repeat
+        // (`line` → `start_line`), and dropping it here would silently hand
+        // Legion's `read` an argument it ignores.
+        arguments: rename_arguments_for_legion_tool(native, &canonical_arguments),
+        arguments_unparsed: call.arguments_unparsed,
+    })
+}
+
+/// Map a model-written tool name onto Legion's native registry name.
+///
+/// Covers both the names small models reach for unprompted (`Read`, `bash`,
+/// `str_replace`) and SmallCode's canonical vocabulary (`read_file`, `patch`,
+/// `find_files`), since either can appear once extraction has run.
+fn legion_registry_name(name: &str) -> Option<&'static str> {
+    match name {
+        "read" | "Read" | "read_file" | "readFile" | "view" | "cat" | "open_file" => Some("read"),
+        "grep" | "search" | "rg" | "ripgrep" | "search_files" | "grep_search" => Some("grep"),
+        "glob" | "find_files" | "ls" | "LS" | "list_directory" | "list_files" => Some("glob"),
+        "outline" | "symbols" | "list_symbols" | "document_symbols" => Some("outline"),
+        // Whole-file writers only. Legion's `edit-as-proposal` takes
+        // `replacement` as the file's *complete* new content, so these are the
+        // aliases whose semantics actually match.
+        "edit-as-proposal" | "write_file" | "write" | "create_file" => Some("edit-as-proposal"),
+        "terminal-command" | "bash" | "shell" | "run_command" | "run_terminal_cmd" | "cmd"
+        | "terminal" | "exec" => Some("terminal-command"),
+        // Targeted-edit aliases (`str_replace`, `patch`, `Edit`, …) are
+        // deliberately absent. Their `old_string`/`new_string` pair describes a
+        // *substring* replacement, and mapping `new_string` onto `replacement`
+        // would propose overwriting the entire file with that fragment. They
+        // stay non-dispatchable until exact-match patch semantics land
+        // (roadmap Phase 2.1).
+        _ => None,
+    }
+}
+
+/// Whether an argument object describes a substring edit rather than a
+/// whole-file write.
+///
+/// Checked independently of the tool name: a call carrying `old_string` means
+/// the model intends to replace part of a file, whatever it called the tool,
+/// and Legion has no tool that can express that yet.
+fn describes_substring_edit(arguments: &Value) -> bool {
+    let Value::Object(object) = arguments else {
+        return false;
+    };
+    ["old_string", "old_str", "oldText", "search", "find"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+}
+
+/// Rename arguments onto the keys a Legion native tool expects.
+///
+/// Directory-listing forms are a shape change rather than a rename: `ls(path)`
+/// becomes `glob(pattern)` over that directory.
+fn rename_arguments_for_legion_tool(tool: &str, arguments: &Value) -> Value {
+    let Value::Object(object) = arguments else {
+        return arguments.clone();
+    };
+    if tool == "glob"
+        && !object.contains_key("pattern")
+        && let Some(dir) = object.get("path").and_then(Value::as_str)
+    {
+        let dir = dir.trim_end_matches('/');
+        let dir = if dir.is_empty() { "." } else { dir };
+        let mut renamed = Map::new();
+        renamed.insert("pattern".to_string(), Value::String(format!("{dir}/*")));
+        return Value::Object(renamed);
+    }
+    let mut renamed = Map::new();
+    for (key, value) in object {
+        let key = match (tool, key.as_str()) {
+            ("read" | "outline" | "edit-as-proposal", "file_path" | "filepath" | "filePath") => {
+                "path"
+            }
+            ("grep" | "glob", "query") => "pattern",
+            ("terminal-command", "cmd") => "command",
+            ("edit-as-proposal", "content" | "new_string" | "new_str" | "text") => "replacement",
+            _ => key.as_str(),
+        };
+        renamed.insert(key.to_string(), value.clone());
+    }
+    Value::Object(renamed)
 }
 
 fn strip_spans(source: &str, spans: &[(usize, usize)]) -> String {
@@ -317,14 +450,21 @@ fn parse_json_lenient(text: &str) -> Option<Value> {
     None
 }
 
+/// Remove commas that immediately precede a closing `}` or `]`.
+///
+/// Copies unchanged input as byte *slices* rather than reconstructing it
+/// character by character. Only ASCII commas are ever dropped, so every cut
+/// lands on a char boundary and multi-byte text passes through byte-exact —
+/// these arguments carry source code and file contents, where silently
+/// rewriting `é` into `Ã©` would corrupt an edit proposal.
 fn strip_trailing_commas(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
+    let mut copied_to = 0usize;
     let mut in_string = false;
     let mut escaped = false;
     for (idx, &byte) in bytes.iter().enumerate() {
         if in_string {
-            out.push(byte as char);
             if escaped {
                 escaped = false;
             } else if byte == b'\\' {
@@ -336,7 +476,6 @@ fn strip_trailing_commas(text: &str) -> String {
         }
         if byte == b'"' {
             in_string = true;
-            out.push('"');
             continue;
         }
         if byte == b',' {
@@ -345,11 +484,12 @@ fn strip_trailing_commas(text: &str) -> String {
                 .iter()
                 .find(|candidate| !candidate.is_ascii_whitespace());
             if matches!(next, Some(b'}') | Some(b']')) {
-                continue;
+                out.push_str(&text[copied_to..idx]);
+                copied_to = idx + 1;
             }
         }
-        out.push(byte as char);
     }
+    out.push_str(&text[copied_to..]);
     out
 }
 
@@ -392,17 +532,27 @@ fn call_from_object(object: &Map<String, Value>) -> Option<ExtractedToolCall> {
 }
 
 fn finish_call(name: String, arguments: Option<&Value>) -> ExtractedToolCall {
+    let mut arguments_unparsed = None;
     let arguments = match arguments {
         // Providers often nest the argument object as a JSON *string*.
-        Some(Value::String(raw)) => parse_json_lenient(raw).unwrap_or(Value::Null),
+        Some(Value::String(raw)) => match parse_json_lenient(raw) {
+            Some(value) => value,
+            None => {
+                arguments_unparsed = Some(raw.clone());
+                Value::Null
+            }
+        },
         Some(value) => value.clone(),
         None => Value::Null,
     };
-    // Extraction reports what the model actually wrote. Alias canonicalization
-    // is a separate stage ([`normalize_alias`]) applied when a recovered call
-    // is matched against Legion's tool registry, so the two concerns stay
-    // independently testable.
-    ExtractedToolCall { name, arguments }
+    // Extraction reports the name the model actually wrote. Canonicalization
+    // happens only if that name does not match an offered tool — see
+    // `resolve_against_known`.
+    ExtractedToolCall {
+        name,
+        arguments,
+        arguments_unparsed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +640,9 @@ impl<'a> LiquidParser<'a> {
         Some(ExtractedToolCall {
             name,
             arguments: Value::Object(arguments),
+            // Liquid arguments are parsed structurally: a malformed one aborts
+            // the whole call rather than surviving as raw text.
+            arguments_unparsed: None,
         })
     }
 
@@ -820,6 +973,167 @@ mod tests {
         );
         assert_eq!(out.calls.len(), 1);
         assert_eq!(out.calls[0].arguments["command"], "ls -la");
+    }
+
+    /// Legion's *real* delegated-loop registry, not a SmallCode-shaped one.
+    /// Testing against invented names would let the alias layer look healthy
+    /// while dropping every call in production.
+    const LEGION_TOOLS: &[&str] = &[
+        "read",
+        "grep",
+        "glob",
+        "outline",
+        "edit-as-proposal",
+        "terminal-command",
+    ];
+
+    #[test]
+    fn near_miss_names_resolve_to_legion_registry_names() {
+        for (written, expected_tool, expected_key, expected_value) in [
+            (
+                "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"src/foo.rs\"}}</tool_call>",
+                "read",
+                "path",
+                "src/foo.rs",
+            ),
+            (
+                "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
+                "read",
+                "path",
+                "a.rs",
+            ),
+            (
+                "<tool_call>{\"name\":\"search\",\"arguments\":{\"query\":\"TODO\"}}</tool_call>",
+                "grep",
+                "pattern",
+                "TODO",
+            ),
+            (
+                "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+                "terminal-command",
+                "command",
+                "ls",
+            ),
+            (
+                "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"file_path\":\"a.rs\",\"content\":\"whole file\"}}</tool_call>",
+                "edit-as-proposal",
+                "replacement",
+                "whole file",
+            ),
+        ] {
+            let out = extract(written, LEGION_TOOLS);
+            assert_eq!(out.calls.len(), 1, "must be recovered: {written}");
+            assert_eq!(out.calls[0].name, expected_tool, "for: {written}");
+            assert_eq!(
+                out.calls[0].arguments[expected_key], expected_value,
+                "argument renamed onto the Legion key for: {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn substring_edits_are_never_mapped_to_a_whole_file_write() {
+        // Legion's `edit-as-proposal` takes `replacement` as the file's entire
+        // new content. Forwarding a `new_string` fragment would propose
+        // deleting everything else in the file.
+        for raw in [
+            "<tool_call>{\"name\":\"str_replace\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
+            "<tool_call>{\"name\":\"patch\",\"arguments\":{\"path\":\"a.rs\",\"old_str\":\"foo\",\"new_str\":\"bar\"}}</tool_call>",
+            "<tool_call>{\"name\":\"Edit\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
+            // Even under a whole-file name, `old_string` means substring intent.
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.rs\",\"old_string\":\"foo\",\"content\":\"bar\"}}</tool_call>",
+        ] {
+            let out = extract(raw, LEGION_TOOLS);
+            assert!(
+                out.calls.is_empty(),
+                "a substring edit must not become a whole-file replacement: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_argument_renames_survive_native_resolution() {
+        // `line` → `start_line` comes from the canonical table, not the native
+        // one; losing it would make `read` return the whole file.
+        let out = extract(
+            "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a.rs\",\"line\":200}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+        assert_eq!(
+            out.calls[0].arguments["start_line"], 200,
+            "the canonical rename must reach the native call"
+        );
+    }
+
+    #[test]
+    fn directory_listing_names_become_glob_patterns_for_legion() {
+        let out = extract(
+            "<tool_call>{\"name\":\"ls\",\"arguments\":{\"path\":\"src/\"}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].name, "glob");
+        assert_eq!(out.calls[0].arguments["pattern"], "src/*");
+    }
+
+    #[test]
+    fn a_smallcode_shaped_registry_still_resolves_to_its_own_names() {
+        // Registries using SmallCode's vocabulary keep working.
+        let out = extract(
+            "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"src/foo.rs\"}}</tool_call>",
+            &["read_file", "bash"],
+        );
+        assert_eq!(out.calls[0].name, "read_file");
+        assert_eq!(out.calls[0].arguments["path"], "src/foo.rs");
+    }
+
+    #[test]
+    fn a_literal_tool_name_is_never_rewritten_by_an_alias() {
+        // `shell` is a real tool here, so it must stay `shell` even though it
+        // is also an alias for `bash`.
+        let out = extract(
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+            &["shell", "read_file"],
+        );
+        assert_eq!(out.calls[0].name, "shell");
+        assert_eq!(out.calls[0].arguments["cmd"], "ls");
+    }
+
+    #[test]
+    fn unparseable_nested_arguments_are_flagged_not_silently_nulled() {
+        let out = extract(
+            "<tool_call>{\"function\":{\"name\":\"bash\",\"arguments\":\"{bad json\"}}</tool_call>",
+            &["bash"],
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].arguments_unparsed.as_deref(),
+            Some("{bad json"),
+            "callers must be able to tell this apart from a call with no arguments"
+        );
+
+        let absent = extract("<tool_call>{\"name\":\"bash\"}</tool_call>", &["bash"]);
+        assert!(
+            absent.calls[0].arguments_unparsed.is_none(),
+            "an absent argument object is not a parse failure"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_repair_preserves_multibyte_text() {
+        // Repair rewrites the argument text, so a byte-wise rebuild would
+        // corrupt any non-ASCII content it passes through — and this content
+        // becomes edit proposals.
+        let out = extract(
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"content\":\"café 🌍 日本語\",}}</tool_call>",
+            &["write_file"],
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].arguments["content"], "café 🌍 日本語",
+            "multi-byte characters must survive trailing-comma repair byte-exact"
+        );
     }
 
     #[test]
