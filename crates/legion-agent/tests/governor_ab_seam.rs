@@ -141,14 +141,15 @@ fn the_measurement_switch_changes_edit_behavior() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
 
-    // SAFETY: this binary runs in its own process and this is its only test
-    // touching the environment, so no other thread can observe the change.
+    // SAFETY: both tests in this binary mutate this variable. `ENV_GUARD`
+    // serializes them and each holds the lock across its whole env-mutating
+    // block, so no other thread can observe a partial state.
     unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
-    assert!(!legion_ai::small_model_governors_enabled());
+    assert!(!legion_ai::governance::small_model_governors_enabled());
     let without = proposals_for_fragment_edit(&dir);
 
     unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
-    assert!(legion_ai::small_model_governors_enabled());
+    assert!(legion_ai::governance::small_model_governors_enabled());
     let with = proposals_for_fragment_edit(&dir);
 
     assert_eq!(
@@ -168,16 +169,62 @@ fn only_the_exact_off_value_disables_governors() {
     for value in ["", "0", "false", "no", "OFFF", "on"] {
         unsafe { std::env::set_var("LEGION_AI_GOVERNORS", value) };
         assert!(
-            legion_ai::small_model_governors_enabled(),
+            legion_ai::governance::small_model_governors_enabled(),
             "{value:?} must not be read as off"
         );
     }
     for value in ["off", "OFF", "Off"] {
         unsafe { std::env::set_var("LEGION_AI_GOVERNORS", value) };
         assert!(
-            !legion_ai::small_model_governors_enabled(),
+            !legion_ai::governance::small_model_governors_enabled(),
             "{value:?} must disable governors"
         );
     }
     unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+}
+
+/// The advertised schema must move with the enforcement.
+///
+/// With governors off the executor rejects fragment edits. If the model were
+/// still shown a schema advertising `old_str`/`new_str`, it would be refused
+/// for following the contract it was given — penalising the raw arm for an
+/// interface that did not exist before the port, and biasing the comparison
+/// toward the governed arm.
+#[test]
+fn the_advertised_edit_schema_matches_the_arm() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let edit_schema = || {
+        legion_agent::agent_loop::tool_definitions_for_tests()
+            .into_iter()
+            .find(|tool| tool.name == "edit-as-proposal")
+            .expect("edit-as-proposal is advertised")
+            .input_schema
+    };
+
+    unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
+    let raw = edit_schema();
+    assert_eq!(
+        raw["required"],
+        serde_json::json!(["path", "replacement"]),
+        "the raw arm must advertise the pre-port contract"
+    );
+    let raw_properties = raw["properties"].as_object().expect("properties");
+    assert!(
+        !raw_properties.contains_key("old_str") && !raw_properties.contains_key("new_str"),
+        "the raw arm must not advertise a capability it will refuse"
+    );
+
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+    let governed = edit_schema();
+    assert_eq!(governed["required"], serde_json::json!(["path"]));
+    assert!(
+        governed["properties"]
+            .as_object()
+            .expect("properties")
+            .contains_key("old_str"),
+        "the governed arm advertises the fragment form"
+    );
 }

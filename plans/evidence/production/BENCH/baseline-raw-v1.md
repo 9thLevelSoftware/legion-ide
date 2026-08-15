@@ -107,6 +107,20 @@ than the original plan. The seam is itself tested
 exact value `off` disables it — a typo silently running the wrong arm would
 invalidate a result without any visible symptom.
 
+**Both halves of the contract move together.** Review caught that the raw arm
+was still *advertising* the governed edit schema (`old_str`/`new_str`, with
+`replacement` no longer required) while *refusing* fragment edits — so a model
+following the contract it was handed would have been penalised for an
+interface that did not exist before the port, biasing the comparison toward
+the governed arm. The advertised schema now switches with the enforcement,
+asserted by `the_advertised_edit_schema_matches_the_arm`.
+
+That flaw could not have affected the numbers above: the raw arm recorded zero
+tool calls on all 13 tasks, so it never reached the edit executor at all. The
+raw arm was nonetheless re-run after the fix and produced an identical result
+(0/13 passed, 0 tasks acted), so the figures here are measured under schema
+parity rather than merely argued to be unaffected.
+
 ## Status
 
 `P9.F1.T4` stays **in-progress**. The baseline is recorded and reproducible,

@@ -210,14 +210,59 @@ fn parse_tool_kind(name: &str) -> Option<LegionToolKind> {
     }
 }
 
+/// Restore the pre-port `edit-as-proposal` schema for the measurement arm.
+///
+/// With governors off the executor rejects fragment edits, but the model was
+/// still being *shown* a schema advertising `old_str`/`new_str` and no longer
+/// requiring `replacement`. A model following that advertised contract would
+/// then be refused for doing exactly what it was told — penalising the raw arm
+/// for an interface that did not exist before the port, and biasing the
+/// comparison toward the governed arm. Both halves of the contract have to
+/// move together for the A/B to mean anything.
+fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinition {
+    if definition.name != LegionToolKind::EditAsProposal.tool_name() {
+        return definition;
+    }
+    if let Some(properties) = definition
+        .input_schema
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    {
+        properties.remove("old_str");
+        properties.remove("new_str");
+        properties.insert(
+            "replacement".to_string(),
+            serde_json::json!({"type": "string"}),
+        );
+    }
+    definition.input_schema["required"] = serde_json::json!(["path", "replacement"]);
+    definition
+}
+
+/// The tool set as advertised to the model, for A/B seam assertions.
+///
+/// Exposed so a test can check that the *advertised* contract moves with the
+/// enforced one; the loop itself uses [`tool_defs_from_registry`].
+pub fn tool_definitions_for_tests() -> Vec<ToolDefinition> {
+    tool_defs_from_registry()
+}
+
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
 fn tool_defs_from_registry() -> Vec<ToolDefinition> {
+    let governed = legion_ai::governance::small_model_governors_enabled();
     legion_protocol::tools::tool_schema_definitions()
         .into_iter()
         .map(|def| ToolDefinition {
             name: def.tool_name,
             description: def.description_label,
             input_schema: def.input_schema,
+        })
+        .map(|def| {
+            if governed {
+                def
+            } else {
+                restore_pre_port_edit_schema(def)
+            }
         })
         .collect()
 }
@@ -773,7 +818,7 @@ fn resolve_fragment_edit(
         )
     };
 
-    if !legion_ai::small_model_governors_enabled() {
+    if !legion_ai::governance::small_model_governors_enabled() {
         // Measurement arm: reproduce the pre-port contract, where an edit had
         // to supply the file's complete content.
         return Err(invalid(

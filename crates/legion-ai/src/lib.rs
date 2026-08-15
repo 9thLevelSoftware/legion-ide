@@ -11,27 +11,31 @@ pub mod normalize;
 /// Exact-match resolution of model-authored edit fragments (ADR-0049).
 pub mod patch;
 
-/// Environment switch used to measure what the small-model reliability layer
-/// is worth.
-///
-/// The roadmap's central claim is that the same local model completes more
-/// tasks *with* these mechanisms than without. Proving that needs a
-/// controlled comparison, and the layers cannot simply be reverted to measure:
-/// they landed in the same commit as the benchmark harness itself, so there is
-/// no revision with the harness and without them. Rather than compare across
-/// commits — where unrelated changes confound the result — the same binary
-/// runs both arms.
-///
-/// Set `LEGION_AI_GOVERNORS=off` to disable tolerant tool-call recovery and
-/// fragment edit resolution, reproducing the pre-port behavior: only
-/// structured tool calls are seen, and an edit must supply the file's complete
-/// content. Any other value (or none) keeps them enabled.
-///
-/// This is a measurement seam, not a product setting: it is read by the
-/// benchmark runner and is not surfaced in the UI.
-pub fn small_model_governors_enabled() -> bool {
-    !std::env::var("LEGION_AI_GOVERNORS").is_ok_and(|value| value.eq_ignore_ascii_case("off"))
+/// The measurement seam for the small-model reliability layer.
+pub mod governance {
+    /// Environment switch used to measure what the small-model reliability layer
+    /// is worth.
+    ///
+    /// The roadmap's central claim is that the same local model completes more
+    /// tasks *with* these mechanisms than without. Proving that needs a
+    /// controlled comparison, and the layers cannot simply be reverted to measure:
+    /// they landed in the same commit as the benchmark harness itself, so there is
+    /// no revision with the harness and without them. Rather than compare across
+    /// commits — where unrelated changes confound the result — the same binary
+    /// runs both arms.
+    ///
+    /// Set `LEGION_AI_GOVERNORS=off` to disable tolerant tool-call recovery and
+    /// fragment edit resolution, reproducing the pre-port behavior: only
+    /// structured tool calls are seen, and an edit must supply the file's complete
+    /// content. Any other value (or none) keeps them enabled.
+    ///
+    /// This is a measurement seam, not a product setting: it is read by the
+    /// benchmark runner and is not surfaced in the UI.
+    pub fn small_model_governors_enabled() -> bool {
+        !std::env::var("LEGION_AI_GOVERNORS").is_ok_and(|value| value.eq_ignore_ascii_case("off"))
+    }
 }
+
 pub mod redaction;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.

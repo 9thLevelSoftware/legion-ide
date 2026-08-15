@@ -1157,7 +1157,7 @@ where
         // Skipped entirely when the provider already returned structured
         // calls, so a call is never counted twice (ADR-0049).
         let known_tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
-        let recovered = if legion_ai::small_model_governors_enabled() {
+        let recovered = if legion_ai::governance::small_model_governors_enabled() {
             extract_tool_calls(&ExtractionInput {
                 content,
                 reasoning_content: message.get("reasoning_content").and_then(Value::as_str),

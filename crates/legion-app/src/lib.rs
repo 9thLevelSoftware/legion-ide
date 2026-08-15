@@ -1550,11 +1550,11 @@ impl ProductAiProviderPreference {
         if let Ok(configured) = std::env::var("LEGION_AI_PROVIDER") {
             return Self::parse(&configured);
         }
-        #[cfg(feature = "test-helpers")]
+        #[cfg(any(test, feature = "test-helpers"))]
         {
             Self::Deterministic
         }
-        #[cfg(not(feature = "test-helpers"))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         {
             Self::default()
         }
