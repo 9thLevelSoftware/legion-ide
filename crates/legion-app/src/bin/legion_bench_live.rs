@@ -840,8 +840,18 @@ fn run_one_task(
             notes.push(format!("model_http_requests={}", state.requests));
         }
 
-        // Apply proposals + audit metrics for the completed path.
-        if let AppDelegatedTaskOutcome::Completed { proposals, .. } = &outcome {
+        // Apply proposals for every outcome that carries them, here, while
+        // `app` still exists. A run the idle governor stopped is scored on the
+        // same evidence as a completed one, and that parity is only real if
+        // its edits actually reach the checkout — relabelling the outcome
+        // later cannot apply anything, because the composition is gone by
+        // then.
+        let proposals = match &outcome {
+            AppDelegatedTaskOutcome::Completed { proposals, .. }
+            | AppDelegatedTaskOutcome::StoppedNoProgress { proposals, .. } => Some(proposals),
+            _ => None,
+        };
+        if let Some(proposals) = proposals {
             result.proposals_total = proposals.len() as u32;
             let (applied, mut apply_notes) = apply_proposals(&mut app, &checkout, proposals);
             result.proposals_applied = applied;
@@ -850,12 +860,17 @@ fn run_one_task(
         Ok(outcome)
     })();
 
-    let audit_metrics = |steps: &[legion_protocol::DelegatedTaskLoopStepRecord]| {
-        let turns = steps
+    // Records every audit-derived field at once. Split across the outcome arms
+    // it was three copies of the same five lines, which is three places to
+    // forget the next time the report grows a field.
+    let record_audit = |steps: &[legion_protocol::DelegatedTaskLoopStepRecord],
+                        result: &mut LiveRunTaskResult,
+                        notes: &mut Vec<String>| {
+        result.turns = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ModelResponse)
             .count() as u32;
-        let tool_calls = steps
+        result.tool_calls = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRequest)
             .count() as u32;
@@ -870,7 +885,13 @@ fn run_one_task(
                 )
             })
             .collect();
-        (turns, tool_calls, rejections)
+        result.retries = rejections.len() as u32;
+        // Why a call was rejected is the whole diagnosis. Without it a failed
+        // run reports `retries=1` and nothing else, and the only way to learn
+        // more is to run the suite again by hand.
+        if !rejections.is_empty() {
+            notes.push(format!("rejections: {}", rejections.join("; ")));
+        }
     };
 
     // A run the idle-turn governor stopped still produced whatever it produced,
@@ -904,16 +925,7 @@ fn run_one_task(
             } else {
                 "completed".to_string()
             };
-            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = rejections.len() as u32;
-            // Why a call was rejected is the whole diagnosis. Without it a
-            // failed run reports `retries=1` and nothing else, and the only
-            // way to learn more is to run the suite again by hand.
-            if !rejections.is_empty() {
-                notes.push(format!("rejections: {}", rejections.join("; ")));
-            }
+            record_audit(&audit_steps, &mut result, &mut notes);
 
             match changed_files(&checkout) {
                 Ok(changed) => {
@@ -964,16 +976,7 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "blocked".to_string();
-            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = rejections.len() as u32;
-            // Why a call was rejected is the whole diagnosis. Without it a
-            // failed run reports `retries=1` and nothing else, and the only
-            // way to learn more is to run the suite again by hand.
-            if !rejections.is_empty() {
-                notes.push(format!("rejections: {}", rejections.join("; ")));
-            }
+            record_audit(&audit_steps, &mut result, &mut notes);
             result.error = Some(format!("loop blocked: {reason}"));
         }
         Ok(AppDelegatedTaskOutcome::BudgetExhausted {
@@ -981,16 +984,7 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "budget_exhausted".to_string();
-            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = rejections.len() as u32;
-            // Why a call was rejected is the whole diagnosis. Without it a
-            // failed run reports `retries=1` and nothing else, and the only
-            // way to learn more is to run the suite again by hand.
-            if !rejections.is_empty() {
-                notes.push(format!("rejections: {}", rejections.join("; ")));
-            }
+            record_audit(&audit_steps, &mut result, &mut notes);
             result.error = Some(format!("budget exhausted: {reason}"));
         }
         // Rewritten into `Completed` above, so this arm is not reached. It

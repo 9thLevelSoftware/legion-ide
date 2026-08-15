@@ -391,6 +391,14 @@ pub struct LiveRunTaskResult {
     pub outcome: String,
     pub task_success: bool,
     pub tests_passed: bool,
+    /// Whether the verification command already passed before the model ran.
+    ///
+    /// Refactor tasks keep their tests green by design, so `tests_passed`
+    /// alone credits a model that did nothing. Carried through to the report
+    /// so a reader can tell an inherited pass from an earned one without
+    /// having to know which tasks are refactors.
+    #[serde(default)]
+    pub tests_passed_at_rest: bool,
     #[serde(default)]
     pub verification_exit: Option<i32>,
     pub proposals_total: u32,

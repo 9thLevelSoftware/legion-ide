@@ -133,24 +133,32 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
             // file's, so the edit remains exact — only the search was
             // tolerant.
             match find_whitespace_insensitive(file_content, old_str) {
-                Some((start, end)) => {
-                    let mut content = String::with_capacity(file_content.len() + new_str.len());
-                    content.push_str(&file_content[..start]);
-                    content.push_str(new_str);
-                    if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
-                        content.push('\n');
-                    }
-                    content.push_str(&file_content[end..]);
-                    PatchResolution::Applied {
-                        content,
-                        outcome: EditResolutionOutcome::Fuzzy,
-                    }
-                }
+                Some((start, end)) => PatchResolution::Applied {
+                    content: splice_replacement(file_content, start, end, new_str),
+                    outcome: EditResolutionOutcome::Fuzzy,
+                },
                 None => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
             }
         }
         many => PatchResolution::Ambiguous { occurrences: many },
     }
+}
+
+/// Replace `file_content[start..end]` with `new_str`.
+///
+/// Shared so the trailing-newline rule lives in one place: replacing a span
+/// that ended a line with text that does not would silently join it to the
+/// following line. Two copies of that rule is one copy that eventually
+/// forgets it.
+pub fn splice_replacement(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
+    let mut content = String::with_capacity(file_content.len() + new_str.len());
+    content.push_str(&file_content[..start]);
+    content.push_str(new_str);
+    if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&file_content[end..]);
+    content
 }
 
 /// Count every position the anchor could start at, including overlapping ones.
@@ -784,6 +792,20 @@ fn brace_balance(text: &str) -> i32 {
                     }
                 }
             }
+            // Block comments count too. A `/* } */` inside a function body
+            // would otherwise close the block early, and the forward scan
+            // would return a truncated range — splicing the new block in and
+            // leaving the tail of the old one behind.
+            '/' if !in_string && !in_char && chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
             '\n' => {
                 // An unterminated char literal is almost always a lifetime
                 // (`&'a str`), not a quote, so reset at end of line rather
@@ -987,7 +1009,23 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
 fn normalize_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut pending_space = false;
+    let mut in_literal: Option<char> = None;
+    let mut escaped = false;
     for c in line.trim().chars() {
+        // Inside a literal, spacing is content: `"a b"` and `"a  b"` are
+        // different strings, and collapsing them would let an anchor match a
+        // line whose code it does not equal.
+        if let Some(delimiter) = in_literal {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == delimiter {
+                in_literal = None;
+            }
+            continue;
+        }
         if c == ' ' || c == '\t' || c == '\r' {
             pending_space = true;
             continue;
@@ -996,6 +1034,13 @@ fn normalize_line(line: &str) -> String {
             out.push(' ');
         }
         pending_space = false;
+        // A `'` that opens no literal — a Rust lifetime — leaves the rest of
+        // the line treated as literal text, which only makes matching
+        // stricter. Missing a match is recoverable; matching the wrong line is
+        // not.
+        if c == '"' || c == '\'' {
+            in_literal = Some(c);
+        }
         out.push(c);
     }
     out
@@ -1077,6 +1122,83 @@ mod whitespace_tests {
         assert!(
             find_whitespace_insensitive(file, "let x = 1;").is_some(),
             "a CRLF file must match an anchor written with LF"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_regression_tests {
+    use super::*;
+
+    /// A `}` inside a block comment must not close the block.
+    ///
+    /// Counting it would truncate the replacement range, so the new block gets
+    /// spliced in and the tail of the old one is left behind — a proposal that
+    /// does not compile, produced silently.
+    #[test]
+    fn a_brace_in_a_block_comment_does_not_close_the_block() {
+        let file = concat!(
+            "fn target() {\n",
+            "    /* the closing } here is prose */\n",
+            "    old();\n",
+            "}\n",
+            "\n",
+            "fn after() {}\n",
+        );
+        let new = "fn target() {\n    fresh();\n}";
+        let (start, end) = anchor_replacement_block(file, new).expect("should anchor");
+        assert_eq!(
+            &file[start..end],
+            "fn target() {\n    /* the closing } here is prose */\n    old();\n}\n",
+            "the range must cover the whole function, not stop at the comment"
+        );
+        let spliced = splice_replacement(file, start, end, new);
+        assert!(
+            !spliced.contains("old();"),
+            "a truncated range leaves the old body behind: {spliced:?}"
+        );
+        assert!(spliced.contains("fn after() {}"));
+    }
+
+    #[test]
+    fn a_multi_line_block_comment_is_skipped_whole() {
+        assert_eq!(brace_balance("/*\n}\n}\n*/\n"), 0);
+        assert_eq!(
+            brace_balance("fn f() { /* } */ }"),
+            0,
+            "one real open and one real close, with a decoy between them"
+        );
+    }
+
+    /// Whitespace inside a string literal is content, not formatting.
+    ///
+    /// `"a b"` and `"a  b"` are different strings. Collapsing both to the same
+    /// normalized form would let an anchor match a line whose code it does not
+    /// equal, and the edit would be applied anyway.
+    #[test]
+    fn spacing_inside_a_string_literal_is_not_collapsed() {
+        let file = "fn f() {\n    let s = \"a  b\";\n}\n";
+        assert!(
+            find_whitespace_insensitive(file, "let s = \"a b\";").is_none(),
+            "two different string literals must not be treated as one anchor"
+        );
+    }
+
+    #[test]
+    fn spacing_outside_a_literal_is_still_collapsed() {
+        let file = "fn f() {\n    let s   =  \"a  b\";\n}\n";
+        assert!(
+            find_whitespace_insensitive(file, "let s = \"a  b\";").is_some(),
+            "the literal matches exactly; only the code around it drifted"
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_literal() {
+        let file = "fn f() {\n    let s = \"a\\\"  b\";\n}\n";
+        assert!(
+            find_whitespace_insensitive(file, "let s = \"a\\\" b\";").is_none(),
+            "the escaped quote keeps the literal open, so its spacing stays significant"
         );
     }
 }

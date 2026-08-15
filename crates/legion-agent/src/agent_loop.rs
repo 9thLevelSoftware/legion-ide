@@ -883,14 +883,12 @@ fn resolve_fragment_edit(
                         .to_string(),
                 )
             })?;
-        let mut resolved = String::with_capacity(file_content.len() + new_str.len());
-        resolved.push_str(&file_content[..start]);
-        resolved.push_str(new_str);
-        if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
-            resolved.push('\n');
-        }
-        resolved.push_str(&file_content[end..]);
-        return Ok(resolved);
+        return Ok(legion_ai::patch::splice_replacement(
+            &file_content,
+            start,
+            end,
+            new_str,
+        ));
     }
 
     match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
@@ -1544,6 +1542,60 @@ pub fn run_delegated_task_loop(
                     // another.
                     if let Some(cached) = governors.cached_result(name, input) {
                         let notice = crate::governors::dedup_notice(name, cached);
+                        // A cache hit still sends the whole result to the model,
+                        // so it costs exactly what a fresh call costs and is
+                        // charged the same. Serving it free would let repeated
+                        // large reads deliver many times the configured
+                        // cumulative ceiling.
+                        total_output_bytes = total_output_bytes.saturating_add(notice.len() as u64);
+                        if total_output_bytes > config.budget.max_total_tool_output_bytes {
+                            // Pair the ToolCallRequest before terminating: the
+                            // call was answered, and only then did the
+                            // cumulative ceiling trip. An unpaired request in
+                            // the trail reads as a call that vanished.
+                            event_seq += 1;
+                            step_index += 1;
+                            audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                                run_id: run_id.clone(),
+                                step_index,
+                                kind: DelegatedTaskLoopStepKind::ToolCallResult,
+                                correlation_id: correlation_id_str.clone(),
+                                causality_id: causality_id_str.clone(),
+                                event_sequence: event_seq,
+                                tool_name: Some(name.clone()),
+                                allowed: Some(true),
+                                reason: Some(
+                                    "served_from_dedup_cache; max_total_tool_output_bytes \
+                                     budget exhausted"
+                                        .to_string(),
+                                ),
+                            });
+                            // Loop-level event, so a fresh causality id rather
+                            // than the pair's — matching the same termination
+                            // after a fresh execution.
+                            event_seq += 1;
+                            step_index += 1;
+                            audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                                run_id: run_id.clone(),
+                                step_index,
+                                kind: DelegatedTaskLoopStepKind::BudgetExhausted,
+                                correlation_id: correlation_id_str.clone(),
+                                causality_id: Uuid::new_v4().to_string(),
+                                event_sequence: event_seq,
+                                tool_name: Some(name.clone()),
+                                allowed: Some(false),
+                                reason: Some("max_total_tool_output_bytes".to_string()),
+                            });
+                            return Ok(DelegatedTaskLoopResult::BudgetExhausted {
+                                reason: "max_total_tool_output_bytes exceeded".to_string(),
+                            });
+                        }
+                        // A cache hit is a successful call, so it breaks a run
+                        // of retries exactly as a fresh success does. Without
+                        // this, failures separated by successful reads still
+                        // accumulate and the loop reports a retry limit the
+                        // model never actually hit consecutively.
+                        consecutive_retries = 0;
                         tool_calls += 1;
                         event_seq += 1;
                         step_index += 1;
@@ -1670,6 +1722,10 @@ pub fn run_delegated_task_loop(
                             // idle too would let the idle governor fire first
                             // and report something vaguer.
                             turn_had_new_signal = true;
+                            // A failed command may still have changed the
+                            // worktree before it failed, so cached reads are
+                            // no longer answers to the same question.
+                            governors.note_possible_mutation(name);
                             let retryable = feedback.retryable;
                             let reason = feedback.detail_label.clone();
                             let tool_name_str = feedback.tool.tool_name().to_string();

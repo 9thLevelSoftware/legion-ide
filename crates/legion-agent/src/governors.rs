@@ -92,6 +92,20 @@ impl LoopGovernors {
             .map(String::as_str)
     }
 
+    /// Discard cached reads if `tool` could have changed the worktree.
+    ///
+    /// Called on the failure path as well as the success one. A
+    /// `terminal-command` that is killed on timeout still ran, and may have
+    /// rewritten files before it died — serving a pre-command read afterwards
+    /// would have the model editing against state that no longer exists.
+    /// Errors are the case where that is *most* likely, so treating only
+    /// success as invalidating would get it exactly backwards.
+    pub fn note_possible_mutation(&mut self, tool: &str) {
+        if self.enabled && !CACHEABLE_TOOLS.contains(&tool) {
+            self.cached_reads.clear();
+        }
+    }
+
     /// Record a completed tool call.
     ///
     /// A call to any tool outside `CACHEABLE_TOOLS` invalidates the whole read
@@ -287,6 +301,32 @@ mod tests {
         assert!(
             g.cached_result("read", &read).is_none(),
             "a command may have rewritten the file, so the earlier read is no longer an answer"
+        );
+    }
+
+    #[test]
+    fn a_failed_command_also_invalidates_cached_reads() {
+        let mut g = LoopGovernors::new(true);
+        let read = json!({"path": "a.rs"});
+        g.record_execution("read", &read, "before");
+        // A command killed on timeout may still have rewritten files first.
+        g.note_possible_mutation("terminal-command");
+        assert!(
+            g.cached_result("read", &read).is_none(),
+            "failure is when a partial write is *most* likely, so treating only              success as invalidating gets it exactly backwards"
+        );
+    }
+
+    #[test]
+    fn a_failed_read_does_not_invalidate_the_cache() {
+        let mut g = LoopGovernors::new(true);
+        let read = json!({"path": "a.rs"});
+        g.record_execution("read", &read, "contents");
+        g.note_possible_mutation("read");
+        assert_eq!(
+            g.cached_result("read", &read),
+            Some("contents"),
+            "a read cannot have changed anything, however it ended"
         );
     }
 

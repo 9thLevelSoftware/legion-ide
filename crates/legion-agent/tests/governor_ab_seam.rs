@@ -636,3 +636,106 @@ fn the_measurement_arm_sees_no_governors_at_all() {
          script runs to its end: got {result:?}"
     );
 }
+
+/// A cache hit costs the model exactly what a fresh call costs.
+///
+/// The whole cached result is sent back, so serving it free would let repeated
+/// large reads deliver many times the configured cumulative ceiling while the
+/// budget that exists to stop that reads zero.
+#[test]
+fn a_cached_result_is_charged_to_the_output_budget() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = TempDir::new().unwrap();
+    // Large enough that a couple of repeats blow a small cumulative ceiling.
+    std::fs::write(dir.path().join("m.rs"), "x".repeat(4096)).unwrap();
+
+    let mut config = config(&dir);
+    config.budget.max_total_tool_output_bytes = 6_000;
+
+    let mut builder = ScriptedToolCallingProviderBuilder::new();
+    for i in 0..4 {
+        builder = builder.tool_use(&format!("t{i}"), "read", read_of("m.rs"));
+    }
+    let provider = builder.end_turn("done").build("test");
+
+    let mut sink = RecordingSink::default();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("budget exhaustion is a result, not an error");
+
+    match result {
+        DelegatedTaskLoopResult::BudgetExhausted { reason } => assert!(
+            reason.contains("max_total_tool_output_bytes"),
+            "cached repeats must hit the same ceiling as fresh reads: {reason}"
+        ),
+        other => panic!("expected the output budget to stop this run, got {other:?}"),
+    }
+    assert!(
+        sink.count("served_from_dedup_cache; max_total_tool_output_bytes budget exhausted") == 1,
+        "the request that tripped the ceiling must still be paired with a result"
+    );
+}
+
+/// A cache hit is a successful call and breaks a run of retries.
+///
+/// Without this, rejections separated by successful repeated reads still
+/// accumulate, and the loop eventually reports a consecutive-retry limit the
+/// model never actually hit consecutively.
+#[test]
+fn a_cached_result_resets_the_retry_counter() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let mut config = config(&dir);
+    config.budget.max_consecutive_retries = 2;
+
+    // An edit that cannot resolve, so each attempt is a retryable rejection.
+    let bad = serde_json::json!({
+        "path": "m.rs",
+        "old_str": "fn absent_from_the_file() {}",
+        "new_str": "fn replaced() {}"
+    });
+    // Rejection, cached read, rejection, cached read, rejection. Three
+    // rejections in total but never three in a row, so the run must survive.
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("r0", "read", read_of("m.rs"))
+        .tool_use("e1", "edit-as-proposal", bad.clone())
+        .tool_use("c1", "read", read_of("m.rs"))
+        .tool_use("e2", "edit-as-proposal", bad.clone())
+        .tool_use("c2", "read", read_of("m.rs"))
+        .tool_use("e3", "edit-as-proposal", bad)
+        .end_turn("done")
+        .build("test");
+
+    let mut sink = RecordingSink::default();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "three non-consecutive rejections must not trip a consecutive-retry \
+         limit of two: got {result:?}"
+    );
+}
