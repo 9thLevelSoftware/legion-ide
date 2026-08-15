@@ -168,9 +168,19 @@ fn resolve_against_known(
     if !known_tools.iter().any(|known| known == native) {
         return None;
     }
+    // Refuse a whole-file write that is really a substring edit, whatever the
+    // model called the tool: `replacement` is the file's complete new content,
+    // so forwarding the fragment would propose deleting everything else.
+    if native == "edit-as-proposal" && describes_substring_edit(&call.arguments) {
+        return None;
+    }
     Some(ExtractedToolCall {
         name: native.to_string(),
-        arguments: rename_arguments_for_legion_tool(native, &call.arguments),
+        // Start from the canonical arguments, not the raw ones: canonical
+        // renaming already covers pairs the native table does not repeat
+        // (`line` → `start_line`), and dropping it here would silently hand
+        // Legion's `read` an argument it ignores.
+        arguments: rename_arguments_for_legion_tool(native, &canonical_arguments),
         arguments_unparsed: call.arguments_unparsed,
     })
 }
@@ -186,12 +196,35 @@ fn legion_registry_name(name: &str) -> Option<&'static str> {
         "grep" | "search" | "rg" | "ripgrep" | "search_files" | "grep_search" => Some("grep"),
         "glob" | "find_files" | "ls" | "LS" | "list_directory" | "list_files" => Some("glob"),
         "outline" | "symbols" | "list_symbols" | "document_symbols" => Some("outline"),
-        "edit-as-proposal" | "edit" | "Edit" | "str_replace" | "str_replace_editor" | "replace"
-        | "patch" | "write_file" | "write" | "apply_patch" => Some("edit-as-proposal"),
+        // Whole-file writers only. Legion's `edit-as-proposal` takes
+        // `replacement` as the file's *complete* new content, so these are the
+        // aliases whose semantics actually match.
+        "edit-as-proposal" | "write_file" | "write" | "create_file" => Some("edit-as-proposal"),
         "terminal-command" | "bash" | "shell" | "run_command" | "run_terminal_cmd" | "cmd"
         | "terminal" | "exec" => Some("terminal-command"),
+        // Targeted-edit aliases (`str_replace`, `patch`, `Edit`, …) are
+        // deliberately absent. Their `old_string`/`new_string` pair describes a
+        // *substring* replacement, and mapping `new_string` onto `replacement`
+        // would propose overwriting the entire file with that fragment. They
+        // stay non-dispatchable until exact-match patch semantics land
+        // (roadmap Phase 2.1).
         _ => None,
     }
+}
+
+/// Whether an argument object describes a substring edit rather than a
+/// whole-file write.
+///
+/// Checked independently of the tool name: a call carrying `old_string` means
+/// the model intends to replace part of a file, whatever it called the tool,
+/// and Legion has no tool that can express that yet.
+fn describes_substring_edit(arguments: &Value) -> bool {
+    let Value::Object(object) = arguments else {
+        return false;
+    };
+    ["old_string", "old_str", "oldText", "search", "find"]
+        .iter()
+        .any(|key| object.contains_key(*key))
 }
 
 /// Rename arguments onto the keys a Legion native tool expects.
@@ -982,10 +1015,10 @@ mod tests {
                 "ls",
             ),
             (
-                "<tool_call>{\"name\":\"str_replace\",\"arguments\":{\"file_path\":\"a.rs\",\"new_string\":\"x\"}}</tool_call>",
+                "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"file_path\":\"a.rs\",\"content\":\"whole file\"}}</tool_call>",
                 "edit-as-proposal",
                 "replacement",
-                "x",
+                "whole file",
             ),
         ] {
             let out = extract(written, LEGION_TOOLS);
@@ -996,6 +1029,42 @@ mod tests {
                 "argument renamed onto the Legion key for: {written}"
             );
         }
+    }
+
+    #[test]
+    fn substring_edits_are_never_mapped_to_a_whole_file_write() {
+        // Legion's `edit-as-proposal` takes `replacement` as the file's entire
+        // new content. Forwarding a `new_string` fragment would propose
+        // deleting everything else in the file.
+        for raw in [
+            "<tool_call>{\"name\":\"str_replace\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
+            "<tool_call>{\"name\":\"patch\",\"arguments\":{\"path\":\"a.rs\",\"old_str\":\"foo\",\"new_str\":\"bar\"}}</tool_call>",
+            "<tool_call>{\"name\":\"Edit\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
+            // Even under a whole-file name, `old_string` means substring intent.
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.rs\",\"old_string\":\"foo\",\"content\":\"bar\"}}</tool_call>",
+        ] {
+            let out = extract(raw, LEGION_TOOLS);
+            assert!(
+                out.calls.is_empty(),
+                "a substring edit must not become a whole-file replacement: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_argument_renames_survive_native_resolution() {
+        // `line` → `start_line` comes from the canonical table, not the native
+        // one; losing it would make `read` return the whole file.
+        let out = extract(
+            "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a.rs\",\"line\":200}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+        assert_eq!(
+            out.calls[0].arguments["start_line"], 200,
+            "the canonical rename must reach the native call"
+        );
     }
 
     #[test]

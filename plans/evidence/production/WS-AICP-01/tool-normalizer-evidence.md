@@ -49,9 +49,21 @@ vocabulary canonicalizes `Read` to `read_file` — a tool Legion does not have.
 Without a Legion-native mapping the alias layer was inert exactly where it was
 supposed to help, and the first test written for it passed only because it
 constructed a registry offering `read_file`. Arguments are renamed onto the
-target tool's keys (`file_path` → `path`, `cmd` → `command`, `new_string` →
-`replacement`), and directory listings reshape rather than rename
-(`ls(path)` → `glob(pattern)`).
+target tool's keys (`file_path` → `path`, `cmd` → `command`, `query` →
+`pattern`), starting from the canonical rename so pairs the native table does
+not repeat (`line` → `start_line`) still reach the call. Directory listings
+reshape rather than rename (`ls(path)` → `glob(pattern)`).
+
+**Targeted-edit aliases are deliberately left non-dispatchable.** Legion's
+`edit-as-proposal` takes `replacement` as the file's *complete* new content.
+A model writing `str_replace(old_string, new_string)` means a substring
+replacement, so mapping `new_string` onto `replacement` would propose
+overwriting the whole file with that fragment — data loss dressed as a
+recovered call. Only whole-file writers (`write_file`, `write`, `create_file`)
+map to `edit-as-proposal`, and the check is also made on the *arguments*: any
+call carrying `old_string`/`old_str` is refused regardless of the tool name it
+used. These aliases stay unmapped until exact-match patch semantics land
+(roadmap Phase 2.1), which is the packet that can express them safely.
 
 **A recovered call is reported as a tool-use turn.** A model writing its call
 as prose reports `finish_reason: "stop"`, because the provider only saw text.
@@ -96,10 +108,10 @@ autonomy expansion (master plan §5.3).
 | `cargo test -p legion-ai --test tool_call_corpus` | 3/3 — **58/58 corpus vectors** recovered exactly or safely rejected (roadmap bar: ≥99%) |
 | Provider contract coverage (near-miss name, unparseable recovered arguments, prose recovery, malformed structured call, transport-shape failure, stop-reason) | 6 tests in `legion-ai-providers` |
 | **End-to-end provider→loop contract** (`legion-agent --test openai_tool_loop_cross_check`) | 3 passed — prose `Read` dispatches as Legion's `read`; malformed prose call is audited then corrected |
-| `cargo test -p legion-ai` | 61 passed / 0 failed |
-| `cargo test -p legion-ai-providers` | 68 passed / 0 failed |
-| `cargo test -p legion-agent --test agent_loop_integration` | 14 passed / 0 failed |
-| `cargo test --workspace --all-targets` | **2729 passed / 0 failed / 250 suites** |
+| `cargo test -p legion-ai` | 69 passed / 0 failed |
+| `cargo test -p legion-ai-providers` | 71 passed / 0 failed |
+| `cargo test -p legion-agent` | 94 passed / 0 failed (incl. 14 agent-loop integration) |
+| `cargo test --workspace --all-targets` | **2745 passed / 0 failed / 250 suites** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 
 Corpus coverage by category: xml_tagged 7, alias 18, liquid 11, fenced_json 4,
@@ -114,7 +126,7 @@ asserting no panic and no empty-named call, plus unicode boundary cases.
 **Corpus coverage alone did not prove the production path — and reviewers were
 right to say so.** The 18 alias vectors exercise `normalize_alias` directly,
 so a green corpus said nothing about whether a near-miss name survives a real
-delegated run. Four gaps were found in review and closed here, none of which
+delegated run. Six gaps were found in review and closed here, none of which
 the corpus could have caught:
 
 1. alias canonicalization never reached the provider filter;
@@ -123,7 +135,15 @@ the corpus could have caught:
 3. recovered calls with unparseable arguments entered dispatch with a null
    input;
 4. a recovered call reported `EndTurn`, so the loop finished before
-   dispatching it.
+   dispatching it;
+5. substring-edit aliases mapped onto a whole-file write, which would have
+   proposed replacing a file with a fragment;
+6. canonical argument renames were discarded during native resolution, so
+   `read` silently ignored a requested line range.
+
+Items 4 and 5 are the instructive ones. Item 4 meant the feature did nothing
+at all end to end while every unit test passed; item 5 meant it would have
+done something actively destructive. Neither is visible from a parser corpus.
 
 The lesson is recorded rather than papered over: a pure-layer corpus proves
 the parser, not the feature. The binding evidence is now the end-to-end
