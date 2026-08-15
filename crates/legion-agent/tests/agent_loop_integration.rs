@@ -13,7 +13,9 @@ use legion_agent::agent_loop::{
     DelegatedTaskAuditSink, DelegatedTaskCancellationProbe, DelegatedTaskLoopConfig,
     DelegatedTaskLoopResult, DelegatedToolHost, run_delegated_task_loop,
 };
-use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+use legion_ai::tool_calls::{
+    ScriptedToolCallingProviderBuilder, ToolCompletionStopReason, ToolTurnBlock,
+};
 use legion_protocol::{
     CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
     CapabilityResponse, DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind,
@@ -991,4 +993,100 @@ fn blocked_run_discards_proposals() {
     );
     // Blocked variant carries no proposals field — verified by the match above.
     assert_audit_pairing(&sink.steps);
+}
+
+/// A malformed tool call is recoverable: the loop reports the diagnostic back
+/// as text and the model's corrected call succeeds, rather than the whole run
+/// dying on one bad JSON string (ADR-0049).
+#[test]
+fn malformed_tool_call_is_reported_back_and_run_recovers() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "Hello, world!").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .turn(
+            vec![ToolTurnBlock::MalformedToolCall {
+                id: "c1".to_string(),
+                name: "read".to_string(),
+                raw_arguments: "{not json".to_string(),
+                diagnostic: "arguments are not valid JSON".to_string(),
+            }],
+            ToolCompletionStopReason::ToolUse,
+        )
+        // The corrected call is only returned if the loop actually fed the
+        // rejection back to the model.
+        .expect_prior_result_contains("not valid JSON")
+        .tool_use("t1", "read", serde_json::json!({"path": "hello.txt"}))
+        .end_turn("Recovered: file says Hello, world!")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("a malformed call must not error the loop");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed after recovery, got {result:?}"
+    );
+
+    let rejected = sink
+        .steps
+        .iter()
+        .filter(|step| step.reason.as_deref() == Some("malformed_tool_arguments"))
+        .count();
+    assert_eq!(rejected, 1, "the malformed call is audited exactly once");
+    assert_event_sequence_monotonic(&sink.steps);
+    assert_step_index_strictly_increasing(&sink.steps);
+}
+
+/// A model that can only emit broken arguments is stopped by the retry budget
+/// instead of looping until the turn budget drains.
+#[test]
+fn repeated_malformed_tool_calls_hit_the_retry_budget() {
+    let dir = TempDir::new().unwrap();
+    let mut builder = ScriptedToolCallingProviderBuilder::new();
+    for index in 0..12 {
+        builder = builder.turn(
+            vec![ToolTurnBlock::MalformedToolCall {
+                id: format!("c{index}"),
+                name: "read".to_string(),
+                raw_arguments: "{still not json".to_string(),
+                diagnostic: "arguments are not valid JSON".to_string(),
+            }],
+            ToolCompletionStopReason::ToolUse,
+        );
+    }
+    let provider = builder.build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("budget exhaustion is a result, not an error");
+
+    match result {
+        DelegatedTaskLoopResult::Blocked { reason } => {
+            assert!(
+                reason.contains("unparseable tool arguments"),
+                "block reason should name the cause: {reason}"
+            );
+        }
+        other => panic!("expected Blocked on repeated malformed calls, got {other:?}"),
+    }
 }

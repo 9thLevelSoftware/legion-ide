@@ -353,9 +353,6 @@ pub struct LiveRunInput {
     pub endpoint: String,
     /// Model identifier sent on every chat completion request.
     pub model: String,
-    /// Bearer token; local servers ignore it (a placeholder is sent when the
-    /// user configured none, because the provider adapter requires a token).
-    pub api_key: String,
     pub tasks: Vec<LiveRunTaskInput>,
 }
 

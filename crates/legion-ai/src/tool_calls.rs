@@ -31,6 +31,33 @@ pub enum ToolTurnBlock {
         /// Whether the tool call errored.
         is_error: bool,
     },
+    /// The model asked for a tool but its arguments could not be parsed.
+    ///
+    /// Deliberately carries **no** `input` field: an unparsed call is not
+    /// dispatchable, and making that a type-level fact means no future caller
+    /// can accidentally execute one. The agent loop turns this into an error
+    /// tool-result so the model can correct itself, instead of the whole
+    /// completion failing and ending the turn.
+    MalformedToolCall {
+        /// Tool-use id when the provider supplied one.
+        id: String,
+        /// Tool name the model asked for, when it was legible.
+        name: String,
+        /// Raw, unparsed argument text — bounded by the provider before it
+        /// reaches here.
+        raw_arguments: String,
+        /// Why parsing failed, phrased for the model to act on.
+        diagnostic: String,
+    },
+}
+
+impl ToolTurnBlock {
+    /// Whether this block is a dispatchable tool request.
+    ///
+    /// [`ToolTurnBlock::MalformedToolCall`] is intentionally excluded.
+    pub fn is_dispatchable_tool_use(&self) -> bool {
+        matches!(self, ToolTurnBlock::ToolUse { .. })
+    }
 }
 
 /// A single turn in a tool-calling conversation.
@@ -255,11 +282,14 @@ impl ToolCallingProvider for ScriptedToolCallingProvider {
         }
         let turn = &self.turns[cursor];
 
-        // Enforce determinism guard if present.
+        // Enforce determinism guard if present. Both tool results and plain
+        // text count: rejection feedback (e.g. a malformed tool call) is
+        // reported as text, because it has no tool_use id to answer.
         if let Some(needle) = &turn.expect_prior_result_contains {
             let found = request.turns.iter().any(|t| {
                 t.blocks.iter().any(|b| match b {
                     ToolTurnBlock::ToolResult { content, .. } => content.contains(needle.as_str()),
+                    ToolTurnBlock::Text(text) => text.contains(needle.as_str()),
                     _ => false,
                 })
             });
@@ -267,7 +297,7 @@ impl ToolCallingProvider for ScriptedToolCallingProvider {
                 return Err(ProviderError::RequestFailed {
                     provider: self.id.clone(),
                     message: format!(
-                        "scripted provider guard failed: expected a prior ToolResult containing {:?}",
+                        "scripted provider guard failed: expected prior feedback containing {:?}",
                         needle
                     ),
                 });

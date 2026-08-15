@@ -3,7 +3,7 @@ use xtask::legion_bench::{
     SCORING_MODE_LIVE_LOCAL, plan_default_legion_bench_suite, plan_legion_bench_report,
     read_report, verify_legion_bench_report, write_report,
 };
-use xtask::legion_bench_corpus::{corpus_suite, parse_corpus_task};
+use xtask::legion_bench_corpus::{LiveRunInput, corpus_suite, parse_corpus_task};
 use xtask::legion_bench_live::{
     DEFAULT_LIVE_ENDPOINT, resolve_live_config, score_live_task, skipped_holdout_score,
 };
@@ -351,6 +351,23 @@ fn live_config_requires_model_and_defaults_endpoint() {
     .expect("full config");
     assert_eq!(config.endpoint, "http://localhost:8080/v1");
     assert_eq!(config.api_key, "sk-test");
+}
+
+#[test]
+fn live_runner_input_never_serializes_provider_credentials() {
+    let stale_input = r#"
+schema_version = 1
+endpoint = "https://provider.example/v1"
+model = "provider-model"
+api_key = "sk-plaintext-secret"
+tasks = []
+"#;
+    let input: LiveRunInput = toml::from_str(stale_input).expect("parse legacy live runner input");
+
+    let serialized = toml::to_string_pretty(&input).expect("serialize live runner input");
+
+    assert!(!serialized.contains("sk-plaintext-secret"));
+    assert!(!serialized.contains("api_key"));
 }
 
 fn sample_raw_result(id: &str) -> xtask::legion_bench_corpus::LiveRunTaskResult {

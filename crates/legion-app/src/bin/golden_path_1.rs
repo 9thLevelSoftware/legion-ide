@@ -452,9 +452,7 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
                 "files": {"watcher": "client"},
                 "cachePriming": {"enable": false}
             })),
-            Some(serde_json::json!({
-                "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
-            })),
+            Some(gp1_client_capabilities()),
         )
         .map_err(|e| format!("initialize: {e}"))?;
 
@@ -1757,5 +1755,38 @@ fn main() {
         );
         let _ = fs::remove_dir_all(&temp_dir);
         process::exit(0);
+    }
+}
+
+fn gp1_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "workspace": {
+            "didChangeWatchedFiles": {"dynamicRegistration": true}
+        },
+        "textDocument": {
+            "publishDiagnostics": {},
+            "diagnostic": {
+                "dynamicRegistration": false,
+                "relatedDocumentSupport": false
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gp1_capabilities_advertise_pull_diagnostics() {
+        let capabilities = gp1_client_capabilities();
+
+        assert_eq!(
+            capabilities
+                .pointer("/textDocument/diagnostic/dynamicRegistration")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+            "GP-1's explicit capability override must retain LSP 3.17 pull diagnostics"
+        );
     }
 }

@@ -4,15 +4,15 @@
 //! model — xtask cannot depend on legion-app, so it spawns this binary exactly
 //! like the golden-path runners). The binary:
 //!
-//! 1. reads a `LiveRunInput` TOML (endpoint, model, api key, task specs),
+//! 1. reads a `LiveRunInput` TOML (endpoint, model, task specs) and receives
+//!    the API key only through the subprocess environment,
 //! 2. per task: copies the fixture to a temp checkout, git-inits a baseline
 //!    commit, opens the checkout as a Trusted workspace in Delegate mode, and
 //!    drives `AppComposition::start_delegated_task` — the SAME worktree/broker/
 //!    scope containment the product uses — against a live OpenAI-compatible
 //!    endpoint,
-//! 3. applies the resulting proposals to the checkout (proposal pipeline where
-//!    possible, direct write of the accepted content otherwise — recorded in
-//!    the notes), runs the task's verification command with a timeout, and
+//! 3. applies the resulting proposals to the checkout through the proposal and
+//!    save pipelines, runs the task's verification command with a timeout, and
 //! 4. writes raw measured metrics as a `LiveRunOutput` TOML. Scoring happens
 //!    in xtask.
 //!
@@ -38,18 +38,22 @@ use legion_ai::{
 use legion_ai_providers::{
     OpenAiCompatibleProvider, ProviderHttpTransport, ReqwestProviderHttpTransport,
 };
-use legion_app::{AppComposition, AppDelegatedTaskOutcome, AppProductMode};
+use legion_app::{AppComposition, AppDelegatedTaskOutcome, AppProductMode, AppSaveOutcome};
 use legion_protocol::{
-    AssistedAiEditProposalOutput, CanonicalPath, CapabilityId, CorrelationId, CreateFileProposal,
-    DelegatedTaskLoopStepKind, DelegatedTaskProposalHunkDisposition, DelegatedTaskRiskTolerance,
-    DelegatedTaskScope, DelegatedTaskScopeTargetKind, LegionToolKind, PreviewSummary, PrincipalId,
-    ProposalId, ProposalPayload, ProposalRequest, ProposalResponse, ProposalVersionPreconditions,
-    TimestampMillis, WorkspaceProposal, WorkspaceTrustState,
+    AssistedAiEditProposalOutput, ByteRange, CanonicalPath, CapabilityId, CorrelationId,
+    CreateFileProposal, DelegatedTaskLoopStepKind, DelegatedTaskProposalHunkDisposition,
+    DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind, EditBatch,
+    LegionToolKind, PreviewSummary, PrincipalId, ProposalAffectedTarget, ProposalId,
+    ProposalPayload, ProposalRequest, ProposalResponse, ProposalTargetCoverage,
+    ProposalTargetCoverageKind, ProposalTargetKind, ProposalVersionPreconditions, RedactionHint,
+    TextEdit, TextRange, TimestampMillis, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
+    WorkspaceProposal, WorkspaceTextEdit, WorkspaceTrustState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const PRINCIPAL: &str = "legion-bench-live";
+const API_KEY_ENV: &str = "LEGION_BENCH_API_KEY";
 
 // ─── Interchange DTOs (wire contract with xtask::legion_bench_corpus) ────────
 
@@ -58,7 +62,6 @@ struct LiveRunInput {
     schema_version: u32,
     endpoint: String,
     model: String,
-    api_key: String,
     tasks: Vec<LiveRunTaskInput>,
 }
 
@@ -387,9 +390,44 @@ fn build_scope(checkout: &Path, task: &LiveRunTaskInput) -> Result<DelegatedTask
 
 // ─── Proposal apply ──────────────────────────────────────────────────────────
 
-/// Apply one CreateFile proposal via the real proposal lifecycle pipeline
-/// (register → Validate → Preview → Apply), mirroring GP-3 s8.
-fn apply_via_pipeline(
+/// Drive one proposal through the real lifecycle (register → validate → preview
+/// → apply), mirroring GP-3 s8.
+fn apply_proposal_lifecycle(
+    app: &mut AppComposition,
+    proposal: WorkspaceProposal,
+) -> Result<(), String> {
+    match app
+        .register_proposal_lifecycle(&proposal)
+        .map_err(|e| format!("register failed: {e:?}"))?
+    {
+        ProposalResponse::Created(_) => {}
+        other => return Err(format!("register returned {other:?}")),
+    }
+    match app
+        .handle_proposal_request(ProposalRequest::Validate(proposal.clone()))
+        .map_err(|e| format!("validate failed: {e:?}"))?
+    {
+        ProposalResponse::Validated(_) => {}
+        other => return Err(format!("validate returned {other:?}")),
+    }
+    match app
+        .handle_proposal_request(ProposalRequest::Preview(proposal.clone()))
+        .map_err(|e| format!("preview failed: {e:?}"))?
+    {
+        ProposalResponse::Previewed { .. } => {}
+        other => return Err(format!("preview returned {other:?}")),
+    }
+    match app
+        .handle_proposal_request(ProposalRequest::Apply(proposal))
+        .map_err(|e| format!("apply failed: {e:?}"))?
+    {
+        ProposalResponse::Applied(_) => Ok(()),
+        other => Err(format!("apply returned {other:?}")),
+    }
+}
+
+/// Apply one CreateFile proposal via the real proposal lifecycle pipeline.
+fn apply_new_file_via_pipeline(
     app: &mut AppComposition,
     checkout: &Path,
     absolute_target: &Path,
@@ -433,44 +471,131 @@ fn apply_via_pipeline(
         created_at: TimestampMillis(1),
     };
 
+    apply_proposal_lifecycle(app, proposal)
+}
+
+/// Replace one existing file through WorkspaceEdit authority, then persist the
+/// dirty editor buffer through the normal save proposal workflow.
+fn apply_existing_file_via_pipeline(
+    app: &mut AppComposition,
+    checkout: &Path,
+    absolute_target: &Path,
+    content: &str,
+    proposal_id: u64,
+) -> Result<(), String> {
+    let opened_workspace = app
+        .open_workspace(
+            checkout,
+            WorkspaceTrustState::Trusted,
+            PrincipalId(PRINCIPAL.to_string()),
+        )
+        .map_err(|e| format!("workspace generation refresh failed: {e:?}"))?;
+    app.open_file(absolute_target.to_string_lossy())
+        .map_err(|e| format!("open existing proposal target failed: {e:?}"))?;
+
+    let opened_file = app
+        .workspace()
+        .open_existing_file_text(
+            opened_workspace.workspace_id,
+            absolute_target.to_string_lossy(),
+        )
+        .map_err(|e| format!("read existing proposal target failed: {e:?}"))?;
+    let buffer_id = app
+        .active_buffer_id()
+        .ok_or_else(|| "existing proposal target has no active buffer".to_string())?;
+    let buffer_version = app
+        .editor()
+        .buffer_version(buffer_id)
+        .map_err(|e| format!("read active buffer version failed: {e:?}"))?;
+    let snapshot_id = app
+        .editor()
+        .current_snapshot(buffer_id)
+        .map_err(|e| format!("read active buffer snapshot failed: {e:?}"))?
+        .snapshot_id;
+    let preconditions = ProposalVersionPreconditions {
+        file_version: Some(opened_file.file_content_version),
+        buffer_version: Some(buffer_version),
+        snapshot_id: Some(snapshot_id),
+        generation: Some(opened_file.workspace_generation),
+        file_content_version: Some(opened_file.file_content_version),
+        workspace_generation: Some(opened_file.workspace_generation),
+        expected_fingerprint: Some(opened_file.fingerprint.clone()),
+        expected_file_length: opened_file.file_length,
+        expected_modified_at: opened_file.modified_at,
+    };
+    let replacement_range = ByteRange::new(0, opened_file.text.len() as u64);
+    let capability = CapabilityId("fs.write".to_string());
+    let payload = WorkspaceEditProposalPayload {
+        workspace_id: opened_workspace.workspace_id,
+        edit_id: uuid::Uuid::now_v7(),
+        title: "Legion-Bench accepted replacement".to_string(),
+        source: WorkspaceEditSourceKind::AiAssisted,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: vec![ProposalAffectedTarget {
+                target_id: format!("bench:file:{}", opened_file.identity.file_id.0),
+                kind: ProposalTargetKind::OpenBuffer,
+                workspace_id: Some(opened_workspace.workspace_id),
+                file_id: Some(opened_file.identity.file_id),
+                buffer_id: Some(buffer_id),
+                path: Some(opened_file.identity.canonical_path.clone()),
+                terminal_session_id: None,
+                plugin_id: None,
+                remote_authority: None,
+                collaboration_session_id: None,
+                byte_ranges: vec![replacement_range],
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            }],
+            omitted_target_count: 0,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        },
+        file_edits: vec![WorkspaceTextEdit {
+            file: opened_file.identity,
+            buffer_id: Some(buffer_id),
+            edits: EditBatch {
+                edits: vec![TextEdit {
+                    range: TextRange::byte(replacement_range.start, replacement_range.end),
+                    replacement: content.to_string(),
+                }],
+            },
+            preconditions: preconditions.clone(),
+        }],
+        file_operations: Vec::new(),
+        required_capability: capability.clone(),
+        diagnostics: Vec::new(),
+        schema_version: 1,
+    };
+    let proposal = WorkspaceProposal {
+        proposal_id: ProposalId(proposal_id),
+        principal: PrincipalId(PRINCIPAL.to_string()),
+        capability,
+        correlation_id: CorrelationId(proposal_id),
+        payload: ProposalPayload::WorkspaceEdit(payload),
+        preconditions,
+        preview: PreviewSummary {
+            summary: "legion-bench live existing-file proposal apply".to_string(),
+            details: Vec::new(),
+        },
+        expires_at: None,
+        created_at: TimestampMillis(1),
+    };
+
+    apply_proposal_lifecycle(app, proposal)?;
     match app
-        .register_proposal_lifecycle(&proposal)
-        .map_err(|e| format!("register failed: {e:?}"))?
+        .save_active_buffer()
+        .map_err(|e| format!("proposal-mediated save failed: {e:?}"))?
     {
-        ProposalResponse::Created(_) => {}
-        other => return Err(format!("register returned {other:?}")),
-    }
-    match app
-        .handle_proposal_request(ProposalRequest::Validate(proposal.clone()))
-        .map_err(|e| format!("validate failed: {e:?}"))?
-    {
-        ProposalResponse::Validated(_) => {}
-        other => return Err(format!("validate returned {other:?}")),
-    }
-    match app
-        .handle_proposal_request(ProposalRequest::Preview(proposal.clone()))
-        .map_err(|e| format!("preview failed: {e:?}"))?
-    {
-        ProposalResponse::Previewed { .. } => {}
-        other => return Err(format!("preview returned {other:?}")),
-    }
-    match app
-        .handle_proposal_request(ProposalRequest::Apply(proposal))
-        .map_err(|e| format!("apply failed: {e:?}"))?
-    {
-        ProposalResponse::Applied(_) => Ok(()),
-        other => Err(format!("apply returned {other:?}")),
+        AppSaveOutcome::Saved(_) => Ok(()),
+        other => Err(format!("proposal-mediated save returned {other:?}")),
     }
 }
 
 /// Apply the loop's proposals to the checkout. Returns (applied, notes).
 ///
 /// The delegated proposal generator emits path-based CreateFile payloads with
-/// full replacement content (checkout-relative, forward slashes). New files go
-/// through the real proposal pipeline; existing files cannot (the CreateFile
-/// apply route rejects existing destinations), so the harness — acting as the
-/// reviewer who accepted the hunks — materializes the accepted content with a
-/// direct write. Every route decision is recorded in the notes.
+/// full replacement content (checkout-relative, forward slashes). New files use
+/// CreateFile proposals. Existing files are translated to full-replacement
+/// WorkspaceEdit proposals and persisted through the save proposal workflow.
 fn apply_proposals(
     app: &mut AppComposition,
     checkout: &Path,
@@ -512,41 +637,42 @@ fn apply_proposals(
         }
 
         if absolute.exists() {
-            match fs::write(&absolute, &content) {
+            match apply_existing_file_via_pipeline(
+                app,
+                checkout,
+                &absolute,
+                &content,
+                900_000 + index as u64,
+            ) {
                 Ok(()) => {
                     applied += 1;
                     notes.push(format!(
-                        "proposal[{index}] {relative}: applied by direct write \
-                         (create-file pipeline rejects existing destinations)"
+                        "proposal[{index}] {relative}: applied via workspace-edit and save proposal pipelines"
                     ));
                 }
                 Err(err) => {
-                    notes.push(format!("proposal[{index}] {relative}: write failed: {err}"));
+                    notes.push(format!(
+                        "proposal[{index}] {relative}: workspace-edit pipeline failed: {err}"
+                    ));
                 }
             }
         } else {
-            match apply_via_pipeline(app, checkout, &absolute, &content, 900_000 + index as u64) {
+            match apply_new_file_via_pipeline(
+                app,
+                checkout,
+                &absolute,
+                &content,
+                900_000 + index as u64,
+            ) {
                 Ok(()) => {
                     applied += 1;
                     notes.push(format!(
                         "proposal[{index}] {relative}: applied via proposal pipeline"
                     ));
                 }
-                Err(err) => match fs::write(&absolute, &content) {
-                    Ok(()) => {
-                        applied += 1;
-                        notes.push(format!(
-                            "proposal[{index}] {relative}: pipeline failed ({err}); \
-                             applied by direct write"
-                        ));
-                    }
-                    Err(write_err) => {
-                        notes.push(format!(
-                            "proposal[{index}] {relative}: pipeline failed ({err}); \
-                             direct write failed: {write_err}"
-                        ));
-                    }
-                },
+                Err(err) => notes.push(format!(
+                    "proposal[{index}] {relative}: create-file pipeline failed: {err}"
+                )),
             }
         }
     }
@@ -735,9 +861,7 @@ fn run_one_task(
                 notes.push(format!("missing expected files: {missing:?}"));
             }
 
-            result.task_success = result.tests_passed
-                && expected_files_ok
-                && result.proposals_applied == result.proposals_total;
+            finalize_completed_task_success(&mut result, expected_files_ok);
         }
         Ok(AppDelegatedTaskOutcome::Blocked {
             reason,
@@ -791,6 +915,10 @@ fn run_one_task(
 
     let _ = fs::remove_dir_all(&checkout);
     result
+}
+
+fn finalize_completed_task_success(result: &mut LiveRunTaskResult, expected_files_ok: bool) {
+    result.task_success = expected_files_ok && result.proposals_applied == result.proposals_total;
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -871,6 +999,13 @@ fn main() {
         );
         process::exit(2);
     }
+    let api_key = match std::env::var(API_KEY_ENV) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!("legion_bench_live: {API_KEY_ENV} is required");
+            process::exit(2);
+        }
+    };
 
     eprintln!(
         "legion_bench_live: endpoint={} model={} tasks={}",
@@ -887,7 +1022,7 @@ fn main() {
             input.tasks.len(),
             task.id
         );
-        let result = run_one_task(task, &input.endpoint, &input.model, &input.api_key);
+        let result = run_one_task(task, &input.endpoint, &input.model, &api_key);
         eprintln!(
             "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} \
              turns={} tool_calls={} wall_ms={}{}",
@@ -925,13 +1060,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use legion_protocol::{
+        AssistedAiTrustProjectionKind, AssistedAiTrustProjectionReference, CausalityId,
+        FileFingerprint, RedactionHint,
+    };
+    use uuid::Uuid;
 
     fn temp_fixture() -> PathBuf {
+        // A clock alone is not a unique name: Windows' system clock is coarse
+        // enough that two tests starting together can read the same instant,
+        // share a directory, and then delete each other's fixture on cleanup.
+        // The counter makes the name unique regardless of clock resolution.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("legion-bench-live-test-{nanos}"));
+        let seq = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("legion-bench-live-test-{nanos}-{seq}"));
         fs::create_dir_all(dir.join("src")).expect("create fixture dirs");
         fs::write(
             dir.join("Cargo.toml"),
@@ -940,6 +1087,59 @@ mod tests {
         .expect("write Cargo.toml");
         fs::write(dir.join("src").join("main.rs"), "fn main() {}\n").expect("write main.rs");
         dir
+    }
+
+    fn create_file_output(path: &str, content: &str) -> AssistedAiEditProposalOutput {
+        let trust_reference = |reference_id: &str, kind| AssistedAiTrustProjectionReference {
+            reference_id: reference_id.to_string(),
+            kind,
+            projection_hash: FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "test-projection".to_string(),
+            },
+            schema_version: 1,
+        };
+        AssistedAiEditProposalOutput {
+            output_id: "bench-output".to_string(),
+            request_id: "bench-request".to_string(),
+            provider_id: "provider:test".to_string(),
+            proposal_id: ProposalId(7),
+            principal: PrincipalId(PRINCIPAL.to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(7),
+            causality_id: CausalityId(Uuid::now_v7()),
+            payload: ProposalPayload::CreateFile(CreateFileProposal {
+                path: CanonicalPath(path.to_string()),
+                initial_content: Some(content.to_string()),
+            }),
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            preview: PreviewSummary {
+                summary: "bench proposal".to_string(),
+                details: Vec::new(),
+            },
+            expires_at: None,
+            created_at: TimestampMillis(1),
+            context_manifest: trust_reference(
+                "context:test",
+                AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            approval_checklist: trust_reference(
+                "approval:test",
+                AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
     }
 
     #[test]
@@ -1025,5 +1225,40 @@ mod tests {
             None
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completed_task_success_is_independent_of_verification_result() {
+        let mut result = LiveRunTaskResult::new("optional-verification");
+        result.tests_passed = false;
+        result.proposals_total = 1;
+        result.proposals_applied = 1;
+
+        finalize_completed_task_success(&mut result, true);
+
+        assert!(result.task_success);
+    }
+
+    #[test]
+    fn existing_file_replacement_uses_workspace_edit_proposal_pipeline() {
+        let fixture = temp_fixture();
+        let mut app = AppComposition::new();
+        let output = create_file_output("src/main.rs", "fn main() { println!(\"updated\"); }\n");
+
+        let (applied, notes) = apply_proposals(&mut app, &fixture, &[output]);
+
+        assert_eq!(applied, 1, "notes={notes:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.join("src/main.rs")).expect("read replaced file"),
+            "fn main() { println!(\"updated\"); }\n"
+        );
+        let applied_proposal = app
+            .workspace_proposal_for_id(ProposalId(900_000))
+            .expect("replacement proposal must be recorded in the lifecycle ledger");
+        assert!(matches!(
+            applied_proposal.payload,
+            ProposalPayload::WorkspaceEdit(_)
+        ));
+        let _ = fs::remove_dir_all(&fixture);
     }
 }

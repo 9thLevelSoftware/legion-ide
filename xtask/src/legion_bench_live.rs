@@ -86,9 +86,9 @@ pub fn live_config_from_env() -> Result<LiveConfig, String> {
 
 /// Score one executed live task against its gate budget.
 ///
-/// `passed` requires: loop completed, proposals applied, verification command
-/// exit matched, expected files present (all folded into `task_success` by the
-/// runner), the tests gate, and every budget ceiling.
+/// `passed` requires: loop completed, proposals applied, expected files present
+/// (folded into `task_success` by the runner), the independently configurable
+/// verification gate, and every budget ceiling.
 pub fn score_live_task(corpus_task: &CorpusTask, raw: &LiveRunTaskResult) -> LegionBenchTaskScore {
     let budget = &corpus_task.task.gate_budget;
     let weights = &corpus_task.live.scoring;
@@ -270,7 +270,6 @@ pub fn run_live_local(workspace_root: &Path, opts: &LiveLocalOptions) -> i32 {
         schema_version: 1,
         endpoint: opts.config.endpoint.clone(),
         model: opts.config.model.clone(),
-        api_key: opts.config.api_key.clone(),
         tasks: executable
             .iter()
             .map(|task| LiveRunTaskInput {
@@ -342,9 +341,8 @@ pub fn run_live_local(workspace_root: &Path, opts: &LiveLocalOptions) -> i32 {
         "legion bench (live-local): spawning subprocess: cargo {}",
         cargo_args.join(" ")
     );
-    let status = process::Command::new("cargo")
+    let status = live_runner_command(&cargo_args, &opts.config.api_key)
         .current_dir(workspace_root)
-        .args(&cargo_args)
         .status();
     match status {
         Ok(status) if status.success() => {}
@@ -443,5 +441,30 @@ pub fn run_live_local(workspace_root: &Path, opts: &LiveLocalOptions) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn live_runner_command(cargo_args: &[String], api_key: &str) -> process::Command {
+    let mut command = process::Command::new("cargo");
+    command
+        .args(cargo_args)
+        .env("LEGION_BENCH_API_KEY", api_key);
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_runner_command_passes_provider_key_only_via_environment() {
+        let command = live_runner_command(&["run".to_string()], "sk-env-secret");
+        let configured_key = command
+            .get_envs()
+            .find(|(name, _)| *name == "LEGION_BENCH_API_KEY")
+            .and_then(|(_, value)| value)
+            .and_then(std::ffi::OsStr::to_str);
+
+        assert_eq!(configured_key, Some("sk-env-secret"));
     }
 }
