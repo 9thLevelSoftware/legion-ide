@@ -1,0 +1,39 @@
+# evals/legion-bench/tasks/bench-py-05.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-05"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = true
+
+prompt = """
+The `stats` subcommand of the TextKit CLI (textkit/cli.py) prints the same
+number for its `words=` and `unique=` lines because both lines call
+`word_count`; the `unique=` line should report the number of distinct tokens
+instead. tests/test_cli.py captures the expected output and currently fails.
+Fix the bug in textkit/cli.py without changing any test, the output format,
+or the textkit.stats module, then run `python -m unittest tests.test_cli`
+from the repository root to confirm the CLI tests pass.
+"""
+
+[verification]
+command = "python -m unittest tests.test_cli"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["textkit/cli.py", "tests/test_cli.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-rust-06.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-06"
+kind = "test_add"
+fixture_repo = "fixtures/gp1-rust"
+holdout = true
+
+prompt = """
+The gp1 smoke fixture's binary prints the marker line SMOKE_MARKER_ALPHA, but
+no test verifies that. Add an integration test at tests/smoke_output.rs that
+runs the compiled binary and checks its output. Locate the binary with
+`env!("CARGO_BIN_EXE_gp1-smoke-fixture")` (Cargo sets that variable for
+integration tests of this package), run it with `std::process::Command`, and
+assert both that the process exits successfully and that its stdout contains
+"SMOKE_MARKER_ALPHA". Do not modify any existing files — only add the new
+test file.
+"""
+
+[verification]
+command = "cargo test --offline"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["tests/smoke_output.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

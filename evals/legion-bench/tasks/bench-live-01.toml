@@ -1,0 +1,41 @@
+# Legion-Bench live-local corpus task. One task per file; loaded (sorted by id)
+# by `cargo run -p xtask -- legion-bench --mode live-local` and by
+# `verify-legion-bench` (to recompute the suite fingerprint).
+schema_version = 1
+id = "bench-live-01"
+kind = "bug_fix"
+fixture_repo = "fixtures/bugfix-count-markers"
+holdout = false
+
+# The exact initial_message handed to the delegated task loop.
+prompt = """
+The scratchpad module's `count_markers` function in src/scratchpad.rs returns one
+less than the true number of SMOKE_MARKER_ALPHA occurrences in the input. Fix the
+off-by-one bug in the implementation without changing the function's public
+signature and without modifying the tests in src/main.rs. Propose the corrected
+file content for src/scratchpad.rs using the edit-as-proposal tool, then end your
+turn.
+"""
+
+[verification]
+command = "cargo test --offline"   # run with cwd = the task checkout AFTER proposals are applied
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/scratchpad.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

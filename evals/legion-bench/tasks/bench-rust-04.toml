@@ -1,0 +1,38 @@
+# evals/legion-bench/tasks/bench-rust-04.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-04"
+kind = "refactor"
+fixture_repo = "fixtures/bench-rust-lib"
+holdout = false
+
+prompt = """
+Refactor miniconf: move the `Value` struct and its entire `impl Value` block
+out of src/lib.rs into a new module file src/value.rs. Declare `mod value;`
+in src/lib.rs and re-export the type with `pub use value::Value;` so the
+public path `miniconf::Value` is unchanged and all crate-internal uses
+(`crate::Value` in src/parser.rs) keep compiling. Do not change any behavior,
+signatures, or tests — the existing test suite must pass unmodified.
+"""
+
+[verification]
+command = "cargo test --offline"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/value.rs", "src/lib.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

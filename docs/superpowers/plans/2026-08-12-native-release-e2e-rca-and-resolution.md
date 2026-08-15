@@ -66,11 +66,11 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - Produces: `prepare.outputs.version`, `prepare.outputs.tag`, `prepare.outputs.source_sha`, `prepare.outputs.previous_tag`, and `prepare.outputs.mode`.
 - Contract: `verify-only` builds and verifies all five installers but cannot create a tag, GitHub Release, or release asset; `publish` can do so only after the aggregate validation gate succeeds.
 
-- [ ] **Step 1: Create the permanent RCA record from the preserved run evidence.**
+- [x] **Step 1: Create the permanent RCA record from the preserved run evidence.**
 
   Include the run URL, source SHA, package artifact IDs, the four root causes in the table above, and an explicit statement that package generation is not the incident’s current failing layer. Link each finding to the exact workflow line range and application containment check.
 
-- [ ] **Step 2: Add a manual-only mode input and propagate it as a job output.**
+- [x] **Step 2: Add a manual-only mode input and propagate it as a job output.**
 
   Use this exact dispatch shape:
 
@@ -126,7 +126,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - Windows command: `scripts/verify-native-package.ps1 -PackageDir <dir> -ReleaseVersion <0.0.N> -SourceSha <sha> -WorkspaceRoot <dir>`.
 - Both write `PACKAGE-EVIDENCE.txt` beside the installer, print the exact same report on failure, and exit non-zero only after their assigned checks complete.
 
-- [ ] **Step 1: Write the failing verifier-contract tests.**
+- [x] **Step 1: Write the failing verifier-contract tests.**
 
   The PowerShell test script must assert command construction and evidence behavior without requiring a local macOS/Linux host:
 
@@ -140,7 +140,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   Add platform-native execution tests to the workflow for each verifier; host-specific tooling is the authority for actual installation/extraction semantics.
 
-- [ ] **Step 2: Implement the shared evidence lifecycle before any format-specific check.**
+- [x] **Step 2: Implement the shared evidence lifecycle before any format-specific check.**
 
   Each verifier must create its report first, append `candidate_tag`, source SHA, format, architecture, OS/tool versions, and command path, then register an error trap/finally handler equivalent to:
 
@@ -156,7 +156,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   The PowerShell equivalent must use `try { ... } finally { Get-Content $evidencePath }`, retain the original failure status, and not suppress package or smoke errors.
 
-- [ ] **Step 3: Implement a canonical smoke-workspace helper.**
+- [x] **Step 3: Implement a canonical smoke-workspace helper.**
 
   For each format, derive the beta workspace exactly as:
 
@@ -166,11 +166,11 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   Keep diagnostic logs/session/evidence under the same `target/release-smoke/<stem>/` parent. The verifier must use the extracted/installed binary, pass `--workspace <workspace-root>`, and pass this beta workspace to `--beta-workspace`; it must not use `$RUNNER_TEMP` for any beta-workspace path.
 
-- [ ] **Step 4: Move the existing checksum, metadata, extraction, and smoke code out of inline YAML.**
+- [x] **Step 4: Move the existing checksum, metadata, extraction, and smoke code out of inline YAML.**
 
   Preserve the checks currently in the workflow, but normalize evidence keys to the release acceptance contract. Use `xvfb-run --auto-servernum` for Linux, `hdiutil verify` plus read-only attach/copy/detach for DMG, and `msiexec /a` for MSI. Do not downgrade smoke to best-effort: its zero exit code remains a hard gate.
 
-- [ ] **Step 5: Run the new verifier contract tests.**
+- [x] **Step 5: Run the new verifier contract tests.**
 
   Run:
 
@@ -202,11 +202,11 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - DEB verifier produces `deb_maintainer=passed value=<approved maintainer>`.
 - The Linux job invokes both verifiers and reports both result records before it returns its aggregate status.
 
-- [ ] **Step 1: Obtain the release maintainer value.**
+- [x] **Step 1: Obtain the release maintainer value.** (Approved identity: `Legion <dasblueeyeddevil@gmail.com>`.)
 
   Require an approved, monitored public identity in Debian control-file format, for example `Organization <support@example.invalid>`. Do not infer it from a GitHub username, a private address, or a placeholder. Record the approved value in the PR/release change description.
 
-- [ ] **Step 2: Write the failing DEB metadata assertion.**
+- [x] **Step 2: Write the failing DEB metadata assertion.**
 
   Add the following check before declaring the DEB valid:
 
@@ -219,7 +219,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   Expected before the metadata change: failure because the control file contains no `Maintainer` field.
 
-- [ ] **Step 3: Add the approved `authors` array to the packager template.**
+- [x] **Step 3: Add the approved `authors` array to the packager template.**
 
   Add only the approved identity:
 
@@ -229,7 +229,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   Keep `publisher` for Windows manufacturer metadata; it does not populate Debian’s maintainer field.
 
-- [ ] **Step 4: Make Linux validation exhaustive.**
+- [x] **Step 4: Make Linux validation exhaustive.**
 
   Invoke the DEB and AppImage verifier commands from a single aggregate shell block that records their exit statuses and returns failure only after both have run:
 
@@ -282,15 +282,15 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 
   If the direct PowerShell dispatch is not accepted on `windows-latest`, run an equivalent temporary `cscript.exe`/VBScript probe, which passes Automation variants natively. Record the exact runner, Windows Installer version, method, and output. Do not merge a replacement based on local-only behavior.
 
-- [ ] **Step 2: Write a failing version-reader test against a real MSI.**
+- [x] **Step 2: Write a failing version-reader test against a real MSI.**
 
   The test runs only on Windows in the verify-only workflow after package generation. It must reject missing `ProductVersion` and reject a version different from `$env:RELEASE_VERSION`; it must surface the query method and any Windows Installer error in `PACKAGE-EVIDENCE.txt`.
 
-- [ ] **Step 3: Implement only the probe-proven reader.**
+- [x] **Step 3: Implement only the probe-proven reader.**
 
   Replace lines 454–517’s manual `GetType().InvokeMember(...)` sequence with the direct Automation call if the probe passed; otherwise, invoke the tested `cscript.exe` helper and parse one exact `ProductVersion=<value>` output line. Retain deterministic COM cleanup/temporary-file cleanup.
 
-- [ ] **Step 4: Retain and complete the real installer check.**
+- [x] **Step 4: Retain and complete the real installer check.**
 
   The verifier must run:
 
@@ -325,15 +325,15 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - DMG verifier derives the expected stem `legion-desktop-macos-<x64|arm64>-dmg` from its `--architecture` argument.
 - It reports `dmg_verify=passed`, `bundle_version=0.0.N`, `structure=passed`, and `smoke_exit=0` in package evidence.
 
-- [ ] **Step 1: Write the DMG verifier’s failure-visible test case.**
+- [x] **Step 1: Write the DMG verifier’s failure-visible test case.**
 
   Make the verifier intentionally point to a non-existent DMG in a shell-level test and assert that the failure report is printed before exit. This directly prevents a repeat of the current misleading terminal line (`"diskN" ejected.`) with the actionable smoke failure hidden in the artifact.
 
-- [ ] **Step 2: Implement guaranteed detach and evidence streaming.**
+- [x] **Step 2: Implement guaranteed detach and evidence streaming.**
 
   Use a `trap` that detaches only a non-empty mount point, preserves the test failure code, and prints the completed evidence report. Do not run beta smoke from the mounted volume; copy the `.app` first, detach, then execute the copied app.
 
-- [ ] **Step 3: Use the canonical target-contained beta workspace.**
+- [x] **Step 3: Use the canonical target-contained beta workspace.**
 
   Run the copied `Contents/MacOS/legion-desktop` with:
 
@@ -370,7 +370,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - Package jobs upload installer, checksum, `RELEASE-METADATA.toml`, `PACKAGE-EVIDENCE.txt`, and `VALIDATION-SUMMARY.toml` even after verification fails.
 - `publish` downloads all five artifacts and rejects publication unless every summary has `result = "passed"`, the expected tag/version/SHA, and `smoke_exit = 0`.
 
-- [ ] **Step 1: Add an aggregate machine-readable validation summary.**
+- [x] **Step 1: Add an aggregate machine-readable validation summary.**
 
   Each verifier writes a small TOML summary next to its evidence:
 
@@ -388,7 +388,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
   result = "passed"
   ```
 
-- [ ] **Step 2: Validate every summary in the publish job before tag creation.**
+- [x] **Step 2: Validate every summary in the publish job before tag creation.**
 
   The publish script must enumerate exactly five expected summaries, parse them with Python’s standard-library `tomllib`, verify candidate tag/source SHA/format/architecture match the prepared output, and fail before `git tag` or `gh release create` if any check is absent or non-passing.
 
@@ -423,7 +423,7 @@ The DEB report additionally must show a non-empty `Maintainer:` field. A validat
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo run -p xtask -- release-pipeline --dry-run`
 - [ ] `cargo run -p xtask -- verify-release-pipeline`
-- [ ] `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native-package-verifiers.ps1`
+- [x] `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native-package-verifiers.ps1`
 - [ ] `git diff --check`
 - [ ] One passing verify-only hosted run covers DEB, AppImage, MSI, macOS x64 DMG, and macOS arm64 DMG.
 - [ ] One negative hosted proof confirms failed verification cannot create a tag or release.

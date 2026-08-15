@@ -1,0 +1,41 @@
+# evals/legion-bench/tasks/bench-ts-03.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-03"
+kind = "refactor"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = '''
+src/report.js and src/cli.js each define an identical private helper
+formatCents(cents) that formats integer cents as a decimal dollar string.
+Deduplicate it into the money module: add formatCents to src/money.js and
+export it via module.exports alongside parseAmount, delete the local copies
+from src/report.js and src/cli.js, and obtain it from './money' with require
+in both files instead. This is a pure refactor — the observable behavior of
+renderReport and of every CLI command must stay byte-for-byte identical, and
+parseAmount must not change. The refactor is checked by
+test/verify-refactor.js; do not modify that file or any existing test.
+'''
+
+[verification]
+command = "node test/verify-refactor.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["src/money.js", "src/report.js", "src/cli.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["test/verify-refactor.js", "test/report.test.js", "test/harness.js", "test/run.js"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 3
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

@@ -28,6 +28,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `MODES.md` — semantics and boundaries of the Manual (default), Assist, Delegate, and Legion Workflow modes; Manual is the primary mode with zero AI and zero egress.
 - `OPERATOR_RUNBOOK.md` — operator-oriented gate list, subagent execution pattern, safety checks, and Phase 8 dry-run procedures. The runbook is the day-to-day reference for running the phase gates and dispatching work.
 - `LEGION_RENAME.md` — history of the Devil → Legion rename, including the rationale for allowing old Devil-era markers to remain in archived evidence and the rules for current user-facing docs.
+- `legal/smallcode-attribution.md` — per-file provenance for behaviors and test vectors ported from SmallCode (MIT); pairs with `../THIRD_PARTY_NOTICES.md` and ADR-0049.
 
 ## Supporting material outside `docs/`
 
@@ -40,6 +41,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/adrs/ADR-0044-dap-client-architecture.md` — **Proposed** real DAP client architecture (Phase 2 B0); fixture dual-path until accepted + dependency-policy activation.
 - `../plans/adrs/ADR-0046-surface-expansion-freeze.md` — no new crates or surface activation until Manual mode is daily-drivable (PR-UI-001 promotion).
 - `../plans/adrs/ADR-0047-extension-distribution.md` — hybrid tiered extension distribution: signed WASM bundles for runtime extensions, Open VSX read-only for declarative content.
+- `../plans/adrs/ADR-0049-smallcode-behavioral-cannibalization.md` — port SmallCode (MIT) behaviors into Legion crates: reuse semantics and tests, reimplement authority; port map, bench holdout, and attribution mechanics.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 

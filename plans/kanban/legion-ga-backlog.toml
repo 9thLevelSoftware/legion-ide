@@ -198,6 +198,133 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     status = "done"
     evidence = "xtask/src/kanban_backlog.rs"
 
+  # Added 2026-08-14 by the production roadmap v1.0 Phase 0 (truth & baseline
+  # repair). See plans/legion-production-roadmap-v1.0.md.
+  [[epics.features]]
+  id = "P0.F4"
+  title = "Evidence-drift repair and configuration truth (2026-08 pass)"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T1"
+    title = "Repair references to files deleted in the 2026-08-12 cleanup (ledger, INDEX, README, CONTRIBUTING, CODEBASE, hygiene allowlist)"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["plans/product-readiness-ledger.md", "docs/INDEX.md", "README.md", "CONTRIBUTING.md", "CODEBASE.md", "docs/hygiene-allowlist.toml"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene", "cargo run -p xtask -- claim-audit", "cargo run -p xtask -- verify-readiness-consistency"]
+    acceptance = ["No current doc cites ENGINEERING_AUDIT.yaml, ENGINEERING_STATUS.md, audit-reports/, .hermes/, or releases/v8.0.0/ as if present."]
+    stop_condition = "Stop if a repair would delete ledger history instead of annotating it."
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/phase-0.2-truth-closure.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T2"
+    title = "Reconcile backlog statuses and meta against commit 5c09a24 (course correction)"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["plans/kanban/legion-ga-backlog.toml"]
+    dependencies = ["P0.F4.T1"]
+    verification = ["cargo run -p xtask -- verify-kanban-backlog", "cargo run -p xtask -- verify-readiness-consistency"]
+    acceptance = ["meta.plan points at an existing file; meta.milestone reflects the earliest milestone with open tasks; streaming and remote-transport task statuses match the tree and ADR-0046."]
+    stop_condition = "Stop if a status flip lacks direct code/tree evidence."
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/phase-0.2-truth-closure.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T3"
+    title = "Fix cargo check -p legion-app --no-default-features and gate the configuration in CI"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["crates/legion-app/src/lib.rs", "crates/legion-app/Cargo.toml", ".github/workflows/legion-gates.yml"]
+    dependencies = []
+    verification = ["cargo check -p legion-app --no-default-features", "cargo check -p legion-app"]
+    acceptance = ["legion-app compiles with and without the ai feature; the no-default-features check runs in legion-gates.yml; legion-sandbox (DAP C4 sandboxing) is unconditional."]
+    stop_condition = "Stop if the fix silently removes debugger sandboxing from any configuration."
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/phase-0.2-truth-closure.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T4"
+    title = "Close the native-release RCA leftovers (verifier script extraction, Debian Maintainer, VALIDATION-SUMMARY publish gate)"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["scripts/verify-native-package.sh", "scripts/verify-native-package.ps1", "packaging/Packager.toml", ".github/workflows/legion-release.yml", "docs/superpowers/plans/2026-08-12-native-release-e2e-rca-and-resolution.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- verify-release-pipeline"]
+    acceptance = ["Per-format validation logic exists once in scripts; dpkg Maintainer is asserted; publish parses all five VALIDATION-SUMMARY.toml files and fails on any non-passed status."]
+    stop_condition = "Stop if publish can succeed without reading the per-format validation summaries."
+    status = "done"
+    evidence = "docs/superpowers/plans/2026-08-12-native-release-e2e-rca-and-resolution.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T6"
+    title = "Restore GP-1 s3 on rust-analyzer >= 1.96 via LSP 3.17 pull diagnostics"
+    mode = "Manual"
+    readiness_row = "PR-LANG-001"
+    files = ["crates/legion-app/src/language/session.rs", "crates/legion-app/src/bin/golden_path_1.rs", "crates/legion-lsp/src/bin/mock_lsp_server.rs", "crates/legion-app/tests/rust_analyzer_read_requests.rs"]
+    dependencies = ["P0.F4.T5"]
+    verification = ["cargo test -p legion-app --test rust_analyzer_read_requests", "cargo run -p xtask -- golden-path-1"]
+    acceptance = ["GP-1 s3 passes against rust-analyzer 1.97.1 (native diagnostics served only via pull); the session advertises textDocument.diagnostic, records diagnosticProvider, and pull reports route through the same ingestion path as pushed notifications; push-only servers still pass via fallback."]
+    stop_condition = "Stop if the fix pins CI to an older rust-analyzer instead of supporting the current diagnostics transport."
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F4.T5"
+    title = "Activate hosted 3-OS legion-smoke.yml runs and start the promotion clock"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = [".github/workflows/legion-smoke.yml", "plans/evidence/production/WS-P0/"]
+    dependencies = []
+    verification = ["gh run list --workflow=legion-smoke.yml"]
+    acceptance = ["A dispatched 3-OS run is recorded with per-job outcomes; failures are diagnosed toward the four-consecutive-green promotion criteria."]
+    stop_condition = "Stop if smoke promotion is claimed without four consecutive green scheduled 3-OS runs."
+    status = "in-progress"
+    evidence = "plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md"
+
+  [[epics.features]]
+  id = "P0.F5"
+  title = "SmallCode behavioral cannibalization governance (ADR-0049)"
+
+    [[epics.features.tasks]]
+    id = "P0.F5.T1"
+    title = "Survey the SmallCode repository and adopt ADR-0049 (port map, authority rule, governor classification, bench holdout policy)"
+    mode = "Manual"
+    readiness_row = "PR-AI-002"
+    files = ["plans/adrs/ADR-0049-smallcode-behavioral-cannibalization.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene", "cargo run -p xtask -- claim-audit"]
+    acceptance = ["Every SmallCode module the port draws from has an explicit port/adapt/reject row with a Legion destination; rejected authority surfaces are named."]
+    stop_condition = "Stop if any port row would move execution authority outside Legion's capability/proposal boundaries."
+    status = "done"
+    evidence = "plans/adrs/ADR-0049-smallcode-behavioral-cannibalization.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F5.T2"
+    title = "Publish MIT attribution artifacts (THIRD_PARTY_NOTICES.md, docs/legal/smallcode-attribution.md)"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["THIRD_PARTY_NOTICES.md", "docs/legal/smallcode-attribution.md"]
+    dependencies = ["P0.F5.T1"]
+    verification = ["cargo run -p xtask -- docs-hygiene", "cargo run -p xtask -- claim-audit"]
+    acceptance = ["The SmallCode MIT license text is preserved verbatim and every derived area is traceable to its source module."]
+    stop_condition = "Stop if any ported behavior lacks an attribution row."
+    status = "done"
+    evidence = "THIRD_PARTY_NOTICES.md"
+
+    [[epics.features.tasks]]
+    id = "P0.F5.T3"
+    title = "Extract SmallCode test-vector corpora (malformed tool calls, patch/edit blocks) as attributed fixture data"
+    mode = "Manual"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/tests/fixtures/smallcode_vectors/"]
+    dependencies = ["P0.F5.T1"]
+    verification = ["ls crates/legion-ai/tests/fixtures/smallcode_vectors/"]
+    acceptance = ["Fixture corpora exist as data files with license headers and definite expected outcomes; no Rust tests are wired yet (Phase 2 scope)."]
+    stop_condition = "Stop if fixture files are copied without attribution headers."
+    status = "done"
+    evidence = "docs/legal/smallcode-attribution.md"
+
 # ---------------------------------------------------------------------------
 # EPIC P1 — Renderer-backed Manual IDE proof
 # Readiness rows: PR-UI-001, PR-UI-002, PR-LANG-001, PR-LANG-002, PR-REL-001.
@@ -1800,6 +1927,21 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     status = "done"
     evidence = "plans/evidence/production/M12/PKT-SIGN-evidence.md"
 
+    [[epics.features.tasks]]
+    id = "P8.F1.T5"
+    title = "Procure signing/update/eval external resources and record the key-escrow policy"
+    mode = "Manual"
+    readiness_row = "PR-REL-001"
+    files = ["plans/release/procurement-and-key-escrow.md"]
+    dependencies = []
+    verification = ["cargo run -p xtask -- docs-hygiene"]
+    acceptance = ["Apple Developer, Azure Trusted Signing, Linux signing keypair, update-feed host, cloud Mac, and live-eval API keys each have a checklist row, an EXT-* mapping, and an owner action; key inventory and escrow/rotation policy are recorded."]
+    stop_condition = "Stop if any signing credential is committed to the tree."
+    # Checklist and escrow policy are written; the purchases themselves are
+    # owner actions (see the doc's Status column).
+    status = "in-progress"
+    evidence = "plans/release/procurement-and-key-escrow.md"
+
   [[epics.features]]
   id = "P8.F2"
   title = "Auto-update and rollback"
@@ -2023,6 +2165,23 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     stop_condition = "Stop if live mode is required for any CI gate."
     status = "in-progress"
     evidence = ".github/workflows/legion-bench.yml"
+
+    [[epics.features.tasks]]
+    id = "P9.F1.T4"
+    title = "Freeze the raw-model bench baseline before any governed-layer code lands (roadmap Phase 0.6)"
+    mode = "Legion Workflows"
+    readiness_row = "PR-AI-002"
+    files = ["xtask/src/legion_bench.rs", "evals/legion-bench/", "plans/evidence/production/BENCH/"]
+    dependencies = ["P9.F1.T1"]
+    verification = ["cargo run -p xtask -- legion-bench", "cargo run -p xtask -- verify-legion-bench"]
+    acceptance = ["Bench scoring executes real fixture tasks (not synthetic budget arithmetic); the corpus spans >=15 tasks across >=3 fixture repos with a held-out subset; the raw (ungoverned) baseline for the reference local model is recorded with a task-set hash under plans/evidence/production/BENCH/baseline-raw-v1.md."]
+    stop_condition = "Stop if the baseline is measured after any SmallCode-derived governor is active in the loop."
+    # Harness + corpus done (live-local execution mode, 18 tasks / 4 fixture
+    # repos / 3 languages / 5 holdout). The baseline measurement itself is
+    # blocked on a local model runtime being installed (EXT-CORPUS covers
+    # corpus externals; the runtime is an owner action, see the evidence).
+    status = "in-progress"
+    evidence = "plans/evidence/production/BENCH/baseline-raw-v1.md"
 
   [[epics.features]]
   id = "P9.F2"

@@ -1,0 +1,32 @@
+# Legion-Bench live-local corpus task (HOLDOUT: excluded from default runs;
+# recorded as `skipped` in the report unless --include-holdout is passed).
+schema_version = 1
+id = "bench-live-02"
+kind = "test_add"
+fixture_repo = "fixtures/gp1-rust"
+holdout = true
+
+prompt = """
+Add a regression test module to src/scratchpad.rs that verifies the public
+`scratchpad()` function can be called (a smoke test is enough). Keep the existing
+code intact — append a #[cfg(test)] mod with at least one #[test] function.
+Propose the updated file content for src/scratchpad.rs using the edit-as-proposal
+tool, then end your turn.
+"""
+
+[verification]
+command = "cargo test --offline"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/scratchpad.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src/main.rs"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25

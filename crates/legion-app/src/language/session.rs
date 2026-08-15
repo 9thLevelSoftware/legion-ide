@@ -207,6 +207,25 @@ impl RustAnalyzerSession {
                     schema_version: 1,
                 });
             }
+            // `diagnosticProvider` (LSP 3.17 pull diagnostics) is an object
+            // capability, not a bool: present-and-not-false means supported.
+            // rust-analyzer >= 1.96-era serves NATIVE diagnostics (type
+            // errors, etc.) only through the pull channel; push
+            // (`publishDiagnostics`) carries flycheck/cargo output, which
+            // only refreshes on save. Callers use
+            // [`supports_pull_diagnostics`] to pick the pull path.
+            let pull_supported = caps
+                .get("diagnosticProvider")
+                .map(|v| !v.is_null() && v.as_bool() != Some(false))
+                .unwrap_or(false);
+            self.health.capabilities.push(LspCapabilitySummary {
+                capability: "diagnosticProvider".to_string(),
+                supported: pull_supported,
+                dynamic_registration: false,
+                option_hash: None,
+                redaction_hints: Vec::new(),
+                schema_version: 1,
+            });
         }
 
         self.session
@@ -414,6 +433,48 @@ impl RustAnalyzerSession {
             .collect()
     }
 
+    /// Whether the server advertised LSP 3.17 pull diagnostics
+    /// (`diagnosticProvider`) in its initialize result.
+    pub fn supports_pull_diagnostics(&self) -> bool {
+        self.health
+            .capabilities
+            .iter()
+            .any(|c| c.capability == "diagnosticProvider" && c.supported)
+    }
+
+    /// Issues a `textDocument/diagnostic` pull request (LSP 3.17) for `uri`
+    /// and parses the document diagnostic report.
+    ///
+    /// No `previousResultId` is sent, so a conforming server always answers
+    /// with a **full** report rather than `unchanged`. The request is ordered
+    /// after any prior `didChange` on the same connection, so the report
+    /// reflects the latest synced content.
+    ///
+    /// Returns [`LanguageSessionError::Unavailable`] if the session is not
+    /// live. Transport/timeout failures surface as
+    /// [`LanguageSessionError::ReadRequest`]; callers polling in a loop
+    /// should treat those as retryable.
+    pub fn pull_diagnostics(
+        &mut self,
+        uri: &str,
+    ) -> Result<PulledDiagnostics, LanguageSessionError> {
+        if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
+            return Err(LanguageSessionError::Unavailable);
+        }
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+        });
+        let response = self
+            .session
+            .request(
+                "textDocument/diagnostic".to_string(),
+                params,
+                super::operation_context(),
+            )
+            .map_err(LanguageSessionError::ReadRequest)?;
+        Ok(parse_pull_diagnostics_result(&response.result, uri))
+    }
+
     /// Sends an LSP read request (e.g. `textDocument/completion`) and blocks
     /// for the correlated response.  Returns an [`LspReadOutcome`] carrying the
     /// raw JSON result, the snapshot the request was issued against, and the
@@ -593,10 +654,94 @@ impl RustAnalyzerSession {
 }
 
 /// Builds the LSP `initialize` request params.
+/// Parsed summary of one `textDocument/diagnostic` (pull) response.
+///
+/// Counts only plus a synthesized `publishDiagnostics`-shaped params object,
+/// so pull results can be routed through the exact same ingestion/projection
+/// path as pushed notifications
+/// (`AppComposition::ingest_lsp_publish_diagnostics_for_buffer`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PulledDiagnostics {
+    /// True when the server answered with a `kind: "full"` report.
+    pub kind_full: bool,
+    /// Items with LSP severity Error (1) — or no severity, which the LSP
+    /// spec tells clients to interpret as an error.
+    pub error_count: usize,
+    /// All items in the report.
+    pub total_count: usize,
+    /// `{"uri": .., "diagnostics": [..]}` synthesized from a full report;
+    /// `None` for `unchanged`/malformed responses.
+    pub publish_params: Option<serde_json::Value>,
+}
+
+/// Parses a `textDocument/diagnostic` result into [`PulledDiagnostics`].
+///
+/// Pure so the report taxonomy is unit-testable: full reports (with/without
+/// errors), `unchanged` reports, null results, and shape surprises all
+/// resolve deterministically without a live server.
+fn parse_pull_diagnostics_result(result: &serde_json::Value, uri: &str) -> PulledDiagnostics {
+    let kind_full = result.get("kind").and_then(|k| k.as_str()) == Some("full");
+    if !kind_full {
+        return PulledDiagnostics {
+            kind_full: false,
+            error_count: 0,
+            total_count: 0,
+            publish_params: None,
+        };
+    }
+    let items: Vec<serde_json::Value> = result
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let error_count = items
+        .iter()
+        .filter(|item| match item.get("severity").and_then(|s| s.as_u64()) {
+            Some(severity) => severity == 1,
+            // LSP: "when absent, it is up to the client to interpret" — the
+            // conservative reading for an error pump is "error".
+            None => true,
+        })
+        .count();
+    let total_count = items.len();
+    let publish_params = Some(serde_json::json!({
+        "uri": uri,
+        "diagnostics": items,
+    }));
+    PulledDiagnostics {
+        kind_full: true,
+        error_count,
+        total_count,
+        publish_params,
+    }
+}
+
+/// Default client capabilities advertised in `initialize`.
+///
+/// Advertises LSP 3.17 pull diagnostics (`textDocument.diagnostic`).
+/// rust-analyzer 1.96+ serves native diagnostics (type errors, borrow errors)
+/// only via the pull channel; push `publishDiagnostics` carries
+/// flycheck/cargo output, which refreshes on save. Without this
+/// advertisement a client that never saves sees no semantic errors at all
+/// (GP-1 s3 wedge, reproduced 2026-08-15 on rust-analyzer 1.97.1 across all
+/// three hosted OSes and locally).
+fn default_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "textDocument": {
+            "publishDiagnostics": {},
+            "diagnostic": {
+                "dynamicRegistration": false,
+                "relatedDocumentSupport": false,
+            },
+        },
+    })
+}
+
 ///
 /// Pure so the wire shape is unit-testable: `initializationOptions` is
 /// emitted only when provided (the LSP spec makes it optional), and the
-/// client `capabilities` object defaults to empty when not provided.
+/// client `capabilities` object defaults to [`default_client_capabilities`]
+/// (pull-diagnostics advertisement) when not provided.
 fn build_initialize_params(
     root_uri: &str,
     initialization_options: Option<serde_json::Value>,
@@ -605,7 +750,7 @@ fn build_initialize_params(
     let mut params = serde_json::json!({
         "processId": std::process::id(),
         "rootUri": root_uri,
-        "capabilities": client_capabilities.unwrap_or_else(|| serde_json::json!({})),
+        "capabilities": client_capabilities.unwrap_or_else(default_client_capabilities),
         "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
     });
     if let Some(options) = initialization_options {
@@ -619,15 +764,66 @@ mod initialize_params_tests {
     use super::build_initialize_params;
 
     #[test]
-    fn default_params_have_empty_capabilities_and_no_initialization_options() {
+    fn default_params_advertise_pull_diagnostics_and_no_initialization_options() {
         let params = build_initialize_params("file:///tmp/ws", None, None);
         assert_eq!(params["rootUri"], "file:///tmp/ws");
-        assert_eq!(params["capabilities"], serde_json::json!({}));
+        // Pull diagnostics (LSP 3.17) must be advertised by default —
+        // rust-analyzer 1.96+ serves native diagnostics only via pull.
+        assert!(
+            params["capabilities"]["textDocument"]["diagnostic"].is_object(),
+            "default capabilities must advertise textDocument.diagnostic"
+        );
         assert!(
             params.get("initializationOptions").is_none(),
             "initializationOptions must be omitted (not null) when unset"
         );
         assert_eq!(params["workspaceFolders"][0]["uri"], "file:///tmp/ws");
+    }
+
+    #[test]
+    fn pull_result_full_report_counts_errors_and_synthesizes_publish_params() {
+        let result = serde_json::json!({
+            "kind": "full",
+            "resultId": "r1",
+            "items": [
+                {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": "boom"},
+                {"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1}}, "severity": 2, "message": "warn"},
+                {"range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 1}}, "message": "no severity — reads as error"},
+            ],
+        });
+        let pulled = super::parse_pull_diagnostics_result(&result, "file:///tmp/a.rs");
+        assert!(pulled.kind_full);
+        assert_eq!(pulled.error_count, 2);
+        assert_eq!(pulled.total_count, 3);
+        let params = pulled
+            .publish_params
+            .expect("full report synthesizes params");
+        assert_eq!(params["uri"], "file:///tmp/a.rs");
+        assert_eq!(params["diagnostics"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn pull_result_clean_full_report_has_zero_errors_with_params() {
+        let result = serde_json::json!({"kind": "full", "resultId": "r2", "items": []});
+        let pulled = super::parse_pull_diagnostics_result(&result, "file:///tmp/a.rs");
+        assert!(pulled.kind_full);
+        assert_eq!(pulled.error_count, 0);
+        assert_eq!(pulled.total_count, 0);
+        assert!(pulled.publish_params.is_some());
+    }
+
+    #[test]
+    fn pull_result_unchanged_and_malformed_are_not_full() {
+        for result in [
+            serde_json::json!({"kind": "unchanged", "resultId": "r1"}),
+            serde_json::json!(null),
+            serde_json::json!({"unexpected": true}),
+        ] {
+            let pulled = super::parse_pull_diagnostics_result(&result, "file:///tmp/a.rs");
+            assert!(!pulled.kind_full);
+            assert_eq!(pulled.error_count, 0);
+            assert!(pulled.publish_params.is_none());
+        }
     }
 
     #[test]

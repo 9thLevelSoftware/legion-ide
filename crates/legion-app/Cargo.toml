@@ -79,6 +79,14 @@ name = "golden_path_3"
 path = "src/bin/golden_path_3.rs"
 required-features = ["ai"]
 
+# Legion-Bench live-local task runner: real agent-loop execution against a
+# local OpenAI-compatible endpoint. Spawned by `xtask legion-bench --mode
+# live-local` with `--features test-helpers` (cancellation watchdog seam).
+[[bin]]
+name = "legion_bench_live"
+path = "src/bin/legion_bench_live.rs"
+required-features = ["ai"]
+
 [[bin]]
 name = "golden_path_4"
 path = "src/bin/golden_path_4.rs"

@@ -1,0 +1,49 @@
+# evals/legion-bench/tasks/bench-rust-05.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-05"
+kind = "multi_file_feature"
+fixture_repo = "fixtures/bench-rust-lib"
+holdout = false
+
+prompt = """
+Add a serializer to miniconf so a parsed `Config` can be written back out as
+text.
+
+1. Create src/writer.rs with `pub fn to_text(config: &Config) -> String` that
+   emits: first the root section's `key = value` lines (keys sorted), then
+   each named section as a `[name]` header followed by its `key = value`
+   lines, sections sorted by name, one entry per line, with a blank line
+   before each section header.
+2. Register the module in src/lib.rs with `mod writer;` and re-export the
+   function with `pub use writer::to_text;`.
+3. Add an integration test at tests/roundtrip.rs proving that parsing a
+   config with both root keys and at least two named sections, serializing it
+   with `to_text`, and parsing the output again yields an equal `Config`.
+
+Build on the existing public API (`Config::sections`, `Config::entries`,
+`Value::as_str`); remember the root section's name is the empty string, so
+skip it when emitting `[name]` headers. All existing tests must keep passing.
+"""
+
+[verification]
+command = "cargo test --offline"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/writer.rs", "tests/roundtrip.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests/parse_basic.rs"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

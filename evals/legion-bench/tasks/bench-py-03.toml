@@ -1,0 +1,42 @@
+# evals/legion-bench/tasks/bench-py-03.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-03"
+kind = "refactor"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+textkit/slug.py builds the slug with four sequential character-by-character
+loops and repeated string concatenation. Refactor `slugify` into a simpler,
+idiomatic implementation (for example a regular-expression substitution or
+str methods) while keeping its public behavior and signature exactly the
+same: lowercase output, runs of alphanumerics preserved, every other run of
+characters collapsed to a single hyphen, no leading or trailing hyphen, and
+an empty string when the input has no alphanumerics. Keep the change inside
+textkit/slug.py and do not modify any test. Run
+`python -m unittest tests.test_slug` from the repository root to confirm the
+behavior is unchanged.
+"""
+
+[verification]
+command = "python -m unittest tests.test_slug"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["textkit/slug.py", "tests/test_slug.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

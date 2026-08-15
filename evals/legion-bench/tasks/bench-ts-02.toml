@@ -1,0 +1,43 @@
+# evals/legion-bench/tasks/bench-ts-02.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-02"
+kind = "test_add"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = '''
+src/ledger.js (balance, totalsByCategory, entriesInCategory, largestEntry)
+has no test coverage. Add a new file test/ledger.test.js following the same
+pattern as test/report.test.js: require { check, report } from './harness',
+run named checks using node's assert module, and call report() at the end so
+the process exits 0 on success and 1 on failure. Cover at least: balance
+summing amounts and returning 0 for an empty list; totalsByCategory grouping
+and summing cents per category; entriesInCategory filtering while preserving
+order; and largestEntry returning the max-amount entry, keeping the earliest
+entry on ties, and returning null for an empty list. Derive expectations from
+the current behavior of src/ledger.js; do not modify src/ledger.js or any
+existing test file.
+'''
+
+[verification]
+command = "node test/run.js ledger report"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["test/ledger.test.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src/ledger.js", "test/run.js", "test/harness.js", "test/report.test.js"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

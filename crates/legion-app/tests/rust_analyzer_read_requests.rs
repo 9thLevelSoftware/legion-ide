@@ -207,3 +207,52 @@ fn request_read_while_unavailable_returns_typed_error() {
         "expected LanguageSessionError::Unavailable, got: {err}"
     );
 }
+
+/// LSP 3.17 pull diagnostics (GP-1 s3 fix, 2026-08-15): the session must
+/// (1) record the server's `diagnosticProvider` capability from the
+/// initialize result, and (2) parse a `textDocument/diagnostic` full report
+/// into counts plus publishDiagnostics-shaped params for ingestion.
+#[test]
+fn pull_diagnostics_full_report_parses_and_synthesizes_publish_params() {
+    let mock_path = lsp_mock::mock_server_path().expect(
+        "mock_lsp_server not found — run `cargo build -p legion-lsp --bin mock_lsp_server`",
+    );
+
+    let config = RustAnalyzerLaunchConfig {
+        discovery: RustAnalyzerDiscovery {
+            configured_path: Some(mock_path),
+            ..Default::default()
+        },
+        supervisor: lsp_mock::mock_supervisor_config(),
+        server_id: LanguageServerId(7),
+        language_id: LanguageId("rust".to_string()),
+    };
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut session = RustAnalyzerSession::launch(config, &mut launcher)
+        .expect("RustAnalyzerSession::launch should succeed");
+    session
+        .initialize("file:///workspace")
+        .expect("RustAnalyzerSession::initialize should succeed");
+
+    assert!(
+        session.supports_pull_diagnostics(),
+        "mock server advertises diagnosticProvider; session must record it"
+    );
+
+    let uri = "file:///workspace/src/lib.rs";
+    let pulled = session
+        .pull_diagnostics(uri)
+        .expect("pull_diagnostics should succeed against the mock server");
+    assert!(pulled.kind_full, "mock answers with a kind=full report");
+    assert_eq!(pulled.total_count, 1);
+    assert_eq!(pulled.error_count, 1, "mock report has one severity-1 item");
+    let params = pulled
+        .publish_params
+        .expect("full report must synthesize publishDiagnostics-shaped params");
+    assert_eq!(params["uri"], uri);
+    assert_eq!(
+        params["diagnostics"].as_array().map(|d| d.len()),
+        Some(1),
+        "synthesized params carry the report items verbatim"
+    );
+}

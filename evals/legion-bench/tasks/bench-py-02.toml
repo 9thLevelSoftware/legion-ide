@@ -1,0 +1,42 @@
+# evals/legion-bench/tasks/bench-py-02.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-02"
+kind = "test_add"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+textkit/wrap.py has no test coverage. Add a new file tests/test_wrap.py using
+only the standard library `unittest` module (no third-party packages) with
+tests for `wrap_text` covering: (1) normal greedy wrapping of a short sentence
+at a given width, (2) a single word longer than the width being emitted on its
+own line without splitting, (3) empty and whitespace-only input returning an
+empty list, and (4) ValueError being raised when width is zero or negative.
+Read the wrap_text docstring for the exact contract and follow the style of
+the existing modules in tests/. Do not modify textkit/wrap.py or any existing
+test. Run `python -m unittest tests.test_wrap` from the repository root to
+confirm the new tests pass.
+"""
+
+[verification]
+command = "python -m unittest tests.test_wrap"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["tests/test_wrap.py", "textkit/wrap.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+forbidden_paths = ["textkit/wrap.py"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

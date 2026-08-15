@@ -1,0 +1,7 @@
+[package]
+name = "miniconf"
+version = "0.1.0"
+edition = "2021"
+
+# Bench fixture: standalone crate, never part of the Legion IDE workspace.
+[workspace]

@@ -1,0 +1,10 @@
+{
+  "name": "bench-ts-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-dependency expense ledger CLI written in plain JavaScript with JSDoc types.",
+  "main": "src/cli.js",
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}
