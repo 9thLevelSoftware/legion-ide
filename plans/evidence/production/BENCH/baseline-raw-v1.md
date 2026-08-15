@@ -138,6 +138,16 @@ than the original plan. The seam is itself tested
 exact value `off` disables it — a typo silently running the wrong arm would
 invalidate a result without any visible symptom.
 
+**Everything the port added is off in the raw arm, not just the visible
+part.** Review found the switch leaking governed behaviour three ways, each of
+which would have run a reliability mechanism inside the supposedly ungoverned
+baseline: the advertised edit schema (below), the *ordering* of validation (a
+malformed edit reached the path checks first and became a terminal block
+instead of retryable feedback), and malformed structured arguments (recovered
+into a retryable `MalformedToolCall` where the pre-port provider failed the
+completion outright). All three now follow the switch, each pinned by a test
+in `governor_ab_seam.rs`.
+
 **Both halves of the contract move together.** Review caught that the raw arm
 was still *advertising* the governed edit schema (`old_str`/`new_str`, with
 `replacement` no longer required) while *refusing* fragment edits — so a model

@@ -1231,6 +1231,18 @@ where
                     .unwrap_or("{}");
                 match serde_json::from_str::<Value>(arguments_str) {
                     Ok(input) => blocks.push(ToolTurnBlock::ToolUse { id, name, input }),
+                    // Measurement arm: unparseable arguments were a hard
+                    // provider error before the port. Recovering them here
+                    // would leave a governed reliability mechanism running
+                    // inside the supposedly raw baseline.
+                    Err(error) if !legion_ai::governance::small_model_governors_enabled() => {
+                        return Err(ProviderError::RequestFailed {
+                            provider: self.id.clone(),
+                            message: format!(
+                                "OpenAI tool_call arguments is not valid JSON: {error}. Raw: {arguments_str:?}"
+                            ),
+                        });
+                    }
                     Err(error) => {
                         // A single unparseable argument string used to fail the
                         // whole completion, ending the turn with no way for the

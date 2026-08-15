@@ -18,7 +18,7 @@ use legion_agent::agent_loop::{
     DelegatedTaskAuditSink, DelegatedTaskCancellationProbe, DelegatedTaskLoopConfig,
     DelegatedTaskLoopResult, DelegatedToolHost, run_delegated_task_loop,
 };
-use legion_ai::tool_calls::ScriptedToolCallingProviderBuilder;
+use legion_ai::tool_calls::{ScriptedToolCallingProviderBuilder, ToolCallingProvider};
 use legion_protocol::{
     CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
     CapabilityResponse, DelegatedTaskLoopBudget, DelegatedTaskLoopStepRecord,
@@ -291,4 +291,88 @@ fn the_raw_arm_rejects_a_malformed_edit_before_checking_the_path() {
         matches!(result, DelegatedTaskLoopResult::Completed { .. }),
         "the missing required field must be caught first as retryable feedback,          not converted into a terminal block by the later path check; got {result:?}"
     );
+}
+
+/// Malformed structured arguments were a hard provider error before the port.
+/// Leaving recovery on in the raw arm would run a governed reliability
+/// mechanism inside the supposedly ungoverned baseline.
+#[test]
+fn the_raw_arm_hard_fails_on_malformed_structured_arguments() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let response = serde_json::json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "not valid json {{{"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let request = || legion_ai::tool_calls::ToolCompletionRequest {
+        provider: "openai-compatible".to_string(),
+        model: "m".to_string(),
+        system: String::new(),
+        turns: vec![legion_ai::tool_calls::ToolConversationTurn {
+            role: "user".to_string(),
+            blocks: vec![legion_ai::tool_calls::ToolTurnBlock::Text("go".to_string())],
+        }],
+        tools: vec![],
+        max_tokens: 64,
+    };
+
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block, so no
+    // other thread in this binary can observe a partial state.
+    unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
+    let raw = legion_ai_providers::OpenAiCompatibleProvider::with_transport(
+        "openai-test",
+        "https://api.openai.com/v1",
+        Some("k".to_string()),
+        FixedResponseTransport(response.clone()),
+    )
+    .complete_with_tools(request());
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+    assert!(
+        raw.is_err(),
+        "the raw arm must reproduce the pre-port hard failure, got {raw:?}"
+    );
+
+    let governed = legion_ai_providers::OpenAiCompatibleProvider::with_transport(
+        "openai-test",
+        "https://api.openai.com/v1",
+        Some("k".to_string()),
+        FixedResponseTransport(response),
+    )
+    .complete_with_tools(request())
+    .expect("the governed arm recovers instead of failing the completion");
+    assert!(
+        governed.blocks.iter().any(|block| matches!(
+            block,
+            legion_ai::tool_calls::ToolTurnBlock::MalformedToolCall { .. }
+        )),
+        "the governed arm surfaces a non-dispatchable malformed call"
+    );
+}
+
+/// Returns the same response to every request.
+#[derive(Clone)]
+struct FixedResponseTransport(serde_json::Value);
+
+impl legion_ai_providers::ProviderHttpTransport for FixedResponseTransport {
+    fn post_json(
+        &self,
+        _endpoint: &str,
+        _bearer_token: Option<&str>,
+        _payload: serde_json::Value,
+    ) -> Result<serde_json::Value, legion_ai::ProviderError> {
+        Ok(self.0.clone())
+    }
 }
