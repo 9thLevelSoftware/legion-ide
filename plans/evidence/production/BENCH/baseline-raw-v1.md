@@ -10,19 +10,28 @@ excluded (ADR-0049 holdout policy).
 
 | | raw (`LEGION_AI_GOVERNORS=off`) | governed |
 | --- | ---: | ---: |
-| **tasks passed (gate)** | **0 / 13** | **0 / 13** |
-| task_success | 0 | 1 |
-| tasks where the model acted | 0 | 11 |
-| tool calls | 0 | 26 |
-| model turns | 13 | 34 |
-| proposals produced | 0 | 1 |
-| runs blocked | 0 | 5 |
-| wall time | 42.6 s | 143.0 s |
+| **tasks passed (gate)** | **0 / 13** | **1 / 13** |
+| task_success | 0 | 2 |
+| tasks where the model acted | 0 | 10 |
+| tool calls | 0 | 23 |
+| proposals applied | 0 | 2 |
+| files changed | 0 | 2 |
+| runs blocked | 0 | 2 |
 
-Both arms pass zero tasks. **Phase 2's exit criterion is not met**, and this
-file should not be cited as evidence that the reliability layer improves task
-success. What it does establish is narrower and still useful: the layer is the
-difference between a model that does nothing and a model that acts.
+**Phase 2's exit criterion is not met.** One task out of thirteen is not a
+≥20% improvement; it is a single success on a single model in a single run,
+and this file should not be cited as evidence that the reliability layer
+improves task completion.
+
+Two things it does establish. The layer is the difference between a model that
+does nothing and a model that acts: 0 → 10 tasks with tool calls, 0 → 23 calls,
+0 → 2 files actually changed. And the arms now separate at all, which they did
+not before the metric was corrected.
+
+**One run per arm is an observation, not a measurement.** Local sampling is
+nondeterministic: an earlier governed run of the same corpus produced 11 acted
+/ 26 calls / 1 task_success where this one produced 10 / 23 / 2. Any figure
+quoted from this file needs repeated runs before it means anything.
 
 ## Why the raw arm scores zero: the model never emits a structured tool call
 
@@ -47,10 +56,12 @@ message *is* the call) and reporting `ToolUse` when recovery fires despite
 `finish_reason: "stop"` — without the latter the loop would end the run before
 dispatching what it just recovered.
 
-## Why the governed arm still scores zero
+## Why the governed arm still scores near zero
 
-Recovery works — 0 → 11 tasks where the model acted, 0 → 26 tool calls — but
-tasks still fail, for reasons that are mostly **not** model quality:
+Recovery works — 0 → 10 tasks where the model acted, 0 → 23 tool calls — but
+almost all tasks still fail, for reasons that are mostly **not** model
+quality (counts from the earlier run, whose per-task failure reasons were
+captured; the pattern is unchanged):
 
 | cause | tasks | nature |
 | --- | ---: | --- |
@@ -88,8 +99,28 @@ on a task whose tests pass at rest it passed outright.
 
 That would have inflated the baseline the governed arm is measured against —
 understating the port's value, the direction that quietly discredits real
-work. `finalize_completed_task_success` now requires at least one applied
-proposal, pinned by `a_run_that_proposed_nothing_is_never_a_success`.
+work.
+
+Review then found the same hole one level deeper, twice:
+
+* An accepted proposal whose content **equals the existing file** still
+  incremented `proposals_applied`, so a no-op edit passed a
+  "proposals > 0" test. Success now requires a non-empty diff — evidence the
+  requested change happened, not evidence the model produced output.
+* `diff_files` itself was over-counting. Starting a delegated task writes
+  `target/delegated-tasks/<id>.lock` **into the workspace**. Rust fixtures hide
+  it behind `/target` in `.gitignore`; Python and JavaScript fixtures do not,
+  because `target/` is a Rust convention. So every non-Rust task reported one
+  changed file that the model never touched — visible in the raw arm, which
+  made zero tool calls and still showed `diff_files = 1` on 8 tasks. The
+  harness now excludes its own runtime artifacts, and records the *names* of
+  changed files so a disagreement between diffs and proposals is diagnosable
+  instead of mysterious.
+
+All three holes pointed the same way: crediting the model for work it had not
+done. Pinned by `a_run_that_proposed_nothing_is_never_a_success`,
+`a_proposal_that_changed_nothing_is_never_a_success`, and
+`legion_runtime_artifacts_do_not_count_as_model_changes`.
 
 ## How the two arms are compared
 

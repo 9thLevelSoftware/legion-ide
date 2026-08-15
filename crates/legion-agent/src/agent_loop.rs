@@ -1081,7 +1081,22 @@ fn validate_and_execute(
     })?;
 
     // Step 2: schema validation — check required fields
-    for field in tool.required_fields() {
+    //
+    // The measurement arm restores `replacement` as a required field here, not
+    // just at execution. Ordering is part of the pre-port contract: a
+    // malformed edit was rejected as retryable `InvalidArguments` *before* any
+    // path check ran. Enforcing it later means a malformed edit aimed at a
+    // forbidden or out-of-scope path terminates the run as `Blocked` instead,
+    // penalising the raw arm for a failure the pre-port loop would have let
+    // the model correct.
+    let required_fields: &[&str] = if tool == LegionToolKind::EditAsProposal
+        && !legion_ai::governance::small_model_governors_enabled()
+    {
+        &["path", "replacement"]
+    } else {
+        tool.required_fields()
+    };
+    for field in required_fields {
         if input.get(*field).is_none() {
             return Err(LegionToolCallFeedback::new(
                 tool,

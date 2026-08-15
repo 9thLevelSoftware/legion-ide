@@ -241,3 +241,54 @@ fn the_advertised_edit_schema_matches_the_arm() {
         "the governed arm advertises the fragment form"
     );
 }
+
+/// Ordering is part of the pre-port contract, not just the rule set.
+///
+/// A malformed edit was rejected as retryable `InvalidArguments` before any
+/// path check ran. If the raw arm only enforced `replacement` at execution
+/// time, a malformed edit aimed at a forbidden path would terminate the run as
+/// `Blocked` instead — penalising the raw arm for a failure the pre-port loop
+/// would have let the model correct.
+#[test]
+fn the_raw_arm_rejects_a_malformed_edit_before_checking_the_path() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("m.rs"),
+        "fn main() {}
+",
+    )
+    .unwrap();
+
+    // No `replacement`, and a path the scope forbids.
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({"path": "../outside.rs", "old_str": "a", "new_str": "b"}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block, so no
+    // other thread in this binary can observe a partial state.
+    unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
+    let result = run_delegated_task_loop(
+        &config(&dir),
+        &provider,
+        &NoOpToolHost,
+        &mut Sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "the missing required field must be caught first as retryable feedback,          not converted into a terminal block by the later path check; got {result:?}"
+    );
+}

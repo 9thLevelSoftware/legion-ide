@@ -334,11 +334,40 @@ fn prepare_checkout(fixture_dir: &Path, task_id: &str) -> Result<PathBuf, String
     Ok(checkout)
 }
 
-/// Count files changed vs the baseline commit (staged so new files count too).
-fn count_diff_files(checkout: &Path) -> Result<u32, String> {
+/// List files changed vs the baseline commit (staged so new files count too).
+///
+/// Returns the paths rather than a bare count: `diff_files` gates task
+/// success, so when it disagrees with the proposals a run made, the names are
+/// what tell you whether the model edited something or the harness dirtied the
+/// checkout by itself.
+fn changed_files(checkout: &Path) -> Result<Vec<String>, String> {
     git_cmd(checkout, &["add", "-A"])?;
     let diff = git_cmd(checkout, &["diff", "--cached", "--name-only"])?;
-    Ok(diff.lines().filter(|line| !line.trim().is_empty()).count() as u32)
+    Ok(diff
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !is_harness_artifact(line))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether a changed path is Legion's own runtime state rather than the
+/// model's work.
+///
+/// Starting a delegated task writes `target/delegated-tasks/<id>.lock` into
+/// the workspace. Rust fixtures hide it behind `/target` in `.gitignore`;
+/// Python and JavaScript fixtures do not, because `target/` is a Rust
+/// convention — so the harness was counting its own lock file as a model edit
+/// on every non-Rust task. That inflated `diff_files`, which gates task
+/// success and feeds the `max_diff_files` budget.
+///
+/// Filtering here rather than adding `target/` to each fixture keeps the
+/// metric honest by definition: it measures what the model changed, not what
+/// running the benchmark changed.
+fn is_harness_artifact(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("target/delegated-tasks/")
 }
 
 fn parse_tool(name: &str) -> Result<LegionToolKind, String> {
@@ -824,8 +853,13 @@ fn run_one_task(
             result.tool_calls = tool_calls;
             result.retries = retries;
 
-            match count_diff_files(&checkout) {
-                Ok(count) => result.diff_files = count,
+            match changed_files(&checkout) {
+                Ok(changed) => {
+                    result.diff_files = changed.len() as u32;
+                    if !changed.is_empty() {
+                        notes.push(format!("changed files: {}", changed.join(", ")));
+                    }
+                }
                 Err(err) => notes.push(format!("diff count failed: {err}")),
             }
 
@@ -918,14 +952,23 @@ fn run_one_task(
 }
 
 fn finalize_completed_task_success(result: &mut LiveRunTaskResult, expected_files_ok: bool) {
-    // A run that proposed nothing did not do the task, whatever the file
-    // checks say. Every corpus task asks for a change, and `expected_files`
-    // mostly names files that already exist, so without this a model that
-    // replies with prose and edits nothing scores a success — and on a task
-    // whose tests already pass at rest, a full pass. That silently inflates
-    // the baseline the governed arm is measured against.
-    let proposed_something = result.proposals_applied > 0;
-    result.task_success = proposed_something
+    // Success requires the worktree to have actually changed.
+    //
+    // Two weaker criteria were tried and both let a do-nothing run pass. First
+    // `expected_files_ok && applied == total`, where `0 == 0` holds and
+    // `expected_files` mostly names files that already exist — so a model that
+    // replied with prose scored a success. Then `applied > 0`, which a
+    // whole-file proposal whose content equals the existing file still
+    // satisfies: the proposal is accepted, nothing changes, `diff_files` is 0.
+    //
+    // `diff_files` comes from a real git diff against the task's baseline
+    // commit, so it is evidence the requested change happened rather than
+    // evidence the model produced output. Every corpus task asks for a change,
+    // so a zero diff is never success — and each of these holes inflated the
+    // baseline the governed arm is measured against, understating the work
+    // being evaluated.
+    result.task_success = result.diff_files > 0
+        && result.proposals_applied > 0
         && expected_files_ok
         && result.proposals_applied == result.proposals_total;
 }
@@ -1242,6 +1285,7 @@ mod tests {
         result.tests_passed = false;
         result.proposals_total = 1;
         result.proposals_applied = 1;
+        result.diff_files = 1;
 
         finalize_completed_task_success(&mut result, true);
 
@@ -1265,6 +1309,44 @@ mod tests {
             !result.task_success,
             "zero proposals must not score as task success"
         );
+    }
+
+    /// The harness must not count its own runtime state as the model's work.
+    /// Starting a delegated task writes a lock file under
+    /// `target/delegated-tasks/`, which non-Rust fixtures do not gitignore.
+    #[test]
+    fn legion_runtime_artifacts_do_not_count_as_model_changes() {
+        assert!(is_harness_artifact("target/delegated-tasks/task-abc.lock"));
+        assert!(is_harness_artifact(
+            "target\\delegated-tasks\\task-abc.lock"
+        ));
+        assert!(!is_harness_artifact("textkit/stats.py"));
+        assert!(!is_harness_artifact("target/release/thing"));
+    }
+
+    /// An accepted proposal that changed nothing is not work done. A
+    /// whole-file proposal whose content equals the existing file still
+    /// increments `proposals_applied`, so without the diff check a no-op
+    /// scores a pass on any task whose verification already passes at rest.
+    #[test]
+    fn a_proposal_that_changed_nothing_is_never_a_success() {
+        let mut result = LiveRunTaskResult::new("no-op-proposal");
+        result.tests_passed = true;
+        result.proposals_total = 1;
+        result.proposals_applied = 1;
+        result.diff_files = 0;
+
+        finalize_completed_task_success(&mut result, true);
+
+        assert!(
+            !result.task_success,
+            "an applied proposal with an empty diff must not score as success"
+        );
+
+        // The same run with a real change does succeed.
+        result.diff_files = 1;
+        finalize_completed_task_success(&mut result, true);
+        assert!(result.task_success);
     }
 
     #[test]
