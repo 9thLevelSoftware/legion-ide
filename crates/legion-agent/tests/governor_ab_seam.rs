@@ -27,8 +27,16 @@ use legion_protocol::{
 };
 use tempfile::TempDir;
 
-/// Serializes the two cases in this binary. Isolating the binary keeps other
-/// suites safe; this keeps these two from racing each other.
+/// Serializes every env-mutating test in this binary.
+///
+/// Isolating the binary keeps other suites safe; this keeps these tests from
+/// racing each other. Every test that touches `LEGION_AI_GOVERNORS` must hold
+/// this lock for the whole of its env-mutating block — that is the invariant
+/// each `SAFETY` comment below refers to.
+///
+/// Deliberately stated here and not restated per test: an earlier version
+/// counted the tests inline and the count was wrong within one commit of
+/// being written.
 static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct Sink;
@@ -141,9 +149,8 @@ fn the_measurement_switch_changes_edit_behavior() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
 
-    // SAFETY: both tests in this binary mutate this variable. `ENV_GUARD`
-    // serializes them and each holds the lock across its whole env-mutating
-    // block, so no other thread can observe a partial state.
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block, so no
+    // other thread in this binary can observe a partial state.
     unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
     assert!(!legion_ai::governance::small_model_governors_enabled());
     let without = proposals_for_fragment_edit(&dir);
@@ -166,6 +173,10 @@ fn only_the_exact_off_value_disables_governors() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A typo must not silently run the wrong arm and quietly invalidate a
     // benchmark result.
+    //
+    // SAFETY (both loops and the reset below): holds `ENV_GUARD` across the
+    // whole env-mutating block, so no other thread in this binary can observe
+    // a partial state.
     for value in ["", "0", "false", "no", "OFFF", "on"] {
         unsafe { std::env::set_var("LEGION_AI_GOVERNORS", value) };
         assert!(
@@ -204,6 +215,8 @@ fn the_advertised_edit_schema_matches_the_arm() {
             .input_schema
     };
 
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block, so no
+    // other thread in this binary can observe a partial state.
     unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
     let raw = edit_schema();
     assert_eq!(
