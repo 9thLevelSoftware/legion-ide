@@ -1456,6 +1456,19 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     status = "done"
     evidence = "plans/evidence/production/WS-AICP-01/tool-normalizer-evidence.md"
 
+    [[epics.features.tasks]]
+    id = "P5.F4.T3"
+    title = "Resolve model-authored edit fragments by exact unique match (patch-first editing)"
+    mode = "Delegate"
+    readiness_row = "PR-AI-002"
+    files = ["crates/legion-ai/src/patch.rs", "crates/legion-ai/tests/patch_resolution.rs", "crates/legion-agent/src/agent_loop.rs", "crates/legion-protocol/src/tools.rs"]
+    dependencies = ["P5.F4.T1"]
+    verification = ["cargo test -p legion-ai --test patch_resolution", "cargo test -p legion-agent --test agent_loop_integration", "cargo test -p legion-agent --test tools_schema"]
+    acceptance = ["edit-as-proposal accepts an old_str/new_str fragment resolved against file content by exact unique match; zero or multiple matches are refused with a diagnostic naming the nearest line; whitespace and line-ending drift do not match; refusals are retryable within the run; the file on disk is never written."]
+    stop_condition = "Stop if a fragment can be forwarded as whole-file content, or if a near-miss is applied by fuzzy matching rather than refused."
+    status = "done"
+    evidence = "plans/evidence/production/WS-AICP-01/patch-first-evidence.md"
+
   [[epics.features]]
   id = "P5.F2"
   title = "Sandbox and worktree isolation"

@@ -1090,3 +1090,248 @@ fn repeated_malformed_tool_calls_hit_the_retry_budget() {
         other => panic!("expected Blocked on repeated malformed calls, got {other:?}"),
     }
 }
+
+/// Fragment edits are resolved against the file rather than treated as whole
+/// content (ADR-0049). Without this, `old_str`/`new_str` would replace the
+/// entire file with the new fragment.
+#[test]
+fn fragment_edit_replaces_only_the_matched_text() {
+    let dir = TempDir::new().unwrap();
+    let original = "fn main() {\n    println!(\"hello\");\n}\n";
+    std::fs::write(dir.path().join("main.rs"), original).unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "main.rs",
+                "old_str": "println!(\"hello\");",
+                "new_str": "println!(\"hello, legion\");"
+            }),
+        )
+        .end_turn("Edited.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    assert_eq!(proposals.len(), 1, "one edit proposal is surfaced");
+
+    // The proposal must carry the whole file with only the fragment changed —
+    // not the fragment alone.
+    let content = match &proposals[0].payload {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+    assert_eq!(
+        content,
+        "fn main() {\n    println!(\"hello, legion\");\n}\n"
+    );
+
+    // The file on disk is untouched: edits stay proposals until reviewed.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
+        original
+    );
+}
+
+/// An ambiguous fragment is refused with retryable feedback, and the model can
+/// correct it in the same run — the loop must not die on a near-miss.
+#[test]
+fn ambiguous_fragment_is_refused_then_corrected() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("cfg.rs"), "x = 1\nx = 1\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({"path": "cfg.rs", "old_str": "x = 1", "new_str": "x = 2"}),
+        )
+        // Only reachable if the refusal was fed back as retryable feedback.
+        .expect_prior_result_contains("ambiguous")
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "cfg.rs",
+                "old_str": "x = 1\nx = 1",
+                "new_str": "x = 1\nx = 2"
+            }),
+        )
+        .end_turn("Disambiguated.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("an ambiguous fragment must not error the loop");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    let content = match &proposals[0].payload {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+    assert_eq!(content, "x = 1\nx = 2\n");
+}
+
+/// A fragment that does not match is refused with a diagnostic naming the
+/// nearest line, so the model can re-read rather than rewrite the file.
+#[test]
+fn unmatched_fragment_is_refused_with_a_locating_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "a.rs",
+                "old_str": "fn beta( ) {}",
+                "new_str": "fn beta(x: u8) {}"
+            }),
+        )
+        .expect_prior_result_contains("closest line is 2")
+        .end_turn("Understood.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("a no-match fragment must not error the loop");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed, got {result:?}"
+    );
+}
+
+/// Two fragment edits to the same file in one run must compose. Without a
+/// per-run overlay the second resolves against the untouched worktree, so its
+/// proposal silently omits the first edit and both carry preconditions for the
+/// same original file — applying either makes the other stale.
+#[test]
+fn successive_fragment_edits_to_one_file_compose() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("cfg.rs"), "let a = 1;\nlet b = 2;\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({"path": "cfg.rs", "old_str": "let a = 1;", "new_str": "let a = 10;"}),
+        )
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({"path": "cfg.rs", "old_str": "let b = 2;", "new_str": "let b = 20;"}),
+        )
+        .end_turn("Both edits staged.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    assert_eq!(proposals.len(), 2, "each edit surfaces its own proposal");
+
+    let content_of = |proposal: &legion_protocol::AssistedAiEditProposalOutput| match &proposal
+        .payload
+    {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+
+    // The second proposal carries both edits, so applying it produces what the
+    // model actually asked for.
+    assert_eq!(content_of(&proposals[0]), "let a = 10;\nlet b = 2;\n");
+    assert_eq!(content_of(&proposals[1]), "let a = 10;\nlet b = 20;\n");
+}
+
+/// A second edit whose anchor exists only because of the first must resolve —
+/// proof the overlay is the resolution source, not just a cache.
+#[test]
+fn a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "m.rs",
+                "old_str": "fn main() {}",
+                "new_str": "fn main() {\n    todo!();\n}"
+            }),
+        )
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({"path": "m.rs", "old_str": "todo!();", "new_str": "println!(\"hi\");"}),
+        )
+        .end_turn("Filled in.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("the second anchor exists only in staged content");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    let last = match &proposals[proposals.len() - 1].payload {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+    assert_eq!(last, "fn main() {\n    println!(\"hi\");\n}\n");
+}

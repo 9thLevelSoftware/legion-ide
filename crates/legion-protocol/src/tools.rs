@@ -56,7 +56,11 @@ impl LegionToolKind {
             Self::Grep => &["pattern"],
             Self::Glob => &["pattern"],
             Self::Outline => &["path"],
-            Self::EditAsProposal => &["path", "replacement"],
+            // `replacement` is deliberately absent: an edit may instead supply
+            // an `old_str`/`new_str` fragment, and a flat required-field list
+            // cannot express "one of these two". The executor checks the pair
+            // and explains which forms are valid.
+            Self::EditAsProposal => &["path"],
             Self::TerminalCommand => &["command"],
             Self::McpPassthrough => &["server_id", "tool_name", "arguments"],
         }
@@ -258,18 +262,36 @@ pub fn tool_schema_definitions() -> Vec<LegionToolSchemaDefinition> {
         ),
         LegionToolSchemaDefinition::new(
             LegionToolKind::EditAsProposal,
+            // Two ways to express an edit. `old_str`/`new_str` is the cheaper
+            // one and what small models reach for; it is resolved against the
+            // file by exact unique match, so a fragment can never be mistaken
+            // for whole-file content (ADR-0049). `replacement` remains the
+            // whole-content form and is required for creating a new file.
+            // Neither is unconditionally required, so the either/or is checked
+            // where it can be explained — see `resolve_fragment_edit`.
             json!({
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "path": {"type": "string"},
-                    "replacement": {"type": "string"},
+                    "replacement": {
+                        "type": ["string", "null"],
+                        "description": "The file's complete new content. Use for new files or full rewrites."
+                    },
+                    "old_str": {
+                        "type": ["string", "null"],
+                        "description": "Exact text to replace, quoted verbatim from the file including indentation. Must match exactly once."
+                    },
+                    "new_str": {
+                        "type": ["string", "null"],
+                        "description": "Text that replaces old_str. Empty string deletes it."
+                    },
                     "start_line": {"type": ["integer", "null"], "minimum": 1},
                     "end_line": {"type": ["integer", "null"], "minimum": 1},
                     "proposal_title": {"type": ["string", "null"]},
                     "proposal_reason": {"type": ["string", "null"]}
                 },
-                "required": ["path", "replacement"]
+                "required": ["path"]
             }),
         ),
         LegionToolSchemaDefinition::new(

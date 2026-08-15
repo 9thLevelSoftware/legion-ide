@@ -94,7 +94,12 @@ pub fn extract_tool_calls(input: &ExtractionInput<'_>) -> ToolCallExtraction {
     let scan = scan_tagged(source)
         .or_else(|| scan_liquid(source))
         .or_else(|| scan_fenced(source))
-        .or_else(|| scan_bare(source));
+        .or_else(|| scan_bare(source))
+        // Last: edits written as literal SEARCH/REPLACE blocks or diff hunks
+        // rather than as a tool call at all. Models trained on those formats
+        // emit them unprompted, and without this they read as prose and the
+        // edit is lost.
+        .or_else(|| scan_edit_blocks(source, input.known_tools));
 
     let Some(scan) = scan else {
         return ToolCallExtraction {
@@ -168,12 +173,6 @@ fn resolve_against_known(
     if !known_tools.iter().any(|known| known == native) {
         return None;
     }
-    // Refuse a whole-file write that is really a substring edit, whatever the
-    // model called the tool: `replacement` is the file's complete new content,
-    // so forwarding the fragment would propose deleting everything else.
-    if native == "edit-as-proposal" && describes_substring_edit(&call.arguments) {
-        return None;
-    }
     Some(ExtractedToolCall {
         name: native.to_string(),
         // Start from the canonical arguments, not the raw ones: canonical
@@ -196,18 +195,17 @@ fn legion_registry_name(name: &str) -> Option<&'static str> {
         "grep" | "search" | "rg" | "ripgrep" | "search_files" | "grep_search" => Some("grep"),
         "glob" | "find_files" | "ls" | "LS" | "list_directory" | "list_files" => Some("glob"),
         "outline" | "symbols" | "list_symbols" | "document_symbols" => Some("outline"),
-        // Whole-file writers only. Legion's `edit-as-proposal` takes
-        // `replacement` as the file's *complete* new content, so these are the
-        // aliases whose semantics actually match.
-        "edit-as-proposal" | "write_file" | "write" | "create_file" => Some("edit-as-proposal"),
+        // Both whole-file writers and targeted-edit aliases map here.
+        // `edit-as-proposal` accepts either `replacement` (complete content)
+        // or an `old_str`/`new_str` fragment resolved by exact unique match,
+        // so a substring edit is expressible without being mistaken for whole
+        // content — see `legion_ai::patch` and `rename_arguments_for_legion_tool`.
+        "edit-as-proposal" | "write_file" | "write" | "create_file" | "edit" | "Edit"
+        | "str_replace" | "str_replace_editor" | "replace" | "patch" | "apply_patch" => {
+            Some("edit-as-proposal")
+        }
         "terminal-command" | "bash" | "shell" | "run_command" | "run_terminal_cmd" | "cmd"
         | "terminal" | "exec" => Some("terminal-command"),
-        // Targeted-edit aliases (`str_replace`, `patch`, `Edit`, …) are
-        // deliberately absent. Their `old_string`/`new_string` pair describes a
-        // *substring* replacement, and mapping `new_string` onto `replacement`
-        // would propose overwriting the entire file with that fragment. They
-        // stay non-dispatchable until exact-match patch semantics land
-        // (roadmap Phase 2.1).
         _ => None,
     }
 }
@@ -215,14 +213,15 @@ fn legion_registry_name(name: &str) -> Option<&'static str> {
 /// Whether an argument object describes a substring edit rather than a
 /// whole-file write.
 ///
-/// Checked independently of the tool name: a call carrying `old_string` means
-/// the model intends to replace part of a file, whatever it called the tool,
-/// and Legion has no tool that can express that yet.
+/// Keyed on the arguments rather than the tool name, because the name is the
+/// least reliable thing a small model produces: a call carrying `old_string`
+/// means fragment intent whatever it called the tool.
 fn describes_substring_edit(arguments: &Value) -> bool {
     let Value::Object(object) = arguments else {
         return false;
     };
-    ["old_string", "old_str", "oldText", "search", "find"]
+    // `search`/`replace` is the Aider-style spelling of the same pair.
+    ["old_string", "old_str", "oldText", "search"]
         .iter()
         .any(|key| object.contains_key(*key))
 }
@@ -245,6 +244,12 @@ fn rename_arguments_for_legion_tool(tool: &str, arguments: &Value) -> Value {
         renamed.insert("pattern".to_string(), Value::String(format!("{dir}/*")));
         return Value::Object(renamed);
     }
+    // An edit is a *fragment* replacement or a whole-file write, and the two
+    // want different keys. Mapping a fragment's `new_string` onto
+    // `replacement` would tell Legion the fragment is the file's entire new
+    // content — the destructive misreading this split exists to prevent.
+    let fragment_edit = tool == "edit-as-proposal" && describes_substring_edit(arguments);
+
     let mut renamed = Map::new();
     for (key, value) in object {
         let key = match (tool, key.as_str()) {
@@ -253,7 +258,15 @@ fn rename_arguments_for_legion_tool(tool: &str, arguments: &Value) -> Value {
             }
             ("grep" | "glob", "query") => "pattern",
             ("terminal-command", "cmd") => "command",
-            ("edit-as-proposal", "content" | "new_string" | "new_str" | "text") => "replacement",
+            ("edit-as-proposal", "old_string" | "oldText" | "search") => "old_str",
+            ("edit-as-proposal", "new_string" | "newText" | "replace") if fragment_edit => {
+                "new_str"
+            }
+            // Whole-content forms only; `new_string` outside a fragment edit
+            // has no `old_str` to anchor to, so it is the full replacement.
+            ("edit-as-proposal", "content" | "text" | "new_string") if !fragment_edit => {
+                "replacement"
+            }
             _ => key.as_str(),
         };
         renamed.insert(key.to_string(), value.clone());
@@ -365,6 +378,47 @@ fn scan_fenced(source: &str) -> Option<ScanResult> {
         cursor = end;
     }
     ScanResult { calls, spans }.non_empty()
+}
+
+/// Recover edits written as SEARCH/REPLACE blocks or diff hunks.
+///
+/// Only runs when the registry actually offers an edit tool, so a chat about
+/// a diff does not become an edit request. The whole message is consumed,
+/// because a block-format edit *is* the message.
+fn scan_edit_blocks(source: &str, known_tools: &[String]) -> Option<ScanResult> {
+    const EDIT_TOOL: &str = "edit-as-proposal";
+    if !known_tools.is_empty() && !known_tools.iter().any(|tool| tool == EDIT_TOOL) {
+        return None;
+    }
+    let blocks = crate::patch::parse_edit_blocks(source);
+    if blocks.is_empty() {
+        return None;
+    }
+    let calls = blocks
+        .into_iter()
+        .map(|block| {
+            let mut arguments = Map::new();
+            arguments.insert("path".to_string(), Value::String(block.path));
+            if block.old_str.is_empty() {
+                // An empty search half means "create this file with exactly
+                // this content" — the whole-content form.
+                arguments.insert("replacement".to_string(), Value::String(block.new_str));
+            } else {
+                arguments.insert("old_str".to_string(), Value::String(block.old_str));
+                arguments.insert("new_str".to_string(), Value::String(block.new_str));
+            }
+            ExtractedToolCall {
+                name: EDIT_TOOL.to_string(),
+                arguments: Value::Object(arguments),
+                arguments_unparsed: None,
+            }
+        })
+        .collect();
+    ScanResult {
+        calls,
+        spans: vec![(0, source.len())],
+    }
+    .non_empty()
 }
 
 fn scan_bare(source: &str) -> Option<ScanResult> {
@@ -1032,23 +1086,81 @@ mod tests {
     }
 
     #[test]
-    fn substring_edits_are_never_mapped_to_a_whole_file_write() {
-        // Legion's `edit-as-proposal` takes `replacement` as the file's entire
-        // new content. Forwarding a `new_string` fragment would propose
-        // deleting everything else in the file.
+    fn substring_edits_keep_fragment_semantics_and_never_become_whole_file_writes() {
+        // The failure this guards against: mapping a fragment's `new_string`
+        // onto `replacement` tells Legion the fragment is the file's entire
+        // new content, deleting everything else.
         for raw in [
             "<tool_call>{\"name\":\"str_replace\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
-            "<tool_call>{\"name\":\"patch\",\"arguments\":{\"path\":\"a.rs\",\"old_str\":\"foo\",\"new_str\":\"bar\"}}</tool_call>",
             "<tool_call>{\"name\":\"Edit\",\"arguments\":{\"file_path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
-            // Even under a whole-file name, `old_string` means substring intent.
-            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.rs\",\"old_string\":\"foo\",\"content\":\"bar\"}}</tool_call>",
+            "<tool_call>{\"name\":\"patch\",\"arguments\":{\"path\":\"a.rs\",\"old_str\":\"foo\",\"new_str\":\"bar\"}}</tool_call>",
+            // Even under a whole-file name, `old_string` means fragment intent.
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.rs\",\"old_string\":\"foo\",\"new_string\":\"bar\"}}</tool_call>",
         ] {
             let out = extract(raw, LEGION_TOOLS);
+            assert_eq!(out.calls.len(), 1, "fragment edit is recovered: {raw}");
+            let call = &out.calls[0];
+            assert_eq!(call.name, "edit-as-proposal");
+            assert_eq!(call.arguments["old_str"], "foo", "for: {raw}");
+            assert_eq!(call.arguments["new_str"], "bar", "for: {raw}");
             assert!(
-                out.calls.is_empty(),
-                "a substring edit must not become a whole-file replacement: {raw}"
+                call.arguments.get("replacement").is_none(),
+                "a fragment must never be forwarded as whole-file content: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn edits_written_as_blocks_become_edit_calls() {
+        let out = extract(
+            "Here is the change:\nsrc/lib.rs\n<<<<<<< SEARCH\nfn old_name() {}\n=======\nfn new_name() {}\n>>>>>>> REPLACE\n",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls.len(), 1, "a block-format edit is recovered");
+        assert_eq!(out.calls[0].name, "edit-as-proposal");
+        assert_eq!(out.calls[0].arguments["path"], "src/lib.rs");
+        assert_eq!(out.calls[0].arguments["old_str"], "fn old_name() {}");
+        assert_eq!(out.calls[0].arguments["new_str"], "fn new_name() {}");
+    }
+
+    #[test]
+    fn an_empty_search_half_becomes_a_whole_file_write() {
+        let out = extract(
+            "src/new.rs\n<<<<<<< SEARCH\n=======\npub fn hello() {}\n>>>>>>> REPLACE\n",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].arguments["replacement"], "pub fn hello() {}");
+        assert!(out.calls[0].arguments.get("old_str").is_none());
+    }
+
+    #[test]
+    fn block_recovery_needs_an_edit_tool_on_offer() {
+        // Discussing a diff is not requesting an edit.
+        let out = extract(
+            "src/lib.rs\n<<<<<<< SEARCH\nfn a() {}\n=======\nfn b() {}\n>>>>>>> REPLACE\n",
+            &["read", "grep"],
+        );
+        assert!(out.calls.is_empty());
+    }
+
+    #[test]
+    fn a_real_tool_call_still_wins_over_a_block_restatement() {
+        let out = extract(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>\nsrc/lib.rs\n<<<<<<< SEARCH\nfn a() {}\n=======\nfn b() {}\n>>>>>>> REPLACE\n",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "read");
+    }
+
+    #[test]
+    fn whole_file_writes_still_map_to_replacement() {
+        let out = extract(
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.rs\",\"content\":\"whole file\"}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].arguments["replacement"], "whole file");
+        assert!(out.calls[0].arguments.get("new_str").is_none());
     }
 
     #[test]

@@ -27,7 +27,7 @@ Legend for "what was taken":
 | `src/governor/early_stop.js`, `src/governor/quality_monitor.js` | `legion-agent` loop governors | nothing yet (semantics port planned) | planned |
 | `src/tools/read_tracker.js`, `src/tools/dedup.js`, `src/tools/trust_decay.js` | `legion-agent` loop state | nothing yet (semantics port planned) | planned |
 | `src/session/plan_tracker.js`, `src/session/dependency_graph.js`, `src/session/contract.js` | `legion-agent` plan anchoring (`legion-protocol/src/plan.rs`) | nothing yet (semantics adaptation planned) | planned |
-| `bin/executor.js` (`patch` tool semantics) | `legion-ai` patch resolution feeding `TextEditProposal` / `WorkspaceEditProposalPayload` | nothing yet (semantics adaptation planned) | planned |
+| `bin/executor.js` (`patch` tool: exact-unique-match `old_str`/`new_str` semantics and its failure taxonomy) | `crates/legion-ai/src/patch.rs`, consumed by `execute_edit_as_proposal` in `legion-agent` | semantics — exact-and-unique matching, no-match/ambiguous/validation refusal taxonomy, strict whitespace and line-ending handling. Re-implemented in Rust from documented behavior; no source copied. | ported 2026-08-15 |
 | `src/tools/hybrid_search.js` | `legion-index` (ranking heuristics only) | nothing yet (semantics adaptation planned) | planned |
 
 Modules rejected in ADR-0049 (executor/shell authority, JS plugins, TUI,
