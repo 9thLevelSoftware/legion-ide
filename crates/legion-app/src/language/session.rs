@@ -165,10 +165,14 @@ impl RustAnalyzerSession {
     /// GP-1 s3 investigation: "notify error: Input watch path is neither a
     /// file nor a directory").
     ///
-    /// `client_capabilities`, when `Some`, replaces the default empty
-    /// capabilities object (e.g. advertising
+    /// `client_capabilities`, when `Some`, is **merged over** the defaults
+    /// from [`default_client_capabilities`] (e.g. advertising
     /// `workspace.didChangeWatchedFiles.dynamicRegistration` so a
-    /// client-watcher config is honoured).
+    /// client-watcher config is honoured). Merging rather than replacing is
+    /// deliberate: a caller adding one unrelated capability must not silently
+    /// drop the pull-diagnostics advertisement, without which a conforming
+    /// server may withhold `diagnosticProvider` and strand the client on the
+    /// push-only path this default exists to avoid.
     pub fn initialize_with_options(
         &mut self,
         root_uri: &str,
@@ -747,16 +751,38 @@ fn build_initialize_params(
     initialization_options: Option<serde_json::Value>,
     client_capabilities: Option<serde_json::Value>,
 ) -> serde_json::Value {
+    let mut capabilities = default_client_capabilities();
+    if let Some(overrides) = client_capabilities {
+        merge_json(&mut capabilities, overrides);
+    }
     let mut params = serde_json::json!({
         "processId": std::process::id(),
         "rootUri": root_uri,
-        "capabilities": client_capabilities.unwrap_or_else(default_client_capabilities),
+        "capabilities": capabilities,
         "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
     });
     if let Some(options) = initialization_options {
         params["initializationOptions"] = options;
     }
     params
+}
+
+/// Recursively merge `overlay` into `base`; non-object values at the same key
+/// replace, so a caller can still override a specific default outright.
+fn merge_json(base: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (base, overlay) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
 }
 
 #[cfg(test)]
@@ -834,11 +860,43 @@ mod initialize_params_tests {
     }
 
     #[test]
-    fn client_capabilities_replace_the_default_empty_object() {
+    fn client_capabilities_merge_over_the_defaults() {
+        // GP-1 passes an override carrying only a watcher capability. Merging
+        // (not replacing) is what keeps pull diagnostics advertised there.
         let caps = serde_json::json!({
             "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
         });
         let params = build_initialize_params("file:///tmp/ws", None, Some(caps.clone()));
-        assert_eq!(params["capabilities"], caps);
+        assert_eq!(
+            params["capabilities"]["workspace"]["didChangeWatchedFiles"]["dynamicRegistration"],
+            true,
+            "caller capability is present"
+        );
+        assert!(
+            params["capabilities"]["textDocument"]["diagnostic"].is_object(),
+            "an unrelated override must not drop the pull-diagnostics default"
+        );
+    }
+
+    #[test]
+    fn a_caller_can_still_override_a_specific_default() {
+        let caps = serde_json::json!({
+            "textDocument": {"diagnostic": {"dynamicRegistration": true}}
+        });
+        let params = build_initialize_params("file:///tmp/ws", None, Some(caps));
+        assert_eq!(
+            params["capabilities"]["textDocument"]["diagnostic"]["dynamicRegistration"], true,
+            "explicit overrides still win over the default value"
+        );
+    }
+
+    #[test]
+    fn merge_replaces_non_object_values() {
+        let caps = serde_json::json!({"textDocument": {"publishDiagnostics": false}});
+        let params = build_initialize_params("file:///tmp/ws", None, Some(caps));
+        assert_eq!(
+            params["capabilities"]["textDocument"]["publishDiagnostics"], false,
+            "a scalar overlay replaces the default object outright"
+        );
     }
 }

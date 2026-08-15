@@ -349,14 +349,21 @@ fn parse_json_lenient(text: &str) -> Option<Value> {
     None
 }
 
+/// Remove commas that immediately precede a closing `}` or `]`.
+///
+/// Copies unchanged input as byte *slices* rather than reconstructing it
+/// character by character. Only ASCII commas are ever dropped, so every cut
+/// lands on a char boundary and multi-byte text passes through byte-exact —
+/// these arguments carry source code and file contents, where silently
+/// rewriting `é` into `Ã©` would corrupt an edit proposal.
 fn strip_trailing_commas(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
+    let mut copied_to = 0usize;
     let mut in_string = false;
     let mut escaped = false;
     for (idx, &byte) in bytes.iter().enumerate() {
         if in_string {
-            out.push(byte as char);
             if escaped {
                 escaped = false;
             } else if byte == b'\\' {
@@ -368,7 +375,6 @@ fn strip_trailing_commas(text: &str) -> String {
         }
         if byte == b'"' {
             in_string = true;
-            out.push('"');
             continue;
         }
         if byte == b',' {
@@ -377,11 +383,12 @@ fn strip_trailing_commas(text: &str) -> String {
                 .iter()
                 .find(|candidate| !candidate.is_ascii_whitespace());
             if matches!(next, Some(b'}') | Some(b']')) {
-                continue;
+                out.push_str(&text[copied_to..idx]);
+                copied_to = idx + 1;
             }
         }
-        out.push(byte as char);
     }
+    out.push_str(&text[copied_to..]);
     out
 }
 
@@ -912,6 +919,22 @@ mod tests {
         assert!(
             absent.calls[0].arguments_unparsed.is_none(),
             "an absent argument object is not a parse failure"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_repair_preserves_multibyte_text() {
+        // Repair rewrites the argument text, so a byte-wise rebuild would
+        // corrupt any non-ASCII content it passes through — and this content
+        // becomes edit proposals.
+        let out = extract(
+            "<tool_call>{\"name\":\"write_file\",\"arguments\":{\"content\":\"café 🌍 日本語\",}}</tool_call>",
+            &["write_file"],
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].arguments["content"], "café 🌍 日本語",
+            "multi-byte characters must survive trailing-comma repair byte-exact"
         );
     }
 
