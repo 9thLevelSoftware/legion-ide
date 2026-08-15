@@ -93,6 +93,15 @@ struct LiveRunTaskResult {
     outcome: String,
     task_success: bool,
     tests_passed: bool,
+    /// Whether the task's verification command already passed before the model
+    /// ran.
+    ///
+    /// Refactor tasks are supposed to preserve behaviour, so their tests pass
+    /// on the untouched fixture. Without this field `tests_passed` reads as an
+    /// achievement on those tasks, and a model that does nothing at all scores
+    /// four of thirteen — which is exactly how the raw arm first appeared to
+    /// beat the governed one.
+    tests_passed_at_rest: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_exit: Option<i32>,
     proposals_total: u32,
@@ -119,6 +128,7 @@ impl LiveRunTaskResult {
             outcome: "error".to_string(),
             task_success: false,
             tests_passed: false,
+            tests_passed_at_rest: false,
             verification_exit: None,
             proposals_total: 0,
             proposals_applied: 0,
@@ -768,6 +778,17 @@ fn run_one_task(
         }
     };
 
+    // Measure the fixture before the model touches it, so a task that already
+    // passes cannot be reported as one the model solved.
+    result.tests_passed_at_rest = matches!(
+        run_verification(
+            &task.verification_command,
+            &checkout,
+            Duration::from_secs(task.timeout_secs),
+        ),
+        Ok(Some(exit)) if exit == task.expected_exit
+    );
+
     let outcome = (|| -> Result<AppDelegatedTaskOutcome, String> {
         let mut app = AppComposition::new();
         app.open_workspace(
@@ -845,9 +866,37 @@ fn run_one_task(
         (turns, tool_calls, retries)
     };
 
+    // A run the idle-turn governor stopped still produced whatever it produced,
+    // and is scored on exactly the same evidence as a completed one: files
+    // actually changed, proposals applied, verification exit code. Scoring it
+    // as a non-outcome instead would let the governor flatter itself by
+    // removing its own weakest runs from the denominator. Only the label
+    // differs, so the evidence can report how often it fired.
+    let mut stopped_no_progress = false;
+    let outcome = match outcome {
+        Ok(AppDelegatedTaskOutcome::StoppedNoProgress {
+            proposals,
+            audit_steps,
+            reason,
+        }) => {
+            stopped_no_progress = true;
+            notes.push(format!("stopped without progress: {reason}"));
+            Ok(AppDelegatedTaskOutcome::Completed {
+                final_message: reason,
+                proposals,
+                audit_steps,
+            })
+        }
+        other => other,
+    };
+
     match outcome {
         Ok(AppDelegatedTaskOutcome::Completed { audit_steps, .. }) => {
-            result.outcome = "completed".to_string();
+            result.outcome = if stopped_no_progress {
+                "stopped_no_progress".to_string()
+            } else {
+                "completed".to_string()
+            };
             let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
             result.turns = turns;
             result.tool_calls = tool_calls;
@@ -918,6 +967,14 @@ fn run_one_task(
             result.tool_calls = tool_calls;
             result.retries = retries;
             result.error = Some(format!("budget exhausted: {reason}"));
+        }
+        // Rewritten into `Completed` above, so this arm is not reached. It
+        // records the run as an error rather than panicking, because a
+        // benchmark that crashes on an unexpected outcome loses the whole
+        // suite's data to protect one row of it.
+        Ok(AppDelegatedTaskOutcome::StoppedNoProgress { reason, .. }) => {
+            result.outcome = "stopped_no_progress".to_string();
+            result.error = Some(reason);
         }
         Ok(AppDelegatedTaskOutcome::Cancelled) => {
             result.outcome = "cancelled".to_string();
@@ -1076,7 +1133,7 @@ fn main() {
         );
         let result = run_one_task(task, &input.endpoint, &input.model, &api_key);
         eprintln!(
-            "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} \
+            "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} tests_passed_at_rest={} \
              turns={} tool_calls={} wall_ms={}{}",
             index + 1,
             input.tasks.len(),
@@ -1084,6 +1141,7 @@ fn main() {
             result.outcome,
             result.task_success,
             result.tests_passed,
+            result.tests_passed_at_rest,
             result.turns,
             result.tool_calls,
             result.wall_ms,

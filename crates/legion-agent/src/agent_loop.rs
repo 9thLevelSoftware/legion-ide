@@ -192,6 +192,18 @@ pub enum DelegatedTaskLoopResult {
         /// Human-readable reason label.
         reason: String,
     },
+    /// The idle-turn governor ended a run that had stopped making progress.
+    ///
+    /// Unlike `Blocked`, this carries the proposals produced before the run
+    /// stalled. Nothing about them is less reviewable because the model later
+    /// went in circles, and discarding them would make the governor destroy
+    /// work the budget-exhaustion path it replaces would have kept.
+    StoppedNoProgress {
+        /// Human-readable reason label.
+        reason: String,
+        /// Edit proposals surfaced before the run stalled.
+        proposals: Vec<AssistedAiEditProposalOutput>,
+    },
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -1292,6 +1304,11 @@ pub fn run_delegated_task_loop(
     // Content staged by edits proposed so far, so successive fragment edits to
     // one file compose rather than each resolving against the original.
     let mut pending_edits: PendingEditContent = PendingEditContent::new();
+    // Waste containment. Off in the measurement arm, so the raw baseline sees
+    // the pre-port loop (see `crates/legion-agent/tests/governor_ab_seam.rs`).
+    let mut governors = crate::governors::LoopGovernors::new(
+        legion_ai::governance::small_model_governors_enabled(),
+    );
 
     let start_time = if config.budget.wall_clock_limit_ms > 0 {
         Some(std::time::Instant::now())
@@ -1397,6 +1414,10 @@ pub fn run_delegated_task_loop(
                 // Collect tool results for this model turn.
                 let mut tool_result_blocks: Vec<ToolTurnBlock> = Vec::new();
                 let mut blocked: Option<String> = None;
+                // Set by any fresh tool execution or any rejection. A turn
+                // with neither is a turn of pure cache hits — the model
+                // re-asking questions it has already had answered.
+                let mut turn_had_new_signal = false;
 
                 for block in &response.blocks {
                     // A call whose arguments never parsed is reported back as
@@ -1408,6 +1429,10 @@ pub fn run_delegated_task_loop(
                         name, diagnostic, ..
                     } = block
                     {
+                        // Governed by `max_consecutive_retries` below, so the
+                        // idle-turn governor must not fire first and replace
+                        // its diagnostic with a vaguer one.
+                        turn_had_new_signal = true;
                         consecutive_retries += 1;
                         event_seq += 1;
                         step_index += 1;
@@ -1481,6 +1506,36 @@ pub fn run_delegated_task_loop(
                         allowed: None,
                         reason: None,
                     });
+
+                    // Dedup: an identical read-only call already answered this
+                    // run is not executed again. The call still counts against
+                    // the tool budget and still appears in the audit trail —
+                    // the model made it, and a governor that hid model actions
+                    // from the audit would be trading one honesty problem for
+                    // another.
+                    if let Some(cached) = governors.cached_result(name, input) {
+                        let notice = crate::governors::dedup_notice(name, cached);
+                        tool_calls += 1;
+                        event_seq += 1;
+                        step_index += 1;
+                        audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                            run_id: run_id.clone(),
+                            step_index,
+                            kind: DelegatedTaskLoopStepKind::ToolCallResult,
+                            correlation_id: correlation_id_str.clone(),
+                            causality_id: causality_id_str.clone(),
+                            event_sequence: event_seq,
+                            tool_name: Some(name.clone()),
+                            allowed: Some(true),
+                            reason: Some("served_from_dedup_cache".to_string()),
+                        });
+                        tool_result_blocks.push(ToolTurnBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: notice,
+                            is_error: false,
+                        });
+                        continue;
+                    }
 
                     // Validate + execute the tool.
                     match validate_and_execute(
@@ -1567,6 +1622,12 @@ pub fn run_delegated_task_loop(
                                 reason: None,
                             });
 
+                            turn_had_new_signal = true;
+                            // Cache the redacted text, not the raw output, so a
+                            // later cache hit hands the model exactly what a
+                            // fresh call would have.
+                            governors.record_execution(name, input, &bound.redacted_text);
+
                             tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                 tool_use_id: id.clone(),
                                 content: bound.redacted_text,
@@ -1574,6 +1635,12 @@ pub fn run_delegated_task_loop(
                             });
                         }
                         Err(feedback) => {
+                            // A rejection is not progress, but it is already
+                            // governed by `max_consecutive_retries`, whose
+                            // termination names the real cause. Counting it as
+                            // idle too would let the idle governor fire first
+                            // and report something vaguer.
+                            turn_had_new_signal = true;
                             let retryable = feedback.retryable;
                             let reason = feedback.detail_label.clone();
                             let tool_name_str = feedback.tool.tool_name().to_string();
@@ -1618,8 +1685,23 @@ pub fn run_delegated_task_loop(
                                     });
                                 }
                                 // Feed error back to model as a ToolResult.
-                                let feedback_content = serde_json::to_string(&feedback)
+                                let mut feedback_content = serde_json::to_string(&feedback)
                                     .unwrap_or_else(|_| reason.clone());
+                                // An edit that missed on a file the model never
+                                // opened has one likely cause, and the remedy is
+                                // not in the diagnostic. Appended rather than
+                                // substituted: the nearest-candidate diagnostic
+                                // is still the more useful half.
+                                if name == "edit-as-proposal"
+                                    && let Some(path) = input.get("path").and_then(|v| v.as_str())
+                                    && governors.should_hint_read_first(
+                                        path,
+                                        config.worktree_root.join(path).is_file(),
+                                    )
+                                {
+                                    feedback_content
+                                        .push_str(&crate::governors::read_first_hint(path));
+                                }
                                 tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                     tool_use_id: id.clone(),
                                     content: feedback_content,
@@ -1636,6 +1718,33 @@ pub fn run_delegated_task_loop(
 
                 if let Some(reason) = blocked {
                     return Ok(DelegatedTaskLoopResult::Blocked { reason });
+                }
+
+                // Idle-turn stop: end a run that has stopped producing new
+                // information, instead of letting it grind to budget
+                // exhaustion. Proposals made before the stall are returned —
+                // they are no less reviewable for what the model did after.
+                if governors.note_turn(turn_had_new_signal) {
+                    event_seq += 1;
+                    step_index += 1;
+                    audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                        run_id: run_id.clone(),
+                        step_index,
+                        kind: DelegatedTaskLoopStepKind::BudgetExhausted,
+                        correlation_id: correlation_id_str.clone(),
+                        causality_id: correlation_id_str.clone(),
+                        event_sequence: event_seq,
+                        tool_name: None,
+                        allowed: Some(false),
+                        reason: Some("no_progress".to_string()),
+                    });
+                    return Ok(DelegatedTaskLoopResult::StoppedNoProgress {
+                        reason: format!(
+                            "no new information in {} consecutive turns",
+                            governors.idle_turns()
+                        ),
+                        proposals: accumulated_proposals,
+                    });
                 }
 
                 // Append the assistant's turn to conversation history.

@@ -14,8 +14,11 @@ pub mod coordinator;
 pub mod dag;
 /// Evidence record construction and worker artifact bridging.
 pub mod evidence;
+
 /// External workspace proposal constructors for delegated agent output.
 pub mod external;
+/// Waste containment for the delegated-task loop.
+pub mod governors;
 /// Merge-readiness reports with verification-evidence citations.
 pub mod merge_readiness;
 /// Editable plan construction helpers for agent workflows.

@@ -2769,6 +2769,15 @@ impl DesktopRuntime {
                     AppDelegatedTaskOutcome::Blocked { reason, .. } => {
                         format!("Delegated task blocked: {reason}")
                     }
+                    AppDelegatedTaskOutcome::StoppedNoProgress {
+                        reason,
+                        proposals,
+                        audit_steps,
+                    } => format!(
+                        "Delegated task stopped without progress proposals={} steps={}: {reason}",
+                        proposals.len(),
+                        audit_steps.len()
+                    ),
                     AppDelegatedTaskOutcome::Cancelled => "Delegated task cancelled".to_string(),
                     AppDelegatedTaskOutcome::SandboxAllocationFailed { reason } => {
                         format!("Delegated task sandbox failed: {reason}")

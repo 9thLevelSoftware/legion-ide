@@ -1,42 +1,70 @@
-# Legion-Bench raw baseline and first raw-vs-governed comparison (P9.F1.T4)
+# Legion-Bench raw baseline and raw-vs-governed comparison (P9.F1.T4)
 
 Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
 Model: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB) via Ollama 0.32.13 at
 `http://127.0.0.1:11434/v1`. Suite fingerprint
-`bench-suite-v1:929fa3b1f30b0920`. 13 executed tasks, 5 holdout tasks
-excluded (ADR-0049 holdout policy).
+`bench-suite-v1:f34b7e1a124dbe91`. 13 executed tasks, 5 holdout tasks
+excluded (ADR-0049 holdout policy). Four runs per arm.
 
-## Headline: a real qualitative difference, not yet a ≥20% claim
+## Correction to the previous version of this file
 
-Three runs per arm, same corpus, same model, alternating nothing but
-`LEGION_AI_GOVERNORS`:
+An earlier revision reported the governed arm passing "0, 0, 2" tasks. **That
+figure was wrong.** It came from counting `tests_passed`, which is not the
+suite gate and, worse, is inherited rather than earned on four of the thirteen
+tasks — see "The metric that was lying" below. Every number in this revision
+is computed from the gate the suite actually applies, and the harness now
+records the measurement that makes the error impossible to repeat.
 
-| per run | raw | governed |
+## Headline: zero versus non-zero activity, and a gate neither arm clears
+
+| per run (4 runs each) | raw | governed |
 | --- | ---: | ---: |
-| **tasks passed (gate)** | 0, 0, 0 | 0, 0, 2 |
-| task_success | 0, 0, 0 | 0, 2, 4 |
-| tasks where the model acted | 0, 0, 0 | 6, 11, 9 |
-| tool calls | 0, 0, 0 | 12, 21, 20 |
-| files actually changed | 0, 0, 0 | 0, 2, 4 |
+| **suite gate** (task_success ∧ tests pass ∧ budgets) | 0, 0, 0, 0 | 0, 0, 0, 1 |
+| tests earned (failing → passing) | 0, 0, 0, 0 | 0, 0, 0, 1 |
+| task_success (verified change to expected files) | 0, 0, 0, 0 | 3, 4, 4, 4 |
+| tasks where the model acted | 0, 0, 0, 0 | 8, 9, 11, 10 |
+| tool calls | 0, 0, 0, 0 | 15, 21, 20, 26 |
 
 **The raw arm is a deterministic zero.** Not "low" — zero on every metric in
-every run, because the model emits no structured tool calls at all and a strict
-provider therefore sees prose and an ended turn. Nothing happens, reproducibly.
+every run, because the model emits no structured tool calls at all and a
+strict provider therefore sees prose and an ended turn. Nothing happens,
+reproducibly.
 
-**The governed arm acts on roughly two thirds of tasks** and completes between
-zero and two of them. That is the difference between a local model being
-unusable and being marginal.
+**The governed arm acts on most tasks and edits the right files on three or
+four of thirteen.** That is the difference between a local model being inert
+and being engaged.
 
-**It is still not the ≥20% improvement the roadmap asks for.** Mean pass rate
-is 0.7/13 ≈ 5%, and the run-to-run spread (0 to 2 passes) is larger than the
-effect being claimed. Phase 2's exit criterion is **not met**, and no
-percentage from this file should be quoted as a result. What is established is
-a floor comparison: zero versus non-zero, reproducible in both directions.
+**Neither arm meaningfully clears the gate.** One task in one governed run of
+four (`bench-ts-02`) passed end to end: 1 of 52 governed task-runs, 1.9%. The
+governed arm changes the files a task names and then, almost always, changes
+them wrongly — the tests do not pass.
 
-**Three runs is the minimum honest sample, not a sufficient one.** Local
-sampling is nondeterministic and n=13 tasks on one model at one quantization
-cannot support a percentage. A defensible figure needs more tasks, more
-repetitions, and more than one model.
+**Phase 2's ≥20% exit criterion is not met and is not close.** No percentage
+in this file should be quoted as a result. What is established is narrow and
+real: the reliability layer moves a local model from producing nothing to
+producing something, and something is usually still wrong.
+
+## The metric that was lying
+
+Four of the thirteen tasks (`bench-py-03`, `bench-rust-03`, `bench-rust-04`,
+`bench-rust-05`) are **refactors**. A refactor preserves behaviour, so its
+tests pass on the untouched fixture — by design. `tests_passed` therefore
+reads `true` on those tasks no matter what the model does, including nothing
+at all.
+
+That is how the raw arm came to score **four "passing" tasks while making zero
+tool calls**, and it is why the earlier headline in this file was wrong in the
+governed arm's favour and then, briefly, in the raw arm's.
+
+The harness now records `tests_passed_at_rest` — the verification command run
+against the fixture *before* the model sees it. The distinction the evidence
+reports is **earned** passes (`tests_passed && !tests_passed_at_rest`). Both
+arms inherit the same four; the governed arm earned one, the raw arm none.
+
+The suite gate was never fooled: it requires `task_success` too, which demands
+a real diff to the expected files and a clean apply. Only the human-readable
+component metric was misleading, which is exactly the kind of number that ends
+up in a summary.
 
 ## Why the raw arm scores zero: the model never emits a structured tool call
 
@@ -54,7 +82,7 @@ reports `finish_reason: "stop"`. A strict provider sees prose and an ended
 turn, which is exactly what the raw arm measures: every task ran one turn,
 made zero tool calls, and finished having done nothing.
 
-This is the behavior the SmallCode port was built for, observed on the
+This is the behaviour the SmallCode port was built for, observed on the
 reference model rather than assumed. It also justifies two decisions that
 looked defensive in review: `scan_bare` (a bare JSON object as the whole
 message *is* the call) and reporting `ToolUse` when recovery fires despite
@@ -68,20 +96,20 @@ task prompts told the model to run verification the harness already performs,
 and scopes granted a terminal that Windows cannot sandbox — so the model
 dutifully tried, was denied, and the run ended. Prompts now say explicitly not
 to run commands, and no task grants `terminal-command`. Blocked runs fell from
-5 of 13 to 1–2.
+5 of 13 to 0–2.
 
-The benchmark then surfaced a real defect in the port itself: a model that
-named `edit-as-proposal` correctly but passed `content` instead of
-`replacement` had its arguments forwarded untouched, because a literal
-tool-name match skipped argument canonicalization. One run spent its entire
-retry budget re-sending the same rejected field. Fixed, with the argument
-renaming now applied to Legion's own tools even when the name needs no change.
+The benchmark then surfaced a real defect in the port: a model that named
+`edit-as-proposal` correctly but passed `content` instead of `replacement` had
+its arguments forwarded untouched, because a literal tool-name match skipped
+argument canonicalization. One run spent its entire retry budget re-sending
+the same rejected field.
 
-What remains is mostly the model: it reads files, sometimes proposes an edit,
-and often produces an edit that does not satisfy the task. That is the honest
-category — a 7B model at Q4 on multi-step repository tasks — and it is what
-the rest of Phase 2 (loop governors, plan anchoring, context budgeting) exists
-to improve.
+What remains is the model. It reads files, proposes an edit to the right file,
+and the edit does not do what the task asked. That is the honest category — a
+7B model at Q4 on multi-step repository tasks — and closing it is what the
+rest of Phase 2 (context budgeting, plan anchoring, model profiles) is for.
+The loop governors landed in this revision are not aimed at it: they contain
+waste, and the idle-turn stop did not fire once in four runs.
 
 ## A scoring bug found and fixed before recording anything
 
@@ -112,8 +140,10 @@ Review then found the same hole one level deeper, twice:
   changed files so a disagreement between diffs and proposals is diagnosable
   instead of mysterious.
 
-All three holes pointed the same way: crediting the model for work it had not
-done. Pinned by `a_run_that_proposed_nothing_is_never_a_success`,
+`tests_passed_at_rest` is the fourth instance of the same failure, and the
+first one caught by reading a result that looked *good* rather than one that
+looked wrong. All four pointed the same way: crediting the model for work it
+had not done. Pinned by `a_run_that_proposed_nothing_is_never_a_success`,
 `a_proposal_that_changed_nothing_is_never_a_success`, and
 `legion_runtime_artifacts_do_not_count_as_model_changes`.
 
@@ -126,9 +156,9 @@ governors. Comparing across commits would confound the result with unrelated
 changes.
 
 Instead both arms run from the **same binary** under
-`LEGION_AI_GOVERNORS=off|unset`, which disables tolerant recovery and fragment
-resolution and reproduces the pre-port contract. This is a stronger design
-than the original plan. The seam is itself tested
+`LEGION_AI_GOVERNORS=off|unset`, which disables tolerant recovery, fragment
+resolution, and the loop governors, reproducing the pre-port contract. This is
+a stronger design than the original plan. The seam is itself tested
 (`crates/legion-agent/tests/governor_ab_seam.rs`), including that only the
 exact value `off` disables it — a typo silently running the wrong arm would
 invalidate a result without any visible symptom.
@@ -141,7 +171,7 @@ malformed edit reached the path checks first and became a terminal block
 instead of retryable feedback), and malformed structured arguments (recovered
 into a retryable `MalformedToolCall` where the pre-port provider failed the
 completion outright). All three now follow the switch, each pinned by a test
-in `governor_ab_seam.rs`.
+in `governor_ab_seam.rs`, as do the three loop governors.
 
 **Both halves of the contract move together.** Review caught that the raw arm
 was still *advertising* the governed edit schema (`old_str`/`new_str`, with
@@ -153,22 +183,31 @@ asserted by `the_advertised_edit_schema_matches_the_arm`.
 
 That flaw could not have affected the numbers above: the raw arm recorded zero
 tool calls on all 13 tasks, so it never reached the edit executor at all. The
-raw arm was nonetheless re-run after the fix and produced an identical result
-(0/13 passed, 0 tasks acted), so the figures here are measured under schema
-parity rather than merely argued to be unaffected.
+raw arm was nonetheless re-run after the fix and produced an identical result,
+so the figures here are measured under schema parity rather than merely argued
+to be unaffected.
+
+## Sample size
+
+Four runs per arm on 13 tasks, one model, one quantization. The raw arm is
+perfectly reproducible, so its zero is solid. The governed arm's spread
+(`task_success` 3–4, gate 0–1) is small in absolute terms but large relative
+to the effect, and a single gate pass across four runs is an anecdote. A
+defensible percentage needs more tasks, more repetitions, and more than one
+model — none of which this file has.
 
 ## Status
 
-`P9.F1.T4` stays **in-progress**. The baseline is recorded and reproducible,
-but the comparison it exists to support is not yet meaningful, because both
-arms are floored at zero by causes above. Next, in order:
+`P9.F1.T4` stays **in-progress**. The baseline is recorded, reproducible, and
+now measured against the right gate. The comparison it exists to support shows
+a real qualitative change (nothing → something) and no meaningful movement on
+task completion. Next, in order:
 
-1. Remove verification instructions from task prompts and align scopes with
-   what each task actually needs.
-2. Re-run both arms; expect the governed arm to separate from raw once runs
-   are not terminated by denials.
-3. Only then quote a percentage — and quote it with n, since 13 tasks on one
-   model is a signal, not a proof.
+1. Context budgeting and model profiles (Phase 2.4) — the excerpt truncation
+   the model currently works from is a plausible cause of edits that target
+   the right file and do the wrong thing.
+2. Plan anchoring (Phase 2.3 residue) — re-inject the current step each turn.
+3. Only then re-measure, with more repetitions, and quote a percentage with n.
 
 ## Reproduction
 

@@ -376,3 +376,263 @@ impl legion_ai_providers::ProviderHttpTransport for FixedResponseTransport {
         Ok(self.0.clone())
     }
 }
+
+// ─── Loop governors (waste containment) ──────────────────────────────────────
+
+/// Audit sink that keeps every step, so these tests assert on the trail the
+/// user actually sees rather than on private governor state.
+#[derive(Default)]
+struct RecordingSink(Vec<DelegatedTaskLoopStepRecord>);
+
+impl DelegatedTaskAuditSink for RecordingSink {
+    fn record_step(&mut self, step: DelegatedTaskLoopStepRecord) {
+        self.0.push(step);
+    }
+}
+
+impl RecordingSink {
+    fn count(&self, reason: &str) -> usize {
+        self.0
+            .iter()
+            .filter(|s| s.reason.as_deref() == Some(reason))
+            .count()
+    }
+}
+
+fn read_of(path: &str) -> serde_json::Value {
+    serde_json::json!({ "path": path })
+}
+
+/// Run a script against a fixture worktree and return the audit trail with it.
+fn run_recording(
+    dir: &TempDir,
+    provider: &dyn ToolCallingProvider,
+) -> (DelegatedTaskLoopResult, RecordingSink) {
+    let mut sink = RecordingSink::default();
+    let result = run_delegated_task_loop(
+        &config(dir),
+        provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+    (result, sink)
+}
+
+fn fixture() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
+    dir
+}
+
+/// A script of `n` identical reads followed by an end turn.
+fn repeated_reads(n: usize) -> ScriptedToolCallingProviderBuilder {
+    let mut builder = ScriptedToolCallingProviderBuilder::new();
+    for i in 0..n {
+        builder = builder.tool_use(&format!("t{i}"), "read", read_of("m.rs"));
+    }
+    builder
+}
+
+#[test]
+fn a_repeated_read_is_not_executed_twice() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let provider = repeated_reads(3).end_turn("done").build("test");
+    let (_result, sink) = run_recording(&dir, &provider);
+
+    assert_eq!(
+        sink.count("served_from_dedup_cache"),
+        2,
+        "the second and third identical reads must be served from cache"
+    );
+}
+
+#[test]
+fn a_deduplicated_call_still_appears_in_the_audit_trail() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let provider = repeated_reads(2).end_turn("done").build("test");
+    let (_result, sink) = run_recording(&dir, &provider);
+
+    let requests = sink
+        .0
+        .iter()
+        .filter(|s| s.kind == legion_protocol::DelegatedTaskLoopStepKind::ToolCallRequest)
+        .count();
+    assert_eq!(
+        requests, 2,
+        "the model made two calls; omitting one to make the trail look tidy \
+         would be the audit lying about what the model did"
+    );
+}
+
+/// An edit on an unread file is never refused for being unread.
+///
+/// This is the case that made the first version of the hint wrong: it
+/// rejected the edit up front, so a model that emits one edit and ends its
+/// turn lost the only work the run produced. The hint must cost nothing.
+#[test]
+fn a_good_edit_on_an_unread_file_is_never_refused() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "m.rs",
+                "old_str": "fn main() {}",
+                "new_str": "fn main() { todo!() }"
+            }),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("an edit that resolves must produce a proposal, got {result:?}");
+    };
+    assert_eq!(proposals.len(), 1);
+}
+
+/// A *failed* edit on an unread file is where the hint belongs.
+#[test]
+fn a_failed_edit_on_an_unread_file_is_told_to_read_it() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    // An anchor that is not in the file, so resolution fails.
+    let bad_edit = serde_json::json!({
+        "path": "m.rs",
+        "old_str": "fn nonexistent_anchor() {}",
+        "new_str": "fn replaced() {}"
+    });
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("t1", "edit-as-proposal", bad_edit)
+        // The guard fails the run if this text never reached the model, so the
+        // assertion is that the hint was actually delivered, not merely built.
+        .expect_prior_result_contains("You have not read `m.rs`")
+        .end_turn("done")
+        .build("test");
+
+    let (result, _sink) = run_recording(&dir, &provider);
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "the scripted guard asserts the hint reached the model: {result:?}"
+    );
+}
+
+#[test]
+fn a_run_that_stops_producing_new_information_is_stopped() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let provider = repeated_reads(8).end_turn("done").build("test");
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    let DelegatedTaskLoopResult::StoppedNoProgress { proposals, .. } = result else {
+        panic!("a run making only repeated calls must be stopped, got {result:?}");
+    };
+    assert!(
+        proposals.is_empty(),
+        "this run proposed nothing; the point of the variant is that it would \
+         have carried proposals had it made any"
+    );
+}
+
+#[test]
+fn an_early_stop_keeps_the_proposals_the_run_produced() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    let dir = fixture();
+    let mut builder = ScriptedToolCallingProviderBuilder::new()
+        .tool_use("r0", "read", read_of("m.rs"))
+        .tool_use(
+            "e1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "m.rs",
+                "old_str": "fn main() {}",
+                "new_str": "fn main() { todo!() }"
+            }),
+        );
+    // Then the model goes in circles.
+    for i in 0..6 {
+        builder = builder.tool_use(&format!("t{i}"), "read", read_of("m.rs"));
+    }
+    let provider = builder.end_turn("done").build("test");
+
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    let DelegatedTaskLoopResult::StoppedNoProgress { proposals, .. } = result else {
+        panic!("expected the idle-turn governor to stop this run, got {result:?}");
+    };
+    assert_eq!(
+        proposals.len(),
+        1,
+        "the edit was good before the model started looping; discarding it would \
+         make the governor destroy work the budget path it replaces would keep"
+    );
+}
+
+#[test]
+fn the_measurement_arm_sees_no_governors_at_all() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: holds `ENV_GUARD` across the whole env-mutating block.
+    unsafe { std::env::set_var("LEGION_AI_GOVERNORS", "off") };
+
+    let dir = fixture();
+    let provider = repeated_reads(8).end_turn("done").build("test");
+    let (result, sink) = run_recording(&dir, &provider);
+
+    unsafe { std::env::remove_var("LEGION_AI_GOVERNORS") };
+
+    assert_eq!(
+        sink.count("served_from_dedup_cache"),
+        0,
+        "dedup must be off in the measurement arm"
+    );
+    assert_eq!(
+        sink.count("read_before_write"),
+        0,
+        "the read-first hint must be off in the measurement arm"
+    );
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "the idle-turn stop must be off in the measurement arm, so the same \
+         script runs to its end: got {result:?}"
+    );
+}
