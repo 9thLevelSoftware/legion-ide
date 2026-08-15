@@ -13,6 +13,8 @@ return 50, not 5). Two-digit decimals and whole-dollar amounts already parse
 correctly. Fix parseAmount in src/money.js without changing its exported
 signature, its documented accepted formats, or any other file. The expected
 behavior is defined by test/money.test.js; do not modify the tests.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 '''
 
 [verification]

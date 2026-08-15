@@ -10,8 +10,9 @@ TextKit's `top_words` in textkit/stats.py is documented to return the `n` most
 frequent tokens as (token, count) pairs, but it currently returns one entry
 too few. Two tests in tests/test_stats.py fail because of this. Fix the slice
 bug in `top_words` without changing its signature, its tie-breaking order, or
-any test, then run `python -m unittest tests.test_stats` from the repository
-root to confirm all of the module's tests pass.
+any test.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
@@ -22,7 +23,7 @@ expected_files = ["textkit/stats.py", "tests/test_stats.py"]
 
 [scope]
 target_kind = "repo"
-allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
 forbidden_paths = ["tests"]
 
 [gate_budget]

@@ -15,6 +15,8 @@ in both files instead. This is a pure refactor — the observable behavior of
 renderReport and of every CLI command must stay byte-for-byte identical, and
 parseAmount must not change. The refactor is checked by
 test/verify-refactor.js; do not modify that file or any existing test.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 '''
 
 [verification]

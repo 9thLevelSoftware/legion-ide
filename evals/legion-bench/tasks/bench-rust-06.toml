@@ -14,6 +14,8 @@ integration tests of this package), run it with `std::process::Command`, and
 assert both that the process exits successfully and that its stdout contains
 "SMOKE_MARKER_ALPHA". Do not modify any existing files — only add the new
 test file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]

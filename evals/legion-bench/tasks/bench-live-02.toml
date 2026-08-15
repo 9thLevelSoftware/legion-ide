@@ -12,6 +12,8 @@ Add a regression test module to src/scratchpad.rs that verifies the public
 code intact — append a #[cfg(test)] mod with at least one #[test] function.
 Propose the updated file content for src/scratchpad.rs using the edit-as-proposal
 tool, then end your turn.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]

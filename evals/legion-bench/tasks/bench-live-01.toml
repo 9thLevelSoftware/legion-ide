@@ -15,6 +15,8 @@ off-by-one bug in the implementation without changing the function's public
 signature and without modifying the tests in src/main.rs. Propose the corrected
 file content for src/scratchpad.rs using the edit-as-proposal tool, then end your
 turn.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]

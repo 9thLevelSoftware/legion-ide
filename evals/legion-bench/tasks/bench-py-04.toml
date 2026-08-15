@@ -20,6 +20,8 @@ Add a line-deduplication feature to TextKit, spanning two files:
 
 Only make the changes the feature needs — leave every other module and all
 existing tests untouched, including any unrelated tests that currently fail.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
@@ -30,7 +32,7 @@ expected_files = ["textkit/dedup.py", "textkit/cli.py"]
 
 [scope]
 target_kind = "repo"
-allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
 forbidden_paths = ["checks"]
 
 [gate_budget]

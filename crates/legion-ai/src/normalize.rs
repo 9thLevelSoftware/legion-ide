@@ -159,6 +159,19 @@ fn resolve_against_known(
     known_tools: &[String],
 ) -> Option<ExtractedToolCall> {
     if known_tools.is_empty() || known_tools.contains(&call.name) {
+        // A literal name match still needs its *arguments* canonicalized. A
+        // model that correctly names `edit-as-proposal` but supplies `content`
+        // instead of `replacement` was previously passed through untouched and
+        // rejected by the executor — observed on the benchmark as a run that
+        // burned its whole retry budget re-sending the same wrong field.
+        // Renaming only applies to Legion's own tools, so a registry using
+        // another vocabulary keeps its argument names.
+        if legion_registry_name(&call.name) == Some(call.name.as_str()) {
+            return Some(ExtractedToolCall {
+                arguments: rename_arguments_for_legion_tool(&call.name, &call.arguments),
+                ..call
+            });
+        }
         return Some(call);
     }
     let (canonical, canonical_arguments) = normalize_alias(&call.name, &call.arguments);
@@ -1151,6 +1164,35 @@ mod tests {
         );
         assert_eq!(out.calls.len(), 1);
         assert_eq!(out.calls[0].name, "read");
+    }
+
+    /// A correctly-named tool with near-miss *arguments* must still be
+    /// canonicalized. Found on the benchmark: a model called
+    /// `edit-as-proposal` with `content` and burned its entire retry budget
+    /// re-sending the same rejected field, because a literal name match
+    /// skipped argument renaming.
+    #[test]
+    fn a_correctly_named_tool_still_gets_its_arguments_canonicalized() {
+        let out = extract(
+            "<tool_call>{\"name\":\"edit-as-proposal\",\"arguments\":{\"file_path\":\"a.rs\",\"content\":\"whole file\"}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "edit-as-proposal");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+        assert_eq!(out.calls[0].arguments["replacement"], "whole file");
+    }
+
+    /// Canonicalization must not reach into a registry using another
+    /// vocabulary: `shell` is a real tool there, and `cmd` is its real field.
+    #[test]
+    fn a_foreign_registry_keeps_its_own_argument_names() {
+        let out = extract(
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+            &["shell", "read_file"],
+        );
+        assert_eq!(out.calls[0].name, "shell");
+        assert_eq!(out.calls[0].arguments["cmd"], "ls");
     }
 
     #[test]

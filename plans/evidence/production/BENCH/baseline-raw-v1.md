@@ -6,32 +6,37 @@ Model: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB) via Ollama 0.32.13 at
 `bench-suite-v1:929fa3b1f30b0920`. 13 executed tasks, 5 holdout tasks
 excluded (ADR-0049 holdout policy).
 
-## Headline: the ≥20% improvement claim is **not** demonstrated
+## Headline: a real qualitative difference, not yet a ≥20% claim
 
-| | raw (`LEGION_AI_GOVERNORS=off`) | governed |
+Three runs per arm, same corpus, same model, alternating nothing but
+`LEGION_AI_GOVERNORS`:
+
+| per run | raw | governed |
 | --- | ---: | ---: |
-| **tasks passed (gate)** | **0 / 13** | **1 / 13** |
-| task_success | 0 | 2 |
-| tasks where the model acted | 0 | 10 |
-| tool calls | 0 | 23 |
-| proposals applied | 0 | 2 |
-| files changed | 0 | 2 |
-| runs blocked | 0 | 2 |
+| **tasks passed (gate)** | 0, 0, 0 | 0, 0, 2 |
+| task_success | 0, 0, 0 | 0, 2, 4 |
+| tasks where the model acted | 0, 0, 0 | 6, 11, 9 |
+| tool calls | 0, 0, 0 | 12, 21, 20 |
+| files actually changed | 0, 0, 0 | 0, 2, 4 |
 
-**Phase 2's exit criterion is not met.** One task out of thirteen is not a
-≥20% improvement; it is a single success on a single model in a single run,
-and this file should not be cited as evidence that the reliability layer
-improves task completion.
+**The raw arm is a deterministic zero.** Not "low" — zero on every metric in
+every run, because the model emits no structured tool calls at all and a strict
+provider therefore sees prose and an ended turn. Nothing happens, reproducibly.
 
-Two things it does establish. The layer is the difference between a model that
-does nothing and a model that acts: 0 → 10 tasks with tool calls, 0 → 23 calls,
-0 → 2 files actually changed. And the arms now separate at all, which they did
-not before the metric was corrected.
+**The governed arm acts on roughly two thirds of tasks** and completes between
+zero and two of them. That is the difference between a local model being
+unusable and being marginal.
 
-**One run per arm is an observation, not a measurement.** Local sampling is
-nondeterministic: an earlier governed run of the same corpus produced 11 acted
-/ 26 calls / 1 task_success where this one produced 10 / 23 / 2. Any figure
-quoted from this file needs repeated runs before it means anything.
+**It is still not the ≥20% improvement the roadmap asks for.** Mean pass rate
+is 0.7/13 ≈ 5%, and the run-to-run spread (0 to 2 passes) is larger than the
+effect being claimed. Phase 2's exit criterion is **not met**, and no
+percentage from this file should be quoted as a result. What is established is
+a floor comparison: zero versus non-zero, reproducible in both directions.
+
+**Three runs is the minimum honest sample, not a sufficient one.** Local
+sampling is nondeterministic and n=13 tasks on one model at one quantization
+cannot support a percentage. A defensible figure needs more tasks, more
+repetitions, and more than one model.
 
 ## Why the raw arm scores zero: the model never emits a structured tool call
 
@@ -56,37 +61,27 @@ message *is* the call) and reporting `ToolUse` when recovery fires despite
 `finish_reason: "stop"` — without the latter the loop would end the run before
 dispatching what it just recovered.
 
-## Why the governed arm still scores near zero
+## What still stops the governed arm
 
-Recovery works — 0 → 10 tasks where the model acted, 0 → 23 tool calls — but
-almost all tasks still fail, for reasons that are mostly **not** model
-quality (counts from the earlier run, whose per-task failure reasons were
-captured; the pattern is unchanged):
+Corpus problems recorded in the first version of this file have been fixed:
+task prompts told the model to run verification the harness already performs,
+and scopes granted a terminal that Windows cannot sandbox — so the model
+dutifully tried, was denied, and the run ended. Prompts now say explicitly not
+to run commands, and no task grants `terminal-command`. Blocked runs fell from
+5 of 13 to 1–2.
 
-| cause | tasks | nature |
-| --- | ---: | --- |
-| Windows sandbox cannot enforce isolation, so `terminal-command` is denied and the run ends | 2 | platform gap (roadmap Phase 5.12) |
-| model reached for a tool the task did not grant, ending the run | 2 | corpus authoring |
-| model tried to edit a file protected as the grading oracle | 1 | working as designed |
-| acted but produced no accepted edit | 7 | model capability + corpus prompts |
-| produced an edit that failed verification | 1 | model capability |
+The benchmark then surfaced a real defect in the port itself: a model that
+named `edit-as-proposal` correctly but passed `content` instead of
+`replacement` had its arguments forwarded untouched, because a literal
+tool-name match skipped argument canonicalization. One run spent its entire
+retry budget re-sending the same rejected field. Fixed, with the argument
+renaming now applied to Legion's own tools even when the name needs no change.
 
-Two of these are ours to fix, and both inflate failure independently of the
-model:
-
-1. **Prompts tell the model to run verification the harness already runs.**
-   Several tasks end with "then run `python -m unittest …` to confirm". On
-   Windows the sandbox denies terminal commands, so the model dutifully tries,
-   is denied, and the run terminates — having already made its edit in some
-   cases. The harness runs verification itself after applying proposals; the
-   prompts should not ask for it.
-2. **Task scopes omit tools their prompts imply.** `bench-rust-01` grants no
-   `terminal-command` yet the task invites verification.
-
-`tests_passed` *dropped* 4 → 2 between arms, which looks like a regression and
-is not: in the raw arm nothing changed, so tasks whose tests already pass at
-rest kept passing. Blocked governed runs never reach verification at all. This
-is why `tests_passed` is not a success metric on its own.
+What remains is mostly the model: it reads files, sometimes proposes an edit,
+and often produces an edit that does not satisfy the task. That is the honest
+category — a 7B model at Q4 on multi-step repository tasks — and it is what
+the rest of Phase 2 (loop governors, plan anchoring, context budgeting) exists
+to improve.
 
 ## A scoring bug found and fixed before recording anything
 

@@ -12,6 +12,8 @@ lives in `cli::parse` in src/cli.rs. Fix the `--lines` branch so it enables
 the line counter only, without changing any other flag's behavior or the
 function signature. The failing unit test `lines_flag_enables_only_lines`
 in src/cli.rs covers this; do not modify the tests themselves.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]

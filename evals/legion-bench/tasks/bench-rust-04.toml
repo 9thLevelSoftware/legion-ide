@@ -12,6 +12,8 @@ in src/lib.rs and re-export the type with `pub use value::Value;` so the
 public path `miniconf::Value` is unchanged and all crate-internal uses
 (`crate::Value` in src/parser.rs) keep compiling. Do not change any behavior,
 signatures, or tests — the existing test suite must pass unmodified.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]

@@ -23,6 +23,8 @@ text.
 Build on the existing public API (`Config::sections`, `Config::entries`,
 `Value::as_str`); remember the root section's name is the empty string, so
 skip it when emitting `[name]` headers. All existing tests must keep passing.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
