@@ -113,7 +113,13 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
             reason: "edit arguments must be an object".to_string(),
         };
     };
-    let old_str = match object.get("old_str").or_else(|| object.get("old_string")) {
+    // Accept the spellings models actually use: `old_str`/`new_str`,
+    // `old_string`/`new_string`, and Aider-style `search`/`replace`.
+    let old_str = match object
+        .get("old_str")
+        .or_else(|| object.get("old_string"))
+        .or_else(|| object.get("search"))
+    {
         Some(Value::String(text)) => text.clone(),
         Some(_) => {
             return PatchResolution::ValidationError {
@@ -126,7 +132,11 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
             };
         }
     };
-    let new_str = match object.get("new_str").or_else(|| object.get("new_string")) {
+    let new_str = match object
+        .get("new_str")
+        .or_else(|| object.get("new_string"))
+        .or_else(|| object.get("replace"))
+    {
         Some(Value::String(text)) => text.clone(),
         Some(_) => {
             return PatchResolution::ValidationError {
@@ -148,20 +158,16 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
 /// guessing, and calls out whitespace or line-ending drift explicitly, since
 /// those are the near-misses that look identical in a chat transcript.
 fn no_match_diagnostic(file_content: &str, old_str: &str) -> ResolutionDiagnostic {
-    let needle_first = old_str.lines().next().unwrap_or(old_str);
-    let mut best_line = None;
-    let mut best_score = 0u32;
-    for (index, line) in file_content.lines().enumerate() {
-        let score = similarity_percent(line.trim(), needle_first.trim());
-        if score > best_score {
-            best_score = score;
-            best_line = Some(index + 1);
-        }
-    }
+    let needle_first = old_str.lines().next().unwrap_or(old_str).trim();
+    let (best_line, best_score) = nearest_candidate_line(file_content, needle_first);
 
     let mut hints = Vec::new();
     if normalize_whitespace(file_content).contains(&normalize_whitespace(old_str)) {
-        hints.push("the text is present but its indentation differs");
+        // Deliberately says "whitespace" rather than "indentation": the same
+        // check fires when the model collapsed a line break or changed inner
+        // spacing, and naming only indentation sends it looking in the wrong
+        // place.
+        hints.push("the text is present but its whitespace differs (indentation, line breaks, or spacing between tokens)");
     }
     if file_content.contains("\r\n") && !old_str.contains("\r\n") {
         hints.push("the file uses CRLF line endings and the search text uses LF");
@@ -188,24 +194,45 @@ fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Crude token-overlap similarity, 0-100. Only used to point a model at the
-/// right region, never to decide whether an edit applies.
-fn similarity_percent(a: &str, b: &str) -> u32 {
-    if a.is_empty() || b.is_empty() {
-        return 0;
+/// Find the line a model should re-read, with a confidence score.
+///
+/// Ordered by how strong the signal is: a line containing the needle outright,
+/// then the best shared prefix. Prefix overlap is used rather than character
+/// counting because position matters — `abc` and `cab` share every character
+/// but are not the same code, and pointing at the wrong line is worse than
+/// admitting low confidence. Single pass over the file.
+fn nearest_candidate_line(file_content: &str, needle_first: &str) -> (Option<usize>, u32) {
+    if needle_first.is_empty() {
+        return (None, 0);
     }
-    if a == b {
-        return 100;
+    let mut best_line = None;
+    let mut best_score = 0u32;
+    for (index, line) in file_content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Containment either way is the strongest available signal: the model
+        // quoted a slice of this line, or padded around it.
+        if trimmed.contains(needle_first) || needle_first.contains(trimmed) {
+            return (Some(index + 1), 100);
+        }
+        let shared = trimmed
+            .chars()
+            .zip(needle_first.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if shared == 0 {
+            continue;
+        }
+        let longest = trimmed.chars().count().max(needle_first.chars().count());
+        let score = ((shared * 100) / longest.max(1)) as u32;
+        if score > best_score {
+            best_score = score;
+            best_line = Some(index + 1);
+        }
     }
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let common = a_chars
-        .iter()
-        .filter(|ch| b_chars.contains(ch))
-        .count()
-        .min(b_chars.len());
-    let longest = a_chars.len().max(b_chars.len());
-    ((common * 100) / longest) as u32
+    (best_line, best_score)
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +434,7 @@ mod tests {
         match out {
             PatchResolution::NoMatch(diagnostic) => {
                 assert!(
-                    diagnostic.message.contains("indentation differs"),
+                    diagnostic.message.contains("whitespace differs"),
                     "diagnostic should name the drift: {}",
                     diagnostic.message
                 );

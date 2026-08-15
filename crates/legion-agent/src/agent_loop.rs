@@ -826,8 +826,21 @@ fn execute_edit_as_proposal(
     // destructive if treated as whole content. Fragments are resolved against
     // the file on disk so the edit lands exactly where the model meant, or is
     // refused with a diagnostic it can retry from (ADR-0049).
-    let replacement = match input.get("replacement").and_then(|value| value.as_str()) {
-        Some(whole_file) => whole_file.to_string(),
+    let replacement = match input.get("replacement") {
+        Some(serde_json::Value::String(whole_file)) => whole_file.clone(),
+        // Present but the wrong shape. Falling through to the fragment path
+        // would tell the model to "provide replacement or old_str/new_str"
+        // when it *did* provide `replacement` — contradictory feedback that
+        // invites it to retry the same mistake.
+        Some(_) => {
+            return Err(LegionToolCallFeedback::new(
+                LegionToolKind::EditAsProposal,
+                LegionToolCallFeedbackKind::InvalidArguments,
+                "`replacement` must be a string containing the file's complete new content"
+                    .to_string(),
+                Some(path_str.to_string()),
+            ));
+        }
         None => resolve_fragment_edit(input, &resolved_edit_path)?,
     };
     let replacement = replacement.as_str();

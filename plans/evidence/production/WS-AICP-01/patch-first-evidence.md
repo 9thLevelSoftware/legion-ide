@@ -43,6 +43,13 @@ against real file content:
   not a partially valid one, and applying its visible half would truncate the
   file.
 
+**Block-format edits are recovered as edit calls.** A model that writes a
+SEARCH/REPLACE block with no tool call at all — the format several model
+families emit unprompted — would otherwise have its edit read as prose and
+lost. Recovery runs last in the extraction order, so a real tool call always
+wins over a block restatement of it, and only when the registry actually
+offers an edit tool, so discussing a diff is not mistaken for requesting one.
+
 **Loop integration.** `execute_edit_as_proposal` accepts either form:
 `replacement` for whole content, or `old_str`/`new_str` resolved against the
 file in the worktree. Every fragment failure returns retryable
@@ -74,10 +81,11 @@ asserts the on-disk file is byte-identical after the run.
 | Check | Result |
 | --- | --- |
 | `cargo test -p legion-ai --test patch_resolution` | 3/3 — **18/18 patch vectors** applied exactly or refused as specified |
-| `cargo test -p legion-ai` | 79 passed / 0 failed |
+| `cargo test -p legion-ai` | 84 passed / 0 failed |
 | `cargo test -p legion-agent --test agent_loop_integration` | 17 passed / 0 failed (3 new fragment-edit cases) |
+| `cargo test -p legion-agent --test openai_tool_loop_cross_check` | 4 passed / 0 failed (incl. block-format edit end to end) |
 | `cargo test -p legion-agent --test tools_schema` | 3 passed / 0 failed |
-| `cargo test --workspace --all-targets` | **2760 passed / 0 failed / 251 suites** |
+| `cargo test --workspace --all-targets` | **2765 passed / 0 failed / 251 suites** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 
 End-to-end coverage in the delegated loop, not just the pure layer:
@@ -89,6 +97,9 @@ End-to-end coverage in the delegated loop, not just the pure layer:
   succeeds within the same run
 - `unmatched_fragment_is_refused_with_a_locating_diagnostic` — the refusal
   names the nearest line, and the run continues
+- `block_format_edit_written_as_prose_reaches_the_edit_tool` — a raw
+  SEARCH/REPLACE block, through the real provider and loop, produces a
+  proposal whose content was resolved by exact match rather than taken whole
 
 Adversarial coverage: every prefix of a block-format seed (mid-marker
 truncation) and a matrix of empty/CRLF/unicode/oversized fragments, asserting

@@ -20,7 +20,7 @@ use legion_protocol::{
     CanonicalPath, CapabilityDecision, CapabilityDecisionId, CapabilityId, CapabilityRequest,
     CapabilityResponse, DelegatedTaskLoopBudget, DelegatedTaskLoopStepRecord,
     DelegatedTaskRiskTolerance, DelegatedTaskScope, DelegatedTaskScopeTargetKind, LegionToolKind,
-    ProtocolResult,
+    ProposalPayload, ProtocolResult,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -412,4 +412,71 @@ fn prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back() {
         1,
         "the malformed recovered call is audited"
     );
+}
+
+/// A model that writes its edit as a SEARCH/REPLACE block — with no tool call
+/// at all — must still produce an edit proposal. Models trained on that format
+/// emit it unprompted, and without recovery the edit reads as prose and is
+/// lost (ADR-0049).
+#[test]
+fn block_format_edit_written_as_prose_reaches_the_edit_tool() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn old_name() {}\n").unwrap();
+
+    let transport = SequentialOpenAiTransport::from_responses(vec![
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "I'll rename it:\n\nlib.rs\n<<<<<<< SEARCH\nfn old_name() {}\n=======\nfn new_name() {}\n>>>>>>> REPLACE\n"
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Renamed."},
+                "finish_reason": "stop"
+            }]
+        }),
+    ]);
+
+    let provider = OpenAiCompatibleProvider::with_transport(
+        "openai-test",
+        "https://api.openai.com/v1",
+        Some("test-key".to_string()),
+        transport,
+    );
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    assert_eq!(
+        proposals.len(),
+        1,
+        "the block-format edit must reach the edit tool; audit: {:?}",
+        sink.steps
+            .iter()
+            .map(|s| (s.kind, s.tool_name.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // Resolved against the file by exact match, not treated as whole content.
+    let content = match &proposals[0].payload {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+    assert_eq!(content, "fn new_name() {}\n");
 }
