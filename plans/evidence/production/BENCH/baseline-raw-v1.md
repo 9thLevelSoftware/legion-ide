@@ -1,7 +1,8 @@
 # Legion-Bench raw baseline and raw-vs-governed comparison (P9.F1.T4)
 
 Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
-Model: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB) via Ollama 0.32.13 at
+Models: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB, local) and
+**deepseek-v4-flash:0731-cloud** (Ollama Cloud), both via Ollama 0.32.13 at
 `http://127.0.0.1:11434/v1`. Suite fingerprint
 `bench-suite-v1:f34b7e1a124dbe91`. 13 executed tasks, 5 holdout tasks
 excluded (ADR-0049 holdout policy). Four raw runs, seven governed.
@@ -15,7 +16,10 @@ tasks — see "The metric that was lying" below. Every number in this revision
 is computed from the gate the suite actually applies, and the harness now
 records the measurement that makes the error impossible to repeat.
 
-## Headline: zero versus non-zero activity, and a gate neither arm clears
+## Headline (local 7B): zero versus non-zero activity, and a gate neither arm clears
+
+For the larger model, where both arms actually work and the comparison is
+therefore meaningful, see "A non-degenerate comparison" below.
 
 The suite gate is `task_success ∧ tests pass ∧ within diff/turn budgets`. It
 is the right measure for both task kinds: a bug fix must turn failing tests
@@ -197,40 +201,129 @@ raw arm was nonetheless re-run after the fix and produced an identical result,
 so the figures here are measured under schema parity rather than merely argued
 to be unaffected.
 
+## A non-degenerate comparison: deepseek-v4-flash
+
+Everything above is measured on a model that emits **no** structured tool calls,
+which makes the raw arm's zero uninformative: "the reliability layer beats a
+model that does nothing" is true and nearly vacuous. The obvious objection is
+that the layer only rescues a broken driver and would add nothing to a
+competent one.
+
+Run against **deepseek-v4-flash:0731-cloud** through the same local endpoint
+(Ollama proxying Ollama Cloud), the same 13 tasks, three runs per arm,
+alternating so any drift in the service hits both arms equally:
+
+| per run | raw | governed |
+| --- | ---: | ---: |
+| **suite gate** | 2, 3, 2 | **6, 5, 6** |
+| mean | 2.33 / 13 (18%) | **5.67 / 13 (44%)** |
+| task_success | 5, 5, 5 | 7, 5, 6 |
+| tasks where the model acted | 13, 13, 13 | 13, 13, 13 |
+| tool calls | 105, 50, 64 | 62, 82, 73 |
+
+This model calls tools properly — `finish_reason: tool_calls`, the right tool
+name, the right argument names — so **both arms act on all 13 tasks**. The
+comparison is like-for-like: two working agents, one with the layer and one
+without.
+
+**The ranges do not overlap.** The governed arm's worst run (5) beats the raw
+arm's best (3), and the governed passing set is nearly identical across runs —
+`bench-live-01`, `bench-py-01`, `bench-py-03`, `bench-rust-01`, `bench-ts-01`
+every time, plus `bench-ts-03` in two of three. That stability is what makes
+three runs worth reporting here when three runs were not enough locally.
+
+**It is not strict dominance.** In round 2 the raw arm passed `bench-py-04` and
+the governed arm did not. One exception in 39 task-runs, but the layer is not
+a pure superset and should not be described as one.
+
+**It does not win by doing less work.** Tool-call volume is the same either way
+— 73 raw against 72 governed on average. A single run suggested a 40% saving
+and that was noise; the honest reading is that the layer makes the same amount
+of work land, not that it shortens the path.
+
+### What this does and does not establish
+
+It answers the objection above: the port helps a model that was already
+competent at tool use, roughly two and a half times as many tasks completed.
+That is the first evidence in this file that the mechanism has value
+independent of rescuing a model that cannot emit a tool call at all.
+
+**It does not satisfy Phase 2's exit criterion.** That gate is about a *local*
+model being daily-drivable, and this is a cloud model. The ≥20% figure is
+cleared here — +143% relative, +26 points absolute — but against the wrong
+subject. On the local 7B the governed arm still passes 0–2 of 13.
+
+**Three runs is still three runs.** The non-overlap is the strongest signal
+available, not a confidence interval. A percentage quoted from this table
+should carry n=3 with it.
+
 ## Sample size
 
-Four raw runs and seven governed runs on 13 tasks, one model, one
-quantization. The raw arm is perfectly reproducible, so its zero is solid. The
-governed arm's spread is not: `task_success` ranged 1–6 and the gate 0–2 with
-nothing changing but sampling. Three gate passes across 91 governed task-runs
-is an anecdote, and no arithmetic on it becomes a percentage worth quoting.
+Four raw runs and seven governed runs on the local 7B; three per arm on the
+cloud model. Thirteen tasks, one quantization each.
+
+The local raw arm is perfectly reproducible, so its zero is solid. The local
+governed arm is not: `task_success` ranged 1-6 and the gate 0-2 with nothing
+changing but sampling, so no local figure here is worth a percentage.
+
+The cloud arms are tighter and their ranges do not overlap, which is why that
+comparison is reported as a result and the local one is not. Three runs is
+still three runs.
 
 ## Status
 
-`P9.F1.T4` stays **in-progress**. The baseline is recorded, reproducible, and
-measured against the right gate. The comparison it exists to support shows a
-real qualitative change — nothing to something — and no reliable movement on
-task completion.
+`P9.F1.T4` stays **in-progress**.
 
-The two edit-resolution stages added here were chosen from measured failure
-modes rather than guessed at, which is the right way to pick them, and they
-still did not visibly move the suite. That is worth saying plainly: the
-remaining gap is the model's ability to write a correct change, not Legion's
-ability to apply one. Next, in order:
+What is now established: the small-model reliability layer measurably improves
+a model that is already competent at tool use — 5.67 of 13 against 2.33 of 13,
+non-overlapping across three runs each. That answers the standing objection
+that the port only rescues a driver too weak to emit a tool call.
 
-1. Context budgeting and model profiles (Phase 2.4).
-2. Plan anchoring — re-inject the current step each turn.
-3. Re-measure with more repetitions and at least one larger model, so the
-   spread stops swamping the effect.
+What is not: the same layer does not yet make the *local* 7B usable, which is
+what Phase 2's exit criterion is actually about. It passes 0-2 of 13 there, and
+the two edit-resolution stages added from measured failure modes did not
+visibly move that number.
+
+The gap between those two sentences is the finding. Legion's edit path can
+apply what a capable model proposes; a 7B at Q4 mostly does not propose the
+right change, and no amount of tolerant matching fixes that. Next, in order:
+
+1. Re-measure the local arm on this build, so the local/cloud contrast comes
+   from one commit rather than runs taken at different ones.
+2. A mid-size local model (14B-32B) — the interesting question is where between
+   7B and a frontier cloud model the layer starts paying off, and that bears
+   directly on the hardware-class recommendations Phase 4 has to ship.
+3. Context budgeting and model profiles (Phase 2.4).
 
 ## Reproduction
 
+Local, the model the roadmap actually targets:
+
 ```
 ollama pull qwen2.5-coder:7b
-LEGION_AI_GOVERNORS=off LEGION_BENCH_MODEL=qwen2.5-coder:7b \
-  cargo run -p xtask -- legion-bench --mode live-local     # raw arm
 LEGION_BENCH_MODEL=qwen2.5-coder:7b \
-  cargo run -p xtask -- legion-bench --mode live-local     # governed arm
+  cargo run -p xtask -- legion-bench --mode live-local                   # governed
+LEGION_AI_GOVERNORS=off LEGION_BENCH_MODEL=qwen2.5-coder:7b \
+  cargo run -p xtask -- legion-bench --mode live-local                   # raw
 ```
+
+Cloud, the non-degenerate comparison:
+
+```
+LEGION_BENCH_MODEL=deepseek-v4-flash:0731-cloud \
+  cargo run -p xtask -- legion-bench --mode live-local                   # governed
+LEGION_AI_GOVERNORS=off LEGION_BENCH_MODEL=deepseek-v4-flash:0731-cloud \
+  cargo run -p xtask -- legion-bench --mode live-local                   # raw
+```
+
+The cloud model needs an Ollama account signed in locally and is served through
+the same `http://127.0.0.1:11434/v1` endpoint, so Legion needs no configuration
+change and no separate API key. The dated tag (`0731`) is pinned deliberately:
+`:preview` and `:cloud` move, and a moving model makes a recorded baseline
+unreproducible — the predecessor `qwen3-coder:480b` was retired on 2026-07-15
+and no longer runs at all.
+
+Diagnosing a run: `LEGION_BENCH_KEEP_CHECKOUTS=1` keeps each task's checkout so
+the diff can be read, and rejection reasons are recorded in each task's notes.
 
 Holdout tasks stay excluded; add `--include-holdout` only at a phase exit.
