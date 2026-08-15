@@ -7,7 +7,9 @@ publish.workspace = true
 
 [features]
 default = ["ai"]
-ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers", "dep:legion-sandbox"]
+# legion-sandbox is NOT part of this feature: sandboxed DAP adapter spawn (C4)
+# is debugger security, not AI, and must not vanish in no-`ai` builds.
+ai = ["dep:legion-agent", "dep:legion-ai", "dep:legion-ai-providers"]
 # offline: no hosted provider calls at runtime.  We still compile legion-ai
 # (pure Rust, no network deps) so that the deterministic-local inline
 # prediction provider is available.  The policy layer prevents actual remote
@@ -44,7 +46,7 @@ legion-ui = { workspace = true }
 legion-agent = { workspace = true, optional = true }
 legion-ai = { workspace = true, optional = true }
 legion-ai-providers = { workspace = true, optional = true }
-legion-sandbox = { workspace = true, optional = true }
+legion-sandbox = { workspace = true }
 legion-tracker = { workspace = true }
 legion-memory = { workspace = true }
 legion-plugin = { workspace = true }

@@ -56,7 +56,7 @@ See `docs/OPERATOR_RUNBOOK.md` "Local verification gates" and "Supply-chain gate
 
 - Current repo state: see `README.md` "Current Status" and `plans/phase-status-ledger.md`.
 - Substrate vs. product readiness: see `plans/phase-status-ledger.md` and `plans/product-readiness-ledger.md`.
-- Historical audit snapshot: `ENGINEERING_STATUS.md` is a **historical** record of the 2026-06-03 audit cycle, not a current status report.
+- Historical audit snapshots (`ENGINEERING_STATUS.md`, `ENGINEERING_AUDIT.yaml`, `audit-reports/`) were removed from the tree in the 2026-08-12 cleanup; `plans/product-readiness-ledger.md` is the current status authority.
 
 ## Licensing
 

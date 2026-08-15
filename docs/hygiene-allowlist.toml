@@ -7,7 +7,6 @@ allowlisted_paths = [
   ".legion/",
   ".planning/",
   "plans/archive/",
-  "audit-reports/",
   "docs/LEGION_RENAME.md",
   "plans/foundational-core-ide-platform-implementation-plan-v0.1.md",
   "plans/proposal-execution-lsp-runtime-gating-plan-v0.1.md",
@@ -25,6 +24,4 @@ allowlisted_paths = [
   "plans/semantic-index-boundary-remediation-plan-v0.1.md",
   # Historical ADR with broken internal links
   "plans/adrs/ADR-0015-streaming-text-viewport.md",
-  # Historical release docs with broken internal links
-  "docs/releases/v8.0.0/",
 ]

@@ -87,6 +87,11 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets
 
+      # Feature-configuration guard: legion-app must also build without the
+      # default "ai" feature (P0.F4.T4 — this configuration silently broke once).
+      - name: cargo check (legion-app no-default-features)
+        run: cargo check -p legion-app --no-default-features
+
       - name: cargo test
         run: cargo test --workspace --all-targets --no-fail-fast
 

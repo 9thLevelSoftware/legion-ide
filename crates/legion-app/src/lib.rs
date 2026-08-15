@@ -1660,7 +1660,8 @@ fn ollama_model_label() -> String {
 }
 
 /// One successful product chat completion (provider id, model, text, optional stream chunks).
-#[cfg(feature = "ai")]
+/// Pure data — deliberately not `ai`-gated so the stream-sink/lane machinery keeps one
+/// signature across feature configurations (no-`ai` builds simply never produce `Some`).
 struct ProductChatCompletion {
     provider_id: String,
     model: String,
@@ -1958,7 +1959,6 @@ fn resolve_delegate_chat_reply(
     )
 }
 
-#[cfg(feature = "ai")]
 fn product_stream_from_completion(
     completion: &ProductChatCompletion,
     operation: &str,

@@ -101,10 +101,7 @@ This is not the full renderer-backed desktop product.
 
 ## Desktop / GUI Evidence
 
-The desktop crate is `legion-desktop`. GUI phase evidence and limitations live under:
-
-- `plans/evidence/gui-productization/`
-- `audit-reports/`
+The desktop crate is `legion-desktop`. GUI phase evidence and limitations live under `plans/evidence/gui-productization/`.
 
 Do not infer production GUI readiness from substrate tests alone; check the product readiness ledger and known limitations.
 
@@ -114,4 +111,4 @@ This repository was renamed from its previous Devil-era product identity to Legi
 
 ## Repository Hygiene
 
-Generated build outputs, local IDE state, Hermes local workspaces, and local Almanac runtime databases should not be committed. Durable reports belong under `audit-reports/` or `plans/`; local working memory belongs in `.hermes/`, `.serena/`, or `.almanac/` according to the current project policy.
+Generated build outputs, local IDE state, and local agent-tool workspaces/databases should not be committed. Durable reports belong under `plans/` (evidence packages under `plans/evidence/`); local agent working memory stays out of the tree. The former `audit-reports/`, `.hermes/`, `.serena/`, and `.almanac/` locations were removed in the 2026-08-12 cleanup.
