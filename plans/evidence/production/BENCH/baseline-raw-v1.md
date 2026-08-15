@@ -4,7 +4,7 @@ Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
 Model: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB) via Ollama 0.32.13 at
 `http://127.0.0.1:11434/v1`. Suite fingerprint
 `bench-suite-v1:f34b7e1a124dbe91`. 13 executed tasks, 5 holdout tasks
-excluded (ADR-0049 holdout policy). Four runs per arm.
+excluded (ADR-0049 holdout policy). Four raw runs, seven governed.
 
 ## Correction to the previous version of this file
 
@@ -17,54 +17,66 @@ records the measurement that makes the error impossible to repeat.
 
 ## Headline: zero versus non-zero activity, and a gate neither arm clears
 
-| per run (4 runs each) | raw | governed |
+The suite gate is `task_success ∧ tests pass ∧ within diff/turn budgets`. It
+is the right measure for both task kinds: a bug fix must turn failing tests
+green, a refactor must change the named files without turning green tests red,
+and `task_success` (a real diff to the expected files, cleanly applied) is
+what stops a model that did nothing from scoring either.
+
+| per run | raw (4 runs) | governed (7 runs) |
 | --- | ---: | ---: |
-| **suite gate** (task_success ∧ tests pass ∧ budgets) | 0, 0, 0, 0 | 0, 0, 0, 1 |
-| tests earned (failing → passing) | 0, 0, 0, 0 | 0, 0, 0, 1 |
-| task_success (verified change to expected files) | 0, 0, 0, 0 | 3, 4, 4, 4 |
-| tasks where the model acted | 0, 0, 0, 0 | 8, 9, 11, 10 |
-| tool calls | 0, 0, 0, 0 | 15, 21, 20, 26 |
+| **suite gate** | 0, 0, 0, 0 | 0, 0, 0, 1, 2, 0, 0 |
+| task_success | 0, 0, 0, 0 | 3, 4, 4, 4, 4, 1, 6 |
+| tasks where the model acted | 0, 0, 0, 0 | 8–11 |
+| tool calls | 0, 0, 0, 0 | 15–26 |
 
 **The raw arm is a deterministic zero.** Not "low" — zero on every metric in
 every run, because the model emits no structured tool calls at all and a
 strict provider therefore sees prose and an ended turn. Nothing happens,
 reproducibly.
 
-**The governed arm acts on most tasks and edits the right files on three or
-four of thirteen.** That is the difference between a local model being inert
-and being engaged.
+**The governed arm acts on most tasks and edits the right files on one to six
+of thirteen.** That is the difference between a local model being inert and
+being engaged.
 
-**Neither arm meaningfully clears the gate.** One task in one governed run of
-four (`bench-ts-02`) passed end to end: 1 of 52 governed task-runs, 1.9%. The
-governed arm changes the files a task names and then, almost always, changes
-them wrongly — the tests do not pass.
+**Neither arm reliably clears the gate.** Three passes across 91 governed
+task-runs is 3%, and the run-to-run spread (`task_success` 1 to 6) is larger
+than any effect being claimed. The governed arm changes the files a task names
+and then usually changes them wrongly.
 
 **Phase 2's ≥20% exit criterion is not met and is not close.** No percentage
 in this file should be quoted as a result. What is established is narrow and
 real: the reliability layer moves a local model from producing nothing to
 producing something, and something is usually still wrong.
 
-## The metric that was lying
+## What the failures actually are
 
-Four of the thirteen tasks (`bench-py-03`, `bench-rust-03`, `bench-rust-04`,
-`bench-rust-05`) are **refactors**. A refactor preserves behaviour, so its
-tests pass on the untouched fixture — by design. `tests_passed` therefore
-reads `true` on those tasks no matter what the model does, including nothing
-at all.
+Diagnosed by keeping the checkouts (`LEGION_BENCH_KEEP_CHECKOUTS=1`), recording
+rejection reasons in the report, and probing the endpoint directly with
+Legion's own `edit-as-proposal` schema. Two failure modes dominate, and both
+are now handled:
 
-That is how the raw arm came to score **four "passing" tasks while making zero
-tool calls**, and it is why the earlier headline in this file was wrong in the
-governed arm's favour and then, briefly, in the raw arm's.
+* **A lone `new_str` with no `old_str`** — roughly half of the model's edit
+  calls. It means "here is the new version of this function". Both obvious
+  readings are wrong: refusing wastes a turn the model does not recover from,
+  and treating it as the file's complete content deletes everything the model
+  did not retype. Legion now anchors on the block's first line when that line
+  appears exactly once, replacing that block and nothing else.
+* **`old_str` not found exactly as written** — the anchor is reconstructed
+  from memory and the spacing drifts. Resolution now falls back to a
+  whitespace-insensitive, line-aligned, still-unique search. The bytes
+  replaced are the file's own, so an applied edit stays exact; only the search
+  became tolerant.
 
-The harness now records `tests_passed_at_rest` — the verification command run
-against the fixture *before* the model sees it. The distinction the evidence
-reports is **earned** passes (`tests_passed && !tests_passed_at_rest`). Both
-arms inherit the same four; the governed arm earned one, the raw arm none.
+Both are individually tested (18 cases in `crates/legion-ai/src/patch.rs`) and
+both reverse an earlier exact-only policy that the corpus vectors had pinned.
+**Neither is shown to move the suite number.** Three runs before and three
+after are indistinguishable against a spread this wide. They are recorded as
+justified by an observed failure mode, not as a measured improvement.
 
-The suite gate was never fooled: it requires `task_success` too, which demands
-a real diff to the expected files and a clean apply. Only the human-readable
-component metric was misleading, which is exactly the kind of number that ends
-up in a summary.
+What remains after them is the model. It reads a file, edits the right one,
+and the edit does not do what the task asked — a 7B model at Q4 on multi-step
+repository work. Closing that is not a matching problem.
 
 ## Why the raw arm scores zero: the model never emits a structured tool call
 
@@ -89,10 +101,11 @@ message *is* the call) and reporting `ToolUse` when recovery fires despite
 `finish_reason: "stop"` — without the latter the loop would end the run before
 dispatching what it just recovered.
 
-## What still stops the governed arm
+## Corpus problems fixed along the way
 
-Corpus problems recorded in the first version of this file have been fixed:
-task prompts told the model to run verification the harness already performs,
+Recorded because they shaped the numbers above, not because they remain open.
+
+Task prompts told the model to run verification the harness already performs,
 and scopes granted a terminal that Windows cannot sandbox — so the model
 dutifully tried, was denied, and the run ended. Prompts now say explicitly not
 to run commands, and no task grants `terminal-command`. Blocked runs fell from
@@ -104,12 +117,9 @@ its arguments forwarded untouched, because a literal tool-name match skipped
 argument canonicalization. One run spent its entire retry budget re-sending
 the same rejected field.
 
-What remains is the model. It reads files, proposes an edit to the right file,
-and the edit does not do what the task asked. That is the honest category — a
-7B model at Q4 on multi-step repository tasks — and closing it is what the
-rest of Phase 2 (context budgeting, plan anchoring, model profiles) is for.
-The loop governors landed in this revision are not aimed at it: they contain
-waste, and the idle-turn stop did not fire once in four runs.
+The loop governors landed in this revision are not aimed at task completion at
+all: they contain waste. The idle-turn stop did not fire once across every run
+recorded here.
 
 ## A scoring bug found and fixed before recording anything
 
@@ -189,25 +199,29 @@ to be unaffected.
 
 ## Sample size
 
-Four runs per arm on 13 tasks, one model, one quantization. The raw arm is
-perfectly reproducible, so its zero is solid. The governed arm's spread
-(`task_success` 3–4, gate 0–1) is small in absolute terms but large relative
-to the effect, and a single gate pass across four runs is an anecdote. A
-defensible percentage needs more tasks, more repetitions, and more than one
-model — none of which this file has.
+Four raw runs and seven governed runs on 13 tasks, one model, one
+quantization. The raw arm is perfectly reproducible, so its zero is solid. The
+governed arm's spread is not: `task_success` ranged 1–6 and the gate 0–2 with
+nothing changing but sampling. Three gate passes across 91 governed task-runs
+is an anecdote, and no arithmetic on it becomes a percentage worth quoting.
 
 ## Status
 
 `P9.F1.T4` stays **in-progress**. The baseline is recorded, reproducible, and
-now measured against the right gate. The comparison it exists to support shows
-a real qualitative change (nothing → something) and no meaningful movement on
-task completion. Next, in order:
+measured against the right gate. The comparison it exists to support shows a
+real qualitative change — nothing to something — and no reliable movement on
+task completion.
 
-1. Context budgeting and model profiles (Phase 2.4) — the excerpt truncation
-   the model currently works from is a plausible cause of edits that target
-   the right file and do the wrong thing.
-2. Plan anchoring (Phase 2.3 residue) — re-inject the current step each turn.
-3. Only then re-measure, with more repetitions, and quote a percentage with n.
+The two edit-resolution stages added here were chosen from measured failure
+modes rather than guessed at, which is the right way to pick them, and they
+still did not visibly move the suite. That is worth saying plainly: the
+remaining gap is the model's ability to write a correct change, not Legion's
+ability to apply one. Next, in order:
+
+1. Context budgeting and model profiles (Phase 2.4).
+2. Plan anchoring — re-inject the current step each turn.
+3. Re-measure with more repetitions and at least one larger model, so the
+   spread stops swamping the effect.
 
 ## Reproduction
 

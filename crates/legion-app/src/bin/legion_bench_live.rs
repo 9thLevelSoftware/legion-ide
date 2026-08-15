@@ -859,11 +859,18 @@ fn run_one_task(
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRequest)
             .count() as u32;
-        let retries = steps
+        let rejections: Vec<String> = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRejected)
-            .count() as u32;
-        (turns, tool_calls, retries)
+            .map(|s| {
+                format!(
+                    "{}:{}",
+                    s.tool_name.as_deref().unwrap_or("?"),
+                    s.reason.as_deref().unwrap_or("?")
+                )
+            })
+            .collect();
+        (turns, tool_calls, rejections)
     };
 
     // A run the idle-turn governor stopped still produced whatever it produced,
@@ -897,10 +904,16 @@ fn run_one_task(
             } else {
                 "completed".to_string()
             };
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
+            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
             result.turns = turns;
             result.tool_calls = tool_calls;
-            result.retries = retries;
+            result.retries = rejections.len() as u32;
+            // Why a call was rejected is the whole diagnosis. Without it a
+            // failed run reports `retries=1` and nothing else, and the only
+            // way to learn more is to run the suite again by hand.
+            if !rejections.is_empty() {
+                notes.push(format!("rejections: {}", rejections.join("; ")));
+            }
 
             match changed_files(&checkout) {
                 Ok(changed) => {
@@ -951,10 +964,16 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "blocked".to_string();
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
+            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
             result.turns = turns;
             result.tool_calls = tool_calls;
-            result.retries = retries;
+            result.retries = rejections.len() as u32;
+            // Why a call was rejected is the whole diagnosis. Without it a
+            // failed run reports `retries=1` and nothing else, and the only
+            // way to learn more is to run the suite again by hand.
+            if !rejections.is_empty() {
+                notes.push(format!("rejections: {}", rejections.join("; ")));
+            }
             result.error = Some(format!("loop blocked: {reason}"));
         }
         Ok(AppDelegatedTaskOutcome::BudgetExhausted {
@@ -962,10 +981,16 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "budget_exhausted".to_string();
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
+            let (turns, tool_calls, rejections) = audit_metrics(&audit_steps);
             result.turns = turns;
             result.tool_calls = tool_calls;
-            result.retries = retries;
+            result.retries = rejections.len() as u32;
+            // Why a call was rejected is the whole diagnosis. Without it a
+            // failed run reports `retries=1` and nothing else, and the only
+            // way to learn more is to run the suite again by hand.
+            if !rejections.is_empty() {
+                notes.push(format!("rejections: {}", rejections.join("; ")));
+            }
             result.error = Some(format!("budget exhausted: {reason}"));
         }
         // Rewritten into `Completed` above, so this arm is not reached. It
@@ -1004,7 +1029,19 @@ fn run_one_task(
         result.notes.push_str("...");
     }
 
-    let _ = fs::remove_dir_all(&checkout);
+    // `LEGION_BENCH_KEEP_CHECKOUTS=1` leaves each task's checkout on disk.
+    // A score says a run failed; only the diff says why, and reproducing one
+    // by hand costs a full suite run. Off by default because a kept suite is
+    // 18 fixture copies.
+    if std::env::var("LEGION_BENCH_KEEP_CHECKOUTS").is_ok_and(|v| v == "1") {
+        eprintln!(
+            "legion_bench_live: kept checkout for {} at {}",
+            task.id,
+            checkout.display()
+        );
+    } else {
+        let _ = fs::remove_dir_all(&checkout);
+    }
     result
 }
 

@@ -7,18 +7,29 @@
 //! content instead, so an edit either lands exactly where the model meant or
 //! is refused with a diagnostic it can act on.
 //!
-//! Matching is deliberately **exact and unique**:
+//! Matching is **unique or nothing**, in three stages, each tried only after
+//! the one before it finds nothing:
 //!
-//! * No match, or more than one, is a refusal — never a guess. Two candidate
-//!   sites mean the model was ambiguous, and picking one silently would edit
-//!   the wrong line.
-//! * Whitespace and line-ending drift do **not** match. A tab-vs-spaces or
-//!   CRLF-vs-LF near-miss is reported as a no-match with a diagnostic, because
-//!   "close enough" on indentation is how a patch lands in the wrong scope.
+//! 1. Exact.
+//! 2. Whitespace-tolerant: indentation and inter-token spacing ignored.
+//! 3. Block-anchored, for replacement text supplied with no anchor at all.
 //!
-//! A refusal carries the nearest candidate line and a similarity score, which
-//! is what lets a model re-read and retry rather than escalating to rewriting
-//! the file.
+//! At every stage, more than one candidate is a refusal — never a guess. Two
+//! sites mean the model was ambiguous, and picking one silently would edit the
+//! wrong line. And the tolerance is only in the *search*: the bytes replaced
+//! are always the file's own, so an applied edit is exact regardless of how it
+//! was located.
+//!
+//! Stages 2 and 3 are a deliberate relaxation of an earlier exact-only policy,
+//! made after measuring what a small model actually gets wrong. Refusing a
+//! whitespace near-miss was correct about the anchor and useless to the model,
+//! which rewrote the same anchor and failed again; on qwen2.5-coder:7b those
+//! two failures accounted for most rejected edits
+//! (`plans/evidence/production/BENCH/baseline-raw-v1.md`).
+//!
+//! A refusal still carries the nearest candidate line and a similarity score,
+//! which is what lets a model re-read and retry rather than escalating to
+//! rewriting the file.
 //!
 //! Behavior and the fixture corpus derive from SmallCode
 //! (<https://github.com/Doorman11991/smallcode>, MIT) — see
@@ -42,6 +53,13 @@ pub struct EditBlock {
 pub enum EditResolutionOutcome {
     /// Matched exactly once.
     Exact,
+    /// Located by ignoring indentation and inter-token spacing, then applied
+    /// to the file's own bytes.
+    ///
+    /// Distinct from [`Exact`](Self::Exact) so review can see that the anchor
+    /// the model wrote did not literally appear in the file — the edit is
+    /// still byte-exact, but the model was working from an approximation.
+    Fuzzy,
     /// Applied as a whole-file replacement because no fragment was given.
     WholeFileFallback,
 }
@@ -107,7 +125,30 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
             content: file_content.replacen(old_str, new_str, 1),
             outcome: EditResolutionOutcome::Exact,
         },
-        0 => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
+        0 => {
+            // Exact matching failed. Before refusing, try again ignoring
+            // indentation and inter-token spacing: the anchor is written from
+            // memory and the spacing is what a small model gets wrong. The
+            // span must still be unique, and the bytes replaced are the
+            // file's, so the edit remains exact — only the search was
+            // tolerant.
+            match find_whitespace_insensitive(file_content, old_str) {
+                Some((start, end)) => {
+                    let mut content = String::with_capacity(file_content.len() + new_str.len());
+                    content.push_str(&file_content[..start]);
+                    content.push_str(new_str);
+                    if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(&file_content[end..]);
+                    PatchResolution::Applied {
+                        content,
+                        outcome: EditResolutionOutcome::Fuzzy,
+                    }
+                }
+                None => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
+            }
+        }
         many => PatchResolution::Ambiguous { occurrences: many },
     }
 }
@@ -487,11 +528,45 @@ mod tests {
             "def f():\n\treturn 1",
             "def f():\n\treturn 2",
         );
+        // Policy change, deliberate: this case used to be refused with a
+        // diagnostic naming the drift. Refusing was correct about the anchor
+        // and useless to the model, which rewrote the same anchor and failed
+        // again. Indentation is now tolerated when it resolves to one span.
+        match out {
+            PatchResolution::Applied { content, outcome } => {
+                assert_eq!(outcome, EditResolutionOutcome::Fuzzy);
+                assert_eq!(
+                    content,
+                    "def f():
+	return 2
+",
+                    "the file's own indentation is what gets replaced"
+                );
+            }
+            other => panic!("expected a fuzzy match, got {other:?}"),
+        }
+    }
+
+    /// The diagnostic that used to fire above still has to work, because an
+    /// anchor whose whitespace differs *and* which appears twice is still
+    /// refused, and that is when the model most needs to be told why.
+    #[test]
+    fn drift_that_resolves_ambiguously_is_still_explained() {
+        let out = apply_edit(
+            "def f():
+    return 1
+
+def g():
+    return 1
+",
+            "	return 1",
+            "	return 2",
+        );
         match out {
             PatchResolution::NoMatch(diagnostic) => {
                 assert!(
                     diagnostic.message.contains("whitespace differs"),
-                    "diagnostic should name the drift: {}",
+                    "diagnostic should still name the drift: {}",
                     diagnostic.message
                 );
                 assert!(diagnostic.nearest_line.is_some());
@@ -507,13 +582,21 @@ mod tests {
             "line one\nline two",
             "line 1\nline 2",
         );
+        // Also a deliberate policy change. A model reading a CRLF file over a
+        // tool boundary that normalizes line endings cannot write a CRLF
+        // anchor, so refusing it punished the model for something it could
+        // not see.
         match out {
-            PatchResolution::NoMatch(diagnostic) => assert!(
-                diagnostic.message.contains("CRLF"),
-                "diagnostic should name the line-ending mismatch: {}",
-                diagnostic.message
-            ),
-            other => panic!("expected NoMatch, got {other:?}"),
+            PatchResolution::Applied { content, outcome } => {
+                assert_eq!(outcome, EditResolutionOutcome::Fuzzy);
+                assert_eq!(
+                    content,
+                    "line 1
+line 2
+"
+                );
+            }
+            other => panic!("expected a fuzzy match, got {other:?}"),
         }
     }
 
@@ -602,6 +685,398 @@ mod tests {
         assert!(
             parse_edit_blocks("```diff\n--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,2 @@\n line\n-old li")
                 .is_empty()
+        );
+    }
+}
+
+// ─── Block anchoring for a replacement given without an anchor ───────────────
+
+/// Infer the region a lone `new_str` was meant to replace.
+///
+/// Small models frequently answer an edit request with only the *new* text —
+/// "here is what the function should be" — and no `old_str`. Observed on
+/// qwen2.5-coder:7b in roughly half of its `edit-as-proposal` calls
+/// (`plans/evidence/production/BENCH/baseline-raw-v1.md`). The two obvious
+/// readings are both wrong: rejecting it wastes a turn the model usually does
+/// not recover from, and treating it as the file's complete content silently
+/// deletes everything the model did not retype — the whole-file clobber that
+/// review caught once already.
+///
+/// The safe reading is narrower. When `new_str` is a brace-balanced block, its
+/// first line names the item it defines; if the file contains that line
+/// exactly once, the region to replace is that line through the end of its
+/// block. Nothing outside that block is touched.
+///
+/// Returns the byte range in `file_content` to replace, or `None` when any
+/// condition fails — in which case the caller must refuse rather than guess.
+pub fn anchor_replacement_block(file_content: &str, new_str: &str) -> Option<(usize, usize)> {
+    let first_line = new_str.lines().find(|line| !line.trim().is_empty())?;
+    let anchor = first_line.trim();
+    // An anchor must be substantial enough to be a definition, not `}` or `{`.
+    if anchor.len() < 4 {
+        return None;
+    }
+    // The replacement must be a complete block; an unbalanced one would leave
+    // the file unparseable no matter where it landed.
+    if brace_balance(new_str) != 0 {
+        return None;
+    }
+    // The anchor line must open a block. A bare statement gives no way to know
+    // how much of the file it was meant to stand in for.
+    if !anchor.contains('{') {
+        return None;
+    }
+
+    // Exactly one line may match, or the target is a guess.
+    let mut match_offset = None;
+    let mut offset = 0_usize;
+    for line in file_content.split_inclusive('\n') {
+        if line.trim() == anchor {
+            if match_offset.is_some() {
+                return None;
+            }
+            match_offset = Some(offset);
+        }
+        offset += line.len();
+    }
+    let start = match_offset?;
+
+    // Walk forward to the end of the block the anchor opens.
+    let mut depth = 0_i32;
+    let mut end = None;
+    let mut cursor = start;
+    for line in file_content[start..].split_inclusive('\n') {
+        depth += brace_balance(line);
+        cursor += line.len();
+        if depth <= 0 {
+            end = Some(cursor);
+            break;
+        }
+    }
+    // A block that never closes means the anchor sits inside a construct this
+    // scan does not understand.
+    Some((start, end?))
+}
+
+/// Net `{` minus `}` in `text`, ignoring braces inside string literals,
+/// character literals, and line comments.
+///
+/// Deliberately not a parser. It has to be right about ordinary code and
+/// conservative everywhere else, because being wrong here means a mangled file
+/// rather than a rejected edit — so anything it cannot account for leaves the
+/// balance non-zero and the caller refuses.
+fn brace_balance(text: &str) -> i32 {
+    let mut depth = 0_i32;
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut in_char = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if in_string || in_char => {
+                chars.next();
+            }
+            '"' if !in_char => in_string = !in_string,
+            '\'' if !in_string => in_char = !in_char,
+            '/' if !in_string && !in_char && chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '\n' => {
+                // An unterminated char literal is almost always a lifetime
+                // (`&'a str`), not a quote, so reset at end of line rather
+                // than letting it swallow the rest of the file.
+                in_char = false;
+            }
+            '{' if !in_string && !in_char => depth += 1,
+            '}' if !in_string && !in_char => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    const FILE: &str = concat!(
+        "use std::fmt;\n",
+        "\n",
+        "pub fn count_words(s: &str) -> usize {\n",
+        "    s.split(' ').count()\n",
+        "}\n",
+        "\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    #[test]\n",
+        "    fn empty_input_has_no_words() {\n",
+        "        assert_eq!(super::count_words(\"\"), 0);\n",
+        "    }\n",
+        "}\n",
+    );
+
+    #[test]
+    fn a_balanced_block_anchors_on_its_own_first_line() {
+        let new = "pub fn count_words(s: &str) -> usize {\n    s.split_whitespace().count()\n}";
+        let (start, end) = anchor_replacement_block(FILE, new).expect("should anchor");
+        assert_eq!(
+            &FILE[start..end],
+            "pub fn count_words(s: &str) -> usize {\n    s.split(' ').count()\n}\n"
+        );
+    }
+
+    #[test]
+    fn anchoring_never_swallows_the_rest_of_the_file() {
+        let new = "pub fn count_words(s: &str) -> usize {\n    s.split_whitespace().count()\n}";
+        let (_, end) = anchor_replacement_block(FILE, new).unwrap();
+        assert!(
+            FILE[end..].contains("mod tests"),
+            "the tests below the replaced function must survive; treating a lone \
+             new_str as whole-file content is how they get deleted"
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_replacement_is_refused() {
+        let new = "pub fn count_words(s: &str) -> usize {\n    s.split_whitespace().count()";
+        assert!(
+            anchor_replacement_block(FILE, new).is_none(),
+            "a block that does not close would leave the file unparseable"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_anchor_is_refused() {
+        let file = "fn helper() {\n    a();\n}\n\nfn helper() {\n    b();\n}\n";
+        let new = "fn helper() {\n    c();\n}";
+        assert!(
+            anchor_replacement_block(file, new).is_none(),
+            "two candidate anchors means the target is a guess"
+        );
+    }
+
+    #[test]
+    fn an_anchor_absent_from_the_file_is_refused() {
+        let new = "pub fn other_function(s: &str) -> usize {\n    0\n}";
+        assert!(anchor_replacement_block(FILE, new).is_none());
+    }
+
+    #[test]
+    fn a_statement_without_a_block_is_refused() {
+        let new = "let x = 1;";
+        assert!(
+            anchor_replacement_block(FILE, new).is_none(),
+            "a bare statement gives no way to know how much it stands in for"
+        );
+    }
+
+    #[test]
+    fn braces_inside_strings_do_not_confuse_the_balance() {
+        assert_eq!(brace_balance("let s = \"{{{\";"), 0);
+        assert_eq!(brace_balance("// } } }"), 0);
+        assert_eq!(brace_balance("let c = '{';"), 0);
+    }
+
+    #[test]
+    fn a_lifetime_is_not_read_as_an_open_char_literal() {
+        assert_eq!(
+            brace_balance("fn f<'a>(x: &'a str) {\n}\n"),
+            0,
+            "treating `'a` as a quote would make every generic function unbalanced"
+        );
+    }
+
+    #[test]
+    fn a_nested_block_closes_at_the_outer_brace() {
+        let file = "fn outer() {\n    if x {\n        y();\n    }\n}\n\nfn after() {}\n";
+        let new = "fn outer() {\n    z();\n}";
+        let (start, end) = anchor_replacement_block(file, new).unwrap();
+        assert_eq!(
+            &file[start..end],
+            "fn outer() {\n    if x {\n        y();\n    }\n}\n"
+        );
+    }
+}
+
+// ─── Whitespace-tolerant anchor resolution ──────────────────────────────────
+
+/// Find the one span of `file_content` that equals `old_str` once both sides
+/// have their indentation and inter-token spacing normalized.
+///
+/// The exact matcher is right to be strict — it is what makes an applied edit
+/// mean "this text was there". But the anchors a small model writes are
+/// reconstructed from what it read, and it reproduces the *code* far more
+/// reliably than the *spacing*: tabs become spaces, indentation shifts by two,
+/// a trailing space disappears. On qwen2.5-coder:7b, "`old_str` was not found
+/// exactly as written" is the single most common edit failure
+/// (`plans/evidence/production/BENCH/baseline-raw-v1.md`), and in the failures
+/// inspected the anchor differed from the file only in whitespace.
+///
+/// The result is still an exact edit: this only *locates* the span, and the
+/// bytes replaced are the file's own. Matching stays line-aligned and must be
+/// unique, so a near-miss cannot silently retarget the edit.
+///
+/// Returns the byte range in `file_content`, or `None` when there is no match
+/// or more than one.
+pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<(usize, usize)> {
+    let needle: Vec<String> = old_str
+        .lines()
+        .map(normalize_line)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if needle.is_empty() {
+        return None;
+    }
+
+    // Line starts, with each line's normalized form, so a match can be mapped
+    // back to real byte offsets.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
+    let mut normalized: Vec<String> = Vec::new();
+    let mut offset = 0_usize;
+    for line in file_content.split_inclusive('\n') {
+        starts.push(offset);
+        offset += line.len();
+        ends.push(offset);
+        normalized.push(normalize_line(line));
+    }
+
+    let mut found: Option<(usize, usize)> = None;
+    // Indexes into three parallel vectors (`starts`, `ends`, `normalized`), so
+    // the index itself is the loop's subject rather than an artefact.
+    #[allow(clippy::needless_range_loop)]
+    for begin in 0..normalized.len() {
+        // Walk the file from `begin`, skipping blank lines, and see whether the
+        // needle's non-blank lines appear in order.
+        let mut cursor = begin;
+        let mut matched = 0_usize;
+        let mut last = begin;
+        while matched < needle.len() && cursor < normalized.len() {
+            if normalized[cursor].is_empty() {
+                // A blank line inside the matched region is tolerated only
+                // once the match has started, so a run of blanks before the
+                // anchor cannot be absorbed into it.
+                if matched == 0 {
+                    break;
+                }
+                cursor += 1;
+                continue;
+            }
+            if normalized[cursor] != needle[matched] {
+                break;
+            }
+            matched += 1;
+            last = cursor;
+            cursor += 1;
+        }
+        if matched == needle.len() {
+            if found.is_some() {
+                return None;
+            }
+            found = Some((starts[begin], ends[last]));
+        }
+    }
+    found
+}
+
+/// Collapse a line to its significant content: no leading or trailing
+/// whitespace, and every internal run of spaces or tabs reduced to one space.
+fn normalize_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut pending_space = false;
+    for c in line.trim().chars() {
+        if c == ' ' || c == '\t' || c == '\r' {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !out.is_empty() {
+            out.push(' ');
+        }
+        pending_space = false;
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod whitespace_tests {
+    use super::*;
+
+    const FILE: &str = concat!(
+        "fn main() {\n",
+        "    let total = compute(\n",
+        "        a,\n",
+        "        b,\n",
+        "    );\n",
+        "}\n",
+    );
+
+    #[test]
+    fn indentation_drift_still_matches() {
+        let anchor = "let total = compute(\na,\nb,\n);";
+        let (start, end) = find_whitespace_insensitive(FILE, anchor).expect("should locate");
+        assert_eq!(
+            &FILE[start..end],
+            "    let total = compute(\n        a,\n        b,\n    );\n",
+            "the span returned is the file's own bytes, so the edit stays exact"
+        );
+    }
+
+    #[test]
+    fn tabs_and_spaces_are_the_same_anchor() {
+        let file = "fn f() {\n\tlet x = 1;\n}\n";
+        let (start, end) = find_whitespace_insensitive(file, "    let x = 1;").unwrap();
+        assert_eq!(&file[start..end], "\tlet x = 1;\n");
+    }
+
+    #[test]
+    fn a_real_difference_is_not_matched() {
+        assert!(
+            find_whitespace_insensitive(FILE, "let total = compute(x)").is_none(),
+            "tolerating whitespace must not tolerate different code"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_anchor_is_refused() {
+        let file = "fn a() {\n    x();\n}\n\nfn b() {\n    x();\n}\n";
+        assert!(
+            find_whitespace_insensitive(file, "x();").is_none(),
+            "two matches means the edit would be applied to a guess"
+        );
+    }
+
+    #[test]
+    fn an_empty_anchor_never_matches() {
+        assert!(find_whitespace_insensitive(FILE, "   \n  \n").is_none());
+    }
+
+    #[test]
+    fn internal_spacing_is_normalized() {
+        let file = "fn f() {\n    let x  =   1;\n}\n";
+        assert!(find_whitespace_insensitive(file, "let x = 1;").is_some());
+    }
+
+    #[test]
+    fn a_blank_line_before_the_anchor_is_not_absorbed() {
+        let file = "fn f() {\n\n    let x = 1;\n}\n";
+        let (start, _) = find_whitespace_insensitive(file, "let x = 1;").unwrap();
+        assert_eq!(
+            &file[start..start + 4],
+            "    ",
+            "the match must begin at the anchor's line, not at the blank above it"
+        );
+    }
+
+    #[test]
+    fn carriage_returns_do_not_defeat_the_match() {
+        let file = "fn f() {\r\n    let x = 1;\r\n}\r\n";
+        assert!(
+            find_whitespace_insensitive(file, "let x = 1;").is_some(),
+            "a CRLF file must match an anchor written with LF"
         );
     }
 }

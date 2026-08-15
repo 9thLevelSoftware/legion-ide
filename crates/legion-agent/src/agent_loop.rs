@@ -838,16 +838,9 @@ fn resolve_fragment_edit(
         ));
     }
 
-    if input.get("old_str").is_none()
-        && input.get("old_string").is_none()
-        && input.get("search").is_none()
-    {
-        return Err(invalid(
-            "provide either `replacement` (the file's complete new content) or \
-             `old_str` and `new_str` (an exact fragment to replace)"
-                .to_string(),
-        ));
-    }
+    let has_anchor = input.get("old_str").is_some()
+        || input.get("old_string").is_some()
+        || input.get("search").is_some();
 
     // Resolve against content this run already staged for the file, falling
     // back to the worktree for the first edit to it.
@@ -863,6 +856,42 @@ fn resolve_fragment_edit(
             ))
         })?,
     };
+
+    if !has_anchor {
+        // Only the new text was supplied. If it is a self-contained block whose
+        // first line appears exactly once in the file, that block is the
+        // target; otherwise refuse, naming what was missing rather than
+        // restating the schema.
+        let new_str = input
+            .get("new_str")
+            .or_else(|| input.get("new_string"))
+            .or_else(|| input.get("replace"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                invalid(
+                    "provide either `replacement` (the file's complete new content) or \
+                     `old_str` and `new_str` (an exact fragment to replace)"
+                        .to_string(),
+                )
+            })?;
+        let (start, end) = legion_ai::patch::anchor_replacement_block(&file_content, new_str)
+            .ok_or_else(|| {
+                invalid(
+                    "you gave `new_str` without `old_str`, and the new text could not be \
+                     matched to one place in the file. Add `old_str`: the exact text being \
+                     replaced, copied verbatim from the file including indentation."
+                        .to_string(),
+                )
+            })?;
+        let mut resolved = String::with_capacity(file_content.len() + new_str.len());
+        resolved.push_str(&file_content[..start]);
+        resolved.push_str(new_str);
+        if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
+            resolved.push('\n');
+        }
+        resolved.push_str(&file_content[end..]);
+        return Ok(resolved);
+    }
 
     match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
         legion_ai::patch::PatchResolution::Applied { content, .. } => Ok(content),
