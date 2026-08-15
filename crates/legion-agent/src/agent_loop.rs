@@ -744,6 +744,54 @@ fn execute_outline(
     Ok(symbols.join("\n"))
 }
 
+/// Resolve an `old_str`/`new_str` fragment edit into the file's complete new
+/// content, reading the target from the worktree.
+///
+/// Every failure returns retryable `InvalidArguments` feedback rather than
+/// terminating the run: a model that quoted text slightly wrong can fix that
+/// on the next turn if it is told what went wrong and where.
+fn resolve_fragment_edit(
+    input: &serde_json::Value,
+    resolved_edit_path: &Path,
+) -> Result<String, LegionToolCallFeedback> {
+    let invalid = |message: String| {
+        LegionToolCallFeedback::new(
+            LegionToolKind::EditAsProposal,
+            LegionToolCallFeedbackKind::InvalidArguments,
+            message,
+            Some(resolved_edit_path.to_string_lossy().into_owned()),
+        )
+    };
+
+    if input.get("old_str").is_none() && input.get("old_string").is_none() {
+        return Err(invalid(
+            "provide either `replacement` (the file's complete new content) or \
+             `old_str` and `new_str` (an exact fragment to replace)"
+                .to_string(),
+        ));
+    }
+
+    // An edit against a file that is not there cannot be a fragment edit; the
+    // model most likely meant to create it and should say so with
+    // `replacement`.
+    let file_content = std::fs::read_to_string(resolved_edit_path).map_err(|err| {
+        invalid(format!(
+            "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
+             `replacement` with its full content instead."
+        ))
+    })?;
+
+    match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
+        legion_ai::patch::PatchResolution::Applied { content, .. } => Ok(content),
+        legion_ai::patch::PatchResolution::NoMatch(diagnostic) => Err(invalid(diagnostic.message)),
+        legion_ai::patch::PatchResolution::Ambiguous { occurrences } => Err(invalid(format!(
+            "`old_str` matches {occurrences} places in the file, so the target is ambiguous. \
+             Include more surrounding context so it matches exactly once."
+        ))),
+        legion_ai::patch::PatchResolution::ValidationError { reason } => Err(invalid(reason)),
+    }
+}
+
 fn execute_edit_as_proposal(
     input: &serde_json::Value,
     worktree_root: &Path,
@@ -751,7 +799,6 @@ fn execute_edit_as_proposal(
     causality_id: Uuid,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::EditAsProposal)?;
-    let replacement = require_string_field(input, "replacement", LegionToolKind::EditAsProposal)?;
     let proposal_title = input
         .get("proposal_title")
         .and_then(|v| v.as_str())
@@ -770,6 +817,20 @@ fn execute_edit_as_proposal(
             Some(path_str.to_string()),
         )
     })?;
+
+    // Two ways to express an edit, and only one of them is safe to guess at.
+    //
+    // `replacement` is the file's complete new content. `old_str`/`new_str` is
+    // a *fragment* replacement, which small models reach for constantly
+    // because it is far cheaper than reproducing a whole file — and which is
+    // destructive if treated as whole content. Fragments are resolved against
+    // the file on disk so the edit lands exactly where the model meant, or is
+    // refused with a diagnostic it can retry from (ADR-0049).
+    let replacement = match input.get("replacement").and_then(|value| value.as_str()) {
+        Some(whole_file) => whole_file.to_string(),
+        None => resolve_fragment_edit(input, &resolved_edit_path)?,
+    };
+    let replacement = replacement.as_str();
 
     // Build the proposal using DelegatedTaskProposalGenerator — zero disk writes.
     let generator = DelegatedTaskProposalGenerator::new(worktree_root.to_path_buf());

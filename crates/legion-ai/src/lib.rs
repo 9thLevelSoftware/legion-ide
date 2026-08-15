@@ -8,6 +8,8 @@ pub mod classifier;
 pub mod manifest;
 /// Tolerant recovery of tool calls embedded in model prose (ADR-0049).
 pub mod normalize;
+/// Exact-match resolution of model-authored edit fragments (ADR-0049).
+pub mod patch;
 pub mod redaction;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.

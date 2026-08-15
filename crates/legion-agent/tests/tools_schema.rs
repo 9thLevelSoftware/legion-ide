@@ -34,7 +34,11 @@ fn each_tool_schema_declares_the_expected_required_fields() {
         (LegionToolKind::Grep, vec!["pattern"]),
         (LegionToolKind::Glob, vec!["pattern"]),
         (LegionToolKind::Outline, vec!["path"]),
-        (LegionToolKind::EditAsProposal, vec!["path", "replacement"]),
+        // Only `path` is unconditionally required: an edit supplies either
+        // `replacement` (whole content) or an `old_str`/`new_str` fragment,
+        // and a flat list cannot express "one of". The executor enforces the
+        // pair — see `resolve_fragment_edit`.
+        (LegionToolKind::EditAsProposal, vec!["path"]),
         (LegionToolKind::TerminalCommand, vec!["command"]),
         (
             LegionToolKind::McpPassthrough,
@@ -62,4 +66,42 @@ fn each_tool_schema_declares_the_expected_required_fields() {
             Some("object")
         );
     }
+}
+
+/// The edit tool must advertise the fragment form, or models have no way to
+/// know it exists and will keep sending whole files — the expensive, lossy
+/// path this work exists to avoid (ADR-0049).
+#[test]
+fn edit_tool_advertises_both_whole_file_and_fragment_forms() {
+    let registry = native_tool_registry();
+    let edit = registry
+        .iter()
+        .find(|tool| tool.kind == LegionToolKind::EditAsProposal)
+        .expect("edit-as-proposal is registered");
+    let properties = edit
+        .input_schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .expect("schema declares properties");
+
+    for field in ["replacement", "old_str", "new_str"] {
+        let property = properties
+            .get(field)
+            .unwrap_or_else(|| panic!("schema must declare `{field}`"));
+        assert!(
+            property
+                .get("description")
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| !text.is_empty()),
+            "`{field}` needs a description — it is how the model learns which form to use"
+        );
+    }
+
+    // The fragment form is only safe because matching is exact and unique;
+    // say so where the model reads it.
+    let old_str_doc = properties["old_str"]["description"].as_str().unwrap_or("");
+    assert!(
+        old_str_doc.contains("exactly once"),
+        "old_str description must state the uniqueness requirement: {old_str_doc}"
+    );
 }
