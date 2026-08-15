@@ -1157,12 +1157,18 @@ where
         // Skipped entirely when the provider already returned structured
         // calls, so a call is never counted twice (ADR-0049).
         let known_tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
-        let recovered = extract_tool_calls(&ExtractionInput {
-            content,
-            reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
-            has_existing_tool_calls: has_structured_calls,
-            known_tools: &known_tools,
-        });
+        let recovered = if legion_ai::governance::small_model_governors_enabled() {
+            extract_tool_calls(&ExtractionInput {
+                content,
+                reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
+                has_existing_tool_calls: has_structured_calls,
+                known_tools: &known_tools,
+            })
+        } else {
+            // Measurement arm: behave as before the port — a call written as
+            // prose is prose.
+            Default::default()
+        };
 
         // Keep the prose the model actually meant as prose: when a call was
         // lifted out of the text, the remaining content is what is left.
@@ -1225,6 +1231,18 @@ where
                     .unwrap_or("{}");
                 match serde_json::from_str::<Value>(arguments_str) {
                     Ok(input) => blocks.push(ToolTurnBlock::ToolUse { id, name, input }),
+                    // Measurement arm: unparseable arguments were a hard
+                    // provider error before the port. Recovering them here
+                    // would leave a governed reliability mechanism running
+                    // inside the supposedly raw baseline.
+                    Err(error) if !legion_ai::governance::small_model_governors_enabled() => {
+                        return Err(ProviderError::RequestFailed {
+                            provider: self.id.clone(),
+                            message: format!(
+                                "OpenAI tool_call arguments is not valid JSON: {error}. Raw: {arguments_str:?}"
+                            ),
+                        });
+                    }
                     Err(error) => {
                         // A single unparseable argument string used to fail the
                         // whole completion, ending the turn with no way for the

@@ -210,14 +210,59 @@ fn parse_tool_kind(name: &str) -> Option<LegionToolKind> {
     }
 }
 
+/// Restore the pre-port `edit-as-proposal` schema for the measurement arm.
+///
+/// With governors off the executor rejects fragment edits, but the model was
+/// still being *shown* a schema advertising `old_str`/`new_str` and no longer
+/// requiring `replacement`. A model following that advertised contract would
+/// then be refused for doing exactly what it was told — penalising the raw arm
+/// for an interface that did not exist before the port, and biasing the
+/// comparison toward the governed arm. Both halves of the contract have to
+/// move together for the A/B to mean anything.
+fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinition {
+    if definition.name != LegionToolKind::EditAsProposal.tool_name() {
+        return definition;
+    }
+    if let Some(properties) = definition
+        .input_schema
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    {
+        properties.remove("old_str");
+        properties.remove("new_str");
+        properties.insert(
+            "replacement".to_string(),
+            serde_json::json!({"type": "string"}),
+        );
+    }
+    definition.input_schema["required"] = serde_json::json!(["path", "replacement"]);
+    definition
+}
+
+/// The tool set as advertised to the model, for A/B seam assertions.
+///
+/// Exposed so a test can check that the *advertised* contract moves with the
+/// enforced one; the loop itself uses [`tool_defs_from_registry`].
+pub fn tool_definitions_for_tests() -> Vec<ToolDefinition> {
+    tool_defs_from_registry()
+}
+
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
 fn tool_defs_from_registry() -> Vec<ToolDefinition> {
+    let governed = legion_ai::governance::small_model_governors_enabled();
     legion_protocol::tools::tool_schema_definitions()
         .into_iter()
         .map(|def| ToolDefinition {
             name: def.tool_name,
             description: def.description_label,
             input_schema: def.input_schema,
+        })
+        .map(|def| {
+            if governed {
+                def
+            } else {
+                restore_pre_port_edit_schema(def)
+            }
         })
         .collect()
 }
@@ -773,7 +818,18 @@ fn resolve_fragment_edit(
         )
     };
 
-    if input.get("old_str").is_none() && input.get("old_string").is_none() {
+    if !legion_ai::governance::small_model_governors_enabled() {
+        // Measurement arm: reproduce the pre-port contract, where an edit had
+        // to supply the file's complete content.
+        return Err(invalid(
+            "required field 'replacement' is missing or not a string".to_string(),
+        ));
+    }
+
+    if input.get("old_str").is_none()
+        && input.get("old_string").is_none()
+        && input.get("search").is_none()
+    {
         return Err(invalid(
             "provide either `replacement` (the file's complete new content) or \
              `old_str` and `new_str` (an exact fragment to replace)"
@@ -1025,7 +1081,22 @@ fn validate_and_execute(
     })?;
 
     // Step 2: schema validation — check required fields
-    for field in tool.required_fields() {
+    //
+    // The measurement arm restores `replacement` as a required field here, not
+    // just at execution. Ordering is part of the pre-port contract: a
+    // malformed edit was rejected as retryable `InvalidArguments` *before* any
+    // path check ran. Enforcing it later means a malformed edit aimed at a
+    // forbidden or out-of-scope path terminates the run as `Blocked` instead,
+    // penalising the raw arm for a failure the pre-port loop would have let
+    // the model correct.
+    let required_fields: &[&str] = if tool == LegionToolKind::EditAsProposal
+        && !legion_ai::governance::small_model_governors_enabled()
+    {
+        &["path", "replacement"]
+    } else {
+        tool.required_fields()
+    };
+    for field in required_fields {
         if input.get(*field).is_none() {
             return Err(LegionToolCallFeedback::new(
                 tool,
@@ -1089,7 +1160,14 @@ fn validate_and_execute(
         LegionToolKind::TerminalCommand | LegionToolKind::McpPassthrough => None,
     };
 
-    // Step 4: scope validation
+    // Step 4: scope validation.
+    //
+    // Both halves are terminal on purpose: a tool outside the granted set and
+    // a target outside the scope each end the run. Making the tool half
+    // retryable was tried, to stop a model's wrong guess from discarding a
+    // benchmark task, and reverted — it turned the exfiltration hostile-eval
+    // into a completed run that handed the attacker the list of tools it could
+    // use instead. See `LegionToolCallFeedbackKind::retryable`.
     validate_delegated_task_tool_call(&config.scope, tool, path_opt.as_deref()).map_err(|e| {
         crate::scope::tool_call_feedback_for_scope_denial(&e).unwrap_or_else(|| {
             LegionToolCallFeedback::new(
