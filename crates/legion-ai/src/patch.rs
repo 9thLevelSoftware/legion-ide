@@ -753,8 +753,13 @@ pub fn anchor_replacement_block(file_content: &str, new_str: &str) -> Option<(us
     let mut depth = 0_i32;
     let mut end = None;
     let mut cursor = start;
+    // The scanner carries state across lines. Balancing each line
+    // independently forgets an open `/*`, so a `}` on a later line of a block
+    // comment reads as syntax and closes the block early — the scan returns a
+    // truncated range and the splice leaves the tail of the old block behind.
+    let mut scan = BalanceScan::default();
     for line in file_content[start..].split_inclusive('\n') {
-        depth += brace_balance(line);
+        depth += scan.consume(line);
         cursor += line.len();
         if depth <= 0 {
             end = Some(cursor);
@@ -766,58 +771,73 @@ pub fn anchor_replacement_block(file_content: &str, new_str: &str) -> Option<(us
     Some((start, end?))
 }
 
-/// Net `{` minus `}` in `text`, ignoring braces inside string literals,
-/// character literals, and line comments.
-///
-/// Deliberately not a parser. It has to be right about ordinary code and
-/// conservative everywhere else, because being wrong here means a mangled file
-/// rather than a rejected edit — so anything it cannot account for leaves the
-/// balance non-zero and the caller refuses.
 fn brace_balance(text: &str) -> i32 {
-    let mut depth = 0_i32;
-    let mut chars = text.chars().peekable();
-    let mut in_string = false;
-    let mut in_char = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if in_string || in_char => {
-                chars.next();
+    BalanceScan::default().consume(text)
+}
+
+/// Brace-counting state that survives between chunks.
+///
+/// Exists because the block scan feeds one line at a time and a block comment
+/// spans lines: restarting the state per line forgets an open `/*`, and a `}`
+/// on its second line then reads as syntax and closes the block early.
+#[derive(Debug, Default)]
+struct BalanceScan {
+    in_string: bool,
+    in_block_comment: bool,
+}
+
+impl BalanceScan {
+    /// Consume `text` and return its net `{` minus `}`, carrying string and
+    /// block-comment state into the next call.
+    ///
+    /// Deliberately not a parser. It has to be right about ordinary code and
+    /// conservative everywhere else, because being wrong here means a mangled
+    /// file rather than a rejected edit — so anything it cannot account for
+    /// leaves the balance non-zero and the caller refuses.
+    fn consume(&mut self, text: &str) -> i32 {
+        let mut depth = 0_i32;
+        let mut chars = text.chars().peekable();
+        // Unlike string and comment state, this resets each line: an
+        // unterminated `'` is almost always a lifetime (`&'a str`), and
+        // carrying it forward would swallow the rest of the file.
+        let mut in_char = false;
+        while let Some(c) = chars.next() {
+            if self.in_block_comment {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    self.in_block_comment = false;
+                }
+                continue;
             }
-            '"' if !in_char => in_string = !in_string,
-            '\'' if !in_string => in_char = !in_char,
-            '/' if !in_string && !in_char && chars.peek() == Some(&'/') => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
+            match c {
+                '\\' if self.in_string || in_char => {
+                    chars.next();
+                }
+                '"' if !in_char => self.in_string = !self.in_string,
+                '\'' if !self.in_string => in_char = !in_char,
+                '/' if !self.in_string && !in_char && chars.peek() == Some(&'/') => {
+                    for c in chars.by_ref() {
+                        if c == '\n' {
+                            break;
+                        }
                     }
                 }
-            }
-            // Block comments count too. A `/* } */` inside a function body
-            // would otherwise close the block early, and the forward scan
-            // would return a truncated range — splicing the new block in and
-            // leaving the tail of the old one behind.
-            '/' if !in_string && !in_char && chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = '\0';
-                for c in chars.by_ref() {
-                    if prev == '*' && c == '/' {
-                        break;
-                    }
-                    prev = c;
+                // Block comments count too. A `/* } */` inside a function body
+                // would otherwise close the block early, and the forward scan
+                // would return a truncated range — splicing the new block in
+                // and leaving the tail of the old one behind.
+                '/' if !self.in_string && !in_char && chars.peek() == Some(&'*') => {
+                    chars.next();
+                    self.in_block_comment = true;
                 }
+                '\n' => in_char = false,
+                '{' if !self.in_string && !in_char => depth += 1,
+                '}' if !self.in_string && !in_char => depth -= 1,
+                _ => {}
             }
-            '\n' => {
-                // An unterminated char literal is almost always a lifetime
-                // (`&'a str`), not a quote, so reset at end of line rather
-                // than letting it swallow the rest of the file.
-                in_char = false;
-            }
-            '{' if !in_string && !in_char => depth += 1,
-            '}' if !in_string && !in_char => depth -= 1,
-            _ => {}
         }
+        depth
     }
-    depth
 }
 
 #[cfg(test)]
@@ -944,9 +964,10 @@ mod anchor_tests {
 /// Returns the byte range in `file_content`, or `None` when there is no match
 /// or more than one.
 pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<(usize, usize)> {
+    let mut needle_normalizer = LineNormalizer::default();
     let needle: Vec<String> = old_str
         .lines()
-        .map(normalize_line)
+        .map(|line| needle_normalizer.normalize(line))
         .filter(|line| !line.is_empty())
         .collect();
     if needle.is_empty() {
@@ -959,11 +980,12 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
     let mut ends: Vec<usize> = Vec::new();
     let mut normalized: Vec<String> = Vec::new();
     let mut offset = 0_usize;
+    let mut file_normalizer = LineNormalizer::default();
     for line in file_content.split_inclusive('\n') {
         starts.push(offset);
         offset += line.len();
         ends.push(offset);
-        normalized.push(normalize_line(line));
+        normalized.push(file_normalizer.normalize(line));
     }
 
     let mut found: Option<(usize, usize)> = None;
@@ -1004,46 +1026,64 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
     found
 }
 
-/// Collapse a line to its significant content: no leading or trailing
-/// whitespace, and every internal run of spaces or tabs reduced to one space.
-fn normalize_line(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut pending_space = false;
-    let mut in_literal: Option<char> = None;
-    let mut escaped = false;
-    for c in line.trim().chars() {
-        // Inside a literal, spacing is content: `"a b"` and `"a  b"` are
-        // different strings, and collapsing them would let an anchor match a
-        // line whose code it does not equal.
-        if let Some(delimiter) = in_literal {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == delimiter {
-                in_literal = None;
+/// Line normalizer whose literal state survives between lines.
+///
+/// A Python triple-quoted string, or any literal a language lets span lines,
+/// is still a literal on its second line. Restarting per line would collapse
+/// its content as if it were indentation, so `"  b"` and `" b"` — different
+/// string values — would normalize to the same thing and match each other.
+#[derive(Debug, Default)]
+struct LineNormalizer {
+    in_literal: Option<char>,
+}
+
+impl LineNormalizer {
+    /// Collapse `line` to its significant content: no leading or trailing
+    /// whitespace, and every internal run of spaces or tabs reduced to one
+    /// space — except inside a literal, where spacing is content and is kept
+    /// exactly.
+    fn normalize(&mut self, line: &str) -> String {
+        // Inside a multi-line literal the whole line is content, indentation
+        // included, so it is taken verbatim rather than trimmed.
+        let body = if self.in_literal.is_some() {
+            line.trim_end_matches(['\n', '\r'])
+        } else {
+            line.trim()
+        };
+        let mut out = String::with_capacity(body.len());
+        let mut pending_space = false;
+        let mut escaped = false;
+        for c in body.chars() {
+            if let Some(delimiter) = self.in_literal {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == delimiter {
+                    self.in_literal = None;
+                }
+                continue;
             }
-            continue;
+            if c == ' ' || c == '\t' || c == '\r' {
+                pending_space = true;
+                continue;
+            }
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            // A `'` that opens no literal — a Rust lifetime — leaves the rest
+            // of the text treated as literal content. That only makes matching
+            // stricter: missing a match is recoverable, matching the wrong
+            // line is not.
+            if c == '"' || c == '\'' {
+                self.in_literal = Some(c);
+            }
+            out.push(c);
         }
-        if c == ' ' || c == '\t' || c == '\r' {
-            pending_space = true;
-            continue;
-        }
-        if pending_space && !out.is_empty() {
-            out.push(' ');
-        }
-        pending_space = false;
-        // A `'` that opens no literal — a Rust lifetime — leaves the rest of
-        // the line treated as literal text, which only makes matching
-        // stricter. Missing a match is recoverable; matching the wrong line is
-        // not.
-        if c == '"' || c == '\'' {
-            in_literal = Some(c);
-        }
-        out.push(c);
+        out
     }
-    out
 }
 
 #[cfg(test)]
@@ -1199,6 +1239,93 @@ mod review_regression_tests {
         assert!(
             find_whitespace_insensitive(file, "let s = \"a\\\" b\";").is_none(),
             "the escaped quote keeps the literal open, so its spacing stays significant"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cross_line_state_tests {
+    use super::*;
+
+    /// The forward scan must remember an open `/*` from a previous line.
+    ///
+    /// The earlier regression test for this called `brace_balance` on the whole
+    /// comment at once, so it never exercised the line-by-line scan that
+    /// `anchor_replacement_block` actually uses — it passed while the bug was
+    /// still there.
+    #[test]
+    fn a_block_comment_spanning_lines_does_not_close_the_block() {
+        let file = concat!(
+            "fn target() {\n",
+            "    /* a comment\n",
+            "       whose second line has a } in it\n",
+            "       and a third line */\n",
+            "    old();\n",
+            "}\n",
+            "\n",
+            "fn after() {}\n",
+        );
+        let new = "fn target() {\n    fresh();\n}";
+        let (start, end) = anchor_replacement_block(file, new).expect("should anchor");
+        assert!(
+            file[start..end].contains("old();"),
+            "the range must reach past the comment to the real closing brace, \
+             got {:?}",
+            &file[start..end]
+        );
+        let spliced = splice_replacement(file, start, end, new);
+        assert!(!spliced.contains("old();"));
+        assert!(!spliced.contains("whose second line"));
+        assert!(spliced.contains("fn after() {}"));
+    }
+
+    #[test]
+    fn balance_state_carries_between_consumed_chunks() {
+        let mut scan = BalanceScan::default();
+        assert_eq!(scan.consume("fn f() { /* open\n"), 1);
+        assert_eq!(
+            scan.consume("} still comment */\n"),
+            0,
+            "the brace is inside a comment that started on the previous chunk"
+        );
+        assert_eq!(scan.consume("}\n"), -1);
+    }
+
+    /// Fuzzy matching must not collapse the interior of a multi-line literal.
+    ///
+    /// Python's triple-quoted strings span lines, so per-line normalization
+    /// treated their content as indentation: `"  b"` and `" b"` — different
+    /// string values — normalized to the same thing and matched each other.
+    #[test]
+    fn spacing_inside_a_multi_line_literal_is_not_collapsed() {
+        let file = concat!(
+            "def f():\n",
+            "    s = \"\"\"\n",
+            "  b\n",
+            "\"\"\"\n",
+            "    return s\n",
+        );
+        // Same shape, but one space where the file has two.
+        let anchor = "s = \"\"\"\n b\n\"\"\"";
+        assert!(
+            find_whitespace_insensitive(file, anchor).is_none(),
+            "two different string values must not be treated as one anchor"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_literal_still_matches_itself() {
+        let file = concat!(
+            "def f():\n",
+            "    s = \"\"\"\n",
+            "  b\n",
+            "\"\"\"\n",
+            "    return s\n",
+        );
+        let anchor = "s   =  \"\"\"\n  b\n\"\"\"";
+        assert!(
+            find_whitespace_insensitive(file, anchor).is_some(),
+            "the literal's content is identical; only the code around it drifted"
         );
     }
 }

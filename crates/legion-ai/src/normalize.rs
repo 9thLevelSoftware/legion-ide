@@ -242,8 +242,26 @@ fn is_legion_native_name(name: &str) -> bool {
 /// `edit` are generic, and a foreign `read` taking `file_path` would be
 /// silently handed `path` and rejected by its own validator.
 fn serves_legion_registry(known_tools: &[String]) -> bool {
-    !known_tools.is_empty() && known_tools.iter().all(|tool| is_legion_native_name(tool))
+    !known_tools.is_empty()
+        && known_tools.iter().all(|tool| is_legion_native_name(tool))
+        && known_tools
+            .iter()
+            .any(|tool| DISTINCTIVE_LEGION_TOOLS.contains(&tool.as_str()))
 }
+
+/// Legion tool names no other registry would plausibly use.
+///
+/// All-names-are-native is necessary but not sufficient: a custom registry
+/// offering nothing but `read` satisfies it, and its `file_path` would then be
+/// rewritten to `path`. Requiring one of these makes the identification
+/// positive rather than merely consistent — they are product-specific,
+/// hyphenated, and not words another tool set reaches for.
+///
+/// This is a heuristic, and it is here because the extraction API sits at the
+/// provider boundary, which serves whatever tools its caller advertises and
+/// has no way to ask whose registry they are. If that ever changes, an
+/// explicit flag on `ExtractionInput` is the better answer.
+const DISTINCTIVE_LEGION_TOOLS: &[&str] = &["edit-as-proposal", "mcp-passthrough"];
 
 fn legion_registry_name(name: &str) -> Option<&'static str> {
     match name {
@@ -1269,6 +1287,25 @@ mod tests {
         assert_eq!(
             out.calls[0].arguments["content"], "x",
             "an empty set disables filtering; it must not also authorize rewriting"
+        );
+    }
+
+    /// A custom registry whose only tool happens to be named `read` is not
+    /// Legion's.
+    ///
+    /// All-names-are-native is satisfied by every nonempty subset of Legion's
+    /// names, so on its own it classified this as Legion and rewrote
+    /// `file_path` to `path`.
+    #[test]
+    fn a_native_name_alone_does_not_identify_legions_registry() {
+        let out = extract(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read"],
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(
+            out.calls[0].arguments["file_path"], "a.rs",
+            "nothing here is distinctively Legion, so nothing may be renamed"
         );
     }
 
