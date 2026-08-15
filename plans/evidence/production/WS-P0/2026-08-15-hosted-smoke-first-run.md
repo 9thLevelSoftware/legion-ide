@@ -77,9 +77,32 @@ server now advertises `diagnosticProvider` and answers pulls.
 alone; 1.97.1 without the fix timed out at 120s). Hosted 3-OS confirmation
 pending the next dispatched run containing this fix.
 
+## Confirmation run — 15/15 green on 3 OSes
+
+Run: https://github.com/9thLevelSoftware/legion-ide/actions/runs/31893365466
+(workflow_dispatch of `legion-smoke.yml` against `phase-0-truth-repair`,
+2026-08-15, containing both fixes).
+
+| Job | ubuntu | windows | macos |
+| --- | --- | --- | --- |
+| GP-1 smoke | pass | pass | pass |
+| GP-2 smoke | pass | pass | pass |
+| GP-3 smoke | pass | pass | pass |
+| GP-4 smoke | pass | pass | pass |
+| Update drill | pass | pass | pass |
+
+Both hosted failures are resolved on the runners that produced them, not
+only locally: the update drill passes now that
+`legion-app --no-default-features` compiles, and GP-1 s3 passes on hosted
+rust-analyzer 1.97.1 via the pull-diagnostics path. **This is the first
+all-green hosted 3-OS smoke run in the project's history** and the first
+cross-platform evidence for GP-1 (previously Windows-local only).
+
 ## Promotion-clock status
 
-The four-consecutive-green scheduled-run criterion
-(`plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`) has not
-started counting: run 1 is red. Next steps in order: land `25a1ec0`
-(update-drill fix), resolve GP-1 s3, then re-dispatch.
+The promotion criterion in
+`plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md` requires
+**four consecutive green _scheduled_ 3-OS runs**. This run was
+workflow_dispatch on a branch, so it does not itself advance that count — it
+establishes that the scheduled runs can now pass. The clock starts on the
+next scheduled Monday 06:00 UTC run after these fixes reach `main`.
