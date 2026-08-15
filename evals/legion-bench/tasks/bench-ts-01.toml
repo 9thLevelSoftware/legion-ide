@@ -1,0 +1,39 @@
+# evals/legion-bench/tasks/bench-ts-01.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-01"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = '''
+The money parser in src/money.js mishandles amounts with a single decimal
+digit: parseAmount("12.5") returns 1205 cents, but a lone decimal digit means
+tenths of a dollar, so it must return 1250 (and parseAmount("0.5") must
+return 50, not 5). Two-digit decimals and whole-dollar amounts already parse
+correctly. Fix parseAmount in src/money.js without changing its exported
+signature, its documented accepted formats, or any other file. The expected
+behavior is defined by test/money.test.js; do not modify the tests.
+'''
+
+[verification]
+command = "node test/money.test.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["src/money.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["test/money.test.js", "test/harness.js", "test/run.js"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

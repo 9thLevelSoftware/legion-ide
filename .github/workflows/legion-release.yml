@@ -256,132 +256,31 @@ jobs:
               --out-dir "$output_dir"
           done
 
-      - name: Validate Linux DEB structure, checksum, and smoke
+      - name: Validate Linux DEB and AppImage structure, checksum, and smoke
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          EXPECTED_DEB_MAINTAINER: "Legion <dasblueeyeddevil@gmail.com>"
         run: |
           set -euo pipefail
-          package_dir="$GITHUB_WORKSPACE/target/native-release/linux-deb"
-          deb_path="$package_dir/legion-desktop-linux-x64-deb.deb"
-          checksum_path="$deb_path.sha256"
-          metadata_path="$package_dir/RELEASE-METADATA.toml"
-          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
-          staging_dir="$RUNNER_TEMP/legion-deb-staging"
-          smoke_dir="$RUNNER_TEMP/legion-deb-smoke"
-          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/linux-x64-deb/workspace"
-          mkdir -p "$staging_dir" "$smoke_dir"
-
-          test -s "$deb_path"
-          test -s "$checksum_path"
-          test -s "$metadata_path"
-          checksum_line="$(tr -d '\r' < "$checksum_path")"
-          expected_hash="${checksum_line%% *}"
-          expected_file="${checksum_line#* }"
-          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
-          test "$expected_file" = "*$(basename "$deb_path")"
-          actual_hash="$(sha256sum "$deb_path" | awk '{print $1}')"
-          test "$actual_hash" = "$expected_hash"
-          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
-          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
-          grep -Fqx 'platform = "linux"' "$metadata_path"
-          grep -Fqx 'architecture = "x64"' "$metadata_path"
-          grep -Fqx 'format = "deb"' "$metadata_path"
-          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
-          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
-
-          dpkg-deb --info "$deb_path" | tee -a "$evidence_path"
-          package_version="$(dpkg-deb -f "$deb_path" Version)"
-          test "$package_version" = "$RELEASE_VERSION"
-          printf 'package_version=passed version=%s\n' "$package_version" >> "$evidence_path"
-          dpkg-deb -x "$deb_path" "$staging_dir"
-          staged_binary="$staging_dir/usr/bin/legion-desktop"
-          desktop_entry="$staging_dir/usr/share/applications/legion.desktop"
-          icon_path="$staging_dir/usr/share/icons/hicolor/512x512/apps/legion.png"
-          test -x "$staged_binary"
-          test -s "$desktop_entry"
-          test -s "$icon_path"
-          printf 'structure=passed binary=%s desktop=%s icon=%s\n' \
-            "$staged_binary" "$desktop_entry" "$icon_path" >> "$evidence_path"
-
-          set +e
-          xvfb-run --auto-servernum "$staged_binary" \
-            --beta-smoke --duration-ms 1500 \
-            --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$beta_workspace" \
-            --evidence "$smoke_dir/beta-smoke.md" \
-            --session-state "$smoke_dir/session.json" \
-            --diagnostics-export "$smoke_dir/diagnostics.md" \
-            > "$smoke_dir/stdout-stderr.log" 2>&1
-          smoke_status=$?
-          set -e
-          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
-          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
-          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
-          test "$smoke_status" -eq 0
-
-      - name: Validate Linux AppImage structure, checksum, and smoke
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_dir="$GITHUB_WORKSPACE/target/native-release/linux-appimage"
-          appimage_path="$package_dir/legion-desktop-linux-x64-appimage.AppImage"
-          checksum_path="$appimage_path.sha256"
-          metadata_path="$package_dir/RELEASE-METADATA.toml"
-          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
-          smoke_dir="$RUNNER_TEMP/legion-appimage-smoke"
-          extract_dir="$RUNNER_TEMP/legion-appimage-extract"
-          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/linux-x64-appimage/workspace"
-          mkdir -p "$smoke_dir" "$extract_dir"
-
-          test -s "$appimage_path"
-          test -s "$checksum_path"
-          test -s "$metadata_path"
-          checksum_line="$(tr -d '\r' < "$checksum_path")"
-          expected_hash="${checksum_line%% *}"
-          expected_file="${checksum_line#* }"
-          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
-          test "$expected_file" = "*$(basename "$appimage_path")"
-          actual_hash="$(sha256sum "$appimage_path" | awk '{print $1}')"
-          test "$actual_hash" = "$expected_hash"
-          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
-          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
-          grep -Fqx 'platform = "linux"' "$metadata_path"
-          grep -Fqx 'architecture = "x64"' "$metadata_path"
-          grep -Fqx 'format = "appimage"' "$metadata_path"
-          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
-          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
-
-          chmod +x "$appimage_path"
-          file "$appimage_path" | tee -a "$evidence_path"
-          (cd "$extract_dir" && "$appimage_path" --appimage-extract >/dev/null)
-          apprun_path="$extract_dir/squashfs-root/AppRun"
-          app_binary="$extract_dir/squashfs-root/usr/bin/legion-desktop"
-          desktop_entry="$extract_dir/squashfs-root/usr/share/applications/legion-desktop.desktop"
-          icon_path="$extract_dir/squashfs-root/usr/share/icons/hicolor/512x512/apps/legion.png"
-          test -x "$apprun_path"
-          test -f "$app_binary"
-          test -x "$app_binary"
-          test -s "$desktop_entry"
-          test -s "$icon_path"
-          printf 'structure=passed apprun=%s binary=%s desktop=%s icon=%s\n' \
-            "$apprun_path" "$app_binary" "$desktop_entry" "$icon_path" >> "$evidence_path"
-
-          set +e
-          xvfb-run --auto-servernum "$appimage_path" --appimage-extract-and-run \
-            --beta-smoke --duration-ms 1500 \
-            --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$beta_workspace" \
-            --evidence "$smoke_dir/beta-smoke.md" \
-            --session-state "$smoke_dir/session.json" \
-            --diagnostics-export "$smoke_dir/diagnostics.md" \
-            > "$smoke_dir/stdout-stderr.log" 2>&1
-          smoke_status=$?
-          set -e
-          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
-          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
-          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
-          test "$smoke_status" -eq 0
+          # Run both verifiers to completion so a DEB defect can never hide
+          # the AppImage E2E result; fail afterward if either failed.
+          failures=0
+          bash scripts/verify-native-package.sh \
+            --format deb \
+            --package-dir "$GITHUB_WORKSPACE/target/native-release/linux-deb" \
+            --release-version "$RELEASE_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --architecture x64 || failures=1
+          bash scripts/verify-native-package.sh \
+            --format appimage \
+            --package-dir "$GITHUB_WORKSPACE/target/native-release/linux-appimage" \
+            --release-version "$RELEASE_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --architecture x64 || failures=1
+          exit "$failures"
 
       - name: Package Windows MSI
         if: runner.os == 'Windows'
@@ -408,120 +307,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $packageDir = Join-Path $env:GITHUB_WORKSPACE "target/native-release/windows-wix"
-          $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
-          $checksumPath = "$msiPath.sha256"
-          $metadataPath = Join-Path $packageDir "RELEASE-METADATA.toml"
-          $evidencePath = Join-Path $packageDir "PACKAGE-EVIDENCE.txt"
-          $stagingDir = Join-Path $env:RUNNER_TEMP "legion-msi-staging"
-          $smokeDir = Join-Path $env:RUNNER_TEMP "legion-msi-smoke"
-          $betaWorkspace = Join-Path $env:GITHUB_WORKSPACE "target/release-smoke/windows-x64-msi/workspace"
-          New-Item -ItemType Directory -Force -Path $stagingDir, $smokeDir | Out-Null
-
-          foreach ($required in @($msiPath, $checksumPath, $metadataPath)) {
-              if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-                  throw "Missing required package file: $required"
-              }
-          }
-          $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Replace("`r", "").Trim()
-          if ($checksumLine -notmatch '^([0-9a-f]{64}) \*(.+)$') {
-              throw "Malformed checksum file: $checksumPath"
-          }
-          if ($Matches[2] -ne (Split-Path -Leaf $msiPath)) {
-              throw "Checksum names unexpected installer: $($Matches[2])"
-          }
-          $actualHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $Matches[1]) {
-              throw "MSI checksum mismatch"
-          }
-          $metadata = Get-Content -LiteralPath $metadataPath
-          foreach ($line in @(
-              "release_version = `"$env:RELEASE_VERSION`""
-              "git_sha = `"$env:SOURCE_SHA`""
-              'platform = "windows"'
-              'architecture = "x64"'
-              'format = "wix"'
-              'signer_status = "unsigned-beta/no-os-code-signing"'
-          )) {
-              if ($metadata -cnotcontains $line) {
-                  throw "Missing metadata line: $line"
-              }
-          }
-          Add-Content -LiteralPath $evidencePath -Value "checksum=passed sha256=$actualHash"
-
-          $env:MSI_PATH = $msiPath
-          $env:STAGING_DIR = $stagingDir
-          $arguments = @('/a', "`"$env:MSI_PATH`"", '/qn', "TARGETDIR=`"$env:STAGING_DIR`"", '/norestart')
-          $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
-          if ($process.ExitCode -ne 0) {
-              throw "msiexec administrative install failed with exit code $($process.ExitCode)"
-          }
-          $stagedBinaries = @(
-              Get-ChildItem -LiteralPath $env:STAGING_DIR -Recurse -File -Filter "legion-desktop.exe"
-          )
-          if ($stagedBinaries.Count -ne 1) {
-              $found = ($stagedBinaries.FullName -join ", ")
-              throw "Expected exactly one staged legion-desktop.exe; found $($stagedBinaries.Count): $found"
-          }
-          $stagedBinary = $stagedBinaries[0].FullName
-
-          $windowsInstaller = $null
-          $database = $null
-          $view = $null
-          $record = $null
-          try {
-              $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
-              $database = $windowsInstaller.OpenDatabase($msiPath, 0)
-              $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''
-              $view = $database.OpenView($query)
-              $view.Execute()
-              $record = $view.Fetch()
-              if ($null -eq $record) {
-                  throw "MSI Property table does not contain ProductVersion"
-              }
-              $productVersion = $record.StringData(1)
-              if ($productVersion -cne $env:RELEASE_VERSION) {
-                  throw "MSI ProductVersion mismatch: expected $env:RELEASE_VERSION, found $productVersion"
-              }
-          } finally {
-              if ($null -ne $view) {
-                  $view.Close()
-              }
-              foreach ($comObject in @($record, $view, $database, $windowsInstaller)) {
-                  if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
-                      [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
-                  }
-              }
-          }
-          Add-Content -LiteralPath $evidencePath -Value "package_version=passed version=$productVersion"
-          Add-Content -LiteralPath $evidencePath -Value "structure=passed binary=$stagedBinary"
-
-          $smokeLog = Join-Path $smokeDir "stdout-stderr.log"
-          $oldPreference = $ErrorActionPreference
-          $ErrorActionPreference = "Continue"
-          $smokeArguments = @(
-              "--beta-smoke"
-              "--duration-ms", "1500"
-              "--workspace", $env:GITHUB_WORKSPACE
-              "--beta-workspace", $betaWorkspace
-              "--evidence", (Join-Path $smokeDir "beta-smoke.md")
-              "--session-state", (Join-Path $smokeDir "session.json")
-              "--diagnostics-export", (Join-Path $smokeDir "diagnostics.md")
-          )
-          & $stagedBinary @smokeArguments *> $smokeLog
-          $smokeStatus = $LASTEXITCODE
-          $ErrorActionPreference = $oldPreference
-          Add-Content -LiteralPath $evidencePath -Value "smoke_exit=$smokeStatus policy=hard-fail-beta-workflow-is-headless"
-          if (Test-Path -LiteralPath $smokeLog) {
-              Get-Content -LiteralPath $smokeLog | Add-Content -LiteralPath $evidencePath
-          }
-          $betaEvidence = Join-Path $smokeDir "beta-smoke.md"
-          if (Test-Path -LiteralPath $betaEvidence) {
-              Get-Content -LiteralPath $betaEvidence | Add-Content -LiteralPath $evidencePath
-          }
-          if ($smokeStatus -ne 0) {
-              throw "Installed MSI beta smoke failed with exit code $smokeStatus"
-          }
+          & .\scripts\verify-native-package.ps1 `
+            -PackageDir (Join-Path $env:GITHUB_WORKSPACE "target/native-release/windows-wix") `
+            -ReleaseVersion $env:RELEASE_VERSION `
+            -SourceSha $env:SOURCE_SHA `
+            -WorkspaceRoot $env:GITHUB_WORKSPACE
 
       - name: Package macOS DMG
         if: runner.os == 'macOS'
@@ -543,91 +333,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stem="legion-desktop-macos-$PACKAGE_ARCHITECTURE-dmg"
-          package_dir="$GITHUB_WORKSPACE/target/native-release/macos-$PACKAGE_ARCHITECTURE-dmg"
-          dmg_path="$package_dir/$stem.dmg"
-          checksum_path="$dmg_path.sha256"
-          metadata_path="$package_dir/RELEASE-METADATA.toml"
-          evidence_path="$package_dir/PACKAGE-EVIDENCE.txt"
-          staging_dir="$RUNNER_TEMP/legion-dmg-staging"
-          smoke_dir="$RUNNER_TEMP/legion-dmg-smoke"
-          attach_plist="$RUNNER_TEMP/legion-dmg-attach.plist"
-          beta_workspace="$GITHUB_WORKSPACE/target/release-smoke/macos-$PACKAGE_ARCHITECTURE-dmg/workspace"
-          mkdir -p "$staging_dir" "$smoke_dir"
-
-          test -s "$dmg_path"
-          test -s "$checksum_path"
-          test -s "$metadata_path"
-          checksum_line="$(tr -d '\r' < "$checksum_path")"
-          expected_hash="${checksum_line%% *}"
-          expected_file="${checksum_line#* }"
-          [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
-          test "$expected_file" = "*$(basename "$dmg_path")"
-          actual_hash="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
-          test "$actual_hash" = "$expected_hash"
-          grep -Fqx "release_version = \"$RELEASE_VERSION\"" "$metadata_path"
-          grep -Fqx "git_sha = \"$SOURCE_SHA\"" "$metadata_path"
-          grep -Fqx 'platform = "macos"' "$metadata_path"
-          grep -Fqx "architecture = \"$PACKAGE_ARCHITECTURE\"" "$metadata_path"
-          grep -Fqx 'format = "dmg"' "$metadata_path"
-          grep -Fqx 'signer_status = "unsigned-beta/no-os-code-signing"' "$metadata_path"
-          printf 'checksum=passed sha256=%s\n' "$actual_hash" >> "$evidence_path"
-
-          hdiutil verify "$dmg_path" | tee -a "$evidence_path"
-          hdiutil attach "$dmg_path" -readonly -nobrowse -plist > "$attach_plist"
-          mount_point="$(python3 - "$attach_plist" <<'PY'
-          import plistlib
-          import sys
-
-          with open(sys.argv[1], "rb") as source:
-              data = plistlib.load(source)
-          mounts = [
-              entity["mount-point"]
-              for entity in data.get("system-entities", [])
-              if "mount-point" in entity
-          ]
-          if len(mounts) != 1:
-              raise SystemExit(f"Expected one mounted volume, got {mounts!r}")
-          print(mounts[0])
-          PY
-          )"
-          cleanup() {
-            if [[ -n "${mount_point:-}" ]]; then
-              hdiutil detach "$mount_point" || true
-            fi
-          }
-          trap cleanup EXIT
-          app_count="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')"
-          test "$app_count" -eq 1
-          app_path="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          copied_app="$staging_dir/$(basename "$app_path")"
-          ditto "$app_path" "$copied_app"
-          info_plist="$copied_app/Contents/Info.plist"
-          staged_binary="$copied_app/Contents/MacOS/legion-desktop"
-          test -f "$info_plist"
-          test -x "$staged_binary"
-          bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")"
-          test "$bundle_version" = "$RELEASE_VERSION"
-          hdiutil detach "$mount_point"
-          mount_point=""
-          printf 'structure=passed app=%s binary=%s bundle_version=%s\n' \
-            "$copied_app" "$staged_binary" "$bundle_version" >> "$evidence_path"
-
-          set +e
-          "$staged_binary" \
-            --beta-smoke --duration-ms 1500 \
-            --workspace "$GITHUB_WORKSPACE" \
-            --beta-workspace "$beta_workspace" \
-            --evidence "$smoke_dir/beta-smoke.md" \
-            --session-state "$smoke_dir/session.json" \
-            --diagnostics-export "$smoke_dir/diagnostics.md" \
-            > "$smoke_dir/stdout-stderr.log" 2>&1
-          smoke_status=$?
-          set -e
-          printf 'smoke_exit=%s policy=hard-fail-beta-workflow-is-headless\n' "$smoke_status" >> "$evidence_path"
-          cat "$smoke_dir/stdout-stderr.log" >> "$evidence_path"
-          test ! -f "$smoke_dir/beta-smoke.md" || cat "$smoke_dir/beta-smoke.md" >> "$evidence_path"
-          test "$smoke_status" -eq 0
+          bash scripts/verify-native-package.sh \
+            --format dmg \
+            --package-dir "$GITHUB_WORKSPACE/target/native-release/macos-$PACKAGE_ARCHITECTURE-dmg" \
+            --release-version "$RELEASE_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --architecture "$PACKAGE_ARCHITECTURE"
 
       - name: Upload Linux DEB artifact
         if: always() && runner.os == 'Linux'
@@ -639,6 +351,7 @@ jobs:
             target/native-release/linux-deb/legion-desktop-linux-x64-deb.deb.sha256
             target/native-release/linux-deb/RELEASE-METADATA.toml
             target/native-release/linux-deb/PACKAGE-EVIDENCE.txt
+            target/native-release/linux-deb/VALIDATION-SUMMARY.toml
           if-no-files-found: error
 
       - name: Upload Linux AppImage artifact
@@ -651,6 +364,7 @@ jobs:
             target/native-release/linux-appimage/legion-desktop-linux-x64-appimage.AppImage.sha256
             target/native-release/linux-appimage/RELEASE-METADATA.toml
             target/native-release/linux-appimage/PACKAGE-EVIDENCE.txt
+            target/native-release/linux-appimage/VALIDATION-SUMMARY.toml
           if-no-files-found: error
 
       - name: Upload Windows MSI artifact
@@ -663,6 +377,7 @@ jobs:
             target/native-release/windows-wix/legion-desktop-windows-x64-msi.msi.sha256
             target/native-release/windows-wix/RELEASE-METADATA.toml
             target/native-release/windows-wix/PACKAGE-EVIDENCE.txt
+            target/native-release/windows-wix/VALIDATION-SUMMARY.toml
           if-no-files-found: error
 
       - name: Upload macOS DMG artifact
@@ -675,6 +390,7 @@ jobs:
             target/native-release/macos-${{ matrix.architecture }}-dmg/legion-desktop-macos-${{ matrix.architecture }}-dmg.dmg.sha256
             target/native-release/macos-${{ matrix.architecture }}-dmg/RELEASE-METADATA.toml
             target/native-release/macos-${{ matrix.architecture }}-dmg/PACKAGE-EVIDENCE.txt
+            target/native-release/macos-${{ matrix.architecture }}-dmg/VALIDATION-SUMMARY.toml
           if-no-files-found: error
 
   publish:
@@ -704,6 +420,66 @@ jobs:
           pattern: legion-desktop-*
           path: downloaded
 
+      - name: Enforce validation summary gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+          import tomllib
+
+          expected_packages = [
+              ("legion-desktop-linux-x64-deb", "deb", "x64"),
+              ("legion-desktop-linux-x64-appimage", "appimage", "x64"),
+              ("legion-desktop-windows-x64-msi", "wix", "x64"),
+              ("legion-desktop-macos-x64-dmg", "dmg", "x64"),
+              ("legion-desktop-macos-arm64-dmg", "dmg", "arm64"),
+          ]
+          tag = os.environ["TAG"]
+          source_sha = os.environ["SOURCE_SHA"]
+          failures = []
+          for stem, fmt, architecture in expected_packages:
+              path = os.path.join("downloaded", stem, "VALIDATION-SUMMARY.toml")
+              if not os.path.isfile(path):
+                  failures.append(f"{stem}: missing {path}")
+                  continue
+              try:
+                  with open(path, "rb") as handle:
+                      summary = tomllib.load(handle)
+              except tomllib.TOMLDecodeError as error:
+                  failures.append(f"{stem}: malformed summary: {error}")
+                  continue
+              expectations = {
+                  "schema_version": 1,
+                  "candidate_tag": tag,
+                  "source_sha": source_sha,
+                  "format": fmt,
+                  "architecture": architecture,
+                  "checksum": "passed",
+                  "metadata": "passed",
+                  "package_version": "passed",
+                  "structure": "passed",
+                  "smoke_exit": 0,
+                  "result": "passed",
+              }
+              for key, expected in expectations.items():
+                  actual = summary.get(key)
+                  if actual != expected:
+                      failures.append(
+                          f"{stem}: {key}={actual!r} (expected {expected!r})"
+                      )
+          if failures:
+              print("Validation summary gate REJECTED publication:")
+              for failure in failures:
+                  print(f"  - {failure}")
+              sys.exit(1)
+          print(
+              f"Validation summary gate passed: all {len(expected_packages)} "
+              f"packages report result=passed and smoke_exit=0 for {tag}."
+          )
+          PY
+
       - name: Verify and stage release assets
         shell: bash
         run: |
@@ -721,9 +497,10 @@ jobs:
             local checksum="$installer.sha256"
             local metadata="$artifact_dir/RELEASE-METADATA.toml"
             local evidence="$artifact_dir/PACKAGE-EVIDENCE.txt"
+            local summary="$artifact_dir/VALIDATION-SUMMARY.toml"
             local checksum_line expected_hash expected_file actual_hash
 
-            for required in "$installer" "$checksum" "$metadata" "$evidence"; do
+            for required in "$installer" "$checksum" "$metadata" "$evidence" "$summary"; do
               test -s "$required" || { echo "Missing required release file: $required" >&2; return 1; }
             done
             checksum_line="$(tr -d '\r' < "$checksum")"
@@ -743,6 +520,7 @@ jobs:
             cp "$installer" "$checksum" dist/
             cp "$metadata" "dist/$stem-RELEASE-METADATA.toml"
             cp "$evidence" "dist/$stem-PACKAGE-EVIDENCE.txt"
+            cp "$summary" "dist/$stem-VALIDATION-SUMMARY.toml"
           }
 
           verify_package legion-desktop-linux-x64-deb deb linux x64 deb
@@ -755,7 +533,7 @@ jobs:
           installer_count="$(find downloaded -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.msi' -o -name '*.dmg' \) | wc -l | tr -d ' ')"
           test "$artifact_count" -eq 5
           test "$installer_count" -eq 5
-          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 20
+          test "$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 25
 
       - name: Write release notes
         shell: bash

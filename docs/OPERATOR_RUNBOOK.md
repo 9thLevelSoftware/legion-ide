@@ -46,14 +46,23 @@ The current package-and-support path is intentionally explicit so release notes 
 
 ### Native installer release (manual)
 
-The installed `legion-release.yml` is a manual-only native-release workflow. An authorized maintainer starts it from the intended source branch with:
+The installed `legion-release.yml` is a manual-only native-release workflow with a required `mode` input. An authorized maintainer starts it from the intended source branch with:
 
 ```sh
-gh workflow run legion-release.yml
+# Build and fully validate all five installers without creating a tag or release:
+gh workflow run legion-release.yml -f mode=verify-only
+
+# Validate and, only if every package verifier passes, tag and publish the next v0.0.N prerelease:
+gh workflow run legion-release.yml -f mode=publish
+
 gh run list --workflow legion-release.yml
 ```
 
-The workflow selects the next unused `v0.0.N` tag, beginning with `v0.0.1`; it creates the GitHub tag and prerelease and publishes the native assets. It passes the corresponding numeric version (for example, `0.0.1`) to the package scripts; the script examples use `0.0.1` only as a placeholder and the workflow substitutes its computed version. This beta release number is independent of the workspace version in `Cargo.toml`.
+A `verify-only` run exercises the complete package-and-verify pipeline but can never create a tag, GitHub Release, or release asset. In `publish` mode the workflow selects the next unused `v0.0.N` tag, beginning with `v0.0.1`; it creates the GitHub tag and prerelease and publishes the native assets. It passes the corresponding numeric version (for example, `0.0.1`) to the package scripts; the script examples use `0.0.1` only as a placeholder and the workflow substitutes its computed version. This beta release number is independent of the workspace version in `Cargo.toml`.
+
+Package verification is performed by two version-controlled entry points rather than inline workflow YAML: `scripts/verify-native-package.sh` (DEB, AppImage, DMG) and `scripts/verify-native-package.ps1` (MSI). Each verifier checks artifact existence, SHA-256, release metadata (including `signer_status`), install/extract structure, installer version (the DEB verifier additionally requires a non-empty Debian `Maintainer:` field), and runs the extracted/installed binary headlessly with `--beta-smoke`; a non-zero smoke exit is a hard failure. The beta smoke workspace is always `target/release-smoke/<platform>-<arch>-<format>/workspace` under the checked-out workspace, because the application rejects beta workspaces outside `<workspace>/target`. Every verifier prints its complete `PACKAGE-EVIDENCE.txt` report to the job log on success and on failure, and the package jobs upload the evidence artifacts even when verification fails, so no failure detail is visible only inside a runner temporary directory. Contract tests for the verifiers run with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native-package-verifiers.ps1` (pwsh works too).
+
+Each verifier also writes a machine-readable `VALIDATION-SUMMARY.toml` beside its installer. The `publish` job parses all five summaries with Python's `tomllib` before any tag or release mutation and refuses to publish unless every summary reports the expected candidate tag, source SHA, format, and architecture with `result = "passed"` and `smoke_exit = 0`; a missing or malformed summary is likewise a publication failure.
 
 Each GitHub prerelease contains these unsigned-beta installer assets and their SHA-256 checksum files:
 
@@ -65,9 +74,9 @@ Each GitHub prerelease contains these unsigned-beta installer assets and their S
 | Linux x64 | `legion-desktop-linux-x64-deb.deb` | Debian package |
 | Linux x64 | `legion-desktop-linux-x64-appimage.AppImage` | AppImage |
 
-For each package, the release includes the installer, its matching `.sha256` checksum, `<package-stem>-RELEASE-METADATA.toml`, and `<package-stem>-PACKAGE-EVIDENCE.txt`; it does not promise a native package manifest. The evidence file records the package-structure checks, checksum verification, and beta-smoke logs produced by the package job. Treat all five installers as `unsigned-beta/no-os-code-signing`: Windows SmartScreen may warn before opening the MSI, and macOS Gatekeeper may require the tester to use Finder's explicit **Open** action for the DMG or app. Only bypass either warning after independently verifying the release source and checksum.
+For each package, the release includes the installer, its matching `.sha256` checksum, `<package-stem>-RELEASE-METADATA.toml`, `<package-stem>-PACKAGE-EVIDENCE.txt`, and `<package-stem>-VALIDATION-SUMMARY.toml`; it does not promise a native package manifest. The evidence file records the package-structure checks, checksum verification, and beta-smoke logs produced by the package job; the validation summary is the machine-readable record the publish gate enforced. Treat all five installers as `unsigned-beta/no-os-code-signing` (no code signature, no notarization): Windows SmartScreen may warn before opening the MSI, and macOS Gatekeeper may require the tester to use Finder's explicit **Open** action for the DMG or app. Only bypass either warning after independently verifying the release source and checksum.
 
-For DMG inspection, run `hdiutil verify <artifact>`, attach it read-only, then detach the mounted volume with `hdiutil detach <mount-point>` when inspection is complete.
+For DMG inspection, run `hdiutil verify <artifact>`, attach it read-only, then detach the mounted volume with `hdiutil detach <mount-point>` when inspection is complete. The hosted DMG verification follows the same tested procedure: verify, attach read-only, copy the single `.app` bundle out of the volume, detach, confirm `CFBundleShortVersionString`, then run the **copied** `Contents/MacOS/legion-desktop` with `--beta-smoke` against the `target/release-smoke/macos-<arch>-dmg/workspace` beta workspace — never from the mounted volume. The verifier guarantees the volume is detached and the full evidence report is printed even when a check fails, so a smoke failure is visible in the job log rather than hidden behind a final `hdiutil detach` line.
 
 For local Linux testing, download the matching asset and run one of these commands:
 

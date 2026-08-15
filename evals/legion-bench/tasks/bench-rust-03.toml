@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-rust-03.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-03"
+kind = "test_add"
+fixture_repo = "fixtures/bench-rust-lib"
+holdout = false
+
+prompt = """
+miniconf's `Value::as_bool` (src/lib.rs) has no test coverage. Create a new
+integration test file at tests/value_bool.rs that exercises
+`miniconf::Value::as_bool` with at least these cases: "true", "yes", and "on"
+(including mixed-case spellings such as "Yes" or "TRUE") return Some(true);
+"false", "no", and "off" return Some(false); an unrecognized value such as
+"maybe" and the empty string return None. Construct values with
+`miniconf::Value::new`. Do not modify any existing files — only add the new
+test file, and make sure the whole test suite passes.
+"""
+
+[verification]
+command = "cargo test --offline"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["tests/value_bool.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

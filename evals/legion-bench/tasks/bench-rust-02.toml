@@ -1,0 +1,38 @@
+# evals/legion-bench/tasks/bench-rust-02.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-02"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-rust-cli"
+holdout = true
+
+prompt = """
+Passing `--lines` to wordtally enables the word counter instead of the line
+counter, so `wordtally --lines file` prints the word count. Flag handling
+lives in `cli::parse` in src/cli.rs. Fix the `--lines` branch so it enables
+the line counter only, without changing any other flag's behavior or the
+function signature. The failing unit test `lines_flag_enables_only_lines`
+in src/cli.rs covers this; do not modify the tests themselves.
+"""
+
+[verification]
+command = "cargo test --offline cli::"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/cli.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = []
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

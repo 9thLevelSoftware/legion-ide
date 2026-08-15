@@ -1,0 +1,53 @@
+# Release Procurement & Key Escrow (P8.F1.T5)
+
+Status: **open — purchases are owner actions.** This document is the checklist
+and the standing key-inventory policy. Update the Status column as each item
+lands; several backlog cards are `blocked` on the `EXT-*` ids below.
+
+## Procurement checklist
+
+| Item | Unblocks | Est. cost | Lead time | Where | Status |
+| --- | --- | --- | --- | --- | --- |
+| Apple Developer Program (organization or individual) | `EXT-CERT-MAC` — Developer ID signing + notarization (Phase 5); fresh-VM Gatekeeper evidence (P8.F1.T3) | $99/yr | Days (identity verification) | developer.apple.com/programs | ☐ |
+| Azure Trusted Signing account + identity validation | `EXT-CERT-WIN` — Authenticode signing for MSI via signtool dlib; SmartScreen reputation accrual starts at first signed release | ~$9.99/mo (Basic) | 1–3 weeks (identity validation) | portal.azure.com → Trusted Signing | ☐ |
+| Linux signing keypair (minisign/Ed25519) | `EXT-CERT-LIN` — detached signatures for DEB/AppImage + signed SHA256SUMS | $0 (generate locally) | Immediate | `minisign -G` (store per escrow policy below) | ☐ |
+| Update-feed domain + Cloudflare R2 bucket | `EXT-FEED` — HTTPS host for per-channel `release-manifest.v1.toml` + `.sig` (ADR-0042; feed topology ADR to follow in Phase 5) | ~$10/yr domain; R2 ≈ $0 at beta scale | Days | Cloudflare dashboard | ☐ |
+| Cloud Mac access (e.g. MacStadium / AWS EC2 Mac / rented Mac mini) | `EXT-VM` — fresh-VM Gatekeeper evidence (P8.F1.T3), macOS notarization drills | ~$50–130/mo (cancel after evidence) | Days | vendor of choice | ☐ |
+| Hosted provider API keys (Anthropic BYOK at minimum) | `EXT-LIVEKEY` — live-model adversarial evals (PR-AI-002 deferred item), Phase 3 hostile-eval runs | usage-billed | Immediate | console.anthropic.com | ☐ |
+
+Not purchased deliberately: no GPU CI runners yet (local-model perf evidence
+runs on the owner's hardware until Phase 4 sizes the need), no external pen
+test yet (`EXT-PENTEST` is Phase 7 scope).
+
+## Key inventory
+
+| Key / credential | Purpose | Lives where | Backup |
+| --- | --- | --- | --- |
+| Ed25519 release-manifest signing key (ADR-0042) | Signs `release-manifest.v1.toml`; public key pinned in the `legion-app` updater | CI secret (never in tree; `xtask` signer config is reference-only) | Offline copy required — see escrow policy |
+| Azure Trusted Signing access (service principal / API creds) | MSI Authenticode at release time | Azure + GitHub Actions secret | Azure account recovery + break-glass owner creds |
+| Apple Developer ID certificates + App Store Connect API key | codesign/notarytool | Apple account + GitHub Actions secret | Apple account recovery; cert re-issue possible |
+| minisign secret key (Linux artifacts) | DEB/AppImage detached sigs | CI secret | Offline copy required |
+| Provider API keys (BYOK) | Live evals only — never shipped, never default | CI secret (evals), OS keyring locally | Revocable/reissuable; no escrow needed |
+
+## Escrow policy
+
+1. **Offline backup** of the Ed25519 manifest key and the minisign secret key:
+   two copies on separate offline media, stored apart from the development
+   machine. Loss of the manifest key strands every installed client on its
+   pinned public key — this is the single worst credential loss in the system.
+2. **Rotation path**: the ADR-0042 manifest schema carries a signer reference;
+   a `manifest key v2` rotation is executed by shipping an update (signed with
+   v1) whose binary pins both v1 and v2, then switching the feed to v2
+   signatures. A break-glass rotation drill is added to `update-drill` in
+   Phase 5 (roadmap step 5.9).
+3. **No signing credential is ever committed**, echoed in `AGENTS.md` and
+   enforced by the existing release-pipeline posture (`dry-run/no-production-signer`
+   until credentials exist in CI).
+4. **Bus factor**: one owner today. Each account above must have recovery
+   contact + 2FA backup codes stored with the offline media.
+
+## Backlog linkage
+
+- `P8.F1.T5` (this checklist) — in progress until every row above is checked.
+- `P8.F1.T3` (fresh-VM evidence) — `blocked` / `EXT-VM`.
+- Phase 5 signing pipeline work starts only after `EXT-CERT-WIN` + `EXT-CERT-MAC` land; everything else in Phases 0–4 proceeds without them.

@@ -586,10 +586,21 @@ enum Commands {
         /// Output directory for the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Run mode for the baseline. Recorded is the offline CI default;
-        /// live is reserved for the weekly external run.
+        /// Run mode for the baseline. Recorded is the offline CI default
+        /// (synthetic budget arithmetic); live is reserved for the weekly
+        /// external run; live-local executes the corpus tasks for real against
+        /// an OpenAI-compatible endpoint (env: LEGION_BENCH_ENDPOINT, default
+        /// http://127.0.0.1:11434/v1; LEGION_BENCH_MODEL required;
+        /// LEGION_BENCH_API_KEY optional).
         #[arg(long, default_value = "recorded")]
         mode: String,
+        /// Corpus directory of live-local task TOMLs (live-local mode only).
+        #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
+        corpus: String,
+        /// Also execute corpus tasks marked `holdout = true` (live-local mode
+        /// only). Excluded holdout tasks are recorded as skipped.
+        #[arg(long = "include-holdout")]
+        include_holdout: bool,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -603,6 +614,10 @@ enum Commands {
         /// Output directory holding the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
+        /// Corpus directory used to recompute the suite when verifying a
+        /// live-local report.
+        #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
+        corpus: String,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -885,14 +900,17 @@ fn main() {
         Commands::LegionBench {
             out,
             mode,
+            corpus,
+            include_holdout,
             strict,
             no_strict,
-        } => run_legion_bench_command(&out, &mode, strict && !no_strict),
+        } => run_legion_bench_command(&out, &mode, &corpus, include_holdout, strict && !no_strict),
         Commands::VerifyLegionBench {
             out,
+            corpus,
             strict,
             no_strict,
-        } => run_verify_legion_bench_command(&out, strict && !no_strict),
+        } => run_verify_legion_bench_command(&out, &corpus, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
         Commands::VerifyReadinessConsistency { ledger, backlog } => {
             run_verify_readiness_consistency_command(&ledger, &backlog)
@@ -1471,7 +1489,13 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
     }
 }
 
-fn run_legion_bench_command(out: &str, mode: &str, strict: bool) -> i32 {
+fn run_legion_bench_command(
+    out: &str,
+    mode: &str,
+    corpus: &str,
+    include_holdout: bool,
+    strict: bool,
+) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -1487,6 +1511,23 @@ fn run_legion_bench_command(out: &str, mode: &str, strict: bool) -> i32 {
             return 1;
         }
     };
+    if mode == xtask::legion_bench::LegionBenchRunMode::LiveLocal {
+        let config = match xtask::legion_bench_live::live_config_from_env() {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("legion bench failed: {err}");
+                return 1;
+            }
+        };
+        let opts = xtask::legion_bench_live::LiveLocalOptions {
+            out_dir: out.to_string(),
+            corpus_dir: corpus.to_string(),
+            include_holdout,
+            strict,
+            config,
+        };
+        return xtask::legion_bench_live::run_live_local(&workspace_root, &opts);
+    }
     let suite = xtask::legion_bench::plan_default_legion_bench_suite();
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
     let report =
@@ -1517,7 +1558,7 @@ fn run_legion_bench_command(out: &str, mode: &str, strict: bool) -> i32 {
     }
 }
 
-fn run_verify_legion_bench_command(out: &str, strict: bool) -> i32 {
+fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -1536,17 +1577,32 @@ fn run_verify_legion_bench_command(out: &str, strict: bool) -> i32 {
             return 1;
         }
     };
-    let suite = xtask::legion_bench::plan_default_legion_bench_suite();
+    // Live-local reports are verified against the corpus-derived suite (the
+    // task list the runner actually executed); recorded reports keep verifying
+    // against the in-code default suite, byte-identical to the historical gate.
+    let suite = if report.scoring_mode == xtask::legion_bench::SCORING_MODE_LIVE_LOCAL {
+        let corpus_dir = workspace_root.join(corpus);
+        match xtask::legion_bench_corpus::load_corpus(&corpus_dir) {
+            Ok(tasks) => xtask::legion_bench_corpus::corpus_suite(&tasks),
+            Err(err) => {
+                eprintln!("legion bench verify failed: {err}");
+                return 1;
+            }
+        }
+    } else {
+        xtask::legion_bench::plan_default_legion_bench_suite()
+    };
     if let Err(err) = xtask::legion_bench::verify_legion_bench_report(&report, &suite) {
         eprintln!("legion bench verify failed: {err}");
         return 1;
     }
     println!(
-        "legion bench verify: total={} passed={} failed={} regressed={} report={} strict={} mode={} provider={} fingerprint={}",
+        "legion bench verify: total={} passed={} failed={} regressed={} skipped={} report={} strict={} mode={} provider={} fingerprint={}",
         report.summary.total,
         report.summary.passed,
         report.summary.failed,
         report.summary.regressed,
+        report.summary.skipped,
         report_path.display(),
         strict,
         report.mode.as_str(),
@@ -1927,8 +1983,11 @@ fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBen
         "live" | "live_weekly" | "weekly" => {
             Ok(xtask::legion_bench::LegionBenchRunMode::LiveWeekly)
         }
+        "live-local" | "live_local" | "local" => {
+            Ok(xtask::legion_bench::LegionBenchRunMode::LiveLocal)
+        }
         other => Err(format!(
-            "unknown legion-bench mode `{other}`; expected recorded or live"
+            "unknown legion-bench mode `{other}`; expected recorded, live, or live-local"
         )),
     }
 }

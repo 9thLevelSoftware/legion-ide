@@ -1,6 +1,8 @@
 product-name = "Legion"
 name = "legion-desktop"
 version = "0.0.0"
+# cargo-packager maps `authors` to the Debian control-file Maintainer field.
+authors = ["Legion <dasblueeyeddevil@gmail.com>"]
 binaries = [{ path = "legion-desktop", main = true }]
 binaries-dir = "__BINARIES_DIR__"
 out-dir = "__OUT_DIR__"

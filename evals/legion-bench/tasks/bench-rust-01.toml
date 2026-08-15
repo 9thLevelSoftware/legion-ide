@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-rust-01.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-01"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-rust-cli"
+holdout = false
+
+prompt = """
+wordtally miscounts words: `stats::count_words` in src/stats.rs splits on
+single space characters only, so runs of spaces produce phantom empty words,
+newlines do not separate words, and the empty string counts as one word.
+Fix `count_words` so it counts whitespace-separated words (any whitespace,
+no empty fragments) without changing its public signature. The failing unit
+tests in src/stats.rs (`empty_input_has_no_words`,
+`repeated_spaces_do_not_add_words`, `newlines_separate_words`) describe the
+expected behavior; do not modify the tests themselves.
+"""
+
+[verification]
+command = "cargo test --offline stats::"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/stats.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = []
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

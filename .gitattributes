@@ -1,0 +1,12 @@
+# Shell scripts must keep LF endings in the repository and in every working
+# copy. A CRLF shebang makes the script unrunnable on Linux/macOS ("bad
+# interpreter: /usr/bin/env bash^M"), which would break native release
+# verification (scripts/verify-native-package.sh) on hosted runners while
+# looking fine on Windows.
+*.sh text eol=lf
+
+# AppImage/deb desktop metadata is read by Linux tooling.
+*.desktop text eol=lf
+
+# PowerShell is Windows-side; keep CRLF so signed/edited scripts stay stable.
+*.ps1 text eol=crlf

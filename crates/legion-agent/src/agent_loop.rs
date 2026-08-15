@@ -1223,6 +1223,41 @@ pub fn run_delegated_task_loop(
                 let mut blocked: Option<String> = None;
 
                 for block in &response.blocks {
+                    // A call whose arguments never parsed is reported back as
+                    // text, not as a tool_result: it has no tool_use id the
+                    // provider would accept. Counting it as a retry keeps a
+                    // model that can only emit broken JSON from looping
+                    // forever (ADR-0049).
+                    if let ToolTurnBlock::MalformedToolCall {
+                        name, diagnostic, ..
+                    } = block
+                    {
+                        consecutive_retries += 1;
+                        event_seq += 1;
+                        step_index += 1;
+                        audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                            run_id: run_id.clone(),
+                            step_index,
+                            kind: DelegatedTaskLoopStepKind::ToolCallRequest,
+                            correlation_id: correlation_id_str.clone(),
+                            causality_id: correlation_id_str.clone(),
+                            event_sequence: event_seq,
+                            tool_name: Some(name.clone()),
+                            allowed: Some(false),
+                            reason: Some("malformed_tool_arguments".to_string()),
+                        });
+                        if consecutive_retries > config.budget.max_consecutive_retries {
+                            return Ok(DelegatedTaskLoopResult::Blocked {
+                                reason: format!(
+                                    "model emitted unparseable tool arguments {consecutive_retries} times in a row"
+                                ),
+                            });
+                        }
+                        tool_result_blocks.push(ToolTurnBlock::Text(format!(
+                            "Tool call `{name}` was rejected: {diagnostic}"
+                        )));
+                        continue;
+                    }
                     let ToolTurnBlock::ToolUse { id, name, input } = block else {
                         continue;
                     };

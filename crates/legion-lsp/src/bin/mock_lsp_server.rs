@@ -114,11 +114,38 @@ fn main() {
                         "textDocumentSync": {"openClose": true, "change": 1},
                         "hoverProvider": true,
                         "definitionProvider": true,
+                        // LSP 3.17 pull diagnostics — lets clients exercise
+                        // the textDocument/diagnostic request path against
+                        // the mock (rust-analyzer 1.96+ serves native
+                        // diagnostics only via pull).
+                        "diagnosticProvider": {
+                            "interFileDependencies": false,
+                            "workspaceDiagnostics": false,
+                        },
                     },
                     "serverInfo": {
                         "name": "mock-lsp-server",
                         "version": "0.1.0",
                     },
+                },
+            })),
+            // LSP 3.17 pull diagnostics: always answer with a full report
+            // containing exactly one severity-1 item, so clients can assert
+            // report parsing and publish-params synthesis deterministically.
+            "textDocument/diagnostic" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "kind": "full",
+                    "resultId": "mock-pull-1",
+                    "items": [{
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 4},
+                        },
+                        "severity": 1,
+                        "message": "mock pull diagnostic error",
+                    }],
                 },
             })),
             "shutdown" => Some(json!({

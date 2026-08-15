@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use legion_ai::normalize::{ExtractionInput, extract_tool_calls};
 use legion_ai::tool_calls::{
     ToolCallingProvider, ToolCompletionRequest, ToolCompletionResponse, ToolCompletionStopReason,
     ToolConversationTurn, ToolDefinition, ToolTurnBlock,
@@ -57,6 +58,24 @@ pub const COPILOT_NES_PROVIDER_ID: &str = "copilot-nes";
 pub const MERCURY_PROVIDER_ID: &str = "mercury";
 /// Codestral inline prediction provider slot.
 pub const CODESTRAL_PROVIDER_ID: &str = "codestral";
+
+/// Cap on raw argument text echoed back in a malformed-tool-call diagnostic.
+/// A model that emits a runaway string should not be able to inflate the next
+/// prompt with it.
+const MALFORMED_ARGUMENTS_PREVIEW_BYTES: usize = 512;
+
+/// Bound the raw argument text carried in a malformed-call diagnostic,
+/// truncating on a character boundary.
+fn bounded_raw_arguments(raw: &str) -> String {
+    if raw.len() <= MALFORMED_ARGUMENTS_PREVIEW_BYTES {
+        return raw.to_string();
+    }
+    let mut end = MALFORMED_ARGUMENTS_PREVIEW_BYTES;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [truncated]", &raw[..end])
+}
 
 /// Provider registry with local, loopback, and BYOK-capable model adapters.
 pub fn make_provider_registry() -> legion_ai::ProviderRegistry {
@@ -1127,15 +1146,47 @@ where
 
         let mut blocks: Vec<ToolTurnBlock> = Vec::new();
 
-        // Extract text content (may be absent or null when tool_calls is present).
-        if let Some(text) = message.get("content").and_then(Value::as_str)
-            && !text.is_empty()
-        {
-            blocks.push(ToolTurnBlock::Text(text.to_string()));
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let structured_calls = message.get("tool_calls").and_then(Value::as_array);
+        let has_structured_calls = structured_calls.is_some_and(|calls| !calls.is_empty());
+
+        // Recover calls the model wrote as prose (tagged / fenced / Liquid).
+        // Skipped entirely when the provider already returned structured
+        // calls, so a call is never counted twice (ADR-0049).
+        let known_tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+        let recovered = extract_tool_calls(&ExtractionInput {
+            content,
+            reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
+            has_existing_tool_calls: has_structured_calls,
+            known_tools: &known_tools,
+        });
+
+        // Keep the prose the model actually meant as prose: when a call was
+        // lifted out of the text, the remaining content is what is left.
+        let text = if recovered.calls.is_empty() {
+            content.to_string()
+        } else {
+            recovered.residual_content.clone()
+        };
+        if !text.is_empty() {
+            blocks.push(ToolTurnBlock::Text(text));
+        }
+
+        for (index, call) in recovered.calls.iter().enumerate() {
+            // Recovered calls have no provider-assigned id; synthesize a
+            // stable one so results can be correlated back.
+            blocks.push(ToolTurnBlock::ToolUse {
+                id: format!("recovered-{index}"),
+                name: call.name.clone(),
+                input: call.arguments.clone(),
+            });
         }
 
         // Extract tool_calls array and convert to ToolUse blocks.
-        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        if let Some(tool_calls) = structured_calls {
             for call in tool_calls {
                 let id = call
                     .get("id")
@@ -1158,16 +1209,24 @@ where
                     .get("arguments")
                     .and_then(Value::as_str)
                     .unwrap_or("{}");
-                let input: Value =
-                    serde_json::from_str(arguments_str).map_err(|e| {
-                        ProviderError::RequestFailed {
-                            provider: self.id.clone(),
-                            message: format!(
-                                "OpenAI tool_call arguments is not valid JSON: {e}. Raw: {arguments_str:?}"
+                match serde_json::from_str::<Value>(arguments_str) {
+                    Ok(input) => blocks.push(ToolTurnBlock::ToolUse { id, name, input }),
+                    Err(error) => {
+                        // A single unparseable argument string used to fail the
+                        // whole completion, ending the turn with no way for the
+                        // model to correct itself. Surface it as a typed,
+                        // non-dispatchable block instead; the agent loop feeds
+                        // the diagnostic back as an error tool-result.
+                        blocks.push(ToolTurnBlock::MalformedToolCall {
+                            id,
+                            name,
+                            raw_arguments: bounded_raw_arguments(arguments_str),
+                            diagnostic: format!(
+                                "arguments are not valid JSON: {error}. Reply with the same tool call and a valid JSON arguments object."
                             ),
-                        }
-                    })?;
-                blocks.push(ToolTurnBlock::ToolUse { id, name, input });
+                        });
+                    }
+                }
             }
         }
 
@@ -2242,7 +2301,13 @@ fn serialize_tool_turn(turn: &ToolConversationTurn) -> Value {
                 "content": content,
                 "is_error": is_error,
             }),
+            // A malformed call has no valid input to replay, and echoing it as
+            // a `tool_use` would oblige a matching `tool_result` for an id the
+            // model never really issued. It is surfaced to the agent loop as
+            // text feedback instead, so it carries no wire representation.
+            ToolTurnBlock::MalformedToolCall { .. } => Value::Null,
         })
+        .filter(|block| !block.is_null())
         .collect();
     json!({
         "role": turn.role,
@@ -2281,6 +2346,8 @@ fn serialize_openai_tool_turn(turn: &ToolConversationTurn) -> Vec<Value> {
                         }));
                     }
                     ToolTurnBlock::ToolResult { .. } => {} // should not appear in assistant turns
+                    // Never replayed as a tool_call — see serialize_tool_turn.
+                    ToolTurnBlock::MalformedToolCall { .. } => {}
                 }
             }
             let mut msg = json!({ "role": "assistant" });
@@ -5498,10 +5565,18 @@ mod tests {
         assert_eq!(resp.stop_reason, ToolCompletionStopReason::ToolUse);
     }
 
-    // --- Malformed arguments → hard error ---
+    // --- Malformed arguments → typed, non-dispatchable block ---
 
+    /// Unparseable arguments must never reach tool dispatch.
+    ///
+    /// This previously failed the whole completion. That upheld the safety
+    /// invariant but ended the turn, giving the model no way to correct
+    /// itself — costly with small local models, which get JSON wrong often.
+    /// The invariant is now carried by the type: `MalformedToolCall` has no
+    /// `input` field, so it cannot be dispatched, and the agent loop feeds the
+    /// diagnostic back as text (ADR-0049).
     #[test]
-    fn openai_malformed_arguments_returns_provider_error() {
+    fn openai_malformed_arguments_yield_non_dispatchable_block() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5516,18 +5591,86 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
+        let resp = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("malformed arguments are recoverable, not a transport failure");
+
+        assert!(
+            !resp
+                .blocks
+                .iter()
+                .any(ToolTurnBlock::is_dispatchable_tool_use),
+            "no dispatchable tool use may be produced from unparseable arguments"
+        );
+        let malformed = resp
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                ToolTurnBlock::MalformedToolCall {
+                    name,
+                    raw_arguments,
+                    diagnostic,
+                    ..
+                } => Some((name, raw_arguments, diagnostic)),
+                _ => None,
+            })
+            .expect("a MalformedToolCall block is surfaced");
+        assert_eq!(malformed.0, "read");
+        assert_eq!(malformed.1, "not valid json {{{");
+        assert!(
+            malformed.2.contains("valid JSON"),
+            "diagnostic should tell the model what to fix: {}",
+            malformed.2
+        );
+    }
+
+    /// The transport-level contract is unchanged: a response whose *shape* is
+    /// wrong is still a hard provider error, not something to recover from.
+    #[test]
+    fn openai_response_missing_message_still_fails_hard() {
+        let response = json!({ "choices": [{ "finish_reason": "stop" }] });
         let err = openai_tool_provider(response)
             .complete_with_tools(simple_openai_request("gpt-4o-mini"))
-            .expect_err("malformed JSON must fail");
-
+            .expect_err("a response missing choices[0].message is malformed transport");
         assert!(
             matches!(err, ProviderError::RequestFailed { .. }),
             "expected RequestFailed, got {err:?}"
         );
-        let msg = format!("{err}");
+    }
+
+    /// Recovery of prose-embedded calls happens only when the provider
+    /// returned none of its own, so a call is never counted twice.
+    #[test]
+    fn openai_recovers_tagged_call_written_as_prose() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Listing files.\n<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("prose-embedded call is recovered");
+
+        let uses: Vec<_> = resp
+            .blocks
+            .iter()
+            .filter(|block| block.is_dispatchable_tool_use())
+            .collect();
+        assert_eq!(uses.len(), 1, "the embedded call is recovered exactly once");
         assert!(
-            msg.contains("not valid JSON") || msg.contains("arguments"),
-            "error message should describe the JSON parse failure: {msg}"
+            matches!(uses[0], ToolTurnBlock::ToolUse { name, .. } if name == "read"),
+            "recovered call keeps the tool name the model wrote"
+        );
+        assert!(
+            resp.blocks.iter().any(|block| matches!(
+                block,
+                ToolTurnBlock::Text(text) if text == "Listing files."
+            )),
+            "surrounding prose survives with the call span removed"
         );
     }
 

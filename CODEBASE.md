@@ -283,7 +283,7 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 | `legion-smoke.yml` | scheduled | 3-OS smoke tests + golden-path + update-drill |
 | `legion-bench.yml` | scheduled | Performance/benchmark recording |
 | `legion-preview.yml` | scheduled | Preview builds |
-| `legion-release.yml` | v* tags / manual | build-and-test → release (3-OS, `--from-artifacts`) |
+| `legion-release.yml` | manual dispatch only (`mode: verify-only\|publish`) | prepare → validation → package (MSI, DMG ×2, DEB, AppImage) → publish (runs only when `mode=publish`) |
 
 ### xtask Commands
 `CheckDeps`, `DocsHygiene`, `ClaimAudit`, `NoEguiTextedit`, `ReleasePipeline`,
@@ -298,8 +298,6 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 |------|---------|
 | `Cargo.toml` | Workspace: 30 members, workspace-level dep pins |
 | `deny.toml` | cargo-deny license/advisory policy |
-| `ENGINEERING_AUDIT.yaml` | Engineering audit tracking |
-| `ENGINEERING_PLAN.yaml` | Engineering plan metadata |
 | `pyproject.toml` | Python tooling config (eval/training scripts) |
 
 **Build profiles**:
@@ -307,7 +305,7 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 - `[profile.dev-full]` — `debug = "full"` (opt-in for debugger stepping)
 
 **Feature flags** (legion-app):
-- `"ai"` — optional: legion-agent, legion-ai, legion-ai-providers, legion-sandbox
+- `"ai"` — optional: legion-agent, legion-ai, legion-ai-providers (legion-sandbox is unconditional — DAP adapter sandboxing is debugger security, not AI)
 - `"test-helpers"` — dev-only test utilities
 - `default-features = false` used by legion-desktop to selectively re-enable
 
@@ -464,6 +462,12 @@ cargo run -p legion-cli -- doctor    # platform health check
 ```
 
 ## 14. Completion Status
+
+> **Scope caveat:** the "finish phases" below were a scoped feature campaign
+> (syntax highlighting → release workflow), not product-readiness claims. The
+> authoritative product state is `plans/product-readiness-ledger.md`, where
+> e.g. Rust LSP remains "substrate validated" and release remains
+> "in progress" (unsigned beta). Do not cite this table as readiness evidence.
 
 All 6 finish phases are complete as of 2026-08-11:
 

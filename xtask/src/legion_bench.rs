@@ -12,11 +12,15 @@ pub const HOSTILE_EVAL_REPORT_FILE: &str = "hostile_eval_report.toml";
 pub const DEFAULT_BENCH_OUTPUT_PATH: &str = "target/legion-bench";
 /// Schema v2 adds `scoring_mode` so reports self-identify synthetic budget arithmetic
 /// (recorded mode does not open fixture repos or run agents until M13 live mode).
-const BENCH_SCHEMA_VERSION: u32 = 2;
+pub const BENCH_SCHEMA_VERSION: u32 = 2;
 /// Recorded/offline scoring fabricates pass/diff/turns/cost from gate budgets.
 pub const SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC: &str = "synthetic_budget_arithmetic";
 /// Hostile eval report scoring is scripted (integration tests own security assertions).
 pub const SCORING_MODE_SCRIPTED_HOSTILE: &str = "scripted_hostile";
+/// Live-local scoring: the delegated agent loop actually ran against a fixture
+/// checkout via a local OpenAI-compatible endpoint; proposals were applied and
+/// the task's verification command executed. Metrics are measured, not derived.
+pub const SCORING_MODE_LIVE_LOCAL: &str = "live_local_execution";
 const DEFAULT_RECORDING_PROFILE: &str = "recorded:gpt-5.5";
 const DEFAULT_LIVE_PROFILE: &str = "live:weekly";
 const DEFAULT_SUITE_NAME: &str = "legion-bench-v0";
@@ -26,6 +30,9 @@ const DEFAULT_SUITE_NAME: &str = "legion-bench-v0";
 pub enum LegionBenchRunMode {
     RecordedOffline,
     LiveWeekly,
+    /// Real local execution: agent loop + proposal apply + verification command
+    /// against a corpus-defined task list (see `legion_bench_corpus`).
+    LiveLocal,
 }
 
 impl LegionBenchRunMode {
@@ -33,6 +40,7 @@ impl LegionBenchRunMode {
         match self {
             Self::RecordedOffline => "recorded_offline",
             Self::LiveWeekly => "live_weekly",
+            Self::LiveLocal => "live_local",
         }
     }
 }
@@ -91,6 +99,9 @@ pub struct LegionBenchSuite {
 pub enum LegionBenchTaskStatus {
     Passed,
     Failed,
+    /// Task was excluded from this run (e.g. a holdout task without
+    /// `--include-holdout`). Only live-local reports emit this status.
+    Skipped,
 }
 
 impl LegionBenchTaskStatus {
@@ -98,8 +109,31 @@ impl LegionBenchTaskStatus {
         match self {
             Self::Passed => "passed",
             Self::Failed => "failed",
+            Self::Skipped => "skipped",
         }
     }
+}
+
+/// Measured live-execution metrics. Present only in live-local reports; recorded
+/// and hostile reports omit the field entirely so their TOML shape is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegionBenchLiveMetrics {
+    /// Loop completed, proposals applied, verification passed, expected files present.
+    pub task_success: bool,
+    /// Total tool calls dispatched by the agent loop (audit ToolCallRequest count).
+    pub tool_calls: u32,
+    /// Tool calls whose (name, arguments) exactly repeated an earlier call.
+    pub duplicate_tool_calls: u32,
+    /// Rejected tool calls the loop fed back to the model (retry pressure).
+    pub retries: u32,
+    /// Sum of prompt tokens reported by the endpoint, when usage was surfaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Sum of completion tokens reported by the endpoint, when usage was surfaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_tokens: Option<u64>,
+    /// Wall-clock milliseconds for the full task (loop + apply + verification).
+    pub wall_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +145,10 @@ pub struct LegionBenchTaskScore {
     pub score: u8,
     pub status: LegionBenchTaskStatus,
     pub notes: String,
+    /// Measured metrics from live-local execution. `None` for recorded/hostile
+    /// scoring (field is omitted from serialized reports when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LegionBenchLiveMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +163,11 @@ pub struct LegionBenchSummary {
     pub passed: usize,
     pub failed: usize,
     pub regressed: usize,
+    /// Tasks excluded from this run (holdout tasks without `--include-holdout`).
+    /// Always 0 for recorded/hostile reports. `default` keeps pre-existing
+    /// reports parseable.
+    #[serde(default)]
+    pub skipped: usize,
     pub average_score: u32,
 }
 
@@ -211,7 +254,9 @@ pub fn plan_legion_bench_report(
 ) -> LegionBenchReport {
     let provider_profile = match mode {
         LegionBenchRunMode::RecordedOffline => suite.recorded_provider_profile.clone(),
-        LegionBenchRunMode::LiveWeekly => suite.live_provider_profile.clone(),
+        LegionBenchRunMode::LiveWeekly | LegionBenchRunMode::LiveLocal => {
+            suite.live_provider_profile.clone()
+        }
     };
     let results = suite
         .tasks
@@ -249,9 +294,10 @@ pub fn verify_legion_bench_report(
     }
     if report.scoring_mode != SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
         && report.scoring_mode != SCORING_MODE_SCRIPTED_HOSTILE
+        && report.scoring_mode != SCORING_MODE_LIVE_LOCAL
     {
         return Err(format!(
-            "unsupported bench scoring_mode: {} (expected synthetic or scripted hostile)",
+            "unsupported bench scoring_mode: {} (expected synthetic, scripted hostile, or live local)",
             report.scoring_mode
         ));
     }
@@ -275,7 +321,13 @@ pub fn verify_legion_bench_report(
             suite.tasks.len()
         ));
     }
-    if report.summary.failed != 0 || report.summary.regressed != 0 {
+    // Recorded/hostile reports are frozen green baselines: any failure means
+    // the report generator and the gate disagree and the baseline is invalid.
+    // Live-local reports measure a real model, so failures are legitimate data;
+    // the caller's strict flag decides whether they fail the invocation.
+    if report.scoring_mode != SCORING_MODE_LIVE_LOCAL
+        && (report.summary.failed != 0 || report.summary.regressed != 0)
+    {
         return Err(format!(
             "bench baseline contains regressions: failed={} regressed={}",
             report.summary.failed, report.summary.regressed
@@ -310,21 +362,31 @@ pub fn verify_legion_bench_report(
 /// can never drift apart. `regressed` is not derivable from a single report's
 /// statuses and is left at the default (`0`); the baseline gate rejects any
 /// non-zero `regressed` separately.
-fn recompute_summary(tasks: &[LegionBenchTaskResult]) -> LegionBenchSummary {
+pub(crate) fn recompute_summary(tasks: &[LegionBenchTaskResult]) -> LegionBenchSummary {
     let mut summary = LegionBenchSummary {
         total: tasks.len(),
         ..LegionBenchSummary::default()
     };
     let mut score_total = 0_u32;
     for result in tasks {
-        score_total = score_total.saturating_add(u32::from(result.score.score));
         match result.score.status {
-            LegionBenchTaskStatus::Passed => summary.passed += 1,
-            LegionBenchTaskStatus::Failed => summary.failed += 1,
+            LegionBenchTaskStatus::Passed => {
+                summary.passed += 1;
+                score_total = score_total.saturating_add(u32::from(result.score.score));
+            }
+            LegionBenchTaskStatus::Failed => {
+                summary.failed += 1;
+                score_total = score_total.saturating_add(u32::from(result.score.score));
+            }
+            LegionBenchTaskStatus::Skipped => summary.skipped += 1,
         }
     }
-    if summary.total > 0 {
-        summary.average_score = score_total / summary.total as u32;
+    // Average over graded (non-skipped) tasks. When nothing is skipped this is
+    // byte-identical to the historical total-based mean, so recorded baselines
+    // are unaffected.
+    let graded = summary.total.saturating_sub(summary.skipped);
+    if graded > 0 {
+        summary.average_score = score_total / graded as u32;
     }
     summary
 }
@@ -433,11 +495,12 @@ fn score_task(
             score,
             status,
             notes,
+            live: None,
         },
     }
 }
 
-fn compute_score(
+pub(crate) fn compute_score(
     budget: &LegionBenchGateBudget,
     diff_files: u32,
     turns: u32,
@@ -475,7 +538,7 @@ fn objective_for(kind: LegionBenchTaskKind, ordinal: usize, fixture_repo: &str) 
     }
 }
 
-fn fingerprint_suite(tasks: &[LegionBenchTask]) -> String {
+pub fn fingerprint_suite(tasks: &[LegionBenchTask]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for task in tasks {
         for byte in format!(
@@ -500,7 +563,7 @@ fn fingerprint_suite(tasks: &[LegionBenchTask]) -> String {
     format!("bench-suite-v1:{hash:016x}")
 }
 
-fn current_utc_rfc3339() -> String {
+pub(crate) fn current_utc_rfc3339() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -608,6 +671,7 @@ fn score_hostile_task(task: &LegionBenchTask) -> LegionBenchTaskResult {
                  required_cargo_test=cargo test -p legion-app --test hostile_eval_integration",
                 SCORING_MODE_SCRIPTED_HOSTILE, task.id
             ),
+            live: None,
         },
     }
 }

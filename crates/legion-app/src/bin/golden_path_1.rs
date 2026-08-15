@@ -452,9 +452,7 @@ fn run_s2(temp_dir: &Path) -> Result<Option<RustAnalyzerSession>, String> {
                 "files": {"watcher": "client"},
                 "cachePriming": {"enable": false}
             })),
-            Some(serde_json::json!({
-                "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}
-            })),
+            Some(gp1_client_capabilities()),
         )
         .map_err(|e| format!("initialize: {e}"))?;
 
@@ -530,15 +528,43 @@ fn run_s3(
         .did_open(&scratchpad_uri, "rust", 1, &at_rest_text)
         .map_err(|e| format!("did_open: {e}"))?;
 
-    // Initial pump: let rust-analyzer settle (bounded 30s).
-    eprintln!("[s3] initial pump (up to 30s) ...");
+    // Diagnostics transport: rust-analyzer 1.96+ serves NATIVE diagnostics
+    // (type errors) only via LSP 3.17 pull (`textDocument/diagnostic`); push
+    // (`publishDiagnostics`) carries flycheck output, which refreshes on
+    // save — and s3 deliberately never saves (FS-watcher race, below). A
+    // push-only pump therefore never sees the type mismatch on 1.97.1
+    // (reproduced 2026-08-15: all three hosted OSes + local Windows,
+    // buffered_notifications=0 after 120s). Pull when the server offers it;
+    // fall back to push for older servers.
+    let pull_supported = session.supports_pull_diagnostics();
+    eprintln!("[s3] diagnostics transport: pull_supported={pull_supported}");
+
+    // Initial settle: a pull round-trip proves the server is answering
+    // document requests; push pump remains for servers without pull.
     let initial_pump_started = Instant::now();
-    let initial = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
-    eprintln!(
-        "[s3] initial pump done: notifications_for_uri={} elapsed={}ms",
-        initial.len(),
-        initial_pump_started.elapsed().as_millis()
-    );
+    if pull_supported {
+        eprintln!("[s3] initial pull (readiness probe) ...");
+        match session.pull_diagnostics(&scratchpad_uri) {
+            Ok(pulled) => eprintln!(
+                "[s3] initial pull done: kind_full={} items={} errors={} elapsed={}ms",
+                pulled.kind_full,
+                pulled.total_count,
+                pulled.error_count,
+                initial_pump_started.elapsed().as_millis()
+            ),
+            Err(err) => eprintln!(
+                "[s3] initial pull failed ({err:?}); continuing — error pump retries pulls"
+            ),
+        }
+    } else {
+        eprintln!("[s3] initial pump (up to 30s) ...");
+        let initial = session.pump_diagnostics(&scratchpad_uri, Duration::from_secs(30));
+        eprintln!(
+            "[s3] initial pump done: notifications_for_uri={} elapsed={}ms",
+            initial.len(),
+            initial_pump_started.elapsed().as_millis()
+        );
+    }
 
     // --- introduce compile error ---
     eprintln!("[s3] introducing compile error via app edit path ...");
@@ -600,6 +626,9 @@ fn run_s3(
     // is exactly what dump_s3_post_mortem discriminates — PKT-S3-WEDGE-R3.
     eprintln!("[s3] pumping for error diagnostic (up to 120s, nudge every 30s) ...");
     let mut got_error = false;
+    // publishDiagnostics-shaped params synthesized from a successful pull;
+    // used for the projection ingestion below when nothing arrived via push.
+    let mut pulled_error_params: Option<serde_json::Value> = None;
     for slice in 0..4u32 {
         if slice > 0 {
             doc_version += 1;
@@ -617,8 +646,37 @@ fn run_s3(
                 return Err(format!("did_change (error nudge): {e}"));
             }
         }
-        if session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(30)) {
-            got_error = true;
+        let slice_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            // Push channel first: short slices when pull is available, the
+            // full 30s when push is the only transport.
+            let push_wait = if pull_supported { 3 } else { 30 };
+            if session.pump_until_has_error_for(&scratchpad_uri, Duration::from_secs(push_wait)) {
+                got_error = true;
+                break;
+            }
+            if pull_supported {
+                match session.pull_diagnostics(&scratchpad_uri) {
+                    Ok(pulled) if pulled.kind_full && pulled.error_count > 0 => {
+                        eprintln!(
+                            "[s3] pull returned error report: items={} errors={}",
+                            pulled.total_count, pulled.error_count
+                        );
+                        pulled_error_params = pulled.publish_params;
+                        got_error = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!("[s3] pull_diagnostics failed ({err:?}); retrying");
+                    }
+                }
+            }
+            if Instant::now() >= slice_deadline {
+                break;
+            }
+        }
+        if got_error {
             break;
         }
     }
@@ -636,9 +694,17 @@ fn run_s3(
     // Route the raw publishDiagnostics payload through the product path the
     // desktop uses: ingest_lsp_publish_diagnostics_for_buffer → LanguageToolingProjection.
     eprintln!("[s3] asserting error through AppComposition projection ...");
-    let error_raw = session
-        .take_last_diagnostic_params_for(&scratchpad_uri)
-        .ok_or("s3: raw publishDiagnostics params absent after pump_until_has_error_for")?;
+    // When the error was detected via PULL, the pulled report is the
+    // authoritative payload — the push buffer may hold only an empty
+    // clearing-ack notification from around the didChange, which would
+    // project zero problems. Push params are used only when push is what
+    // matched the error predicate.
+    let error_raw = match pulled_error_params {
+        Some(pulled) => pulled,
+        None => session
+            .take_last_diagnostic_params_for(&scratchpad_uri)
+            .ok_or("s3: no diagnostics params (pushed or pulled) after error pump")?,
+    };
     let error_projection = app
         .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &error_raw, false, None)
         .map_err(|e| format!("s3: ingest_lsp_publish_diagnostics_for_buffer (error): {e:?}"))?;
@@ -693,6 +759,7 @@ fn run_s3(
     // didChange (see the error-pump comment above).
     eprintln!("[s3] pumping until errors clear (up to 60s, nudge at 30s) ...");
     let mut cleared = false;
+    let mut pulled_clear_params: Option<serde_json::Value> = None;
     for slice in 0..2u32 {
         if slice > 0 {
             doc_version += 1;
@@ -705,8 +772,36 @@ fn run_s3(
                 return Err(format!("did_change (fix nudge): {e}"));
             }
         }
-        if session.pump_until_diagnostics_clear(&scratchpad_uri, Duration::from_secs(30)) {
-            cleared = true;
+        let slice_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let push_wait = if pull_supported { 3 } else { 30 };
+            if session.pump_until_diagnostics_clear(&scratchpad_uri, Duration::from_secs(push_wait))
+            {
+                cleared = true;
+                break;
+            }
+            if pull_supported {
+                match session.pull_diagnostics(&scratchpad_uri) {
+                    Ok(pulled) if pulled.kind_full && pulled.error_count == 0 => {
+                        eprintln!(
+                            "[s3] pull returned clean report: items={}",
+                            pulled.total_count
+                        );
+                        pulled_clear_params = pulled.publish_params;
+                        cleared = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!("[s3] pull_diagnostics failed ({err:?}); retrying");
+                    }
+                }
+            }
+            if Instant::now() >= slice_deadline {
+                break;
+            }
+        }
+        if cleared {
             break;
         }
     }
@@ -730,9 +825,15 @@ fn run_s3(
 
     // Prove the clear is visible through AppComposition's projection layer (I-1).
     eprintln!("[s3] asserting clear through AppComposition projection ...");
-    let clear_raw = session
-        .take_last_diagnostic_params_for(&scratchpad_uri)
-        .ok_or("s3: raw publishDiagnostics params absent after pump_until_diagnostics_clear")?;
+    // Same precedence as the error phase: a pull-detected clear must ingest
+    // the pulled (empty) report — the push buffer may still hold the earlier
+    // ERROR notification, which would fail the clear assertion.
+    let clear_raw = match pulled_clear_params {
+        Some(pulled) => pulled,
+        None => session
+            .take_last_diagnostic_params_for(&scratchpad_uri)
+            .ok_or("s3: no diagnostics params (pushed or pulled) after clear pump")?,
+    };
     let clear_projection = app
         .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &clear_raw, false, None)
         .map_err(|e| format!("s3: ingest_lsp_publish_diagnostics_for_buffer (clear): {e:?}"))?;
@@ -1654,5 +1755,38 @@ fn main() {
         );
         let _ = fs::remove_dir_all(&temp_dir);
         process::exit(0);
+    }
+}
+
+fn gp1_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "workspace": {
+            "didChangeWatchedFiles": {"dynamicRegistration": true}
+        },
+        "textDocument": {
+            "publishDiagnostics": {},
+            "diagnostic": {
+                "dynamicRegistration": false,
+                "relatedDocumentSupport": false
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gp1_capabilities_advertise_pull_diagnostics() {
+        let capabilities = gp1_client_capabilities();
+
+        assert_eq!(
+            capabilities
+                .pointer("/textDocument/diagnostic/dynamicRegistration")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+            "GP-1's explicit capability override must retain LSP 3.17 pull diagnostics"
+        );
     }
 }

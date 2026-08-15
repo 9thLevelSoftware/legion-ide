@@ -1,0 +1,54 @@
+# evals/legion-bench/tasks/bench-ts-04.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-04"
+kind = "multi_file_feature"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = '''
+Add a per-month totals feature to the ledger CLI, spread across two files:
+
+1. Create src/monthly.js exporting two functions via module.exports:
+   - groupByMonth(entries): entries are objects with a date string
+     "YYYY-MM-DD" and an integer amountCents. Return a plain object mapping
+     each month key "YYYY-MM" (the first 7 characters of the date — do not
+     use Date objects) to the summed cents for that month. An empty entry
+     list returns an empty object.
+   - renderMonthly(byMonth): given such an object, return one line per
+     month, sorted ascending by month key, formatted as the month key, a
+     single space, and the total as a decimal dollar string with two decimal
+     digits (e.g. 1550 cents renders as 15.50). Lines are joined with a
+     newline character; an empty object returns an empty string. Example:
+     an object with 2026-04 -> 825 and 2026-03 -> 1550 renders as the line
+     "2026-03 15.50" followed by the line "2026-04 8.25".
+2. Wire a new command into src/cli.js: `monthly <ledger.csv>` parses the
+   ledger CSV the same way as the existing balance and report commands and
+   prints renderMonthly(groupByMonth(entries)) with console.log. Mention the
+   new command in the usage message. Existing commands must keep working
+   unchanged.
+
+The spec is encoded in test/verify-monthly.js; do not modify that file.
+'''
+
+[verification]
+command = "node test/verify-monthly.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["src/monthly.js", "src/cli.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["test/verify-monthly.js", "test/harness.js", "test/run.js", "sample/expenses.csv"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

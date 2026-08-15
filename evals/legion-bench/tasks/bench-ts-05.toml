@@ -1,0 +1,41 @@
+# evals/legion-bench/tasks/bench-ts-05.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-05"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = true
+
+prompt = '''
+The CSV parser in src/csv.js documents that inside a quoted field a doubled
+quote ("") is an escaped literal quote character, but parseLine does not
+implement that: parseLine('"say ""hi""",b') currently returns
+['say hi', 'b'] instead of the correct ['say "hi"', 'b']. Fix parseLine so
+that a doubled quote encountered inside a quoted field emits a single
+literal quote and stays inside the field. Do not change the exported API,
+and do not change the behavior of the already-correct cases: plain fields,
+empty fields, quoted fields containing commas, and quoted empty fields. The
+expected behavior is defined by test/csv.test.js; do not modify the tests.
+'''
+
+[verification]
+command = "node test/csv.test.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["src/csv.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["test/csv.test.js", "test/harness.js", "test/run.js"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 2
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

@@ -1,0 +1,46 @@
+# evals/legion-bench/tasks/bench-py-04.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-04"
+kind = "multi_file_feature"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+Add a line-deduplication feature to TextKit, spanning two files:
+
+1. Create textkit/dedup.py containing a function `dedupe_lines(lines)` that
+   returns a NEW list keeping only the first occurrence of each line,
+   preserving the original order, comparing lines case-sensitively, and never
+   mutating the input list.
+2. Add a `dedup` subcommand to textkit/cli.py, following the existing
+   subcommand pattern there: it takes one positional TEXT argument, splits it
+   with `str.splitlines()`, dedupes the lines via `dedupe_lines`, prints each
+   surviving line with `print()`, and `main` returns 0. Empty TEXT prints
+   nothing and still returns 0.
+
+Only make the changes the feature needs — leave every other module and all
+existing tests untouched, including any unrelated tests that currently fail.
+"""
+
+[verification]
+command = "python checks/verify_dedup.py"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["textkit/dedup.py", "textkit/cli.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+forbidden_paths = ["checks"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40
