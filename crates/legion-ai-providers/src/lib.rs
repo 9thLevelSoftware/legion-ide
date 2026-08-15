@@ -1178,11 +1178,25 @@ where
         for (index, call) in recovered.calls.iter().enumerate() {
             // Recovered calls have no provider-assigned id; synthesize a
             // stable one so results can be correlated back.
-            blocks.push(ToolTurnBlock::ToolUse {
-                id: format!("recovered-{index}"),
-                name: call.name.clone(),
-                input: call.arguments.clone(),
-            });
+            let id = format!("recovered-{index}");
+            match &call.arguments_unparsed {
+                // A recovered call whose arguments never parsed is exactly as
+                // undispatchable as a structured one — route it down the same
+                // path rather than handing dispatch a null input.
+                Some(raw) => blocks.push(ToolTurnBlock::MalformedToolCall {
+                    id,
+                    name: call.name.clone(),
+                    raw_arguments: bounded_raw_arguments(raw),
+                    diagnostic:
+                        "arguments are not valid JSON. Reply with the same tool call and a valid JSON arguments object."
+                            .to_string(),
+                }),
+                None => blocks.push(ToolTurnBlock::ToolUse {
+                    id,
+                    name: call.name.clone(),
+                    input: call.arguments.clone(),
+                }),
+            }
         }
 
         // Extract tool_calls array and convert to ToolUse blocks.
@@ -5635,6 +5649,86 @@ mod tests {
         assert!(
             matches!(err, ProviderError::RequestFailed { .. }),
             "expected RequestFailed, got {err:?}"
+        );
+    }
+
+    /// A prose call under a near-miss name must reach the offered tool.
+    /// Registry names are canonical, so filtering on the raw name alone would
+    /// silently drop exactly the calls small models get wrong most often.
+    #[test]
+    fn openai_recovers_prose_call_under_a_near_miss_name() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let request = ToolCompletionRequest {
+            provider: "openai-compatible".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            system: String::new(),
+            turns: vec![ToolConversationTurn {
+                role: "user".to_string(),
+                blocks: vec![ToolTurnBlock::Text("go".to_string())],
+            }],
+            tools: vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: "read a file".to_string(),
+                input_schema: json!({"type": "object"}),
+            }],
+            max_tokens: 256,
+        };
+        let resp = openai_tool_provider(response)
+            .complete_with_tools(request)
+            .expect("near-miss call is recovered");
+
+        let use_block = resp
+            .blocks
+            .iter()
+            .find(|block| block.is_dispatchable_tool_use())
+            .expect("a dispatchable call is produced");
+        match use_block {
+            ToolTurnBlock::ToolUse { name, input, .. } => {
+                assert_eq!(name, "read_file", "name canonicalized to the offered tool");
+                assert_eq!(input["path"], "a.rs", "arguments canonicalized with it");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// A recovered call whose arguments never parsed must not reach dispatch
+    /// with a null input — it is as undispatchable as a structured one.
+    #[test]
+    fn openai_recovered_call_with_unparseable_arguments_is_not_dispatchable() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call>{\"function\":{\"name\":\"read\",\"arguments\":\"{bad json\"}}</tool_call>",
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("recovery does not fail the completion");
+
+        assert!(
+            !resp
+                .blocks
+                .iter()
+                .any(ToolTurnBlock::is_dispatchable_tool_use),
+            "a recovered call with unparseable arguments must not be dispatchable"
+        );
+        assert!(
+            resp.blocks.iter().any(|block| matches!(
+                block,
+                ToolTurnBlock::MalformedToolCall { raw_arguments, .. } if raw_arguments == "{bad json"
+            )),
+            "it is surfaced as a malformed call carrying the raw text"
         );
     }
 

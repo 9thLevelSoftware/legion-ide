@@ -31,12 +31,19 @@ use serde_json::{Map, Value};
 /// One tool call recovered from model output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedToolCall {
-    /// Tool name exactly as the model wrote it. Canonicalization is a separate
-    /// stage — see [`normalize_alias`].
+    /// Tool name. Left exactly as the model wrote it unless it had to be
+    /// canonicalized to match an offered tool — see [`normalize_alias`].
     pub name: String,
-    /// Arguments object. `Value::Null` when the model supplied arguments that
-    /// could not be parsed — the call is reported but is not dispatchable.
+    /// Parsed arguments, or `Value::Null` when the model supplied none.
     pub arguments: Value,
+    /// Raw argument text when the model *did* supply arguments but they could
+    /// not be parsed.
+    ///
+    /// Distinguishing this from "no arguments" matters: a call with absent
+    /// arguments may be perfectly valid, whereas one with unparseable
+    /// arguments must never be dispatched. Callers turn this into a
+    /// non-dispatchable malformed block.
+    pub arguments_unparsed: Option<String>,
 }
 
 /// Result of scanning one assistant message for embedded tool calls.
@@ -99,7 +106,7 @@ pub fn extract_tool_calls(input: &ExtractionInput<'_>) -> ToolCallExtraction {
     let calls = scan
         .calls
         .into_iter()
-        .filter(|call| is_known_tool(&call.name, input.known_tools))
+        .filter_map(|call| resolve_against_known(call, input.known_tools))
         .collect();
 
     ToolCallExtraction {
@@ -124,8 +131,33 @@ impl ScanResult {
     }
 }
 
-fn is_known_tool(name: &str, known_tools: &[String]) -> bool {
-    known_tools.is_empty() || known_tools.iter().any(|known| known == name)
+/// Match a recovered call against the tools the model was actually offered.
+///
+/// The name the model wrote is preserved whenever it already names an offered
+/// tool. Only when it does not — `Read` against a registry offering
+/// `read_file` — is [`normalize_alias`] applied, and then only if
+/// canonicalization actually produces an offered tool. A call that matches
+/// nothing either way is dropped rather than forwarded.
+///
+/// Ordering matters: canonicalizing unconditionally would rewrite a call whose
+/// literal name is a real tool (a registry offering `shell` would start
+/// receiving `bash`).
+fn resolve_against_known(
+    call: ExtractedToolCall,
+    known_tools: &[String],
+) -> Option<ExtractedToolCall> {
+    if known_tools.is_empty() || known_tools.contains(&call.name) {
+        return Some(call);
+    }
+    let (canonical, arguments) = normalize_alias(&call.name, &call.arguments);
+    if canonical != call.name && known_tools.contains(&canonical) {
+        return Some(ExtractedToolCall {
+            name: canonical,
+            arguments,
+            arguments_unparsed: call.arguments_unparsed,
+        });
+    }
+    None
 }
 
 fn strip_spans(source: &str, spans: &[(usize, usize)]) -> String {
@@ -392,17 +424,27 @@ fn call_from_object(object: &Map<String, Value>) -> Option<ExtractedToolCall> {
 }
 
 fn finish_call(name: String, arguments: Option<&Value>) -> ExtractedToolCall {
+    let mut arguments_unparsed = None;
     let arguments = match arguments {
         // Providers often nest the argument object as a JSON *string*.
-        Some(Value::String(raw)) => parse_json_lenient(raw).unwrap_or(Value::Null),
+        Some(Value::String(raw)) => match parse_json_lenient(raw) {
+            Some(value) => value,
+            None => {
+                arguments_unparsed = Some(raw.clone());
+                Value::Null
+            }
+        },
         Some(value) => value.clone(),
         None => Value::Null,
     };
-    // Extraction reports what the model actually wrote. Alias canonicalization
-    // is a separate stage ([`normalize_alias`]) applied when a recovered call
-    // is matched against Legion's tool registry, so the two concerns stay
-    // independently testable.
-    ExtractedToolCall { name, arguments }
+    // Extraction reports the name the model actually wrote. Canonicalization
+    // happens only if that name does not match an offered tool — see
+    // `resolve_against_known`.
+    ExtractedToolCall {
+        name,
+        arguments,
+        arguments_unparsed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +532,9 @@ impl<'a> LiquidParser<'a> {
         Some(ExtractedToolCall {
             name,
             arguments: Value::Object(arguments),
+            // Liquid arguments are parsed structurally: a malformed one aborts
+            // the whole call rather than surviving as raw text.
+            arguments_unparsed: None,
         })
     }
 
@@ -820,6 +865,54 @@ mod tests {
         );
         assert_eq!(out.calls.len(), 1);
         assert_eq!(out.calls[0].arguments["command"], "ls -la");
+    }
+
+    #[test]
+    fn near_miss_names_are_canonicalized_to_the_offered_tool() {
+        // The registry offers `read_file`; the model wrote `Read`. Without
+        // canonicalization at the filter step this call is silently dropped.
+        let out = extract(
+            "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"src/foo.rs\"}}</tool_call>",
+            &["read_file", "bash"],
+        );
+        assert_eq!(out.calls.len(), 1, "near-miss name must still be recovered");
+        assert_eq!(out.calls[0].name, "read_file");
+        assert_eq!(
+            out.calls[0].arguments["path"], "src/foo.rs",
+            "argument names are canonicalized alongside the tool name"
+        );
+    }
+
+    #[test]
+    fn a_literal_tool_name_is_never_rewritten_by_an_alias() {
+        // `shell` is a real tool here, so it must stay `shell` even though it
+        // is also an alias for `bash`.
+        let out = extract(
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+            &["shell", "read_file"],
+        );
+        assert_eq!(out.calls[0].name, "shell");
+        assert_eq!(out.calls[0].arguments["cmd"], "ls");
+    }
+
+    #[test]
+    fn unparseable_nested_arguments_are_flagged_not_silently_nulled() {
+        let out = extract(
+            "<tool_call>{\"function\":{\"name\":\"bash\",\"arguments\":\"{bad json\"}}</tool_call>",
+            &["bash"],
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(
+            out.calls[0].arguments_unparsed.as_deref(),
+            Some("{bad json"),
+            "callers must be able to tell this apart from a call with no arguments"
+        );
+
+        let absent = extract("<tool_call>{\"name\":\"bash\"}</tool_call>", &["bash"]);
+        assert!(
+            absent.calls[0].arguments_unparsed.is_none(),
+            "an absent argument object is not a parse failure"
+        );
     }
 
     #[test]

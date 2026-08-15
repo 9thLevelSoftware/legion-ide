@@ -36,6 +36,14 @@ between `tool_call_extractor.js` and `tool_aliases.js`):
 - Consumed spans are stripped from the residual prose, so recovery never
   leaves a call restated as text.
 
+**Alias canonicalization is applied at the registry boundary, not during
+extraction.** A recovered name is preserved whenever it already names an
+offered tool; only when it does not — `Read` against a registry offering
+`read_file` — is the alias table consulted, and then only if canonicalization
+actually produces an offered tool. Doing it unconditionally would rewrite
+calls whose literal name is a real tool (a registry offering `shell` would
+start receiving `bash`).
+
 **Non-dispatchable malformed calls.** `ToolTurnBlock::MalformedToolCall`
 carries `raw_arguments` and a diagnostic but deliberately has **no `input`
 field** — an unparsed call is not dispatchable, and making that a type-level
@@ -43,6 +51,13 @@ fact means no future caller can execute one by accident. Adding the variant
 made the compiler flag both wire serializers, which now skip it: replaying a
 broken `tool_use` would oblige a `tool_result` for an id the model never
 really issued.
+
+This holds for **both** sources of a malformed call. `ExtractedToolCall`
+distinguishes "arguments absent" from "arguments present but unparseable" via
+`arguments_unparsed`, so a *recovered prose* call whose nested argument string
+fails to parse becomes a malformed block too, rather than entering dispatch
+with a null input. Collapsing both cases to `Value::Null` would have made a
+legitimately argument-less call and a broken one indistinguishable.
 
 **Loop feedback.** `run_delegated_task_loop` reports the diagnostic back as
 text (not a `tool_result`, which would dangle without a matching `tool_use`),
@@ -63,6 +78,7 @@ autonomy expansion (master plan §5.3).
 | Check | Result |
 | --- | --- |
 | `cargo test -p legion-ai --test tool_call_corpus` | 3/3 — **58/58 corpus vectors** recovered exactly or safely rejected (roadmap bar: ≥99%) |
+| Provider contract coverage (near-miss name, unparseable recovered arguments, prose recovery, malformed structured call, transport-shape failure) | 5 tests in `legion-ai-providers` |
 | `cargo test -p legion-ai` | 61 passed / 0 failed |
 | `cargo test -p legion-ai-providers` | 68 passed / 0 failed |
 | `cargo test -p legion-agent --test agent_loop_integration` | 14 passed / 0 failed |
@@ -77,6 +93,14 @@ python_literals 2, reasoning_fallback 2, single_quoted_keys 1, truncated_json
 Beyond the corpus: structural fuzzing over every prefix of 18 adversarial
 seeds (unterminated tags, half-open fences, lone backslashes, brace soup)
 asserting no panic and no empty-named call, plus unicode boundary cases.
+
+**Corpus coverage alone would not have proven the production path.** The 18
+alias vectors exercise `normalize_alias` directly, so a green corpus said
+nothing about whether a near-miss name survives an actual provider call, where
+`known_tools` holds canonical registry names. Two gaps found in review and
+closed here — alias canonicalization never reaching the provider filter, and
+recovered calls with unparseable arguments entering dispatch — are now covered
+by provider-level contract tests rather than by unit tests of the pure layer.
 
 ## Replaced test, preserved invariant
 
