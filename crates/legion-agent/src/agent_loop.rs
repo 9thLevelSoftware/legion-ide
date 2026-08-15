@@ -147,6 +147,15 @@ pub struct DelegatedTaskLoopConfig {
     pub forbidden_paths: Vec<String>,
 }
 
+/// Content staged by edits already proposed in this run, keyed by target path.
+///
+/// A run may edit the same file twice. The second fragment must resolve
+/// against what the first one produced, not against the untouched worktree —
+/// otherwise the second proposal silently omits the first edit, and the two
+/// carry preconditions for the same original file, so applying one makes the
+/// other stale.
+type PendingEditContent = std::collections::HashMap<PathBuf, String>;
+
 /// Output returned by a single tool executor call.
 pub struct ToolExecutionOutput {
     /// Text content to feed back to the model.
@@ -753,6 +762,7 @@ fn execute_outline(
 fn resolve_fragment_edit(
     input: &serde_json::Value,
     resolved_edit_path: &Path,
+    pending_edits: &PendingEditContent,
 ) -> Result<String, LegionToolCallFeedback> {
     let invalid = |message: String| {
         LegionToolCallFeedback::new(
@@ -771,15 +781,20 @@ fn resolve_fragment_edit(
         ));
     }
 
-    // An edit against a file that is not there cannot be a fragment edit; the
-    // model most likely meant to create it and should say so with
-    // `replacement`.
-    let file_content = std::fs::read_to_string(resolved_edit_path).map_err(|err| {
-        invalid(format!(
-            "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
-             `replacement` with its full content instead."
-        ))
-    })?;
+    // Resolve against content this run already staged for the file, falling
+    // back to the worktree for the first edit to it.
+    let file_content = match pending_edits.get(resolved_edit_path) {
+        Some(staged) => staged.clone(),
+        // An edit against a file that is not there cannot be a fragment edit;
+        // the model most likely meant to create it and should say so with
+        // `replacement`.
+        None => std::fs::read_to_string(resolved_edit_path).map_err(|err| {
+            invalid(format!(
+                "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
+                 `replacement` with its full content instead."
+            ))
+        })?,
+    };
 
     match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
         legion_ai::patch::PatchResolution::Applied { content, .. } => Ok(content),
@@ -797,6 +812,7 @@ fn execute_edit_as_proposal(
     worktree_root: &Path,
     loop_correlation_id: u64,
     causality_id: Uuid,
+    pending_edits: &mut PendingEditContent,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::EditAsProposal)?;
     let proposal_title = input
@@ -841,8 +857,11 @@ fn execute_edit_as_proposal(
                 Some(path_str.to_string()),
             ));
         }
-        None => resolve_fragment_edit(input, &resolved_edit_path)?,
+        None => resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?,
     };
+    // Stage the result so a later edit to the same file composes with this one
+    // instead of resolving against stale content.
+    pending_edits.insert(resolved_edit_path.clone(), replacement.clone());
     let replacement = replacement.as_str();
 
     // Build the proposal using DelegatedTaskProposalGenerator — zero disk writes.
@@ -993,6 +1012,7 @@ fn validate_and_execute(
     tool_host: &dyn DelegatedToolHost,
     loop_correlation_id: u64,
     causality_id: Uuid,
+    pending_edits: &mut PendingEditContent,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     // Step 1: parse tool kind
     let tool = parse_tool_kind(tool_name).ok_or_else(|| {
@@ -1130,6 +1150,7 @@ fn validate_and_execute(
             &config.worktree_root,
             loop_correlation_id,
             causality_id,
+            pending_edits,
         ),
         LegionToolKind::TerminalCommand => {
             execute_terminal_command(input, &config.worktree_root, tool_host).map(|content| {
@@ -1190,6 +1211,9 @@ pub fn run_delegated_task_loop(
     // Proposals accumulate across all model turns; only `Completed` returns them.
     // Blocked/BudgetExhausted/Cancelled discard partial proposals.
     let mut accumulated_proposals: Vec<AssistedAiEditProposalOutput> = Vec::new();
+    // Content staged by edits proposed so far, so successive fragment edits to
+    // one file compose rather than each resolving against the original.
+    let mut pending_edits: PendingEditContent = PendingEditContent::new();
 
     let start_time = if config.budget.wall_clock_limit_ms > 0 {
         Some(std::time::Instant::now())
@@ -1389,6 +1413,7 @@ pub fn run_delegated_task_loop(
                         tool_host,
                         correlation_id_u64,
                         causality_uuid,
+                        &mut pending_edits,
                     ) {
                         Ok(ToolExecutionOutput {
                             content: raw_output,

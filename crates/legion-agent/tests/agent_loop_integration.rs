@@ -1235,3 +1235,103 @@ fn unmatched_fragment_is_refused_with_a_locating_diagnostic() {
         "expected Completed, got {result:?}"
     );
 }
+
+/// Two fragment edits to the same file in one run must compose. Without a
+/// per-run overlay the second resolves against the untouched worktree, so its
+/// proposal silently omits the first edit and both carry preconditions for the
+/// same original file — applying either makes the other stale.
+#[test]
+fn successive_fragment_edits_to_one_file_compose() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("cfg.rs"), "let a = 1;\nlet b = 2;\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({"path": "cfg.rs", "old_str": "let a = 1;", "new_str": "let a = 10;"}),
+        )
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({"path": "cfg.rs", "old_str": "let b = 2;", "new_str": "let b = 20;"}),
+        )
+        .end_turn("Both edits staged.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    assert_eq!(proposals.len(), 2, "each edit surfaces its own proposal");
+
+    let content_of = |proposal: &legion_protocol::AssistedAiEditProposalOutput| match &proposal
+        .payload
+    {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+
+    // The second proposal carries both edits, so applying it produces what the
+    // model actually asked for.
+    assert_eq!(content_of(&proposals[0]), "let a = 10;\nlet b = 2;\n");
+    assert_eq!(content_of(&proposals[1]), "let a = 10;\nlet b = 20;\n");
+}
+
+/// A second edit whose anchor exists only because of the first must resolve —
+/// proof the overlay is the resolution source, not just a cache.
+#[test]
+fn a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "edit-as-proposal",
+            serde_json::json!({
+                "path": "m.rs",
+                "old_str": "fn main() {}",
+                "new_str": "fn main() {\n    todo!();\n}"
+            }),
+        )
+        .tool_use(
+            "t2",
+            "edit-as-proposal",
+            serde_json::json!({"path": "m.rs", "old_str": "todo!();", "new_str": "println!(\"hi\");"}),
+        )
+        .end_turn("Filled in.")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("the second anchor exists only in staged content");
+
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("expected Completed, got {result:?}");
+    };
+    let last = match &proposals[proposals.len() - 1].payload {
+        ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
+        other => panic!("expected a file-content payload, got {other:?}"),
+    };
+    assert_eq!(last, "fn main() {\n    println!(\"hi\");\n}\n");
+}

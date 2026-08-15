@@ -25,7 +25,14 @@ against real file content:
 
 - **Exact and unique, or refuse.** Zero matches is a no-match; two or more is
   ambiguous. Neither guesses, because picking one of two candidate sites edits
-  the wrong line.
+  the wrong line. Occurrences are counted **overlapping**, since
+  `str::matches` reports `"aa"` in `"aaa"` once while it in fact starts at two
+  positions — applying that under a uniqueness guarantee that does not hold.
+- **An empty anchor never overwrites a file.** `old_str: ""` is meaningful only
+  for a file that does not exist yet. Against existing content it would mean
+  "replace everything", so a model attempting an insertion with a blank anchor
+  is refused and pointed at `replacement` rather than silently destroying the
+  file.
 - **Whitespace and line-ending drift do not match.** A tab-vs-spaces or
   CRLF-vs-LF near-miss is refused, since "close enough" on indentation is how
   a patch lands in the wrong scope. Both are called out by name in the
@@ -49,6 +56,14 @@ families emit unprompted — would otherwise have its edit read as prose and
 lost. Recovery runs last in the extraction order, so a real tool call always
 wins over a block restatement of it, and only when the registry actually
 offers an edit tool, so discussing a diff is not mistaken for requesting one.
+
+**Successive edits to one file compose.** A run may edit the same file twice.
+The loop keeps a per-run overlay of content already staged by earlier
+proposals, and a fragment resolves against that rather than the untouched
+worktree. Without it the second proposal silently omits the first edit, and
+both carry preconditions for the same original file — so applying either makes
+the other stale. The overlay is also the resolution *source*, not a cache: a
+fragment can anchor on text an earlier edit introduced.
 
 **Loop integration.** `execute_edit_as_proposal` accepts either form:
 `replacement` for whole content, or `old_str`/`new_str` resolved against the
@@ -81,11 +96,11 @@ asserts the on-disk file is byte-identical after the run.
 | Check | Result |
 | --- | --- |
 | `cargo test -p legion-ai --test patch_resolution` | 3/3 — **18/18 patch vectors** applied exactly or refused as specified |
-| `cargo test -p legion-ai` | 84 passed / 0 failed |
-| `cargo test -p legion-agent --test agent_loop_integration` | 17 passed / 0 failed (3 new fragment-edit cases) |
+| `cargo test -p legion-ai` | 86 passed / 0 failed |
+| `cargo test -p legion-agent --test agent_loop_integration` | 19 passed / 0 failed (5 new fragment-edit cases) |
 | `cargo test -p legion-agent --test openai_tool_loop_cross_check` | 4 passed / 0 failed (incl. block-format edit end to end) |
 | `cargo test -p legion-agent --test tools_schema` | 3 passed / 0 failed |
-| `cargo test --workspace --all-targets` | **2765 passed / 0 failed / 251 suites** |
+| `cargo test --workspace --all-targets` | **2769 passed / 0 failed / 251 suites** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 
 End-to-end coverage in the delegated loop, not just the pure layer:
@@ -100,10 +115,16 @@ End-to-end coverage in the delegated loop, not just the pure layer:
 - `block_format_edit_written_as_prose_reaches_the_edit_tool` — a raw
   SEARCH/REPLACE block, through the real provider and loop, produces a
   proposal whose content was resolved by exact match rather than taken whole
+- `successive_fragment_edits_to_one_file_compose` — the second proposal carries
+  both edits rather than omitting the first
+- `a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit` — the overlay
+  is the resolution source, not merely a cache
 
 Adversarial coverage: every prefix of a block-format seed (mid-marker
 truncation) and a matrix of empty/CRLF/unicode/oversized fragments, asserting
-no panic.
+no panic. Diagnostic construction is bounded — a 200K-character single-line
+file against a 50K-character anchor builds its refusal in well under a second,
+because the failure path compares bounded samples rather than whole lines.
 
 ## Not claimed
 

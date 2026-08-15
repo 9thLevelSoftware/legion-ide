@@ -84,15 +84,25 @@ pub enum PatchResolution {
 /// Apply one exact-match edit to `file_content`.
 pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchResolution {
     if old_str.is_empty() {
-        // No fragment to locate: the model is supplying whole content. Callers
-        // mark this so review can show it as a full-file change.
+        // An empty anchor is only meaningful for a file that does not exist
+        // yet. Against existing content it would mean "replace everything" —
+        // and a model attempting an insertion by leaving the anchor blank
+        // would silently destroy the file. Whole-file rewrites must say so by
+        // using `replacement`.
+        if !file_content.is_empty() {
+            return PatchResolution::ValidationError {
+                reason: "`old_str` is empty, which would replace the file's entire contents. \
+                         Quote the exact text to replace, or pass `replacement` to rewrite the \
+                         whole file deliberately."
+                    .to_string(),
+            };
+        }
         return PatchResolution::Applied {
             content: new_str.to_string(),
             outcome: EditResolutionOutcome::WholeFileFallback,
         };
     }
-    let occurrences = file_content.matches(old_str).count();
-    match occurrences {
+    match count_overlapping(file_content, old_str) {
         1 => PatchResolution::Applied {
             content: file_content.replacen(old_str, new_str, 1),
             outcome: EditResolutionOutcome::Exact,
@@ -100,6 +110,35 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
         0 => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
         many => PatchResolution::Ambiguous { occurrences: many },
     }
+}
+
+/// Count every position the anchor could start at, including overlapping ones.
+///
+/// `str::matches` counts non-overlapping occurrences, which under-reports a
+/// self-overlapping anchor: `"aa"` in `"aaa"` starts at two positions but
+/// counts as one, and the edit would then be applied at the first site under
+/// a uniqueness guarantee that does not hold.
+fn count_overlapping(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(offset) = haystack[from..].find(needle) {
+        count += 1;
+        let start = from + offset;
+        // Advance one character, not one match, so overlaps are seen.
+        from = start
+            + haystack[start..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    count
 }
 
 /// Resolve an edit from a tool call's raw arguments, validating types first.
@@ -194,6 +233,14 @@ fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Borrow at most `max_chars` characters, cutting on a character boundary.
+fn char_prefix(text: &str, max_chars: usize) -> &str {
+    match text.char_indices().nth(max_chars) {
+        Some((offset, _)) => &text[..offset],
+        None => text,
+    }
+}
+
 /// Find the line a model should re-read, with a confidence score.
 ///
 /// Ordered by how strong the signal is: a line containing the needle outright,
@@ -205,6 +252,13 @@ fn nearest_candidate_line(file_content: &str, needle_first: &str) -> (Option<usi
     if needle_first.is_empty() {
         return (None, 0);
     }
+    // Diagnostics are advisory, and this runs on the failure path where the
+    // file may be minified — a single megabyte-long line against a long anchor
+    // would otherwise cost billions of comparisons just to build retry
+    // feedback. Comparing bounded samples points at the same line.
+    const SAMPLE_CHARS: usize = 256;
+    let needle_sample = char_prefix(needle_first, SAMPLE_CHARS);
+
     let mut best_line = None;
     let mut best_score = 0u32;
     for (index, line) in file_content.lines().enumerate() {
@@ -212,6 +266,8 @@ fn nearest_candidate_line(file_content: &str, needle_first: &str) -> (Option<usi
         if trimmed.is_empty() {
             continue;
         }
+        let trimmed = char_prefix(trimmed, SAMPLE_CHARS);
+        let needle_first = needle_sample;
         // Containment either way is the strongest available signal: the model
         // quoted a slice of this line, or padded around it.
         if trimmed.contains(needle_first) || needle_first.contains(trimmed) {
@@ -474,14 +530,57 @@ mod tests {
     }
 
     #[test]
-    fn empty_search_is_a_whole_file_write() {
-        let out = apply_edit("", "", "pub fn hello() {}");
+    fn empty_search_creates_a_file_but_never_overwrites_one() {
+        // Creating a file: nothing to anchor to, so the content stands alone.
         assert_eq!(
-            out,
+            apply_edit("", "", "pub fn hello() {}"),
             PatchResolution::Applied {
                 content: "pub fn hello() {}".to_string(),
                 outcome: EditResolutionOutcome::WholeFileFallback,
             }
+        );
+
+        // Against an existing file, an empty anchor would mean "replace
+        // everything" — a model attempting an insertion this way would destroy
+        // the file, so it is refused and told which field to use instead.
+        match apply_edit("existing content\n", "", "inserted") {
+            PatchResolution::ValidationError { reason } => assert!(
+                reason.contains("replacement"),
+                "should point at the deliberate whole-file field: {reason}"
+            ),
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_overlapping_anchors_count_as_ambiguous() {
+        // "aa" starts at offsets 0 and 1 in "aaa". `str::matches` reports one
+        // occurrence, which would apply the edit under a uniqueness guarantee
+        // that does not actually hold.
+        assert_eq!(
+            apply_edit("aaa", "aa", "bb"),
+            PatchResolution::Ambiguous { occurrences: 2 }
+        );
+        // A genuinely unique anchor still applies.
+        assert!(matches!(
+            apply_edit("abab\n", "abab", "cd"),
+            PatchResolution::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn diagnostics_stay_bounded_on_minified_input() {
+        // One very long line plus a long anchor: the failure path must not
+        // turn retry feedback into a stall.
+        let content = format!("{}\n", "x".repeat(200_000));
+        let anchor = "y".repeat(50_000);
+        let started = std::time::Instant::now();
+        let out = apply_edit(&content, &anchor, "z");
+        assert!(matches!(out, PatchResolution::NoMatch(_)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "diagnostic construction took {:?}",
+            started.elapsed()
         );
     }
 
