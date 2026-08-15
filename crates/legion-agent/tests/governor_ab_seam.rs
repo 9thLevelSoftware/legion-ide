@@ -289,7 +289,7 @@ fn the_raw_arm_rejects_a_malformed_edit_before_checking_the_path() {
 
     assert!(
         matches!(result, DelegatedTaskLoopResult::Completed { .. }),
-        "the missing required field must be caught first as retryable feedback,          not converted into a terminal block by the later path check; got {result:?}"
+        "the missing required field must be caught first as retryable feedback, not converted \n         into a terminal block by the later path check; got {result:?}"
     );
 }
 
