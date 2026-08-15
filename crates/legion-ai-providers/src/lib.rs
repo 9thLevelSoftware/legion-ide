@@ -1253,6 +1253,21 @@ where
         let stop_reason = match finish_reason {
             "tool_calls" => ToolCompletionStopReason::ToolUse,
             "length" => ToolCompletionStopReason::MaxTokens,
+            // A model that writes its call as prose reports `stop`, because as
+            // far as the provider is concerned it only produced text. Reporting
+            // EndTurn would make the agent loop finish the run without ever
+            // dispatching the call we just recovered — or feeding back the
+            // diagnostic for one we could not parse — which would leave
+            // recovery inert in exactly the case it exists for.
+            _ if blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ToolTurnBlock::ToolUse { .. } | ToolTurnBlock::MalformedToolCall { .. }
+                )
+            }) =>
+            {
+                ToolCompletionStopReason::ToolUse
+            }
             _ => ToolCompletionStopReason::EndTurn,
         };
 
@@ -5730,6 +5745,60 @@ mod tests {
             )),
             "it is surfaced as a malformed call carrying the raw text"
         );
+    }
+
+    /// A recovered call must arrive as a tool-use turn even though the model
+    /// reported `stop` — the agent loop returns immediately on `EndTurn`, so
+    /// reporting it would strand the recovered call undispatched.
+    #[test]
+    fn recovered_calls_report_tool_use_even_when_the_model_said_stop() {
+        let valid = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = openai_tool_provider(valid)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("recovered call");
+        assert_eq!(
+            resp.stop_reason,
+            ToolCompletionStopReason::ToolUse,
+            "a recovered call must not be reported as the end of the turn"
+        );
+
+        let malformed = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call>{\"function\":{\"name\":\"read\",\"arguments\":\"{bad\"}}</tool_call>",
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = openai_tool_provider(malformed)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("recovered malformed call");
+        assert_eq!(
+            resp.stop_reason,
+            ToolCompletionStopReason::ToolUse,
+            "the diagnostic must reach the loop rather than ending the run"
+        );
+
+        // Plain prose with no call in it still ends the turn.
+        let prose = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "All done."},
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = openai_tool_provider(prose)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
+            .expect("plain response");
+        assert_eq!(resp.stop_reason, ToolCompletionStopReason::EndTurn);
     }
 
     /// Recovery of prose-embedded calls happens only when the provider

@@ -36,13 +36,29 @@ between `tool_call_extractor.js` and `tool_aliases.js`):
 - Consumed spans are stripped from the residual prose, so recovery never
   leaves a call restated as text.
 
-**Alias canonicalization is applied at the registry boundary, not during
-extraction.** A recovered name is preserved whenever it already names an
-offered tool; only when it does not — `Read` against a registry offering
-`read_file` — is the alias table consulted, and then only if canonicalization
-actually produces an offered tool. Doing it unconditionally would rewrite
-calls whose literal name is a real tool (a registry offering `shell` would
-start receiving `bash`).
+**Alias resolution targets Legion's own registry.** Candidates are tried in
+order and the first the registry offers wins: the name as written, then
+SmallCode's canonical name, then Legion's native name (`read`, `grep`, `glob`,
+`outline`, `edit-as-proposal`, `terminal-command`). A literal match always
+wins first, so a registry exposing `shell` keeps receiving `shell` rather than
+being rewritten to `bash`.
+
+The third step is the one that matters in production and was missing in
+review: the delegated loop offers Legion's names, while SmallCode's
+vocabulary canonicalizes `Read` to `read_file` — a tool Legion does not have.
+Without a Legion-native mapping the alias layer was inert exactly where it was
+supposed to help, and the first test written for it passed only because it
+constructed a registry offering `read_file`. Arguments are renamed onto the
+target tool's keys (`file_path` → `path`, `cmd` → `command`, `new_string` →
+`replacement`), and directory listings reshape rather than rename
+(`ls(path)` → `glob(pattern)`).
+
+**A recovered call is reported as a tool-use turn.** A model writing its call
+as prose reports `finish_reason: "stop"`, because the provider only saw text.
+Mapping that to `EndTurn` would make the loop finish the run without
+dispatching what was just recovered — leaving the whole feature inert. The
+provider therefore reports `ToolUse` whenever recovery produced a call or a
+malformed block, and plain prose still ends the turn.
 
 **Non-dispatchable malformed calls.** `ToolTurnBlock::MalformedToolCall`
 carries `raw_arguments` and a diagnostic but deliberately has **no `input`
@@ -78,7 +94,8 @@ autonomy expansion (master plan §5.3).
 | Check | Result |
 | --- | --- |
 | `cargo test -p legion-ai --test tool_call_corpus` | 3/3 — **58/58 corpus vectors** recovered exactly or safely rejected (roadmap bar: ≥99%) |
-| Provider contract coverage (near-miss name, unparseable recovered arguments, prose recovery, malformed structured call, transport-shape failure) | 5 tests in `legion-ai-providers` |
+| Provider contract coverage (near-miss name, unparseable recovered arguments, prose recovery, malformed structured call, transport-shape failure, stop-reason) | 6 tests in `legion-ai-providers` |
+| **End-to-end provider→loop contract** (`legion-agent --test openai_tool_loop_cross_check`) | 3 passed — prose `Read` dispatches as Legion's `read`; malformed prose call is audited then corrected |
 | `cargo test -p legion-ai` | 61 passed / 0 failed |
 | `cargo test -p legion-ai-providers` | 68 passed / 0 failed |
 | `cargo test -p legion-agent --test agent_loop_integration` | 14 passed / 0 failed |
@@ -94,13 +111,28 @@ Beyond the corpus: structural fuzzing over every prefix of 18 adversarial
 seeds (unterminated tags, half-open fences, lone backslashes, brace soup)
 asserting no panic and no empty-named call, plus unicode boundary cases.
 
-**Corpus coverage alone would not have proven the production path.** The 18
-alias vectors exercise `normalize_alias` directly, so a green corpus said
-nothing about whether a near-miss name survives an actual provider call, where
-`known_tools` holds canonical registry names. Two gaps found in review and
-closed here — alias canonicalization never reaching the provider filter, and
-recovered calls with unparseable arguments entering dispatch — are now covered
-by provider-level contract tests rather than by unit tests of the pure layer.
+**Corpus coverage alone did not prove the production path — and reviewers were
+right to say so.** The 18 alias vectors exercise `normalize_alias` directly,
+so a green corpus said nothing about whether a near-miss name survives a real
+delegated run. Four gaps were found in review and closed here, none of which
+the corpus could have caught:
+
+1. alias canonicalization never reached the provider filter;
+2. it then targeted SmallCode's names rather than Legion's registry, so it
+   remained inert even once wired;
+3. recovered calls with unparseable arguments entered dispatch with a null
+   input;
+4. a recovered call reported `EndTurn`, so the loop finished before
+   dispatching it.
+
+The lesson is recorded rather than papered over: a pure-layer corpus proves
+the parser, not the feature. The binding evidence is now the end-to-end
+contract in `crates/legion-agent/tests/openai_tool_loop_cross_check.rs`, where
+a real `OpenAiCompatibleProvider` drives the real loop over a scripted
+transport: a model writing `<tool_call>{"name":"Read",...}</tool_call>` with
+`finish_reason: "stop"` results in an audited dispatch of Legion's `read`
+tool, and one with unparseable arguments produces a
+`malformed_tool_arguments` audit followed by a successful corrected call.
 
 ## Replaced test, preserved invariant
 

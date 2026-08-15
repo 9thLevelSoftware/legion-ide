@@ -133,15 +133,22 @@ impl ScanResult {
 
 /// Match a recovered call against the tools the model was actually offered.
 ///
-/// The name the model wrote is preserved whenever it already names an offered
-/// tool. Only when it does not — `Read` against a registry offering
-/// `read_file` — is [`normalize_alias`] applied, and then only if
-/// canonicalization actually produces an offered tool. A call that matches
-/// nothing either way is dropped rather than forwarded.
+/// Candidates are tried in order and the first one the registry offers wins:
 ///
-/// Ordering matters: canonicalizing unconditionally would rewrite a call whose
-/// literal name is a real tool (a registry offering `shell` would start
-/// receiving `bash`).
+/// 1. **The name as written.** A literal match always wins, so a registry
+///    exposing `shell` keeps receiving `shell` rather than being rewritten to
+///    `bash`.
+/// 2. **The SmallCode canonical name** ([`normalize_alias`]) — for registries
+///    that use that vocabulary.
+/// 3. **Legion's own registry name** ([`legion_registry_name`]) — the case
+///    that actually matters in a delegated run, where the offered tools are
+///    `read`, `grep`, `glob`, `outline`, `edit-as-proposal`,
+///    `terminal-command`.
+///
+/// Without step 3 the alias layer is inert in production: a model writing
+/// `Read` canonicalizes to SmallCode's `read_file`, which Legion does not
+/// offer, and the call is dropped — precisely the near-miss this exists to
+/// rescue. A call matching no candidate is dropped rather than forwarded.
 fn resolve_against_known(
     call: ExtractedToolCall,
     known_tools: &[String],
@@ -149,15 +156,76 @@ fn resolve_against_known(
     if known_tools.is_empty() || known_tools.contains(&call.name) {
         return Some(call);
     }
-    let (canonical, arguments) = normalize_alias(&call.name, &call.arguments);
-    if canonical != call.name && known_tools.contains(&canonical) {
+    let (canonical, canonical_arguments) = normalize_alias(&call.name, &call.arguments);
+    if known_tools.contains(&canonical) {
         return Some(ExtractedToolCall {
             name: canonical,
-            arguments,
+            arguments: canonical_arguments,
             arguments_unparsed: call.arguments_unparsed,
         });
     }
-    None
+    let native = legion_registry_name(&call.name)?;
+    if !known_tools.iter().any(|known| known == native) {
+        return None;
+    }
+    Some(ExtractedToolCall {
+        name: native.to_string(),
+        arguments: rename_arguments_for_legion_tool(native, &call.arguments),
+        arguments_unparsed: call.arguments_unparsed,
+    })
+}
+
+/// Map a model-written tool name onto Legion's native registry name.
+///
+/// Covers both the names small models reach for unprompted (`Read`, `bash`,
+/// `str_replace`) and SmallCode's canonical vocabulary (`read_file`, `patch`,
+/// `find_files`), since either can appear once extraction has run.
+fn legion_registry_name(name: &str) -> Option<&'static str> {
+    match name {
+        "read" | "Read" | "read_file" | "readFile" | "view" | "cat" | "open_file" => Some("read"),
+        "grep" | "search" | "rg" | "ripgrep" | "search_files" | "grep_search" => Some("grep"),
+        "glob" | "find_files" | "ls" | "LS" | "list_directory" | "list_files" => Some("glob"),
+        "outline" | "symbols" | "list_symbols" | "document_symbols" => Some("outline"),
+        "edit-as-proposal" | "edit" | "Edit" | "str_replace" | "str_replace_editor" | "replace"
+        | "patch" | "write_file" | "write" | "apply_patch" => Some("edit-as-proposal"),
+        "terminal-command" | "bash" | "shell" | "run_command" | "run_terminal_cmd" | "cmd"
+        | "terminal" | "exec" => Some("terminal-command"),
+        _ => None,
+    }
+}
+
+/// Rename arguments onto the keys a Legion native tool expects.
+///
+/// Directory-listing forms are a shape change rather than a rename: `ls(path)`
+/// becomes `glob(pattern)` over that directory.
+fn rename_arguments_for_legion_tool(tool: &str, arguments: &Value) -> Value {
+    let Value::Object(object) = arguments else {
+        return arguments.clone();
+    };
+    if tool == "glob"
+        && !object.contains_key("pattern")
+        && let Some(dir) = object.get("path").and_then(Value::as_str)
+    {
+        let dir = dir.trim_end_matches('/');
+        let dir = if dir.is_empty() { "." } else { dir };
+        let mut renamed = Map::new();
+        renamed.insert("pattern".to_string(), Value::String(format!("{dir}/*")));
+        return Value::Object(renamed);
+    }
+    let mut renamed = Map::new();
+    for (key, value) in object {
+        let key = match (tool, key.as_str()) {
+            ("read" | "outline" | "edit-as-proposal", "file_path" | "filepath" | "filePath") => {
+                "path"
+            }
+            ("grep" | "glob", "query") => "pattern",
+            ("terminal-command", "cmd") => "command",
+            ("edit-as-proposal", "content" | "new_string" | "new_str" | "text") => "replacement",
+            _ => key.as_str(),
+        };
+        renamed.insert(key.to_string(), value.clone());
+    }
+    Value::Object(renamed)
 }
 
 fn strip_spans(source: &str, spans: &[(usize, usize)]) -> String {
@@ -874,20 +942,81 @@ mod tests {
         assert_eq!(out.calls[0].arguments["command"], "ls -la");
     }
 
+    /// Legion's *real* delegated-loop registry, not a SmallCode-shaped one.
+    /// Testing against invented names would let the alias layer look healthy
+    /// while dropping every call in production.
+    const LEGION_TOOLS: &[&str] = &[
+        "read",
+        "grep",
+        "glob",
+        "outline",
+        "edit-as-proposal",
+        "terminal-command",
+    ];
+
     #[test]
-    fn near_miss_names_are_canonicalized_to_the_offered_tool() {
-        // The registry offers `read_file`; the model wrote `Read`. Without
-        // canonicalization at the filter step this call is silently dropped.
+    fn near_miss_names_resolve_to_legion_registry_names() {
+        for (written, expected_tool, expected_key, expected_value) in [
+            (
+                "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"src/foo.rs\"}}</tool_call>",
+                "read",
+                "path",
+                "src/foo.rs",
+            ),
+            (
+                "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
+                "read",
+                "path",
+                "a.rs",
+            ),
+            (
+                "<tool_call>{\"name\":\"search\",\"arguments\":{\"query\":\"TODO\"}}</tool_call>",
+                "grep",
+                "pattern",
+                "TODO",
+            ),
+            (
+                "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+                "terminal-command",
+                "command",
+                "ls",
+            ),
+            (
+                "<tool_call>{\"name\":\"str_replace\",\"arguments\":{\"file_path\":\"a.rs\",\"new_string\":\"x\"}}</tool_call>",
+                "edit-as-proposal",
+                "replacement",
+                "x",
+            ),
+        ] {
+            let out = extract(written, LEGION_TOOLS);
+            assert_eq!(out.calls.len(), 1, "must be recovered: {written}");
+            assert_eq!(out.calls[0].name, expected_tool, "for: {written}");
+            assert_eq!(
+                out.calls[0].arguments[expected_key], expected_value,
+                "argument renamed onto the Legion key for: {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_listing_names_become_glob_patterns_for_legion() {
+        let out = extract(
+            "<tool_call>{\"name\":\"ls\",\"arguments\":{\"path\":\"src/\"}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls[0].name, "glob");
+        assert_eq!(out.calls[0].arguments["pattern"], "src/*");
+    }
+
+    #[test]
+    fn a_smallcode_shaped_registry_still_resolves_to_its_own_names() {
+        // Registries using SmallCode's vocabulary keep working.
         let out = extract(
             "<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"src/foo.rs\"}}</tool_call>",
             &["read_file", "bash"],
         );
-        assert_eq!(out.calls.len(), 1, "near-miss name must still be recovered");
         assert_eq!(out.calls[0].name, "read_file");
-        assert_eq!(
-            out.calls[0].arguments["path"], "src/foo.rs",
-            "argument names are canonicalized alongside the tool name"
-        );
+        assert_eq!(out.calls[0].arguments["path"], "src/foo.rs");
     }
 
     #[test]

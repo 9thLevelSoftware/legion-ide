@@ -265,3 +265,151 @@ fn openai_provider_compatible_with_agent_loop_read_then_end() {
         );
     }
 }
+
+/// Provider-to-loop contract for prose-embedded calls (ADR-0049).
+///
+/// A model that writes its call as prose reports `finish_reason: "stop"`,
+/// because the provider only saw text. Both halves have to agree for recovery
+/// to do anything: the provider must report the turn as tool use, and the loop
+/// must dispatch the recovered call. If either half regresses, the run ends
+/// after turn one with the file never read.
+#[test]
+fn prose_embedded_call_is_recovered_and_dispatched_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "Hello, world!").unwrap();
+
+    let transport = SequentialOpenAiTransport::from_responses(vec![
+        // Turn 1: the call is written as prose under a near-miss name, with
+        // `stop` as the finish reason — the shape small local models produce.
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "I'll read it.\n<tool_call>{\"name\":\"Read\",\"arguments\":{\"file_path\":\"hello.txt\"}}</tool_call>"
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Done: Hello, world!"},
+                "finish_reason": "stop"
+            }]
+        }),
+    ]);
+
+    let provider = OpenAiCompatibleProvider::with_transport(
+        "openai-test",
+        "https://api.openai.com/v1",
+        Some("test-key".to_string()),
+        transport,
+    );
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed, got {result:?}"
+    );
+
+    // The decisive assertion: the recovered call actually reached dispatch,
+    // under Legion's registry name rather than the name the model wrote.
+    let read_calls = sink
+        .steps
+        .iter()
+        .filter(|step| step.tool_name.as_deref() == Some("read"))
+        .count();
+    assert!(
+        read_calls > 0,
+        "the prose-embedded call must be dispatched as `read`; audit steps: {:?}",
+        sink.steps
+            .iter()
+            .map(|s| (s.kind, s.tool_name.clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The same contract for a call whose arguments cannot be parsed: the
+/// diagnostic has to reach the model instead of ending the run silently.
+#[test]
+fn prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "Hello, world!").unwrap();
+
+    let transport = SequentialOpenAiTransport::from_responses(vec![
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "<tool_call>{\"function\":{\"name\":\"read\",\"arguments\":\"{not json\"}}</tool_call>"
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        // Turn 2: corrected call, only reachable if the loop kept going.
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{\"path\": \"hello.txt\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Recovered."},
+                "finish_reason": "stop"
+            }]
+        }),
+    ]);
+
+    let provider = OpenAiCompatibleProvider::with_transport(
+        "openai-test",
+        "https://api.openai.com/v1",
+        Some("test-key".to_string()),
+        transport,
+    );
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let result = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("a malformed recovered call must not error the loop");
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed after correction, got {result:?}"
+    );
+    assert_eq!(
+        sink.steps
+            .iter()
+            .filter(|step| step.reason.as_deref() == Some("malformed_tool_arguments"))
+            .count(),
+        1,
+        "the malformed recovered call is audited"
+    );
+}
