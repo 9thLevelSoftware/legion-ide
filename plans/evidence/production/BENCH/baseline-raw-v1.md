@@ -4,8 +4,8 @@ Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
 Models: **qwen2.5-coder:7b** (Q4_K_M, 4.7 GB, local), **qwen2.5-coder:14b**
 (Q4_K_M, 9.0 GB, local) and **deepseek-v4-flash:0731-cloud** (Ollama Cloud),
 all via Ollama 0.32.13 at `http://127.0.0.1:11434/v1`. Suite fingerprint
-`bench-suite-v1:f34b7e1a124dbe91`. 13 executed tasks, 5 holdout tasks
-excluded (ADR-0049 holdout policy). Four raw runs, seven governed.
+`bench-suite-v1:020ff34100dd8689` — 25 tasks, 20 executed, 5 holdout excluded
+(ADR-0049 holdout policy).
 
 ## Correction to the previous version of this file
 
@@ -16,7 +16,10 @@ tasks — see "The metric that was lying" below. Every number in this revision
 is computed from the gate the suite actually applies, and the harness now
 records the measurement that makes the error impossible to repeat.
 
-## Headline (local 7B): zero versus non-zero activity, and a gate neither arm clears
+## Headline (local 7B, superseded corpus): zero versus non-zero activity
+
+Measured on the 13-task corpus, not the repaired 20-task one. Kept for the
+mechanism it documents; the counts should not be quoted.
 
 For the larger model, where both arms actually work and the comparison is
 therefore meaningful, see "A non-degenerate comparison" below.
@@ -203,177 +206,143 @@ to be unaffected.
 
 ## A non-degenerate comparison: deepseek-v4-flash
 
-Everything above is measured on a model that emits **no** structured tool calls,
-which makes the raw arm's zero uninformative: "the reliability layer beats a
-model that does nothing" is true and nearly vacuous. The obvious objection is
-that the layer only rescues a broken driver and would add nothing to a
-competent one.
+Everything measured on the local models runs against a model that emits **no**
+structured tool calls, which makes the raw arm's zero uninformative: "the
+reliability layer beats a model that does nothing" is true and nearly vacuous.
+The obvious objection is that the layer only rescues a broken driver and would
+add nothing to a competent one.
 
 Run against **deepseek-v4-flash:0731-cloud** through the same local endpoint
-(Ollama proxying Ollama Cloud), the same 13 tasks, three runs per arm,
-alternating so any drift in the service hits both arms equally:
+(Ollama proxying Ollama Cloud), three runs per arm, alternating so any drift in
+the service hits both arms equally:
 
 | per run | raw | governed |
 | --- | ---: | ---: |
-| **suite gate** | 2, 3, 2 | **6, 5, 6** |
-| mean | 2.33 / 13 (18%) | **5.67 / 13 (44%)** |
-| task_success | 5, 5, 5 | 7, 5, 6 |
-| tasks where the model acted | 13, 13, 13 | 13, 13, 13 |
-| tool calls | 105, 50, 64 | 62, 82, 73 |
+| **suite gate** | 1, 2, 3 | 7, 3, 4 |
+| mean | 2.00 / 20 (10%) | **4.67 / 20 (23%)** |
+| task_success | 5, 6, 5 | 7, 5, 6 |
+| tasks where the model acted | 20, 20, 20 | 20, 20, 20 |
+| tool calls | 69, 67, 59 | 66, 95, 74 |
 
 This model calls tools properly — `finish_reason: tool_calls`, the right tool
-name, the right argument names — so **both arms act on all 13 tasks**. The
+name, the right argument names — so **both arms act on all 20 tasks**. The
 comparison is like-for-like: two working agents, one with the layer and one
 without.
 
-**The ranges do not overlap.** The governed arm's worst run (5) beats the raw
-arm's best (3), and the governed passing set is nearly identical across runs —
-`bench-live-01`, `bench-py-01`, `bench-py-03`, `bench-rust-01`, `bench-ts-01`
-every time, plus `bench-ts-03` in two of three. That stability is what makes
-three runs worth reporting here when three runs were not enough locally.
+The layer roughly doubles the number of tasks completed. That answers the
+objection above: it helps a model that was already competent at tool use, not
+only one that cannot emit a call at all.
 
-**It is not strict dominance.** In round 2 the raw arm passed `bench-py-04` and
-the governed arm did not. One exception in 39 task-runs, but the layer is not
-a pure superset and should not be described as one.
+### What this measurement is not
 
-**It does not win by doing less work.** Tool-call volume is the same either way
-— 73 raw against 72 governed on average. A single run suggested a 40% saving
-and that was noise; the honest reading is that the layer makes the same amount
-of work land, not that it shortens the path.
+**The ranges overlap.** The governed arm's worst run (3) is matched by the raw
+arm's best (3). Three runs each, with that much spread, cannot establish a
+separation — only a difference in means that could still be sampling.
 
-### What this does and does not establish
+**It is not dominance.** The raw arm passed tasks the governed arm did not in
+**two rounds of three** — `bench-py-03`, and `bench-py-04` as well in the third.
+The layer is not a superset of the baseline and must not be described as one.
 
-It answers the objection above: the port helps a model that was already
-competent at tool use, roughly two and a half times as many tasks completed.
-That is the first evidence in this file that the mechanism has value
-independent of rescuing a model that cannot emit a tool call at all.
+**It does not win by doing less work.** Tool-call volume is 65 raw against 78
+governed on average: the layer makes more calls, not fewer, and converts them
+into completed tasks at a better rate.
 
-**It does not satisfy Phase 2's exit criterion.** That gate is about a *local*
-model being daily-drivable, and this is a cloud model. The ≥20% figure is
-cleared here — +143% relative, +26 points absolute — but against the wrong
-subject. On the local 7B the governed arm still passes 0–2 of 13.
+### This supersedes an earlier, cleaner-looking result
 
-**Three runs is still three runs.** The non-overlap is the strongest signal
-available, not a confidence interval. A percentage quoted from this table
-should carry n=3 with it.
+A previous revision reported 6, 5, 6 against 2, 3, 2 with **non-overlapping**
+ranges, and described the governed arm's worst run as beating the raw arm's
+best. Those runs were real but the corpus underneath them was not sound: it had
+13 executed tasks, two of which (`bench-rust-03`, `bench-rust-05`) passed on
+the untouched fixture and so could not distinguish a working agent from a dead
+one, and the loop then advertised tools no task's scope granted.
+
+On the repaired 20-task corpus the same comparison is **weaker**: the same
+direction, a similar ratio, and none of the crispness. The earlier figure
+should not be quoted, and the difference between the two is a fair measure of
+how much a small unsound corpus can flatter a result.
 
 ## Where the layer starts paying off: 7B, 14B, frontier
 
-Three models, same 13 tasks, same build, same endpoint. Three runs per arm
-except the 7B (four raw, seven governed, accumulated earlier).
+**Every figure in this section was measured on the superseded corpus and has
+not been re-taken.** It is kept because the *shape* it describes does not
+depend on the task count, and removing it would lose the finding. The numbers
+themselves should not be quoted.
 
 | model | raw gate | governed gate | raw acted | governed acted |
 | --- | ---: | ---: | ---: | ---: |
 | qwen2.5-coder:7b | 0, 0, 0, 0 | 0, 0, 0, 1, 2, 0, 0 | 0 / 13 | 8–11 / 13 |
-| **qwen2.5-coder:14b** | **0, 0, 0** | **3, 3, 4** | **0 / 13** | **10–11 / 13** |
+| qwen2.5-coder:14b | 0, 0, 0 | 3, 3, 4 | 0 / 13 | 10–11 / 13 |
 | deepseek-v4-flash | 2, 3, 2 | 6, 5, 6 | 13 / 13 | 13 / 13 |
 
-Means: 0.00 → 0.43 (7B), **0.00 → 3.33 (14B)**, 2.33 → 5.67 (cloud).
+The shape, which stands independently of the counts:
 
-### The crossover is between 7B and 14B, and it is not where it looks
-
-Both local models fail identically at the transport layer: neither emits a
-structured tool call, so both raw arms are a flat zero across every run. The
-recovery layer works equally well on both — it gets the 7B acting on 8–11 tasks
-and the 14B on 10–11.
-
-What changes between them is whether the recovered edit is *correct*. The 7B
-converts that activity into 0.43 passes; the 14B converts almost identical
-activity into 3.33. The layer is not what improves; the model's ability to
+Both local models fail identically at the transport layer. Neither emits a
+structured tool call, so both raw arms are a flat zero in every run, and the
+recovery layer gets both acting on most tasks. What changes between them is
+whether the recovered edit is *correct* — near-identical activity, very
+different completion. The layer is not what improves; the model's ability to
 write a right answer is, and the layer is what lets that ability reach the
 workspace at all.
 
-So the value of the port is highest exactly at 14B, where the two failure modes
-come apart:
-
-* **7B** — can neither speak the transport nor write the change. The layer
-  fixes the first and the second still fails. Passes 0–2 of 13.
-* **14B** — cannot speak the transport, *can* often write the change. Without
-  the layer it scores zero on every run; with it, 3–4 of 13. This is the case
-  the port was built for, and it is the only model measured here whose
-  usefulness depends entirely on it.
-* **frontier** — speaks the transport natively, so the raw arm works. The layer
-  still roughly doubles it (2.33 → 5.67), but by improving a working agent
-  rather than enabling a dead one.
-
-### What this means for Phase 2's exit criterion
-
-The criterion is that on the same local model the governed loop measurably
-beats the raw loop by ≥20% relative. On the 14B the governed loop beats the raw
-loop 3.33 to 0.00, reproducibly, with no overlap and no exceptions.
-
-**But the ratio is undefined, not large.** A baseline of zero makes "≥20%
-relative" unmeasurable in the same way it was unmeasurable on the 7B, and this
-file should not pretend otherwise. Stated in absolute terms: 0% → 26% of tasks
-completed. Whether that satisfies the gate is a judgement about what the gate
-was written to mean, and it belongs in the ledger, not here.
-
-**The product goal is clearly not met.** A local model completing 26% of
-thirteen small tasks is not daily-drivable, and no reading of the criterion
-makes it so.
+That makes the port's value highest at 14B, the only model measured whose
+usefulness depends entirely on it: zero without, several with. The 7B cannot
+write the change either way. The frontier model speaks the transport natively,
+so the layer improves a working agent rather than enabling a dead one.
 
 ### What it means for Phase 4's hardware tiers
 
-The roadmap's Fast/Balanced/Strong mapping is currently asserted rather than
-measured. This is the first measurement bearing on it, and it says the
-Fast tier as specified is not worth shipping: a 7B produces almost nothing
-usable even with the whole reliability layer behind it.
+The roadmap's Fast/Balanced/Strong mapping is asserted rather than measured.
+This is the first measurement bearing on it, and it says the Fast tier as
+specified is not worth shipping: a 7B produces almost nothing usable even with
+the whole reliability layer behind it.
 
 Also measured, on the target hardware class (RTX 4070 Laptop, 8 GB VRAM,
 32 GB RAM): qwen2.5-coder:14b at Q4_K_M loads as 10 GB and Ollama splits it
-38% CPU / 62% GPU at a 4096-token context. It still completed 13 tasks in
-about 8 minutes, so the split is tolerable rather than fatal — but it is a
-concrete instance of the fit problem Phase 3.5 has to solve, and it says the
-memory-fit calculator needs to model partial offload rather than treating
-"does not fit in VRAM" as a refusal.
+38% CPU / 62% GPU at a 4096-token context, still completing a 13-task suite in
+about 8 minutes. Tolerable rather than fatal — so the memory-fit calculator
+Phase 3.5 owes must model partial offload rather than treating "does not fit in
+VRAM" as a refusal.
 
 ## Sample size
 
-Thirteen tasks, one quantization per model. Four raw and seven governed runs on
-the 7B; three per arm on the 14B and on the cloud model.
+Three runs per arm on the cloud model against the repaired 20-task corpus. The
+local-model figures above are from the superseded 13-task corpus and have not
+been re-taken.
 
-Every raw arm on a local model is a flat zero in every run, which is solid
-precisely because it is degenerate — the model never emits a tool call, so
-there is nothing to vary. The governed arms vary: 0–2 on the 7B, 3–4 on the
-14B, 5–6 on the cloud model. The 14B and cloud spreads are narrow and do not
-overlap their raw arms; the 7B's does not clear zero often enough to mean
-anything.
-
-Three runs is still three runs. The separations reported here are large
-relative to their spreads, which is the argument for taking them seriously —
-not a confidence interval.
+The cloud arms' ranges overlap (governed 3-7, raw 1-3), so what is established
+is a difference in means on n=3, not a separation. That is weaker than the
+previous revision of this file claimed, and the weakening came from repairing
+the corpus rather than from any change to the code under test.
 
 ## Status
 
 `P9.F1.T4` stays **in-progress**.
 
-Established:
+Established, on a corpus where every task is now checked to distinguish a
+working agent from a dead one:
 
-1. The reliability layer converts a local model that produces literally nothing
-   into one that acts on most tasks. That holds at both 7B and 14B, and the
-   raw arms are zero in every run at both sizes.
-2. Whether that activity becomes a *passing* task depends on the model, not the
-   layer. 7B: 0.43 of 13. 14B: 3.33 of 13, from near-identical activity.
-3. The layer also helps a model that never needed rescuing — 2.33 → 5.67 on a
-   frontier cloud model — so its value is not an artifact of broken transport.
+1. The reliability layer roughly doubles what a competent tool-calling model
+   completes: 4.67 of 20 against 2.00 of 20, same direction in all three runs.
+2. On local models it is the difference between nothing and something at all —
+   both the 7B and the 14B emit no structured tool calls, so their raw arms are
+   zero in every run.
+3. It is not a superset of the baseline. The raw arm won tasks the governed arm
+   did not in two rounds of three.
 
-Not established, and not close: a local model good enough to depend on. The
-best local result here is 26% of thirteen small tasks.
+Not established: any of it to a standard that survives the overlap. Three runs
+on 20 tasks with a governed spread of 3-7 supports "better on average" and
+nothing sharper.
 
-The next questions worth measuring, in order:
+Next, in order:
 
-1. **A 32B local model.** The 7B→14B step took pass rate from 3% to 26%; the
-   shape of the next step decides whether "capable local coding agent" is a
-   hardware problem that solves itself or a wall. It needs ~20 GB, which
-   exceeds the free RAM on this machine, so it needs either a smaller quant or
-   different hardware.
-2. **Why the 14B fails the other 9 tasks.** The failure mode has changed since
-   the 7B — these are wrong changes, not unparseable ones — and nothing here
-   yet says whether context budgeting (Phase 2.4) would move them.
-3. **A structured-output path for local models.** Both local models fail the
-   same way at the transport layer while being fine at content. Ollama supports
-   constrained decoding; forcing tool calls into the schema may be worth more
-   than any further tolerance in the parser.
+1. **More runs before any percentage is quoted.** The overlap is the binding
+   constraint now, not the corpus size.
+2. **Re-measure the local models** on the repaired corpus. Their figures are
+   the ones the Phase 2 exit criterion actually concerns, and they are stale.
+3. **Re-run the three transports on the 14B** — native, recovery, and
+   schema-constrained — which settles whether constrained decoding helps and
+   whether the pre/post scope-fix gap was variance, both of which were raised
+   on the old corpus and cannot be answered from it.
 
 ## Reproduction
 
