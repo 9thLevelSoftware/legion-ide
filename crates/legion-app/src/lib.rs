@@ -42,6 +42,9 @@ pub mod terminal_policy;
 /// Auto-updater client: manifest source, version compare, staging, journal, rollback (ADR-0042).
 pub mod updater;
 
+/// Vim modal editing session state and character/byte column conversion.
+pub mod vim_session;
+
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
 pub use intent_routing::*;
@@ -13976,6 +13979,9 @@ pub struct AppClipboardUpdate {
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
+    /// Vim modal editing state changed; carries the mode to display, or
+    /// `None` when modal editing is off.
+    VimModeChanged(Option<legion_ui::EditorInputMode>),
     /// Command had no effect.
     Noop,
     /// Command requested shell termination.
@@ -16126,6 +16132,8 @@ pub struct AppComposition {
     checkpoint_store: CheckpointStore,
     /// In-editor find/replace state, owned by app composition for projection building.
     buffer_search_state: legion_editor::BufferSearchState,
+    /// Vim modal editing state, carried across keystrokes.
+    vim: crate::vim_session::VimSession,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -16432,6 +16440,7 @@ impl AppComposition {
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
             checkpoint_store: CheckpointStore::new(),
             buffer_search_state: legion_editor::BufferSearchState::default(),
+            vim: crate::vim_session::VimSession::default(),
         }
     }
 
@@ -19501,6 +19510,72 @@ impl AppComposition {
         .map_or_else(Vec::new, |operands| operands.values())
     }
 
+    /// Handle a Vim modal-editing intent, or return `None` if it is not one.
+    ///
+    /// Separate from the pure router because resolving `w` needs the buffer's
+    /// text and its current cursor, and `CommandDispatcher` is deliberately
+    /// given neither.
+    ///
+    /// Motions become an ordinary `SetCursor`, so undo, projection and every
+    /// other cursor consumer stay unaware that Vim exists. Modal editing that
+    /// bypassed the normal cursor path would have to reimplement all of it.
+    fn dispatch_vim_intent(
+        &mut self,
+        intent: &CommandDispatchIntent,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::{byte_to_character_column, character_to_byte_column};
+
+        match intent {
+            CommandDispatchIntent::SetVimModeEnabled(enabled) => {
+                self.vim.set_enabled(*enabled);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimChangeMode(mode) => {
+                // Ignored when modal editing is off: a mode change with no Vim
+                // session is a request to enter a state the user cannot leave,
+                // because no key would be routed to the parser that exits it.
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::VimModeChanged(None)));
+                }
+                self.vim.state.set_mode(*mode);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimMotion { motion, count } => {
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                let Some(buffer_id) = self.active_documents.active_buffer_id else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let text = self.editor.text(buffer_id)?.to_string();
+                let position = self.editor.primary_cursor(buffer_id)?;
+
+                // Into character space, resolve, and back: the editor counts
+                // columns in bytes and Vim counts them in characters.
+                let from = legion_protocol::TextCoordinate {
+                    line: position.line as u32,
+                    character: byte_to_character_column(&text, position.line, position.column)
+                        as u32,
+                    byte_offset: None,
+                    utf16_offset: None,
+                };
+                let to = legion_ui::resolve_motion(&text, from, *motion, *count);
+                let target = legion_editor::TextPosition::new(
+                    to.line as usize,
+                    character_to_byte_column(&text, to.line as usize, to.character as usize),
+                );
+                self.editor
+                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+                Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Route a UI dispatch intent through editor and workspace authorities.
     pub fn dispatch_ui_intent(
         &mut self,
@@ -19509,6 +19584,13 @@ impl AppComposition {
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
+        }
+
+        // Vim intents need the buffer's text and cursor, which the pure
+        // router does not have, so they are handled here for the same reason
+        // find/replace is.
+        if let Some(outcome) = self.dispatch_vim_intent(&intent)? {
+            return Ok(outcome);
         }
 
         // Find/replace intents mutate buffer_search_state directly and return early.

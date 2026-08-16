@@ -302,6 +302,13 @@ impl DesktopLaunchConfig {
 pub enum DesktopWorkflowOutcome {
     /// Command had no effect.
     Noop,
+    /// Vim modal editing state changed.
+    ///
+    /// Carries the mode to display, or `None` when modal editing is off, so
+    /// the status bar can tell "not using Vim" from "using Vim, in insert
+    /// mode" — identical while typing, and very different in what the next
+    /// keystroke will do.
+    VimModeChanged(Option<legion_ui::EditorInputMode>),
     /// Product mode changed through app authority.
     ProductModeChanged {
         /// Active app-owned product mode.
@@ -582,6 +589,8 @@ pub struct DesktopRuntime {
     onboarding_visible: bool,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
+    /// Vim mode to show in the status bar; `None` when modal editing is off.
+    vim_mode: Option<legion_ui::EditorInputMode>,
     last_status_details: Vec<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
     /// Whether the LSP completion popup is currently visible (T6).
@@ -700,6 +709,7 @@ impl DesktopRuntime {
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
             last_status: Some(status),
+            vim_mode: None,
             last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
             completion_popup_open: false,
@@ -2409,6 +2419,17 @@ impl DesktopRuntime {
                     format!("Close dirty prompt {}", buffer_id.0),
                 );
                 DesktopWorkflowOutcome::CloseDirtyPrompt(buffer_id)
+            }
+            AppCommandOutcome::VimModeChanged(mode) => {
+                self.vim_mode = mode;
+                self.set_status(
+                    StatusSeverity::Info,
+                    match mode {
+                        Some(mode) => format!("Vim: {}", mode.label()),
+                        None => "Vim mode off".to_string(),
+                    },
+                );
+                DesktopWorkflowOutcome::VimModeChanged(mode)
             }
             AppCommandOutcome::CursorSet(buffer_id) => {
                 self.set_status(StatusSeverity::Info, format!("Cursor set {}", buffer_id.0));

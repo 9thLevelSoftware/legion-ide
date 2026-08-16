@@ -1975,6 +1975,24 @@ impl EditorEngine {
             .len())
     }
 
+    /// The buffer's primary cursor.
+    ///
+    /// The first cursor is the primary one — the same one viewport projection
+    /// reports — and a buffer always has at least one, so this returns a
+    /// position rather than an option. Callers that need every cursor for
+    /// multi-cursor editing should read them from the projection.
+    pub fn primary_cursor(&self, buffer_id: BufferId) -> Result<TextPosition, EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        Ok(state
+            .cursors
+            .first()
+            .map(|cursor| cursor.position)
+            .unwrap_or_else(TextPosition::zero))
+    }
+
     /// Replace cursors for a buffer.
     pub fn set_cursors(
         &mut self,

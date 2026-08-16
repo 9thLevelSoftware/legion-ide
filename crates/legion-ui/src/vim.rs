@@ -162,6 +162,7 @@ enum PendingSequence {
 /// Feed keystrokes through [`process_key`](Self::process_key) and act on the
 /// returned [`VimAction`].  The state machine is fully self-contained and does
 /// not access any external resource.
+#[derive(Debug)]
 pub struct VimState {
     mode: EditorInputMode,
     pending_count: Option<usize>,
@@ -201,6 +202,18 @@ impl VimState {
             None => {}
         }
         s
+    }
+
+    /// Switch mode directly, discarding any half-typed command.
+    ///
+    /// The parser normally changes mode itself in response to keys. This is
+    /// for the cases where something else decides — Escape handled by the
+    /// desktop layer, or a mode restored on session start — and it resets for
+    /// the same reason toggling does: a pending operator carried into a new
+    /// mode would consume the next motion typed for something else.
+    pub fn set_mode(&mut self, mode: EditorInputMode) {
+        self.reset();
+        self.mode = mode;
     }
 
     /// Clear all pending state without changing mode.
