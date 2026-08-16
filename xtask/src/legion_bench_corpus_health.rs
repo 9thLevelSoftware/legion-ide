@@ -174,7 +174,15 @@ fn run_at_rest(task: &CorpusTask, repo_root: &Path) -> Result<Option<i32>, Strin
     let _ = std::fs::remove_dir_all(&scratch);
     copy_tree(&source, &scratch).map_err(|e| format!("copying fixture failed: {e}"))?;
     let result = run_in(&scratch, task);
-    let _ = std::fs::remove_dir_all(&scratch);
+    // Report a failed cleanup rather than swallowing it. A build tree left
+    // behind is tens of megabytes, and 25 of them accumulating silently on a
+    // CI box is the kind of leak nobody attributes to the corpus gate.
+    if let Err(err) = std::fs::remove_dir_all(&scratch) {
+        eprintln!(
+            "legion-bench corpus: could not remove {}: {err}",
+            scratch.display()
+        );
+    }
     result
 }
 
