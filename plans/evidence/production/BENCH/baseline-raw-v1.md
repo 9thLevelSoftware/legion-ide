@@ -1,9 +1,9 @@
 # Legion-Bench raw baseline and raw-vs-governed comparison (P9.F1.T4)
 
 Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
-Models: **qwen2.5-coder:7b** (Q4_K_M, 4.68 GB, local) and
-**deepseek-v4-flash:0731-cloud** (Ollama Cloud), both via Ollama 0.32.13 at
-`http://127.0.0.1:11434/v1`. Suite fingerprint
+Models: **qwen2.5-coder:7b** (Q4_K_M, 4.7 GB, local), **qwen2.5-coder:14b**
+(Q4_K_M, 9.0 GB, local) and **deepseek-v4-flash:0731-cloud** (Ollama Cloud),
+all via Ollama 0.32.13 at `http://127.0.0.1:11434/v1`. Suite fingerprint
 `bench-suite-v1:f34b7e1a124dbe91`. 13 executed tasks, 5 holdout tasks
 excluded (ADR-0049 holdout policy). Four raw runs, seven governed.
 
@@ -257,50 +257,131 @@ subject. On the local 7B the governed arm still passes 0–2 of 13.
 available, not a confidence interval. A percentage quoted from this table
 should carry n=3 with it.
 
+## Where the layer starts paying off: 7B, 14B, frontier
+
+Three models, same 13 tasks, same build, same endpoint. Three runs per arm
+except the 7B (four raw, seven governed, accumulated earlier).
+
+| model | raw gate | governed gate | raw acted | governed acted |
+| --- | ---: | ---: | ---: | ---: |
+| qwen2.5-coder:7b | 0, 0, 0, 0 | 0, 0, 0, 1, 2, 0, 0 | 0 / 13 | 8–11 / 13 |
+| **qwen2.5-coder:14b** | **0, 0, 0** | **3, 3, 4** | **0 / 13** | **10–11 / 13** |
+| deepseek-v4-flash | 2, 3, 2 | 6, 5, 6 | 13 / 13 | 13 / 13 |
+
+Means: 0.00 → 0.43 (7B), **0.00 → 3.33 (14B)**, 2.33 → 5.67 (cloud).
+
+### The crossover is between 7B and 14B, and it is not where it looks
+
+Both local models fail identically at the transport layer: neither emits a
+structured tool call, so both raw arms are a flat zero across every run. The
+recovery layer works equally well on both — it gets the 7B acting on 8–11 tasks
+and the 14B on 10–11.
+
+What changes between them is whether the recovered edit is *correct*. The 7B
+converts that activity into 0.43 passes; the 14B converts almost identical
+activity into 3.33. The layer is not what improves; the model's ability to
+write a right answer is, and the layer is what lets that ability reach the
+workspace at all.
+
+So the value of the port is highest exactly at 14B, where the two failure modes
+come apart:
+
+* **7B** — can neither speak the transport nor write the change. The layer
+  fixes the first and the second still fails. Passes 0–2 of 13.
+* **14B** — cannot speak the transport, *can* often write the change. Without
+  the layer it scores zero on every run; with it, 3–4 of 13. This is the case
+  the port was built for, and it is the only model measured here whose
+  usefulness depends entirely on it.
+* **frontier** — speaks the transport natively, so the raw arm works. The layer
+  still roughly doubles it (2.33 → 5.67), but by improving a working agent
+  rather than enabling a dead one.
+
+### What this means for Phase 2's exit criterion
+
+The criterion is that on the same local model the governed loop measurably
+beats the raw loop by ≥20% relative. On the 14B the governed loop beats the raw
+loop 3.33 to 0.00, reproducibly, with no overlap and no exceptions.
+
+**But the ratio is undefined, not large.** A baseline of zero makes "≥20%
+relative" unmeasurable in the same way it was unmeasurable on the 7B, and this
+file should not pretend otherwise. Stated in absolute terms: 0% → 26% of tasks
+completed. Whether that satisfies the gate is a judgement about what the gate
+was written to mean, and it belongs in the ledger, not here.
+
+**The product goal is clearly not met.** A local model completing 26% of
+thirteen small tasks is not daily-drivable, and no reading of the criterion
+makes it so.
+
+### What it means for Phase 4's hardware tiers
+
+The roadmap's Fast/Balanced/Strong mapping is currently asserted rather than
+measured. This is the first measurement bearing on it, and it says the
+Fast tier as specified is not worth shipping: a 7B produces almost nothing
+usable even with the whole reliability layer behind it.
+
+Also measured, on the target hardware class (RTX 4070 Laptop, 8 GB VRAM,
+32 GB RAM): qwen2.5-coder:14b at Q4_K_M loads as 10 GB and Ollama splits it
+38% CPU / 62% GPU at a 4096-token context. It still completed 13 tasks in
+about 8 minutes, so the split is tolerable rather than fatal — but it is a
+concrete instance of the fit problem Phase 3.5 has to solve, and it says the
+memory-fit calculator needs to model partial offload rather than treating
+"does not fit in VRAM" as a refusal.
+
 ## Sample size
 
-Four raw runs and seven governed runs on the local 7B; three per arm on the
-cloud model. Thirteen tasks, one quantization each.
+Thirteen tasks, one quantization per model. Four raw and seven governed runs on
+the 7B; three per arm on the 14B and on the cloud model.
 
-The local raw arm is perfectly reproducible, so its zero is solid. The local
-governed arm is not: `task_success` ranged 1-6 and the gate 0-2 with nothing
-changing but sampling, so no local figure here is worth a percentage.
+Every raw arm on a local model is a flat zero in every run, which is solid
+precisely because it is degenerate — the model never emits a tool call, so
+there is nothing to vary. The governed arms vary: 0–2 on the 7B, 3–4 on the
+14B, 5–6 on the cloud model. The 14B and cloud spreads are narrow and do not
+overlap their raw arms; the 7B's does not clear zero often enough to mean
+anything.
 
-The cloud arms are tighter and their ranges do not overlap, which is why that
-comparison is reported as a result and the local one is not. Three runs is
-still three runs.
+Three runs is still three runs. The separations reported here are large
+relative to their spreads, which is the argument for taking them seriously —
+not a confidence interval.
 
 ## Status
 
 `P9.F1.T4` stays **in-progress**.
 
-What is now established: the small-model reliability layer measurably improves
-a model that is already competent at tool use — 5.67 of 13 against 2.33 of 13,
-non-overlapping across three runs each. That answers the standing objection
-that the port only rescues a driver too weak to emit a tool call.
+Established:
 
-What is not: the same layer does not yet make the *local* 7B usable, which is
-what Phase 2's exit criterion is actually about. It passes 0-2 of 13 there, and
-the two edit-resolution stages added from measured failure modes did not
-visibly move that number.
+1. The reliability layer converts a local model that produces literally nothing
+   into one that acts on most tasks. That holds at both 7B and 14B, and the
+   raw arms are zero in every run at both sizes.
+2. Whether that activity becomes a *passing* task depends on the model, not the
+   layer. 7B: 0.43 of 13. 14B: 3.33 of 13, from near-identical activity.
+3. The layer also helps a model that never needed rescuing — 2.33 → 5.67 on a
+   frontier cloud model — so its value is not an artifact of broken transport.
 
-The gap between those two sentences is the finding. Legion's edit path can
-apply what a capable model proposes; a 7B at Q4 mostly does not propose the
-right change, and no amount of tolerant matching fixes that. Next, in order:
+Not established, and not close: a local model good enough to depend on. The
+best local result here is 26% of thirteen small tasks.
 
-1. Re-measure the local arm on this build, so the local/cloud contrast comes
-   from one commit rather than runs taken at different ones.
-2. A mid-size local model (14B-32B) — the interesting question is where between
-   7B and a frontier cloud model the layer starts paying off, and that bears
-   directly on the hardware-class recommendations Phase 4 has to ship.
-3. Context budgeting and model profiles (Phase 2.4).
+The next questions worth measuring, in order:
+
+1. **A 32B local model.** The 7B→14B step took pass rate from 3% to 26%; the
+   shape of the next step decides whether "capable local coding agent" is a
+   hardware problem that solves itself or a wall. It needs ~20 GB, which
+   exceeds the free RAM on this machine, so it needs either a smaller quant or
+   different hardware.
+2. **Why the 14B fails the other 9 tasks.** The failure mode has changed since
+   the 7B — these are wrong changes, not unparseable ones — and nothing here
+   yet says whether context budgeting (Phase 2.4) would move them.
+3. **A structured-output path for local models.** Both local models fail the
+   same way at the transport layer while being fine at content. Ollama supports
+   constrained decoding; forcing tool calls into the schema may be worth more
+   than any further tolerance in the parser.
 
 ## Reproduction
 
-Local, the model the roadmap actually targets:
+Local. Substitute `qwen2.5-coder:14b` for the model that actually produces
+something:
 
 ```
-ollama pull qwen2.5-coder:7b
+ollama pull qwen2.5-coder:7b        # or qwen2.5-coder:14b
 LEGION_BENCH_MODEL=qwen2.5-coder:7b \
   cargo run -p xtask -- legion-bench --mode live-local                   # governed
 LEGION_AI_GOVERNORS=off LEGION_BENCH_MODEL=qwen2.5-coder:7b \
