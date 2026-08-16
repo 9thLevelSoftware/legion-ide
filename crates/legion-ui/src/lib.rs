@@ -5,6 +5,8 @@
 pub mod projection;
 pub mod ui;
 pub mod vim;
+/// Resolving a Vim motion against buffer text.
+mod vim_motion;
 
 pub use projection::{
     LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
@@ -14,6 +16,7 @@ pub use projection::{
 };
 
 pub use vim::{EditorInputMode, VimAction, VimMotionKind, VimOperatorKind, VimState};
+pub use vim_motion::resolve_motion;
 
 pub use ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,

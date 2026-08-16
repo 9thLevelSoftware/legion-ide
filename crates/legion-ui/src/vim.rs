@@ -37,7 +37,11 @@ impl EditorInputMode {
 }
 
 /// Motions that move the cursor or define a text object range.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Copy` because every variant is a discriminant or a `char`: motion
+/// resolution repeats one for a count, and threading clones through that loop
+/// would say something about ownership that is not true of the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimMotionKind {
     /// `h` — left one character.
     Left,
