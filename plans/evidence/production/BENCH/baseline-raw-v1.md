@@ -229,7 +229,9 @@ name, the right argument names — so **both arms act on all 20 tasks**. The
 comparison is like-for-like: two working agents, one with the layer and one
 without.
 
-The layer roughly doubles the number of tasks completed. That answers the
+The layer roughly doubles the number of tasks clearing the suite gate — the
+`task_success` row moves far less, and the two must not be read as one. That
+answers the
 objection above: it helps a model that was already competent at tool use, not
 only one that cannot emit a call at all.
 
@@ -239,9 +241,10 @@ only one that cannot emit a call at all.
 arm's best (3). Three runs each, with that much spread, cannot establish a
 separation — only a difference in means that could still be sampling.
 
-**It is not dominance.** The raw arm passed tasks the governed arm did not in
-**two rounds of three** — `bench-py-03`, and `bench-py-04` as well in the third.
-The layer is not a superset of the baseline and must not be described as one.
+**It is not dominance.** In two of the three rounds the raw arm passed a task
+the governed arm did not: `bench-py-03` in both, and `bench-py-04` in addition
+in one of them. The layer is not a superset of the baseline and must not be
+described as one.
 
 **It does not win by doing less work.** Tool-call volume is 65 raw against 78
 governed on average: the layer makes more calls, not fewer, and converts them
@@ -272,7 +275,11 @@ themselves should not be quoted.
 | --- | ---: | ---: | ---: | ---: |
 | qwen2.5-coder:7b | 0, 0, 0, 0 | 0, 0, 0, 1, 2, 0, 0 | 0 / 13 | 8–11 / 13 |
 | qwen2.5-coder:14b | 0, 0, 0 | 3, 3, 4 | 0 / 13 | 10–11 / 13 |
-| deepseek-v4-flash | 2, 3, 2 | 6, 5, 6 | 13 / 13 | 13 / 13 |
+| deepseek-v4-flash | *see above* | *see above* | 20 / 20 | 20 / 20 |
+
+The frontier row deliberately carries no numbers: it has current ones in "A
+non-degenerate comparison" sixty lines up, and printing the retracted pair here
+as well is how a withdrawn figure gets quoted later.
 
 The shape, which stands independently of the counts:
 

@@ -31,12 +31,12 @@
 //! provider, so it runs offline in CI in seconds.
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
+use crate::legion_bench::LegionBenchTaskKind;
 use crate::legion_bench_corpus::{CorpusTask, load_corpus};
 
 /// What a task's kind implies about its pristine fixture.
@@ -48,12 +48,35 @@ pub enum AtRestExpectation {
     Fails,
 }
 
-/// The at-rest state a task of this kind must have.
-pub fn expected_at_rest(kind_name: &str) -> AtRestExpectation {
-    match kind_name {
-        "refactor" => AtRestExpectation::Passes,
-        _ => AtRestExpectation::Fails,
+/// The at-rest state a task must have.
+///
+/// Takes the enum rather than its name so a new task kind is a compile error
+/// here instead of a silent default — this module exists to stop a task being
+/// scored wrongly, and guessing at an unknown kind is the same failure in
+/// miniature.
+pub fn expected_at_rest(
+    kind: LegionBenchTaskKind,
+    override_value: Option<&str>,
+) -> Result<AtRestExpectation, String> {
+    match override_value {
+        Some("passes") => return Ok(AtRestExpectation::Passes),
+        Some("fails") => return Ok(AtRestExpectation::Fails),
+        Some(other) => {
+            return Err(format!(
+                "at_rest must be \"passes\" or \"fails\", got {other:?}"
+            ));
+        }
+        None => {}
     }
+    Ok(match kind {
+        // Preserves behaviour, so the existing suite is green before and after.
+        LegionBenchTaskKind::Refactor => AtRestExpectation::Passes,
+        // Passing has to prove work, so the command must start red.
+        LegionBenchTaskKind::BugFix
+        | LegionBenchTaskKind::TestAdd
+        | LegionBenchTaskKind::MultiFileFeature
+        | LegionBenchTaskKind::HostileEval => AtRestExpectation::Fails,
+    })
 }
 
 /// One task's health verdict.
@@ -123,17 +146,61 @@ pub fn check_task_statically(task: &CorpusTask, repo_root: &Path) -> Vec<String>
         );
     }
 
-    if task.live.verification.timeout_secs == 0 {
-        problems.push("timeout_secs is 0".to_string());
-    }
     problems
 }
 
-/// Run one task's verification command against its pristine fixture.
+/// Run one task's verification command against a throwaway copy of its
+/// fixture.
+///
+/// A copy, not the fixture, because these commands build: running `cargo test`
+/// in `fixtures/bench-rust-lib` leaves a gitignored `target/` behind, and the
+/// live runner's checkout step copies every file it finds with no ignore
+/// rules — so one health check would make every later task deep-copy hundreds
+/// of megabytes, once per task, per run. A gate that measures the corpus must
+/// not be the thing that degrades it.
+///
+/// It also contains the timeout path. Killing the child kills the shell, not
+/// the `cargo` and `rustc` grandchildren under it; those keep writing until
+/// they finish, and here they write into a directory nothing else will read.
 ///
 /// Returns the exit code, or `None` if the command timed out.
 fn run_at_rest(task: &CorpusTask, repo_root: &Path) -> Result<Option<i32>, String> {
-    let fixture = repo_root.join(&task.task.fixture_repo);
+    let source = repo_root.join(&task.task.fixture_repo);
+    let scratch = std::env::temp_dir().join(format!(
+        "legion-bench-health-{}-{}",
+        task.task.id,
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&scratch);
+    copy_tree(&source, &scratch).map_err(|e| format!("copying fixture failed: {e}"))?;
+    let result = run_in(&scratch, task);
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// Copy a fixture, skipping build output that would make the copy enormous.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(
+            name.to_string_lossy().as_ref(),
+            "target" | "node_modules" | "__pycache__" | ".git"
+        ) {
+            continue;
+        }
+        let target = to.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_in(fixture: &Path, task: &CorpusTask) -> Result<Option<i32>, String> {
     let command = &task.live.verification.command;
 
     let (shell, flag) = if cfg!(windows) {
@@ -144,7 +211,7 @@ fn run_at_rest(task: &CorpusTask, repo_root: &Path) -> Result<Option<i32>, Strin
     let mut child = Command::new(shell)
         .arg(flag)
         .arg(command)
-        .current_dir(&fixture)
+        .current_dir(fixture)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -177,38 +244,50 @@ pub fn check_corpus(
     repo_root: &Path,
     execute: bool,
 ) -> Result<Vec<TaskHealth>, String> {
+    // `load_corpus` already rejects an empty directory, a duplicate id and a
+    // zero timeout, so this checks only what it cannot: whether a
+    // well-formed task can actually be scored.
     let tasks = load_corpus(corpus_dir)?;
-    if tasks.is_empty() {
-        return Err(format!("no corpus tasks found in {}", corpus_dir.display()));
-    }
-
-    let mut seen_ids: BTreeMap<String, usize> = BTreeMap::new();
     let mut report = Vec::with_capacity(tasks.len());
 
     for task in &tasks {
         let mut problems = check_task_statically(task, repo_root);
-        *seen_ids.entry(task.task.id.clone()).or_insert(0) += 1;
 
         if execute && problems.is_empty() {
             let kind = task.task.kind.as_str();
-            let expectation = expected_at_rest(kind);
+            let expectation =
+                match expected_at_rest(task.task.kind, task.live.verification.at_rest.as_deref()) {
+                    Ok(expectation) => expectation,
+                    Err(message) => {
+                        report.push(TaskHealth {
+                            id: task.task.id.clone(),
+                            problems: vec![message],
+                        });
+                        continue;
+                    }
+                };
             match run_at_rest(task, repo_root) {
                 Ok(Some(code)) => {
                     let passed = code == task.live.verification.expected_exit;
-                    // Failing at rest is always sound: the model has to make it
-                    // pass, so the exit code alone proves work happened.
-                    //
-                    // Passing at rest is only defensible for a `refactor`,
-                    // where keeping the tests green *is* the goal. Even then it
-                    // is the weaker design, because the gate then rests
-                    // entirely on `task_success` — and a refactor verified by a
-                    // script that checks the restructuring happened, which
-                    // fails at rest, is better still.
-                    if passed && expectation == AtRestExpectation::Fails {
-                        problems.push(format!(
+                    match (expectation, passed) {
+                        (AtRestExpectation::Fails, true) => problems.push(format!(
                             "kind `{kind}` already passes on the untouched fixture, so the task \
                              cannot distinguish a working agent from one that does nothing"
-                        ));
+                        )),
+                        // The case that matters most, and the one this gate
+                        // originally missed: a task is unwinnable when its
+                        // command is red for a reason the model is not allowed
+                        // to fix — most easily when another task in the same
+                        // fixture deliberately breaks a shared test.
+                        (AtRestExpectation::Passes, false) => problems.push(format!(
+                            "expected to pass on the untouched fixture but exited {code} \
+                             (expected {}). Either the task is unwinnable — check whether \
+                             another task in this fixture broke a test this one runs but \
+                             cannot edit — or it is verified by a script that checks the \
+                             change happened, in which case set `at_rest = \"fails\"`",
+                            task.live.verification.expected_exit
+                        )),
+                        _ => {}
                     }
                 }
                 Ok(None) => problems.push(format!(
@@ -223,15 +302,6 @@ pub fn check_corpus(
             id: task.task.id.clone(),
             problems,
         });
-    }
-
-    for (id, count) in seen_ids {
-        if count > 1 {
-            report.push(TaskHealth {
-                id: id.clone(),
-                problems: vec![format!("duplicate task id appears {count} times")],
-            });
-        }
     }
 
     Ok(report)
@@ -265,18 +335,40 @@ mod tests {
 
     #[test]
     fn a_refactor_must_pass_before_the_model_runs() {
-        assert_eq!(expected_at_rest("refactor"), AtRestExpectation::Passes);
+        assert_eq!(
+            expected_at_rest(LegionBenchTaskKind::Refactor, None),
+            Ok(AtRestExpectation::Passes)
+        );
     }
 
     #[test]
     fn every_other_kind_must_fail_before_the_model_runs() {
-        for kind in ["bug_fix", "test_add", "multi_file_feature"] {
+        for kind in [
+            LegionBenchTaskKind::BugFix,
+            LegionBenchTaskKind::TestAdd,
+            LegionBenchTaskKind::MultiFileFeature,
+        ] {
             assert_eq!(
-                expected_at_rest(kind),
-                AtRestExpectation::Fails,
-                "`{kind}` that already passes cannot distinguish a working agent \
+                expected_at_rest(kind, None),
+                Ok(AtRestExpectation::Fails),
+                "a {kind:?} that already passes cannot distinguish a working agent \
                  from one that does nothing"
             );
         }
+    }
+
+    #[test]
+    fn an_explicit_override_wins_over_the_kind_default() {
+        assert_eq!(
+            expected_at_rest(LegionBenchTaskKind::Refactor, Some("fails")),
+            Ok(AtRestExpectation::Fails),
+            "a refactor verified by a script that checks the change happened is \
+             red at rest on purpose"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_override_is_rejected_rather_than_guessed() {
+        assert!(expected_at_rest(LegionBenchTaskKind::BugFix, Some("maybe")).is_err());
     }
 }

@@ -22,6 +22,7 @@ Do not run tests, build commands, or any shell command: this environment does no
 [verification]
 command = "node test/verify-refactor.js"
 expected_exit = 0
+at_rest = "fails"
 timeout_secs = 120
 expected_files = ["src/money.js", "src/report.js", "src/cli.js"]
 

@@ -153,8 +153,16 @@ pub enum SchemaAction {
     Call {
         /// Tool name.
         name: String,
-        /// Arguments, with the `tool` discriminator removed.
+        /// Arguments, with the `tool` discriminator and reasoning removed.
         arguments: Value,
+        /// What the model said before choosing, if anything.
+        ///
+        /// Kept rather than discarded: this field exists because reasoning
+        /// measurably changes the edits a constrained model makes, and a
+        /// human reviewing the resulting proposal should be able to read the
+        /// argument for it. It is stripped from `arguments` because no tool
+        /// accepts it, not because it stops being interesting.
+        reasoning: Option<String>,
     },
     /// The model ended its turn.
     Done {
@@ -187,6 +195,12 @@ pub fn parse_action(content: &str) -> Option<SchemaAction> {
     }
     let mut arguments = object.clone();
     arguments.remove("tool");
+    let reasoning = arguments
+        .get(THOUGHT_FIELD)
+        .or_else(|| arguments.get("thought"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty());
     // The reasoning is for the model, not the executor: forwarding it would
     // fail argument validation on every tool Legion offers. The unprefixed
     // spelling is stripped too — the grammar cannot produce it, but a model
@@ -197,6 +211,7 @@ pub fn parse_action(content: &str) -> Option<SchemaAction> {
     Some(SchemaAction::Call {
         name: name.to_string(),
         arguments: Value::Object(arguments),
+        reasoning,
     })
 }
 
@@ -379,6 +394,7 @@ mod tests {
             SchemaAction::Call {
                 name: "read".to_string(),
                 arguments: json!({"path": "a.rs"}),
+                reasoning: Some("the anchor is on line 3".to_string()),
             },
             "the reasoning is for the model; forwarding it would fail argument \
              validation on every tool Legion offers"
@@ -391,6 +407,7 @@ mod tests {
             SchemaAction::Call {
                 name: "read".to_string(),
                 arguments: json!({"path": "a.rs"}),
+                reasoning: Some("stray".to_string()),
             },
             "a model ignoring its grammar should cost a field, not the call"
         );
@@ -404,6 +421,7 @@ mod tests {
             SchemaAction::Call {
                 name: "read".to_string(),
                 arguments: json!({"path": "a.rs"}),
+                reasoning: None,
             },
             "`tool` is the discriminator, not an argument the executor takes"
         );

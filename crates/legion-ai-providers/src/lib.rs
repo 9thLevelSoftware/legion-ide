@@ -1106,18 +1106,33 @@ fn schema_constrained_response(
     use legion_ai::schema_tools::{SchemaAction, parse_action};
 
     match parse_action(content) {
-        Some(SchemaAction::Call { name, arguments }) => ToolCompletionResponse {
-            provider,
-            model,
+        Some(SchemaAction::Call {
+            name,
+            arguments,
+            reasoning,
+        }) => {
+            // The reasoning precedes the call in the transcript, so the audit
+            // trail and the human reviewing the proposal see the argument for
+            // the edit and not just the edit. Under a grammar this is the only
+            // channel the model has for it.
+            let mut blocks = Vec::with_capacity(2);
+            if let Some(reasoning) = reasoning {
+                blocks.push(ToolTurnBlock::Text(reasoning));
+            }
             // One action per reply under a grammar, so a fixed id is enough
             // and keeps the block reproducible across runs.
-            blocks: vec![ToolTurnBlock::ToolUse {
+            blocks.push(ToolTurnBlock::ToolUse {
                 id: "schema-0".to_string(),
                 name,
                 input: arguments,
-            }],
-            stop_reason: ToolCompletionStopReason::ToolUse,
-        },
+            });
+            ToolCompletionResponse {
+                provider,
+                model,
+                blocks,
+                stop_reason: ToolCompletionStopReason::ToolUse,
+            }
+        }
         Some(SchemaAction::Done { summary }) => ToolCompletionResponse {
             provider,
             model,

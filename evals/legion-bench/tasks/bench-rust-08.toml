@@ -11,7 +11,7 @@ output. Create a new integration test file at tests/error_display.rs that
 asserts the rendered message of each variant, constructing each with a line
 number and checking the string produced by `to_string()`: UnterminatedSection
 mentions the missing ']', EmptySectionName says the section name is empty,
-EmptyKey says the key is empty, and MissingEquals reports the missing '='.
+EmptyKey says the key is empty, and MissingEquals says a 'key = value' assignment was expected.
 Every message begins with "line N: ". Do not modify any existing files — only
 add the new test file.
 
