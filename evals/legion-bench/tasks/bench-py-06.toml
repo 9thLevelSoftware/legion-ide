@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-py-06.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-06"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+textkit/dates.py miscounts calendar spans. `month_span` is documented as
+returning the *inclusive* number of months — `month_span(2024, 1, 2024, 3)` is
+3, covering January, February and March — but it returns one less than that.
+Fix `month_span` so it counts inclusively, without changing its signature, its
+ValueError behaviour, or `quarter_of`. The failing tests in
+tests/test_dates.py describe the expected results; do not modify the tests.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "python -m unittest tests.test_dates"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["textkit/dates.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

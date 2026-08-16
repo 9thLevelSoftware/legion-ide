@@ -1,0 +1,42 @@
+# evals/legion-bench/tasks/bench-rust-08.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-08"
+kind = "test_add"
+fixture_repo = "fixtures/bench-rust-lib"
+holdout = false
+
+prompt = """
+miniconf's `ParseError` (src/error.rs) has no test covering its Display
+output. Create a new integration test file at tests/error_display.rs that
+asserts the rendered message of each variant, constructing each with a line
+number and checking the string produced by `to_string()`: UnterminatedSection
+mentions the missing ']', EmptySectionName says the section name is empty,
+EmptyKey says the key is empty, and MissingEquals says a 'key = value' assignment was expected.
+Every message begins with "line N: ". Do not modify any existing files — only
+add the new test file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "cargo test --offline --test error_display"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["tests/error_display.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

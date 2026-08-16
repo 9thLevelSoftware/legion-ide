@@ -14,8 +14,9 @@ own line without splitting, (3) empty and whitespace-only input returning an
 empty list, and (4) ValueError being raised when width is zero or negative.
 Read the wrap_text docstring for the exact contract and follow the style of
 the existing modules in tests/. Do not modify textkit/wrap.py or any existing
-test. Run `python -m unittest tests.test_wrap` from the repository root to
-confirm the new tests pass.
+test.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
@@ -26,7 +27,7 @@ expected_files = ["tests/test_wrap.py", "textkit/wrap.py"]
 
 [scope]
 target_kind = "repo"
-allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
 forbidden_paths = ["textkit/wrap.py"]
 
 [gate_budget]

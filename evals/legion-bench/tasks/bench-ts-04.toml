@@ -28,6 +28,8 @@ Add a per-month totals feature to the ledger CLI, spread across two files:
    unchanged.
 
 The spec is encoded in test/verify-monthly.js; do not modify that file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 '''
 
 [verification]

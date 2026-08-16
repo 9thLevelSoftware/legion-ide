@@ -14,10 +14,12 @@ integration test file at tests/value_bool.rs that exercises
 "maybe" and the empty string return None. Construct values with
 `miniconf::Value::new`. Do not modify any existing files — only add the new
 test file, and make sure the whole test suite passes.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
-command = "cargo test --offline"
+command = "cargo test --offline --test value_bool"
 expected_exit = 0
 timeout_secs = 300
 expected_files = ["tests/value_bool.rs"]

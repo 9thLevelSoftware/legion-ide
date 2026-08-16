@@ -10,6 +10,7 @@ pub mod manifest;
 pub mod normalize;
 /// Exact-match resolution of model-authored edit fragments (ADR-0049).
 pub mod patch;
+pub mod schema_tools;
 
 /// The measurement seam for the small-model reliability layer.
 pub mod governance {

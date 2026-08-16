@@ -95,6 +95,15 @@ pub struct ToolCompletionRequest {
     pub tools: Vec<ToolDefinition>,
     /// Max tokens to generate.
     pub max_tokens: u32,
+    /// True when `tools` is Legion's own registry.
+    ///
+    /// Providers use this to decide whether recovered calls may have their
+    /// argument names canonicalized. Inferring it from the names fails both
+    /// ways: a foreign `read` gets rewritten, and a read-only Legion scope
+    /// offering only `read`, `grep`, `glob` and `outline` looks foreign and
+    /// loses recovery — which is worst for exactly the small models that
+    /// depend on it. The caller knows; the provider cannot.
+    pub legion_tools: bool,
 }
 
 /// Why the model stopped generating.
@@ -327,6 +336,7 @@ mod tests {
             turns,
             tools: vec![],
             max_tokens: 1024,
+            legion_tools: false,
         }
     }
 

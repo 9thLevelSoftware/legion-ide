@@ -36,6 +36,13 @@ jobs:
       - name: Legion bench verify (report integrity, not agent behavior)
         run: cargo run -p xtask -- verify-legion-bench
 
+      # Structure only. The execution half runs each task's verification
+      # command against its pristine fixture, which needs Python, Node and a
+      # Cargo build per fixture; that belongs with the live-local run, not on
+      # every push.
+      - name: Legion bench corpus health (structural)
+        run: cargo run -p xtask -- verify-legion-bench-corpus --no-execute
+
       - name: Upload legion bench report
         if: always()
         uses: actions/upload-artifact@v4

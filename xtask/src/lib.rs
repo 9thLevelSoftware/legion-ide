@@ -8,6 +8,7 @@ pub mod golden_path_5;
 pub mod kanban_backlog;
 pub mod legion_bench;
 pub mod legion_bench_corpus;
+pub mod legion_bench_corpus_health;
 pub mod legion_bench_live;
 pub mod no_egui_textedit;
 pub mod perf_harness;

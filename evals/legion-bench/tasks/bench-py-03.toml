@@ -13,9 +13,9 @@ str methods) while keeping its public behavior and signature exactly the
 same: lowercase output, runs of alphanumerics preserved, every other run of
 characters collapsed to a single hyphen, no leading or trailing hyphen, and
 an empty string when the input has no alphanumerics. Keep the change inside
-textkit/slug.py and do not modify any test. Run
-`python -m unittest tests.test_slug` from the repository root to confirm the
-behavior is unchanged.
+textkit/slug.py and do not modify any test.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
@@ -26,7 +26,7 @@ expected_files = ["textkit/slug.py", "tests/test_slug.py"]
 
 [scope]
 target_kind = "repo"
-allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
 forbidden_paths = ["tests"]
 
 [gate_budget]

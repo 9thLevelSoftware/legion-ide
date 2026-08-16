@@ -376,6 +376,9 @@ fn sample_raw_result(id: &str) -> xtask::legion_bench_corpus::LiveRunTaskResult 
         outcome: "completed".to_string(),
         task_success: true,
         tests_passed: true,
+        // A fixture whose tests already passed would make `tests_passed`
+        // meaningless, so the sample models the case the metric is about.
+        tests_passed_at_rest: false,
         verification_exit: Some(0),
         proposals_total: 1,
         proposals_applied: 1,

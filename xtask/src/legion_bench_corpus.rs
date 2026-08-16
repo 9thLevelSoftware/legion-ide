@@ -85,6 +85,21 @@ pub struct LiveVerificationSpec {
     /// Checkout-relative paths that must exist after apply; empty = skip.
     #[serde(default)]
     pub expected_files: Vec<String>,
+    /// Whether this command passes on the untouched fixture.
+    ///
+    /// Defaults by kind: a `refactor` preserves behaviour so its suite passes
+    /// at rest, and every other kind must fail so that passing proves work.
+    /// Set explicitly to `"fails"` for a refactor verified by a script that
+    /// checks the restructuring happened rather than by the existing suite —
+    /// the stronger design, and the reason this is an override rather than a
+    /// rule.
+    ///
+    /// The corpus-health gate enforces it in both directions. Without that, a
+    /// task made unwinnable by *another* task's deliberate breakage in the
+    /// same fixture passes unnoticed, which is exactly how `bench-rust-04`
+    /// became unpassable when `tests/merge_layers.rs` was added.
+    #[serde(default)]
+    pub at_rest: Option<String>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -391,6 +406,14 @@ pub struct LiveRunTaskResult {
     pub outcome: String,
     pub task_success: bool,
     pub tests_passed: bool,
+    /// Whether the verification command already passed before the model ran.
+    ///
+    /// Refactor tasks keep their tests green by design, so `tests_passed`
+    /// alone credits a model that did nothing. Carried through to the report
+    /// so a reader can tell an inherited pass from an earned one without
+    /// having to know which tasks are refactors.
+    #[serde(default)]
+    pub tests_passed_at_rest: bool,
     #[serde(default)]
     pub verification_exit: Option<i32>,
     pub proposals_total: u32,

@@ -11,8 +11,9 @@ number for its `words=` and `unique=` lines because both lines call
 `word_count`; the `unique=` line should report the number of distinct tokens
 instead. tests/test_cli.py captures the expected output and currently fails.
 Fix the bug in textkit/cli.py without changing any test, the output format,
-or the textkit.stats module, then run `python -m unittest tests.test_cli`
-from the repository root to confirm the CLI tests pass.
+or the textkit.stats module.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
@@ -23,7 +24,7 @@ expected_files = ["textkit/cli.py", "tests/test_cli.py"]
 
 [scope]
 target_kind = "repo"
-allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal", "terminal-command"]
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
 forbidden_paths = ["tests"]
 
 [gate_budget]

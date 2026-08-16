@@ -123,13 +123,14 @@ pub fn score_live_task(corpus_task: &CorpusTask, raw: &LiveRunTaskResult) -> Leg
         .map(|err| format!(" error={err}"))
         .unwrap_or_default();
     let notes = format!(
-        "scoring_mode={SCORING_MODE_LIVE_LOCAL} outcome={} task_success={} tests_passed={} \
+        "scoring_mode={SCORING_MODE_LIVE_LOCAL} outcome={} task_success={} tests_passed={} tests_passed_at_rest={} \
          verification_exit={} proposals_applied={}/{} diff_files={} turns={} tool_calls={} \
          duplicate_tool_calls={} retries={} context_tokens={} generation_tokens={} wall_ms={} \
          cost_cents=0 (local endpoint; no billing accounting){}{}",
         raw.outcome,
         raw.task_success,
         raw.tests_passed,
+        raw.tests_passed_at_rest,
         raw.verification_exit
             .map(|code| code.to_string())
             .unwrap_or_else(|| "none".to_string()),

@@ -93,6 +93,15 @@ struct LiveRunTaskResult {
     outcome: String,
     task_success: bool,
     tests_passed: bool,
+    /// Whether the task's verification command already passed before the model
+    /// ran.
+    ///
+    /// Refactor tasks are supposed to preserve behaviour, so their tests pass
+    /// on the untouched fixture. Without this field `tests_passed` reads as an
+    /// achievement on those tasks, and a model that does nothing at all scores
+    /// four of thirteen — which is exactly how the raw arm first appeared to
+    /// beat the governed one.
+    tests_passed_at_rest: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_exit: Option<i32>,
     proposals_total: u32,
@@ -119,6 +128,7 @@ impl LiveRunTaskResult {
             outcome: "error".to_string(),
             task_success: false,
             tests_passed: false,
+            tests_passed_at_rest: false,
             verification_exit: None,
             proposals_total: 0,
             proposals_applied: 0,
@@ -768,6 +778,17 @@ fn run_one_task(
         }
     };
 
+    // Measure the fixture before the model touches it, so a task that already
+    // passes cannot be reported as one the model solved.
+    result.tests_passed_at_rest = matches!(
+        run_verification(
+            &task.verification_command,
+            &checkout,
+            Duration::from_secs(task.timeout_secs),
+        ),
+        Ok(Some(exit)) if exit == task.expected_exit
+    );
+
     let outcome = (|| -> Result<AppDelegatedTaskOutcome, String> {
         let mut app = AppComposition::new();
         app.open_workspace(
@@ -819,8 +840,18 @@ fn run_one_task(
             notes.push(format!("model_http_requests={}", state.requests));
         }
 
-        // Apply proposals + audit metrics for the completed path.
-        if let AppDelegatedTaskOutcome::Completed { proposals, .. } = &outcome {
+        // Apply proposals for every outcome that carries them, here, while
+        // `app` still exists. A run the idle governor stopped is scored on the
+        // same evidence as a completed one, and that parity is only real if
+        // its edits actually reach the checkout — relabelling the outcome
+        // later cannot apply anything, because the composition is gone by
+        // then.
+        let proposals = match &outcome {
+            AppDelegatedTaskOutcome::Completed { proposals, .. }
+            | AppDelegatedTaskOutcome::StoppedNoProgress { proposals, .. } => Some(proposals),
+            _ => None,
+        };
+        if let Some(proposals) = proposals {
             result.proposals_total = proposals.len() as u32;
             let (applied, mut apply_notes) = apply_proposals(&mut app, &checkout, proposals);
             result.proposals_applied = applied;
@@ -829,29 +860,72 @@ fn run_one_task(
         Ok(outcome)
     })();
 
-    let audit_metrics = |steps: &[legion_protocol::DelegatedTaskLoopStepRecord]| {
-        let turns = steps
+    // Records every audit-derived field at once. Split across the outcome arms
+    // it was three copies of the same five lines, which is three places to
+    // forget the next time the report grows a field.
+    let record_audit = |steps: &[legion_protocol::DelegatedTaskLoopStepRecord],
+                        result: &mut LiveRunTaskResult,
+                        notes: &mut Vec<String>| {
+        result.turns = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ModelResponse)
             .count() as u32;
-        let tool_calls = steps
+        result.tool_calls = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRequest)
             .count() as u32;
-        let retries = steps
+        let rejections: Vec<String> = steps
             .iter()
             .filter(|s| s.kind == DelegatedTaskLoopStepKind::ToolCallRejected)
-            .count() as u32;
-        (turns, tool_calls, retries)
+            .map(|s| {
+                format!(
+                    "{}:{}",
+                    s.tool_name.as_deref().unwrap_or("?"),
+                    s.reason.as_deref().unwrap_or("?")
+                )
+            })
+            .collect();
+        result.retries = rejections.len() as u32;
+        // Why a call was rejected is the whole diagnosis. Without it a failed
+        // run reports `retries=1` and nothing else, and the only way to learn
+        // more is to run the suite again by hand.
+        if !rejections.is_empty() {
+            notes.push(format!("rejections: {}", rejections.join("; ")));
+        }
+    };
+
+    // A run the idle-turn governor stopped still produced whatever it produced,
+    // and is scored on exactly the same evidence as a completed one: files
+    // actually changed, proposals applied, verification exit code. Scoring it
+    // as a non-outcome instead would let the governor flatter itself by
+    // removing its own weakest runs from the denominator. Only the label
+    // differs, so the evidence can report how often it fired.
+    let mut stopped_no_progress = false;
+    let outcome = match outcome {
+        Ok(AppDelegatedTaskOutcome::StoppedNoProgress {
+            proposals,
+            audit_steps,
+            reason,
+        }) => {
+            stopped_no_progress = true;
+            notes.push(format!("stopped without progress: {reason}"));
+            Ok(AppDelegatedTaskOutcome::Completed {
+                final_message: reason,
+                proposals,
+                audit_steps,
+            })
+        }
+        other => other,
     };
 
     match outcome {
         Ok(AppDelegatedTaskOutcome::Completed { audit_steps, .. }) => {
-            result.outcome = "completed".to_string();
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = retries;
+            result.outcome = if stopped_no_progress {
+                "stopped_no_progress".to_string()
+            } else {
+                "completed".to_string()
+            };
+            record_audit(&audit_steps, &mut result, &mut notes);
 
             match changed_files(&checkout) {
                 Ok(changed) => {
@@ -902,10 +976,7 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "blocked".to_string();
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = retries;
+            record_audit(&audit_steps, &mut result, &mut notes);
             result.error = Some(format!("loop blocked: {reason}"));
         }
         Ok(AppDelegatedTaskOutcome::BudgetExhausted {
@@ -913,11 +984,16 @@ fn run_one_task(
             audit_steps,
         }) => {
             result.outcome = "budget_exhausted".to_string();
-            let (turns, tool_calls, retries) = audit_metrics(&audit_steps);
-            result.turns = turns;
-            result.tool_calls = tool_calls;
-            result.retries = retries;
+            record_audit(&audit_steps, &mut result, &mut notes);
             result.error = Some(format!("budget exhausted: {reason}"));
+        }
+        // Rewritten into `Completed` above, so this arm is not reached. It
+        // records the run as an error rather than panicking, because a
+        // benchmark that crashes on an unexpected outcome loses the whole
+        // suite's data to protect one row of it.
+        Ok(AppDelegatedTaskOutcome::StoppedNoProgress { reason, .. }) => {
+            result.outcome = "stopped_no_progress".to_string();
+            result.error = Some(reason);
         }
         Ok(AppDelegatedTaskOutcome::Cancelled) => {
             result.outcome = "cancelled".to_string();
@@ -947,7 +1023,19 @@ fn run_one_task(
         result.notes.push_str("...");
     }
 
-    let _ = fs::remove_dir_all(&checkout);
+    // `LEGION_BENCH_KEEP_CHECKOUTS=1` leaves each task's checkout on disk.
+    // A score says a run failed; only the diff says why, and reproducing one
+    // by hand costs a full suite run. Off by default because a kept suite is
+    // 18 fixture copies.
+    if std::env::var("LEGION_BENCH_KEEP_CHECKOUTS").is_ok_and(|v| v == "1") {
+        eprintln!(
+            "legion_bench_live: kept checkout for {} at {}",
+            task.id,
+            checkout.display()
+        );
+    } else {
+        let _ = fs::remove_dir_all(&checkout);
+    }
     result
 }
 
@@ -1076,7 +1164,7 @@ fn main() {
         );
         let result = run_one_task(task, &input.endpoint, &input.model, &api_key);
         eprintln!(
-            "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} \
+            "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} tests_passed_at_rest={} \
              turns={} tool_calls={} wall_ms={}{}",
             index + 1,
             input.tasks.len(),
@@ -1084,6 +1172,7 @@ fn main() {
             result.outcome,
             result.task_success,
             result.tests_passed,
+            result.tests_passed_at_rest,
             result.turns,
             result.tool_calls,
             result.wall_ms,

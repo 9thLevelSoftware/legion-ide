@@ -1078,6 +1078,76 @@ where
     }
 }
 
+/// Whether requests should carry a tool-call grammar instead of tool
+/// definitions.
+///
+/// Off by default and independent of `LEGION_AI_GOVERNORS`: this changes the
+/// wire format rather than adding tolerance, it only works on endpoints that
+/// implement `response_format: json_schema`, and applying it to a model with
+/// working native tool use would replace a capability with a workaround. The
+/// long-term home for the decision is a per-model profile (roadmap 2.4); the
+/// environment variable is what makes it measurable today.
+fn schema_constrained_tools_enabled() -> bool {
+    std::env::var("LEGION_AI_TOOL_TRANSPORT").is_ok_and(|v| v.eq_ignore_ascii_case("schema"))
+}
+
+/// Turn a grammar-constrained reply into loop blocks.
+///
+/// A response that does not parse is reported as text rather than as a
+/// malformed call: under a grammar the model had no way to produce a *broken*
+/// call, so an unparseable body means the endpoint ignored the schema, and
+/// treating that as the model's fault would send it a correction it cannot act
+/// on.
+fn schema_constrained_response(
+    provider: ProviderId,
+    model: String,
+    content: &str,
+) -> ToolCompletionResponse {
+    use legion_ai::schema_tools::{SchemaAction, parse_action};
+
+    match parse_action(content) {
+        Some(SchemaAction::Call {
+            name,
+            arguments,
+            reasoning,
+        }) => {
+            // The reasoning precedes the call in the transcript, so the audit
+            // trail and the human reviewing the proposal see the argument for
+            // the edit and not just the edit. Under a grammar this is the only
+            // channel the model has for it.
+            let mut blocks = Vec::with_capacity(2);
+            if let Some(reasoning) = reasoning {
+                blocks.push(ToolTurnBlock::Text(reasoning));
+            }
+            // One action per reply under a grammar, so a fixed id is enough
+            // and keeps the block reproducible across runs.
+            blocks.push(ToolTurnBlock::ToolUse {
+                id: "schema-0".to_string(),
+                name,
+                input: arguments,
+            });
+            ToolCompletionResponse {
+                provider,
+                model,
+                blocks,
+                stop_reason: ToolCompletionStopReason::ToolUse,
+            }
+        }
+        Some(SchemaAction::Done { summary }) => ToolCompletionResponse {
+            provider,
+            model,
+            blocks: vec![ToolTurnBlock::Text(summary)],
+            stop_reason: ToolCompletionStopReason::EndTurn,
+        },
+        None => ToolCompletionResponse {
+            provider,
+            model,
+            blocks: vec![ToolTurnBlock::Text(content.to_string())],
+            stop_reason: ToolCompletionStopReason::EndTurn,
+        },
+    }
+}
+
 impl<T> ToolCallingProvider for OpenAiCompatibleProvider<T>
 where
     T: ProviderHttpTransport,
@@ -1119,7 +1189,51 @@ where
             "max_tokens": request.max_tokens,
             "messages": messages,
         });
-        if !tools.is_empty() {
+
+        // Schema-constrained tool calling, for endpoints serving a model that
+        // cannot emit `tool_calls` at all. Instead of advertising `tools` and
+        // recovering whatever prose comes back, the decoder is handed a
+        // grammar it must satisfy, so a malformed call becomes unrepresentable
+        // rather than repairable. Opt-in: a model with working native tool use
+        // must not be downgraded to this.
+        let schema_tools: Option<Value> = if schema_constrained_tools_enabled() {
+            legion_ai::schema_tools::build_action_schema(
+                &request
+                    .tools
+                    .iter()
+                    .map(|t| legion_ai::schema_tools::SchemaTool {
+                        name: t.name.clone(),
+                        parameters: t.input_schema.clone(),
+                        // An edit is either a whole-file `replacement` or an
+                        // `old_str`/`new_str` fragment. Legion's schema cannot
+                        // say that — it requires only `path` and checks the
+                        // rest where a failure can be explained — but a grammar
+                        // has to, or it permits an edit with no content at all.
+                        required_groups: if t.name == "edit-as-proposal" {
+                            vec![
+                                vec!["replacement".to_string()],
+                                vec!["old_str".to_string(), "new_str".to_string()],
+                            ]
+                        } else {
+                            Vec::new()
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
+        if let Some(schema) = &schema_tools {
+            payload["response_format"] = json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": legion_ai::schema_tools::ACTION_SCHEMA_NAME,
+                    "strict": true,
+                    "schema": schema,
+                }
+            });
+        } else if !tools.is_empty() {
             payload["tools"] = json!(tools);
         }
 
@@ -1150,6 +1264,16 @@ where
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
+
+        // Under a grammar the whole reply is one action object, so it is
+        // parsed directly rather than run through prose recovery.
+        if schema_tools.is_some() {
+            return Ok(schema_constrained_response(
+                self.id.clone(),
+                request.model.clone(),
+                content,
+            ));
+        }
         let structured_calls = message.get("tool_calls").and_then(Value::as_array);
         let has_structured_calls = structured_calls.is_some_and(|calls| !calls.is_empty());
 
@@ -1163,6 +1287,7 @@ where
                 reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
                 has_existing_tool_calls: has_structured_calls,
                 known_tools: &known_tools,
+                legion_tools: request.legion_tools,
             })
         } else {
             // Measurement arm: behave as before the port — a call written as
@@ -5141,6 +5266,7 @@ mod tests {
                 }),
             }],
             max_tokens: 1024,
+            legion_tools: false,
         };
 
         let response = client
@@ -5209,6 +5335,7 @@ mod tests {
                 }),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
 
         let response = client
@@ -5280,6 +5407,7 @@ mod tests {
             }],
             tools: vec![],
             max_tokens: 64,
+            legion_tools: false,
         }
     }
 
@@ -5318,6 +5446,7 @@ mod tests {
                 }),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
         provider.complete_with_tools(request).expect("completes");
 
@@ -5426,6 +5555,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 256,
+                legion_tools: false,
             })
             .expect("round-trip succeeds");
 
@@ -5557,6 +5687,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 256,
+                legion_tools: false,
             })
             .expect("round-trip succeeds");
 
@@ -5713,6 +5844,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
         let resp = openai_tool_provider(response)
             .complete_with_tools(request)
@@ -5894,6 +6026,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 64,
+                legion_tools: false,
             })
             .expect("ok");
 
@@ -5979,6 +6112,7 @@ mod tests {
             }],
             tools: vec![weather_tool.clone()],
             max_tokens: 256,
+            legion_tools: false,
         };
         let response = provider
             .complete_with_tools(request)
@@ -6025,6 +6159,7 @@ mod tests {
             ],
             tools: vec![weather_tool],
             max_tokens: 256,
+            legion_tools: false,
         };
         let final_response = provider
             .complete_with_tools(final_request)

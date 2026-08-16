@@ -7,6 +7,7 @@
 
 mod error;
 mod parser;
+pub mod merge;
 
 pub use error::ParseError;
 

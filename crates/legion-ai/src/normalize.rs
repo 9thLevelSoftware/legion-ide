@@ -69,6 +69,15 @@ pub struct ExtractionInput<'a> {
     pub has_existing_tool_calls: bool,
     /// Tool names the model was offered. Empty disables filtering.
     pub known_tools: &'a [String],
+    /// True when the caller knows `known_tools` is Legion's own registry.
+    ///
+    /// Argument canonicalization rewrites field names, so it must only run
+    /// against the registry those names belong to. Inferring that from the
+    /// names alone fails in both directions: a foreign `read` gets rewritten,
+    /// and a legitimate read-only Legion scope — `read`, `grep`, `glob`,
+    /// `outline`, with no distinctive tool among them — is mistaken for
+    /// foreign and loses recovery entirely. A caller that knows says so.
+    pub legion_tools: bool,
 }
 
 /// Recover tool calls embedded in an assistant message.
@@ -111,7 +120,7 @@ pub fn extract_tool_calls(input: &ExtractionInput<'_>) -> ToolCallExtraction {
     let calls = scan
         .calls
         .into_iter()
-        .filter_map(|call| resolve_against_known(call, input.known_tools))
+        .filter_map(|call| resolve_against_known(call, input.known_tools, input.legion_tools))
         .collect();
 
     ToolCallExtraction {
@@ -157,8 +166,26 @@ impl ScanResult {
 fn resolve_against_known(
     call: ExtractedToolCall,
     known_tools: &[String],
+    declared_legion: bool,
 ) -> Option<ExtractedToolCall> {
+    let legion_registry = declared_legion || serves_legion_registry(known_tools);
     if known_tools.is_empty() || known_tools.contains(&call.name) {
+        // A literal name match still needs its *arguments* canonicalized. A
+        // model that correctly names `edit-as-proposal` but supplies `content`
+        // instead of `replacement` was previously passed through untouched and
+        // rejected by the executor — observed on the benchmark as a run that
+        // burned its whole retry budget re-sending the same wrong field.
+        //
+        // Gated on the whole advertised set, not on the name: `read` and
+        // `edit` are generic enough that another registry may well offer them
+        // with different arguments, and rewriting those would break a caller
+        // that was already correct.
+        if legion_registry && is_legion_native_name(&call.name) {
+            return Some(ExtractedToolCall {
+                arguments: rename_arguments_for_legion_tool(&call.name, &call.arguments),
+                ..call
+            });
+        }
         return Some(call);
     }
     let (canonical, canonical_arguments) = normalize_alias(&call.name, &call.arguments);
@@ -168,6 +195,9 @@ fn resolve_against_known(
             arguments: canonical_arguments,
             arguments_unparsed: call.arguments_unparsed,
         });
+    }
+    if !legion_registry {
+        return None;
     }
     let native = legion_registry_name(&call.name)?;
     if !known_tools.iter().any(|known| known == native) {
@@ -189,6 +219,62 @@ fn resolve_against_known(
 /// Covers both the names small models reach for unprompted (`Read`, `bash`,
 /// `str_replace`) and SmallCode's canonical vocabulary (`read_file`, `patch`,
 /// `find_files`), since either can appear once extraction has run.
+/// Legion's own tool names.
+///
+/// Listed here rather than derived from the alias table below, because that
+/// table's job is mapping *foreign* names onto Legion's and it does not
+/// enumerate Legion's own — `mcp-passthrough` has no aliases and appears
+/// nowhere in it. Deriving the registry from it made every genuine Legion tool
+/// set fail the check in `serves_legion_registry`, silently disabling the
+/// canonicalization this module exists to do. Keep in sync with
+/// `legion_protocol::LegionToolKind`.
+const LEGION_NATIVE_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "outline",
+    "edit-as-proposal",
+    "terminal-command",
+    "mcp-passthrough",
+];
+
+/// Whether `name` is already one of Legion's registry names.
+fn is_legion_native_name(name: &str) -> bool {
+    LEGION_NATIVE_TOOLS.contains(&name)
+}
+
+/// Whether the advertised tool set is Legion's own registry.
+///
+/// Argument canonicalization rewrites field names, so it must only run against
+/// the registry those names belong to. A caller offering anything Legion does
+/// not define is some other registry, and an empty set is no evidence at all —
+/// both keep their arguments untouched. Names alone are not enough: `read` and
+/// `edit` are generic, and a foreign `read` taking `file_path` would be
+/// silently handed `path` and rejected by its own validator.
+fn serves_legion_registry(known_tools: &[String]) -> bool {
+    !known_tools.is_empty()
+        && known_tools.iter().all(|tool| is_legion_native_name(tool))
+        && known_tools
+            .iter()
+            .any(|tool| DISTINCTIVE_LEGION_TOOLS.contains(&tool.as_str()))
+}
+
+/// Legion tool names no other registry would plausibly use.
+///
+/// All-names-are-native is necessary but not sufficient: a custom registry
+/// offering nothing but `read` satisfies it, and its `file_path` would then be
+/// rewritten to `path`. Requiring one of these makes the identification
+/// positive rather than merely consistent — they are product-specific,
+/// hyphenated, and not words another tool set reaches for.
+///
+/// It is still only a heuristic, which is why [`ExtractionInput::legion_tools`]
+/// exists: a caller that *knows* it is serving Legion says so, and a read-only
+/// scope offering just `read`, `grep`, `glob` and `outline` keeps its
+/// recovery. Without that flag, narrowing advertisement per scope would
+/// silently disable the alias layer for exactly the scopes least able to
+/// recover from a dropped call.
+const DISTINCTIVE_LEGION_TOOLS: &[&str] = &["edit-as-proposal", "mcp-passthrough"];
+
 fn legion_registry_name(name: &str) -> Option<&'static str> {
     match name {
         "read" | "Read" | "read_file" | "readFile" | "view" | "cat" | "open_file" => Some("read"),
@@ -963,6 +1049,7 @@ mod tests {
             reasoning_content: None,
             has_existing_tool_calls: false,
             known_tools: &known,
+            legion_tools: false,
         })
     }
 
@@ -1153,6 +1240,128 @@ mod tests {
         assert_eq!(out.calls[0].name, "read");
     }
 
+    /// A correctly-named tool with near-miss *arguments* must still be
+    /// canonicalized. Found on the benchmark: a model called
+    /// `edit-as-proposal` with `content` and burned its entire retry budget
+    /// re-sending the same rejected field, because a literal name match
+    /// skipped argument renaming.
+    #[test]
+    fn a_correctly_named_tool_still_gets_its_arguments_canonicalized() {
+        let out = extract(
+            "<tool_call>{\"name\":\"edit-as-proposal\",\"arguments\":{\"file_path\":\"a.rs\",\"content\":\"whole file\"}}</tool_call>",
+            LEGION_TOOLS,
+        );
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "edit-as-proposal");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+        assert_eq!(out.calls[0].arguments["replacement"], "whole file");
+    }
+
+    /// Canonicalization must not reach into a registry using another
+    /// vocabulary: `shell` is a real tool there, and `cmd` is its real field.
+    #[test]
+    fn a_foreign_registry_keeps_its_own_argument_names() {
+        let out = extract(
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call>",
+            &["shell", "read_file"],
+        );
+        assert_eq!(out.calls[0].name, "shell");
+        assert_eq!(out.calls[0].arguments["cmd"], "ls");
+    }
+
+    /// A registry that happens to use a name Legion also uses keeps its own
+    /// arguments.
+    ///
+    /// `read`, `edit`, and `write` are generic enough that another tool set
+    /// will define them differently. Deciding from the name alone that a call
+    /// is Legion's would rewrite a caller that was already correct — handing a
+    /// `read` that documents `file_path` a `path` it does not accept.
+    fn extract_declared(source: &str, tools: &[&str], legion: bool) -> ToolCallExtraction {
+        let owned: Vec<String> = tools.iter().map(|t| (*t).to_string()).collect();
+        extract_tool_calls(&ExtractionInput {
+            content: source,
+            reasoning_content: None,
+            has_existing_tool_calls: false,
+            known_tools: &owned,
+            legion_tools: legion,
+        })
+    }
+
+    #[test]
+    fn a_foreign_read_is_not_treated_as_legions_read() {
+        let out = extract(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read", "fetch_url", "send_email"],
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(
+            out.calls[0].arguments["file_path"], "a.rs",
+            "the advertised set is not Legion's, so nothing may be renamed"
+        );
+        assert!(out.calls[0].arguments.get("path").is_none());
+    }
+
+    /// With no advertised tools there is no evidence of whose registry it is.
+    #[test]
+    fn an_empty_tool_set_is_not_evidence_of_legions_registry() {
+        let out = extract(
+            "<tool_call>{\"name\":\"edit-as-proposal\",\"arguments\":{\"path\":\"a.rs\",\"content\":\"x\"}}</tool_call>",
+            &[],
+        );
+        assert_eq!(
+            out.calls[0].arguments["content"], "x",
+            "an empty set disables filtering; it must not also authorize rewriting"
+        );
+    }
+
+    /// A custom registry whose only tool happens to be named `read` is not
+    /// Legion's.
+    ///
+    /// All-names-are-native is satisfied by every nonempty subset of Legion's
+    /// names, so on its own it classified this as Legion and rewrote
+    /// `file_path` to `path`.
+    #[test]
+    fn a_native_name_alone_does_not_identify_legions_registry() {
+        let out = extract(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read"],
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(
+            out.calls[0].arguments["file_path"], "a.rs",
+            "nothing here is distinctively Legion, so nothing may be renamed"
+        );
+    }
+
+    /// A read-only Legion scope keeps its recovery.
+    ///
+    /// `read`, `grep`, `glob` and `outline` contain nothing distinctively
+    /// Legion, so name-based detection calls this foreign and drops a
+    /// recovered `read_file` — disabling the alias layer for exactly the
+    /// scopes least able to afford a wasted turn. The caller says so instead.
+    #[test]
+    fn a_read_only_legion_scope_still_resolves_aliases() {
+        let out = extract_declared(
+            "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read", "grep", "glob", "outline"],
+            true,
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+    }
+
+    /// The declaration is what distinguishes it — the same names without it
+    /// are just names.
+    #[test]
+    fn the_same_names_undeclared_are_left_alone() {
+        let out = extract_declared(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read", "grep", "glob", "outline"],
+            false,
+        );
+        assert_eq!(out.calls[0].arguments["file_path"], "a.rs");
+    }
+
     #[test]
     fn whole_file_writes_still_map_to_replacement() {
         let out = extract(
@@ -1265,6 +1474,7 @@ mod tests {
             reasoning_content: None,
             has_existing_tool_calls: true,
             known_tools: &known,
+            legion_tools: false,
         });
         assert!(out.calls.is_empty(), "never double-count a structured call");
     }
@@ -1279,6 +1489,7 @@ mod tests {
             ),
             has_existing_tool_calls: false,
             known_tools: &known,
+            legion_tools: false,
         });
         assert_eq!(out.calls.len(), 1);
         assert_eq!(

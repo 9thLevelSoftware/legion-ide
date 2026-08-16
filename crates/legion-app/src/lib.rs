@@ -2503,6 +2503,19 @@ pub enum AppDelegatedTaskOutcome {
         /// Audit steps recorded before the loop was blocked.
         audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
     },
+    /// The idle-turn governor ended a run that had stopped making progress.
+    ///
+    /// Carries proposals, unlike `Blocked` and `BudgetExhausted`: the run
+    /// stopped because the model went in circles, which says nothing about
+    /// the edits it produced before that.
+    StoppedNoProgress {
+        /// Human-readable reason label.
+        reason: String,
+        /// Edit proposals produced before the run stalled.
+        proposals: Vec<AssistedAiEditProposalOutput>,
+        /// Audit steps recorded before the stop.
+        audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+    },
     /// The loop was cancelled via the cancellation probe.
     Cancelled,
     /// Sandbox allocation failed before the loop could start.
@@ -22487,6 +22500,20 @@ impl AppComposition {
                     audit_steps,
                 }
             }
+            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+                // Register before reporting: these proposals are reviewable on
+                // the same terms as a completed run's, and the run is still
+                // waiting on a human either way.
+                let registered = self.register_delegated_task_proposals(proposals)?;
+                self.delegate_workflow.set_runtime_activation(
+                    DelegatedTaskRuntimeActivationState::WaitingForApproval,
+                );
+                AppDelegatedTaskOutcome::StoppedNoProgress {
+                    reason,
+                    proposals: registered,
+                    audit_steps,
+                }
+            }
             DelegatedTaskLoopResult::Cancelled => AppDelegatedTaskOutcome::Cancelled,
             DelegatedTaskLoopResult::Blocked { reason } => AppDelegatedTaskOutcome::Blocked {
                 reason,
@@ -23397,7 +23424,13 @@ impl AppComposition {
 
         // Update workflow activation state based on loop outcome.
         match &loop_result {
-            DelegatedTaskLoopResult::Completed { .. } => {
+            // A stalled run that produced proposals is waiting on a human in
+            // exactly the way a completed one is. Letting it fall through to
+            // `Blocked` would register reviewable proposals while every
+            // projection reported the workflow as stopped — and the background
+            // path already reports it correctly, so the two would disagree.
+            DelegatedTaskLoopResult::Completed { .. }
+            | DelegatedTaskLoopResult::StoppedNoProgress { .. } => {
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
                 );
@@ -23435,6 +23468,14 @@ impl AppComposition {
             DelegatedTaskLoopResult::MaxTokensExhausted => {
                 AppDelegatedTaskOutcome::BudgetExhausted {
                     reason: "max tokens exhausted on every model turn".to_string(),
+                    audit_steps,
+                }
+            }
+            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+                let registered = self.register_delegated_task_proposals(proposals)?;
+                AppDelegatedTaskOutcome::StoppedNoProgress {
+                    reason,
+                    proposals: registered,
                     audit_steps,
                 }
             }
@@ -24697,6 +24738,25 @@ impl AppComposition {
             &budget_usage,
         );
 
+        // A workflow worker's job is to produce one proposal. If the idle-turn
+        // governor stopped a run that had already produced one, the worker did
+        // its job and the stall is not its outcome — so that case is handled
+        // exactly like a completed run. A stall with no proposal falls through
+        // to the blocked path, which is also where an empty `Completed` lands.
+        let loop_result = match loop_result {
+            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+                if proposals.is_empty() {
+                    DelegatedTaskLoopResult::Blocked { reason }
+                } else {
+                    DelegatedTaskLoopResult::Completed {
+                        final_message: reason,
+                        proposals,
+                    }
+                }
+            }
+            other => other,
+        };
+
         match &loop_result {
             DelegatedTaskLoopResult::Completed { .. } => {
                 self.delegate_workflow.set_runtime_activation(
@@ -24834,6 +24894,25 @@ impl AppComposition {
                     "ERROR",
                     format!("worker:{}", worker.worker_id.0),
                     format!("Budget exhausted: {reason}"),
+                );
+            }
+            // Normalized into `Completed` or `Blocked` before the activation
+            // match above, so this arm is not reached today. It blocks the
+            // worker rather than panicking, so that if that normalization is
+            // ever changed the worst case is a worker that needs re-running,
+            // not a crash in the workflow coordinator.
+            DelegatedTaskLoopResult::StoppedNoProgress { reason, .. } => {
+                self.block_legion_workflow_worker(
+                    session,
+                    coordinator,
+                    &worker.worker_id,
+                    vec![format!("legion_workflow.worker_no_progress:{reason}")],
+                    outputs,
+                )?;
+                self.record_legion_workflow_comm_row(
+                    "ERROR",
+                    format!("worker:{}", worker.worker_id.0),
+                    format!("Worker stopped without progress: {reason}"),
                 );
             }
             DelegatedTaskLoopResult::MaxTokensExhausted => {

@@ -17,6 +17,8 @@ order; and largestEntry returning the max-amount entry, keeping the earliest
 entry on ties, and returning null for an empty list. Derive expectations from
 the current behavior of src/ledger.js; do not modify src/ledger.js or any
 existing test file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 '''
 
 [verification]

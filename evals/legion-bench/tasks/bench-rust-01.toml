@@ -14,6 +14,8 @@ no empty fragments) without changing its public signature. The failing unit
 tests in src/stats.rs (`empty_input_has_no_words`,
 `repeated_spaces_do_not_add_words`, `newlines_separate_words`) describe the
 expected behavior; do not modify the tests themselves.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
 """
 
 [verification]
