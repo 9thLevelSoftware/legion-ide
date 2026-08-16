@@ -95,6 +95,7 @@ fn run_vector(vector: &Value) -> Outcome {
         reasoning_content: reasoning.as_deref(),
         has_existing_tool_calls: has_existing,
         known_tools: &known,
+        legion_tools: false,
     });
 
     Outcome {
@@ -213,6 +214,7 @@ fn recovery_never_panics_on_adversarial_input() {
                 reasoning_content: None,
                 has_existing_tool_calls: false,
                 known_tools: &known,
+                legion_tools: false,
             });
             for call in out.calls {
                 assert!(
@@ -237,6 +239,7 @@ fn unicode_input_is_handled_on_character_boundaries() {
             reasoning_content: None,
             has_existing_tool_calls: false,
             known_tools: &known,
+            legion_tools: false,
         });
         assert_eq!(out.calls.len(), 1, "unicode content: {content}");
     }

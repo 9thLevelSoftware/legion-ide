@@ -729,9 +729,12 @@ pub fn anchor_replacement_block(file_content: &str, new_str: &str) -> Option<(us
     if brace_balance(new_str) != 0 {
         return None;
     }
-    // The anchor line must open a block. A bare statement gives no way to know
-    // how much of the file it was meant to stand in for.
-    if !anchor.contains('{') {
+    // The anchor line must *syntactically* open a block. Testing for the
+    // character instead accepts `const marker = "{";`, whose brace the scanner
+    // correctly ignores — the forward scan then sees depth zero on the first
+    // line, ends the range there, and the splice keeps whatever followed.
+    // The guard has to ask the same question the scan answers.
+    if BalanceScan::default().consume(first_line) <= 0 {
         return None;
     }
 
@@ -782,7 +785,10 @@ fn brace_balance(text: &str) -> i32 {
 /// on its second line then reads as syntax and closes the block early.
 #[derive(Debug, Default)]
 struct BalanceScan {
-    in_string: bool,
+    /// Open `"` or `` ` `` literal. Backticks matter because a JavaScript
+    /// template literal spans lines and may contain a brace — an unhandled
+    /// ``const marker = `}`;`` closes the block early and truncates the range.
+    in_string: Option<char>,
     in_block_comment: bool,
 }
 
@@ -810,12 +816,16 @@ impl BalanceScan {
                 continue;
             }
             match c {
-                '\\' if self.in_string || in_char => {
+                '\\' if self.in_string.is_some() || in_char => {
                     chars.next();
                 }
-                '"' if !in_char => self.in_string = !self.in_string,
-                '\'' if !self.in_string => in_char = !in_char,
-                '/' if !self.in_string && !in_char && chars.peek() == Some(&'/') => {
+                '"' | '`' if !in_char => match self.in_string {
+                    Some(open) if open == c => self.in_string = None,
+                    Some(_) => {}
+                    None => self.in_string = Some(c),
+                },
+                '\'' if self.in_string.is_none() => in_char = !in_char,
+                '/' if self.in_string.is_none() && !in_char && chars.peek() == Some(&'/') => {
                     for c in chars.by_ref() {
                         if c == '\n' {
                             break;
@@ -826,13 +836,13 @@ impl BalanceScan {
                 // would otherwise close the block early, and the forward scan
                 // would return a truncated range — splicing the new block in
                 // and leaving the tail of the old one behind.
-                '/' if !self.in_string && !in_char && chars.peek() == Some(&'*') => {
+                '/' if self.in_string.is_none() && !in_char && chars.peek() == Some(&'*') => {
                     chars.next();
                     self.in_block_comment = true;
                 }
                 '\n' => in_char = false,
-                '{' if !self.in_string && !in_char => depth += 1,
-                '}' if !self.in_string && !in_char => depth -= 1,
+                '{' if self.in_string.is_none() && !in_char => depth += 1,
+                '}' if self.in_string.is_none() && !in_char => depth -= 1,
                 _ => {}
             }
         }
@@ -1028,8 +1038,8 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
 
 /// Line normalizer whose literal state survives between lines.
 ///
-/// A Python triple-quoted string, or any literal a language lets span lines,
-/// is still a literal on its second line. Restarting per line would collapse
+/// A Python triple-quoted string or a JavaScript template literal is still a
+/// literal on its second line. Restarting per line would collapse
 /// its content as if it were indentation, so `"  b"` and `" b"` — different
 /// string values — would normalize to the same thing and match each other.
 #[derive(Debug, Default)]
@@ -1053,7 +1063,8 @@ impl LineNormalizer {
         let mut out = String::with_capacity(body.len());
         let mut pending_space = false;
         let mut escaped = false;
-        for c in body.chars() {
+        let mut chars = body.chars().peekable();
+        while let Some(c) = chars.next() {
             if let Some(delimiter) = self.in_literal {
                 out.push(c);
                 if escaped {
@@ -1073,11 +1084,31 @@ impl LineNormalizer {
                 out.push(' ');
             }
             pending_space = false;
+
+            // A line comment ends the line's lexical structure. Reading on
+            // would let an apostrophe in prose — `// don't` — open a literal
+            // that swallows the *next* line, whose real literal then closes
+            // the false one and has its spacing collapsed as if it were
+            // formatting.
+            if c == '/' && chars.peek() == Some(&'/') {
+                out.push(c);
+                out.extend(chars);
+                break;
+            }
+            if c == '#' {
+                out.push(c);
+                out.extend(chars);
+                break;
+            }
+
+            // Backticks count: a JavaScript template literal spans lines and
+            // its contents are content, not formatting.
+            //
             // A `'` that opens no literal — a Rust lifetime — leaves the rest
             // of the text treated as literal content. That only makes matching
             // stricter: missing a match is recoverable, matching the wrong
             // line is not.
-            if c == '"' || c == '\'' {
+            if c == '"' || c == '\'' || c == '`' {
                 self.in_literal = Some(c);
             }
             out.push(c);
@@ -1326,6 +1357,99 @@ mod cross_line_state_tests {
         assert!(
             find_whitespace_insensitive(file, anchor).is_some(),
             "the literal's content is identical; only the code around it drifted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lexical_tests {
+    use super::*;
+
+    /// The anchor guard must ask the same question the forward scan answers.
+    ///
+    /// A textual `contains('{')` accepts a line whose brace lives in a string.
+    /// The scanner correctly ignores that brace, so the scan sees depth zero
+    /// immediately, ends the range on the first line, and the splice keeps
+    /// whatever followed — a silently truncated replacement.
+    #[test]
+    fn a_brace_inside_a_string_does_not_open_a_block() {
+        let file = concat!("const marker = \"{\";\n", "old_one();\n", "old_two();\n",);
+        let new = "const marker = \"{\";\nfresh();";
+        assert!(
+            anchor_replacement_block(file, new).is_none(),
+            "this line opens no block, so there is no block to replace"
+        );
+    }
+
+    #[test]
+    fn a_real_opening_brace_still_anchors() {
+        let file = "fn target() {\n    old();\n}\n\nfn after() {}\n";
+        let new = "fn target() {\n    fresh();\n}";
+        assert!(anchor_replacement_block(file, new).is_some());
+    }
+
+    /// A JavaScript template literal spans lines and may contain a brace.
+    #[test]
+    fn a_brace_in_a_template_literal_does_not_close_the_block() {
+        let file = concat!(
+            "function target() {\n",
+            "  const marker = `}`;\n",
+            "  old();\n",
+            "}\n",
+            "\n",
+            "function after() {}\n",
+        );
+        let new = "function target() {\n  fresh();\n}";
+        let (start, end) = anchor_replacement_block(file, new).expect("should anchor");
+        assert!(
+            file[start..end].contains("old();"),
+            "the range must reach the real closing brace, got {:?}",
+            &file[start..end]
+        );
+        assert!(splice_replacement(file, start, end, new).contains("function after() {}"));
+    }
+
+    #[test]
+    fn template_state_carries_between_chunks() {
+        let mut scan = BalanceScan::default();
+        assert_eq!(scan.consume("const t = `open\n"), 0);
+        assert_eq!(
+            scan.consume("} still template`;\n"),
+            0,
+            "the brace is inside a template opened on the previous chunk"
+        );
+    }
+
+    /// Spacing inside a template literal is content, not formatting.
+    #[test]
+    fn spacing_inside_a_template_literal_is_not_collapsed() {
+        let file = "function f() {\n  const s = `a  b`;\n}\n";
+        assert!(
+            find_whitespace_insensitive(file, "const s = `a b`;").is_none(),
+            "two different template values must not be treated as one anchor"
+        );
+    }
+
+    /// An apostrophe in a comment must not open a literal.
+    ///
+    /// Carrying that false state into the next line lets a real literal there
+    /// close it, and the real literal's spacing is then collapsed as if it
+    /// were indentation — so a semantically different string matches.
+    #[test]
+    fn an_apostrophe_in_a_comment_does_not_open_a_literal() {
+        let file = "// don't\nlet s = 'a  b';\n";
+        assert!(
+            find_whitespace_insensitive(file, "// don't\nlet s = 'a b';").is_none(),
+            "the two string values differ, so this must not match"
+        );
+    }
+
+    #[test]
+    fn a_comment_does_not_break_an_otherwise_valid_match() {
+        let file = "// don't\nlet s = 'a  b';\n";
+        assert!(
+            find_whitespace_insensitive(file, "// don't\nlet s = 'a  b';").is_some(),
+            "identical content must still match through a comment"
         );
     }
 }

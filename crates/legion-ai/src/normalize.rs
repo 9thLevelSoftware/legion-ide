@@ -69,6 +69,15 @@ pub struct ExtractionInput<'a> {
     pub has_existing_tool_calls: bool,
     /// Tool names the model was offered. Empty disables filtering.
     pub known_tools: &'a [String],
+    /// True when the caller knows `known_tools` is Legion's own registry.
+    ///
+    /// Argument canonicalization rewrites field names, so it must only run
+    /// against the registry those names belong to. Inferring that from the
+    /// names alone fails in both directions: a foreign `read` gets rewritten,
+    /// and a legitimate read-only Legion scope — `read`, `grep`, `glob`,
+    /// `outline`, with no distinctive tool among them — is mistaken for
+    /// foreign and loses recovery entirely. A caller that knows says so.
+    pub legion_tools: bool,
 }
 
 /// Recover tool calls embedded in an assistant message.
@@ -111,7 +120,7 @@ pub fn extract_tool_calls(input: &ExtractionInput<'_>) -> ToolCallExtraction {
     let calls = scan
         .calls
         .into_iter()
-        .filter_map(|call| resolve_against_known(call, input.known_tools))
+        .filter_map(|call| resolve_against_known(call, input.known_tools, input.legion_tools))
         .collect();
 
     ToolCallExtraction {
@@ -157,8 +166,9 @@ impl ScanResult {
 fn resolve_against_known(
     call: ExtractedToolCall,
     known_tools: &[String],
+    declared_legion: bool,
 ) -> Option<ExtractedToolCall> {
-    let legion_registry = serves_legion_registry(known_tools);
+    let legion_registry = declared_legion || serves_legion_registry(known_tools);
     if known_tools.is_empty() || known_tools.contains(&call.name) {
         // A literal name match still needs its *arguments* canonicalized. A
         // model that correctly names `edit-as-proposal` but supplies `content`
@@ -257,10 +267,12 @@ fn serves_legion_registry(known_tools: &[String]) -> bool {
 /// positive rather than merely consistent — they are product-specific,
 /// hyphenated, and not words another tool set reaches for.
 ///
-/// This is a heuristic, and it is here because the extraction API sits at the
-/// provider boundary, which serves whatever tools its caller advertises and
-/// has no way to ask whose registry they are. If that ever changes, an
-/// explicit flag on `ExtractionInput` is the better answer.
+/// It is still only a heuristic, which is why [`ExtractionInput::legion_tools`]
+/// exists: a caller that *knows* it is serving Legion says so, and a read-only
+/// scope offering just `read`, `grep`, `glob` and `outline` keeps its
+/// recovery. Without that flag, narrowing advertisement per scope would
+/// silently disable the alias layer for exactly the scopes least able to
+/// recover from a dropped call.
 const DISTINCTIVE_LEGION_TOOLS: &[&str] = &["edit-as-proposal", "mcp-passthrough"];
 
 fn legion_registry_name(name: &str) -> Option<&'static str> {
@@ -1037,6 +1049,7 @@ mod tests {
             reasoning_content: None,
             has_existing_tool_calls: false,
             known_tools: &known,
+            legion_tools: false,
         })
     }
 
@@ -1263,6 +1276,17 @@ mod tests {
     /// will define them differently. Deciding from the name alone that a call
     /// is Legion's would rewrite a caller that was already correct — handing a
     /// `read` that documents `file_path` a `path` it does not accept.
+    fn extract_declared(source: &str, tools: &[&str], legion: bool) -> ToolCallExtraction {
+        let owned: Vec<String> = tools.iter().map(|t| (*t).to_string()).collect();
+        extract_tool_calls(&ExtractionInput {
+            content: source,
+            reasoning_content: None,
+            has_existing_tool_calls: false,
+            known_tools: &owned,
+            legion_tools: legion,
+        })
+    }
+
     #[test]
     fn a_foreign_read_is_not_treated_as_legions_read() {
         let out = extract(
@@ -1307,6 +1331,35 @@ mod tests {
             out.calls[0].arguments["file_path"], "a.rs",
             "nothing here is distinctively Legion, so nothing may be renamed"
         );
+    }
+
+    /// A read-only Legion scope keeps its recovery.
+    ///
+    /// `read`, `grep`, `glob` and `outline` contain nothing distinctively
+    /// Legion, so name-based detection calls this foreign and drops a
+    /// recovered `read_file` — disabling the alias layer for exactly the
+    /// scopes least able to afford a wasted turn. The caller says so instead.
+    #[test]
+    fn a_read_only_legion_scope_still_resolves_aliases() {
+        let out = extract_declared(
+            "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read", "grep", "glob", "outline"],
+            true,
+        );
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(out.calls[0].arguments["path"], "a.rs");
+    }
+
+    /// The declaration is what distinguishes it — the same names without it
+    /// are just names.
+    #[test]
+    fn the_same_names_undeclared_are_left_alone() {
+        let out = extract_declared(
+            "<tool_call>{\"name\":\"read\",\"arguments\":{\"file_path\":\"a.rs\"}}</tool_call>",
+            &["read", "grep", "glob", "outline"],
+            false,
+        );
+        assert_eq!(out.calls[0].arguments["file_path"], "a.rs");
     }
 
     #[test]
@@ -1421,6 +1474,7 @@ mod tests {
             reasoning_content: None,
             has_existing_tool_calls: true,
             known_tools: &known,
+            legion_tools: false,
         });
         assert!(out.calls.is_empty(), "never double-count a structured call");
     }
@@ -1435,6 +1489,7 @@ mod tests {
             ),
             has_existing_tool_calls: false,
             known_tools: &known,
+            legion_tools: false,
         });
         assert_eq!(out.calls.len(), 1);
         assert_eq!(

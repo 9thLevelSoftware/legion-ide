@@ -1412,6 +1412,10 @@ pub fn run_delegated_task_loop(
             turns: turns.clone(),
             tools: tool_defs.clone(),
             max_tokens: 4096,
+            // These are Legion's own tools, scope-filtered. Saying so keeps
+            // argument canonicalization working for a read-only scope, whose
+            // names alone would look like any other registry's.
+            legion_tools: true,
         };
 
         let response = provider.complete_with_tools(request).map_err(|e| {

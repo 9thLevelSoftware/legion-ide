@@ -23424,7 +23424,13 @@ impl AppComposition {
 
         // Update workflow activation state based on loop outcome.
         match &loop_result {
-            DelegatedTaskLoopResult::Completed { .. } => {
+            // A stalled run that produced proposals is waiting on a human in
+            // exactly the way a completed one is. Letting it fall through to
+            // `Blocked` would register reviewable proposals while every
+            // projection reported the workflow as stopped — and the background
+            // path already reports it correctly, so the two would disagree.
+            DelegatedTaskLoopResult::Completed { .. }
+            | DelegatedTaskLoopResult::StoppedNoProgress { .. } => {
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
                 );

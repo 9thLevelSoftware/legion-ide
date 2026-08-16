@@ -1204,6 +1204,19 @@ where
                     .map(|t| legion_ai::schema_tools::SchemaTool {
                         name: t.name.clone(),
                         parameters: t.input_schema.clone(),
+                        // An edit is either a whole-file `replacement` or an
+                        // `old_str`/`new_str` fragment. Legion's schema cannot
+                        // say that — it requires only `path` and checks the
+                        // rest where a failure can be explained — but a grammar
+                        // has to, or it permits an edit with no content at all.
+                        required_groups: if t.name == "edit-as-proposal" {
+                            vec![
+                                vec!["replacement".to_string()],
+                                vec!["old_str".to_string(), "new_str".to_string()],
+                            ]
+                        } else {
+                            Vec::new()
+                        },
                     })
                     .collect::<Vec<_>>(),
             )
@@ -1274,6 +1287,7 @@ where
                 reasoning_content: message.get("reasoning_content").and_then(Value::as_str),
                 has_existing_tool_calls: has_structured_calls,
                 known_tools: &known_tools,
+                legion_tools: request.legion_tools,
             })
         } else {
             // Measurement arm: behave as before the port — a call written as
@@ -5252,6 +5266,7 @@ mod tests {
                 }),
             }],
             max_tokens: 1024,
+            legion_tools: false,
         };
 
         let response = client
@@ -5320,6 +5335,7 @@ mod tests {
                 }),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
 
         let response = client
@@ -5391,6 +5407,7 @@ mod tests {
             }],
             tools: vec![],
             max_tokens: 64,
+            legion_tools: false,
         }
     }
 
@@ -5429,6 +5446,7 @@ mod tests {
                 }),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
         provider.complete_with_tools(request).expect("completes");
 
@@ -5537,6 +5555,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 256,
+                legion_tools: false,
             })
             .expect("round-trip succeeds");
 
@@ -5668,6 +5687,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 256,
+                legion_tools: false,
             })
             .expect("round-trip succeeds");
 
@@ -5824,6 +5844,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
             max_tokens: 256,
+            legion_tools: false,
         };
         let resp = openai_tool_provider(response)
             .complete_with_tools(request)
@@ -6005,6 +6026,7 @@ mod tests {
                 ],
                 tools: vec![],
                 max_tokens: 64,
+                legion_tools: false,
             })
             .expect("ok");
 
@@ -6090,6 +6112,7 @@ mod tests {
             }],
             tools: vec![weather_tool.clone()],
             max_tokens: 256,
+            legion_tools: false,
         };
         let response = provider
             .complete_with_tools(request)
@@ -6136,6 +6159,7 @@ mod tests {
             ],
             tools: vec![weather_tool],
             max_tokens: 256,
+            legion_tools: false,
         };
         let final_response = provider
             .complete_with_tools(final_request)

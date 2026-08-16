@@ -13,7 +13,9 @@
 //! request carries a JSON Schema the decoder must satisfy, so a malformed call
 //! is not something to repair but something the model could not have produced.
 //! On the 7B that structurally eliminates its most common edit failure — a
-//! `new_str` with no `old_str` — because the schema makes both mandatory.
+//! `new_str` with no `old_str`. Legion's own edit schema requires only `path`,
+//! so that guarantee is not inherited: [`build_action_schema`] adds the
+//! requirement itself, via [`SchemaTool::required_groups`].
 //!
 //! The two layers are complements, not alternatives. Constrained decoding is
 //! only available on endpoints that support it; recovery still covers
@@ -43,6 +45,18 @@ pub struct SchemaTool {
     pub name: String,
     /// The tool's JSON Schema for its arguments.
     pub parameters: Value,
+    /// Alternative sets of arguments, any one of which is sufficient.
+    ///
+    /// Legion's edit schema requires only `path`, because whether an edit
+    /// needs `replacement` or `old_str`/`new_str` is checked where it can be
+    /// explained. A grammar cannot explain anything — it can only permit or
+    /// forbid — so the transport that exists to make a malformed edit
+    /// unrepresentable has to encode the alternatives itself, or it accepts
+    /// `{"tool":"edit-as-proposal","path":"a.rs"}` and the model burns its
+    /// retry budget on a call the executor was always going to reject.
+    ///
+    /// Empty means the tool's own `required` list is the whole contract.
+    pub required_groups: Vec<Vec<String>>,
 }
 
 /// Build the union schema describing every action the model may take.
@@ -57,7 +71,15 @@ pub fn build_action_schema(tools: &[SchemaTool]) -> Option<Value> {
     }
     let mut branches: Vec<Value> = Vec::with_capacity(tools.len() + 1);
     for tool in tools {
-        branches.push(tool_branch(tool));
+        if tool.required_groups.is_empty() {
+            branches.push(tool_branch(tool, &[]));
+        } else {
+            // One branch per sufficient set, so the grammar permits exactly
+            // the calls the executor accepts and nothing else.
+            for group in &tool.required_groups {
+                branches.push(tool_branch(tool, group));
+            }
+        }
     }
     branches.push(json!({
         "type": "object",
@@ -93,7 +115,7 @@ pub fn build_action_schema(tools: &[SchemaTool]) -> Option<Value> {
 pub const THOUGHT_FIELD: &str = "_thought";
 
 /// One `anyOf` branch: the tool's own schema with a `tool` discriminator.
-fn tool_branch(tool: &SchemaTool) -> Value {
+fn tool_branch(tool: &SchemaTool, extra_required: &[String]) -> Value {
     let mut properties = Map::new();
     properties.insert(
         THOUGHT_FIELD.to_string(),
@@ -113,6 +135,25 @@ fn tool_branch(tool: &SchemaTool) -> Value {
     if let Some(Value::Array(names)) = tool.parameters.get("required") {
         required.extend(names.iter().cloned());
     }
+    for name in extra_required {
+        let value = json!(name);
+        if !required.contains(&value) {
+            required.push(value);
+        }
+    }
+
+    // Under OpenAI's structured-output contract `strict` means every declared
+    // property is also required, so a branch is only marked strict when that
+    // actually holds. Claiming it otherwise gets the request rejected by an
+    // endpoint that enforces the rule, and — worse — silently accepted by one
+    // that does not, which then invents its own view of which fields are
+    // allowed. Properties that are not required are dropped instead: a
+    // grammar that cannot express "optional" should offer fewer fields rather
+    // than lie about them.
+    let properties: Map<String, Value> = properties
+        .into_iter()
+        .filter(|(key, _)| required.iter().any(|r| r.as_str() == Some(key.as_str())))
+        .collect();
 
     json!({
         "type": "object",
@@ -262,11 +303,13 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
+                    "replacement": {"type": ["string", "null"]},
                     "old_str": {"type": ["string", "null"]},
                     "new_str": {"type": ["string", "null"]}
                 },
                 "required": ["path"]
             }),
+            required_groups: Vec::new(),
         }
     }
 
@@ -278,6 +321,7 @@ mod tests {
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"]
             }),
+            required_groups: Vec::new(),
         }
     }
 
@@ -318,14 +362,63 @@ mod tests {
     }
 
     #[test]
-    fn nullable_arguments_become_concrete_types() {
-        let schema = build_action_schema(&[edit_tool()]).unwrap();
+    fn a_required_nullable_argument_becomes_a_concrete_type() {
+        let mut tool = edit_tool();
+        tool.required_groups = vec![vec!["old_str".to_string(), "new_str".to_string()]];
+        let schema = build_action_schema(&[tool]).unwrap();
         let edit = &schema["anyOf"][0];
         assert_eq!(
             edit["properties"]["old_str"]["type"], "string",
             "a nullable type lets the decoder satisfy the field with null, \
              which is the omission the constraint exists to prevent"
         );
+    }
+
+    /// `strict` means every declared property is also required, so a property
+    /// that is not required must not be declared at all.
+    #[test]
+    fn optional_properties_are_dropped_rather_than_declared() {
+        let schema = build_action_schema(&[edit_tool()]).unwrap();
+        let properties = schema["anyOf"][0]["properties"].as_object().unwrap();
+        let required = schema["anyOf"][0]["required"].as_array().unwrap();
+        for key in properties.keys() {
+            assert!(
+                required.iter().any(|r| r.as_str() == Some(key)),
+                "`{key}` is declared but not required, which breaks the strict contract"
+            );
+        }
+    }
+
+    /// Legion's edit schema requires only `path`; the grammar must add the
+    /// content requirement itself or it permits an edit that says nothing.
+    #[test]
+    fn an_edit_must_carry_content_in_every_branch() {
+        let mut tool = edit_tool();
+        tool.required_groups = vec![
+            vec!["replacement".to_string()],
+            vec!["old_str".to_string(), "new_str".to_string()],
+        ];
+        let schema = build_action_schema(&[tool]).unwrap();
+        let edits: Vec<&Value> = schema["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["properties"]["tool"]["const"] == "edit-as-proposal")
+            .collect();
+        assert_eq!(edits.len(), 2, "one branch per sufficient argument set");
+        for branch in edits {
+            let required: Vec<&str> = branch["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(
+                required.contains(&"replacement")
+                    || (required.contains(&"old_str") && required.contains(&"new_str")),
+                "no branch may accept an edit with no content: {required:?}"
+            );
+        }
     }
 
     #[test]
@@ -349,6 +442,7 @@ mod tests {
                 },
                 "required": ["path", "old_str", "new_str"]
             }),
+            required_groups: Vec::new(),
         };
         let schema = build_action_schema(&[strict]).unwrap();
         let required = schema["anyOf"][0]["required"].as_array().unwrap();

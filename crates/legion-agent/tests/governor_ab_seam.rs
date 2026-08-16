@@ -329,6 +329,7 @@ fn the_raw_arm_hard_fails_on_malformed_structured_arguments() {
         }],
         tools: vec![],
         max_tokens: 64,
+        legion_tools: false,
     };
 
     // SAFETY: holds `ENV_GUARD` across the whole env-mutating block, so no
