@@ -235,6 +235,18 @@ answers the
 objection above: it helps a model that was already competent at tool use, not
 only one that cannot emit a call at all.
 
+### One task in this run was unwinnable
+
+`bench-rust-04` verified with the whole `cargo test` suite while forbidding
+`tests/`, and a test added for `bench-rust-07` in the same fixture was red at
+rest. A model could perform its refactor perfectly and still fail. Both arms
+ate that zero equally, so the *comparison* holds, but the denominator does
+not: these figures are 19 winnable tasks reported as 20.
+
+Fixed after the run — `bench-rust-04` is now scoped to its own surface, and
+the corpus-health gate enforces the pass-at-rest direction that let it
+through. The numbers above have not been re-taken.
+
 ### What this measurement is not
 
 **The ranges overlap.** The governed arm's worst run (3) is matched by the raw
