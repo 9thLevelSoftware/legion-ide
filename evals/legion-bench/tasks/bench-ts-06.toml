@@ -1,0 +1,41 @@
+# evals/legion-bench/tasks/bench-ts-06.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-06"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = """
+src/dates.js reports the wrong year for ISO weeks near a year boundary.
+`isoWeek` computes the ISO week number correctly, but returns the calendar
+year of the input date instead of the ISO week-numbering year, so 1 January
+2021 is reported as week 53 of 2021 rather than week 53 of 2020. Fix `isoWeek`
+so the returned `year` is the ISO week-numbering year, without changing its
+signature or `formatIsoWeek`. The failing checks in test/dates.test.js
+describe the expected results; do not modify the tests.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "node test/dates.test.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["src/dates.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["test"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

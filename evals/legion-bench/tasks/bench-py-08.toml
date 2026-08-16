@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-py-08.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-08"
+kind = "test_add"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+textkit/wrap.py's `wrap_text` has no test for its documented edge cases.
+Create tests/test_wrap_edges.py, a unittest module that exercises
+`textkit.wrap.wrap_text` for: whitespace-only input returning an empty list; a
+single word longer than the width being emitted on its own line without being
+split; and a width of zero or a negative width raising ValueError. Do not
+modify textkit/wrap.py — only add the new test file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "python -m unittest tests.test_wrap_edges"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["tests/test_wrap_edges.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["textkit"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

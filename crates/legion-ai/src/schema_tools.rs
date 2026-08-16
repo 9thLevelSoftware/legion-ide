@@ -63,20 +63,48 @@ pub fn build_action_schema(tools: &[SchemaTool]) -> Option<Value> {
         "type": "object",
         "additionalProperties": false,
         "properties": {
+            THOUGHT_FIELD: {"type": "string"},
             "tool": {"const": DONE_TOOL},
             "summary": {"type": "string"}
         },
-        "required": ["tool", "summary"]
+        "required": [THOUGHT_FIELD, "tool", "summary"]
     }));
     Some(json!({ "anyOf": branches }))
 }
 
+/// The field a constrained model reasons in before committing to an action.
+///
+/// A grammar leaves no room for thinking aloud: the model may emit the action
+/// object and nothing else, so the reasoning it would normally write before a
+/// tool call has nowhere to go. Measured on qwen2.5-coder:14b, that is not
+/// free — a constrained run without this field edited the right files on 6 of
+/// 13 tasks and got every single edit wrong, against a recovery-based run
+/// making fewer but better edits.
+///
+/// **The leading underscore is load-bearing.** Grammar-constrained decoders
+/// emit object properties in the order the schema lists them, and
+/// `serde_json` serializes maps alphabetically unless built with
+/// `preserve_order` — which this workspace is not, and enabling it would
+/// change key ordering in every serialized structure, not just this one. Named
+/// `thought` the field sorts after `new_str`, `old_str` and `path`, so the
+/// model would emit its reasoning *after* the arguments that reasoning is
+/// supposed to inform: a justification of tokens already chosen. `_` (0x5F)
+/// sorts before every lowercase letter, so `_thought` is generated first.
+pub const THOUGHT_FIELD: &str = "_thought";
+
 /// One `anyOf` branch: the tool's own schema with a `tool` discriminator.
 fn tool_branch(tool: &SchemaTool) -> Value {
     let mut properties = Map::new();
+    properties.insert(
+        THOUGHT_FIELD.to_string(),
+        json!({
+            "type": "string",
+            "description": "Reason about the task and this specific action before choosing its arguments."
+        }),
+    );
     properties.insert("tool".to_string(), json!({"const": tool.name}));
 
-    let mut required = vec![json!("tool")];
+    let mut required = vec![json!(THOUGHT_FIELD), json!("tool")];
     if let Some(Value::Object(props)) = tool.parameters.get("properties") {
         for (key, spec) in props {
             properties.insert(key.clone(), strip_nullable(spec));
@@ -159,6 +187,13 @@ pub fn parse_action(content: &str) -> Option<SchemaAction> {
     }
     let mut arguments = object.clone();
     arguments.remove("tool");
+    // The reasoning is for the model, not the executor: forwarding it would
+    // fail argument validation on every tool Legion offers. The unprefixed
+    // spelling is stripped too — the grammar cannot produce it, but a model
+    // ignoring its grammar can, and that should cost a field rather than the
+    // whole call.
+    arguments.remove(THOUGHT_FIELD);
+    arguments.remove("thought");
     Some(SchemaAction::Call {
         name: name.to_string(),
         arguments: Value::Object(arguments),
@@ -305,6 +340,60 @@ mod tests {
         for field in ["tool", "path", "old_str", "new_str"] {
             assert!(required.contains(&json!(field)), "{field} must be required");
         }
+    }
+
+    #[test]
+    fn every_branch_makes_room_to_reason_first() {
+        let schema = build_action_schema(&[read_tool(), edit_tool()]).unwrap();
+        for branch in schema["anyOf"].as_array().unwrap() {
+            let props = branch["properties"].as_object().unwrap();
+            assert!(
+                props.contains_key(THOUGHT_FIELD),
+                "a grammar leaves no room for thinking aloud unless the schema \
+                 provides it: {branch}"
+            );
+            assert!(
+                branch["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(THOUGHT_FIELD)),
+                "optional reasoning is reasoning the model will skip"
+            );
+            let first = props.keys().next().unwrap();
+            assert_eq!(
+                first, THOUGHT_FIELD,
+                "constrained decoders emit properties in schema order, so the \
+                 reasoning has to come before the arguments it informs — \
+                 otherwise it is a justification of tokens already chosen"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reasoning_never_reaches_the_executor() {
+        let action =
+            parse_action(r#"{"_thought":"the anchor is on line 3","tool":"read","path":"a.rs"}"#)
+                .unwrap();
+        assert_eq!(
+            action,
+            SchemaAction::Call {
+                name: "read".to_string(),
+                arguments: json!({"path": "a.rs"}),
+            },
+            "the reasoning is for the model; forwarding it would fail argument \
+             validation on every tool Legion offers"
+        );
+
+        let unprefixed =
+            parse_action(r#"{"thought":"stray","tool":"read","path":"a.rs"}"#).unwrap();
+        assert_eq!(
+            unprefixed,
+            SchemaAction::Call {
+                name: "read".to_string(),
+                arguments: json!({"path": "a.rs"}),
+            },
+            "a model ignoring its grammar should cost a field, not the call"
+        );
     }
 
     #[test]

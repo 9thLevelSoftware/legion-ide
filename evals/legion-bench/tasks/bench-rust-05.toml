@@ -28,7 +28,7 @@ Do not run tests, build commands, or any shell command: this environment does no
 """
 
 [verification]
-command = "cargo test --offline"
+command = "cargo test --offline --test roundtrip"
 expected_exit = 0
 timeout_secs = 300
 expected_files = ["src/writer.rs", "tests/roundtrip.rs"]

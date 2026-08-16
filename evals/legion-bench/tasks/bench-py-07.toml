@@ -1,0 +1,40 @@
+# evals/legion-bench/tasks/bench-py-07.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-py-07"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-py-tool"
+holdout = false
+
+prompt = """
+textkit/table.py sizes columns wrongly. `column_widths` is documented as
+making each column as wide as its longest cell *counting the header*, but it
+only measures the data rows, so a long header is truncated and a table with no
+rows returns zero widths. Fix `column_widths` so the header participates,
+without changing its signature or `render_row`. The failing tests in
+tests/test_table.py describe the expected widths; do not modify the tests.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "python -m unittest tests.test_table"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["textkit/table.py"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

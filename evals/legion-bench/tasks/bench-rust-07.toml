@@ -1,0 +1,41 @@
+# evals/legion-bench/tasks/bench-rust-07.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-rust-07"
+kind = "bug_fix"
+fixture_repo = "fixtures/bench-rust-lib"
+holdout = false
+
+prompt = """
+miniconf's src/merge.rs gets layer precedence backwards. `merge_layers`
+is documented as taking layers ordered from lowest precedence to highest, so a
+key in a later layer replaces the same key from an earlier one — but it keeps
+the first value it sees and later layers are ignored. Fix `merge_layers` so
+later layers win, without changing its signature or `differing_keys`. The
+failing tests in tests/merge_layers.rs describe the expected behaviour; do not
+modify the tests.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "cargo test --offline --test merge_layers"
+expected_exit = 0
+timeout_secs = 300
+expected_files = ["src/merge.rs"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["tests"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

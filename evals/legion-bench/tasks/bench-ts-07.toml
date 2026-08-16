@@ -1,0 +1,42 @@
+# evals/legion-bench/tasks/bench-ts-07.toml — one task per file, loaded by the live-local runner
+schema_version = 1
+id = "bench-ts-07"
+kind = "test_add"
+fixture_repo = "fixtures/bench-ts-app"
+holdout = false
+
+prompt = """
+src/money.js exports `parseAmount`, which converts a decimal money
+string into integer cents and rejects anything malformed, but its rejection
+behaviour is untested. Create test/money-reject.test.js using the existing
+harness (`require('./harness')` exposes `check(name, fn)` and `report()`, exactly
+as test/money.test.js does) and assert that `parseAmount` throws for: the empty
+string, a value with three decimal places such as "1.234", a non-numeric value
+such as "abc", and a value with whitespace inside it such as "1 2". Do not
+modify src/money.js — only add the new test file.
+
+Do not run tests, build commands, or any shell command: this environment does not provide them, and your edits are verified automatically after you finish. Make the code change and stop.
+"""
+
+[verification]
+command = "node test/money-reject.test.js"
+expected_exit = 0
+timeout_secs = 120
+expected_files = ["test/money-reject.test.js"]
+
+[scope]
+target_kind = "repo"
+allowed_tools = ["read", "grep", "glob", "outline", "edit-as-proposal"]
+forbidden_paths = ["src"]
+
+[gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[scoring]
+diff_file_penalty = 4
+turn_penalty = 3
+cost_half_cents_penalty = 1
+fail_penalty = 40

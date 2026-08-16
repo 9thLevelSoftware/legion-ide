@@ -609,6 +609,17 @@ enum Commands {
         #[arg(long = "no-strict")]
         no_strict: bool,
     },
+    /// Check that every Legion-Bench corpus task can distinguish a working
+    /// agent from one that does nothing.
+    VerifyLegionBenchCorpus {
+        /// Corpus directory of task TOMLs.
+        #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
+        corpus: String,
+        /// Skip running each verification command against its pristine
+        /// fixture. Structural checks only, so no toolchains are needed.
+        #[arg(long = "no-execute")]
+        no_execute: bool,
+    },
     /// Verify a previously-written Legion-Bench report.
     VerifyLegionBench {
         /// Output directory holding the bench report.
@@ -905,6 +916,9 @@ fn main() {
             strict,
             no_strict,
         } => run_legion_bench_command(&out, &mode, &corpus, include_holdout, strict && !no_strict),
+        Commands::VerifyLegionBenchCorpus { corpus, no_execute } => {
+            run_verify_legion_bench_corpus_command(&corpus, !no_execute)
+        }
         Commands::VerifyLegionBench {
             out,
             corpus,
@@ -1452,6 +1466,28 @@ fn append_manual_renderer_measurement(
     xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
     report.skeletons.push(measurement);
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
+}
+
+/// Check that every corpus task can tell a working agent from a dead one.
+fn run_verify_legion_bench_corpus_command(corpus: &str, execute: bool) -> i32 {
+    let repo_root = std::path::Path::new(".");
+    match xtask::legion_bench_corpus_health::check_corpus(
+        std::path::Path::new(corpus),
+        repo_root,
+        execute,
+    ) {
+        Ok(report) => {
+            if xtask::legion_bench_corpus_health::report_corpus_health(&report) {
+                0
+            } else {
+                1
+            }
+        }
+        Err(err) => {
+            eprintln!("legion-bench corpus check failed: {err}");
+            1
+        }
+    }
 }
 
 fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
