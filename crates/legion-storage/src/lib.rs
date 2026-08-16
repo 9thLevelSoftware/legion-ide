@@ -393,10 +393,20 @@ impl FilePaletteUsageRepository {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        // A clock reading is not unique. Two repositories flushing from
+        // different threads of one process share a pid, and on a platform
+        // whose clock granularity is coarser than a nanosecond they can read
+        // the same instant — `create_new` then fails for one of them, and
+        // because `record_usage` treats a failed flush as advisory, that
+        // write is lost silently. Observed as a macOS-only test failure where
+        // the earlier records persisted and the last one vanished.
+        static FLUSH_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = FLUSH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let temp_path = parent.join(format!(
-            ".palette_usage.{}.{}.tmp",
+            ".palette_usage.{}.{}.{}.tmp",
             std::process::id(),
-            suffix
+            suffix,
+            sequence
         ));
         let write_result = (|| -> std::io::Result<()> {
             let mut file = OpenOptions::new()
