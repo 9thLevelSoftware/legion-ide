@@ -347,6 +347,10 @@ mod tests {
             LegionBenchTaskKind::BugFix,
             LegionBenchTaskKind::TestAdd,
             LegionBenchTaskKind::MultiFileFeature,
+            // Listed so the match arm has a witness. Without it the next
+            // hostile-style task copies this loop, sees green, and never
+            // learns that nothing else looks at this variant.
+            LegionBenchTaskKind::HostileEval,
         ] {
             assert_eq!(
                 expected_at_rest(kind, None),
