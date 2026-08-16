@@ -207,8 +207,10 @@ fn the_advertised_edit_schema_matches_the_arm() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    let dir = TempDir::new().unwrap();
+    let scope = config(&dir).scope;
     let edit_schema = || {
-        legion_agent::agent_loop::tool_definitions_for_tests()
+        legion_agent::agent_loop::tool_definitions_for_tests(&scope)
             .into_iter()
             .find(|tool| tool.name == "edit-as-proposal")
             .expect("edit-as-proposal is advertised")
@@ -374,6 +376,46 @@ impl legion_ai_providers::ProviderHttpTransport for FixedResponseTransport {
         _payload: serde_json::Value,
     ) -> Result<serde_json::Value, legion_ai::ProviderError> {
         Ok(self.0.clone())
+    }
+}
+
+/// Only tools the scope grants may be advertised.
+///
+/// Offering one the broker will refuse invites the model to spend a turn on it
+/// and then take a non-retryable denial, and it has no way to know in advance
+/// which tools those are. Under a constrained-decoding transport it is worse
+/// than a wasted turn: every advertised tool is an equally legal branch of the
+/// grammar, and a benchmark run with `terminal-command` advertised but not
+/// granted blocked on all 13 tasks because the model kept picking a branch
+/// that could only fail.
+#[test]
+fn only_granted_tools_are_advertised() {
+    let dir = TempDir::new().unwrap();
+    let scope = config(&dir).scope;
+    assert_eq!(
+        scope.allowed_tools,
+        vec![LegionToolKind::Read, LegionToolKind::EditAsProposal],
+        "fixture precondition"
+    );
+
+    let advertised: Vec<String> = legion_agent::agent_loop::tool_definitions_for_tests(&scope)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert!(advertised.contains(&"read".to_string()));
+    assert!(advertised.contains(&"edit-as-proposal".to_string()));
+    for denied in [
+        "terminal-command",
+        "mcp-passthrough",
+        "grep",
+        "glob",
+        "outline",
+    ] {
+        assert!(
+            !advertised.contains(&denied.to_string()),
+            "`{denied}` is not in the scope and must not be offered: {advertised:?}"
+        );
     }
 }
 

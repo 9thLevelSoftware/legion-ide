@@ -255,15 +255,27 @@ fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinitio
 ///
 /// Exposed so a test can check that the *advertised* contract moves with the
 /// enforced one; the loop itself uses [`tool_defs_from_registry`].
-pub fn tool_definitions_for_tests() -> Vec<ToolDefinition> {
-    tool_defs_from_registry()
+pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+    tool_defs_from_registry(scope)
 }
 
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
-fn tool_defs_from_registry() -> Vec<ToolDefinition> {
+///
+/// Only tools the scope actually grants are advertised. Offering one the
+/// broker will refuse invites the model to spend a turn on it and then take a
+/// non-retryable denial, and the model has no way to know in advance which
+/// tools those are.
+///
+/// This matters far more under a constrained-decoding transport, where every
+/// advertised tool is an equally legal branch of the grammar rather than
+/// something the model merely might reach for: a benchmark run with
+/// `terminal-command` in the schema but not in the scope blocked on all 13
+/// tasks, because the model kept picking a branch that could only fail.
+fn tool_defs_from_registry(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
     let governed = legion_ai::governance::small_model_governors_enabled();
     legion_protocol::tools::tool_schema_definitions()
         .into_iter()
+        .filter(|def| parse_tool_kind(&def.tool_name).is_some_and(|kind| scope.allows_tool(kind)))
         .map(|def| ToolDefinition {
             name: def.tool_name,
             description: def.description_label,
@@ -1311,7 +1323,7 @@ pub fn run_delegated_task_loop(
         u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
     };
 
-    let tool_defs = tool_defs_from_registry();
+    let tool_defs = tool_defs_from_registry(&config.scope);
 
     // Initialize conversation with the user's task message.
     let mut turns: Vec<ToolConversationTurn> = vec![ToolConversationTurn {
