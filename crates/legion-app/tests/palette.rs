@@ -1136,6 +1136,12 @@ fn palette_command_mode_covers_registered_command_catalog() {
         "Git: Export Worktree Evidence",
         "Git: Local History",
         "Git: New Worktree",
+        // Remote verbs need a configured remote and a policy decision; covered by
+        // legion-app --test git_remote_policy_workflow and the legion-security
+        // git_remote_policy suite (P2.F5.T2/T4).
+        "Git: Push",
+        "Git: Fetch",
+        "Git: Pull",
     ]
     .into_iter()
     .map(str::to_string)
