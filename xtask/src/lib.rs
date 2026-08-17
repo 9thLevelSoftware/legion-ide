@@ -1,4 +1,5 @@
 pub mod claim_audit;
+pub mod dap_adapter_probe;
 pub mod docs_hygiene;
 pub mod extract_before_modify;
 pub mod golden_path;
