@@ -503,6 +503,19 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     status = "done"
     evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
 
+    [[epics.features.tasks]]
+    id = "P1.F3.T5"
+    title = "Wire Vim modal editing: motions, operators, register, insert entry, and the desktop key feed"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-ui/src/vim_motion.rs", "crates/legion-ui/src/vim_intent.rs", "crates/legion-app/src/vim_session.rs", "crates/legion-app/tests/vim_modal_editing.rs"]
+    dependencies = ["P1.F3.T2"]
+    verification = ["cargo test -p legion-app --test vim_modal_editing", "cargo test -p legion-ui vim"]
+    acceptance = ["A key typed in the code canvas reaches the Vim parser and moves the real cursor or edits the real buffer; normal-mode keys are not also inserted as text."]
+    stop_condition = "Stop if a normal-mode keystroke both acts and types, or if modal editing is reachable while disabled."
+    status = "done"
+    evidence = "crates/legion-app/tests/vim_modal_editing.rs"
+
   [[epics.features]]
   id = "P1.F4"
   title = "Large-file streaming mode"
