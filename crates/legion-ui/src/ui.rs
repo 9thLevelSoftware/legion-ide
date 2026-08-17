@@ -2779,6 +2779,25 @@ pub enum CommandDispatchIntent {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Add a cursor one line above each existing one.
+    AddCursorAbove {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Add a cursor one line below each existing one.
+    AddCursorBelow {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Collapse back to a single cursor.
+    ///
+    /// Its own intent rather than a side effect of clicking, because a user who
+    /// has built a ten-cursor set needs a way to leave it that does not also
+    /// move the caret somewhere.
+    ClearExtraCursors {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Select the entire target buffer through editor authority.
     SelectAll {
         /// Target buffer identifier.

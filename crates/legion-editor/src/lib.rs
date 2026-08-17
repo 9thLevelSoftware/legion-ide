@@ -33,6 +33,9 @@ use uuid::Uuid;
 
 pub use legion_text::{TextEdit, TextPosition, TextRange};
 
+/// Multiple cursors: creating them, and editing at all of them at once.
+pub mod multi_cursor;
+
 /// Editor operation errors.
 #[derive(Debug, Error)]
 pub enum EditorError {
@@ -1991,6 +1994,15 @@ impl EditorEngine {
             .first()
             .map(|cursor| cursor.position)
             .unwrap_or_else(TextPosition::zero))
+    }
+
+    /// Every cursor for a buffer, in stored order.
+    pub fn cursors(&self, buffer_id: BufferId) -> Result<&[Cursor], EditorError> {
+        Ok(&self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .cursors)
     }
 
     /// Replace cursors for a buffer.

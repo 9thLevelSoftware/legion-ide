@@ -638,6 +638,13 @@ impl CommandDispatcher {
             | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
                 Ok(AppCommandRequest::Noop)
             }
+            // Multi-cursor intents need the buffer's text to clamp a new
+            // cursor to a shorter line, which this router does not have. They
+            // are handled in `AppComposition::dispatch_ui_intent`, and these
+            // arms satisfy exhaustiveness.
+            CommandDispatchIntent::AddCursorAbove { .. }
+            | CommandDispatchIntent::AddCursorBelow { .. }
+            | CommandDispatchIntent::ClearExtraCursors { .. } => Ok(AppCommandRequest::Noop),
             // Vim modal editing intents: VimState parser exists in legion-ui
             // but is not yet wired to the desktop keyboard handler. These arms
             // satisfy exhaustiveness until integration lands.

@@ -45,6 +45,13 @@ pub mod updater;
 /// Vim modal editing session state and character/byte column conversion.
 pub mod vim_session;
 
+/// The position one past the last character of `text`.
+fn end_position(text: &str) -> legion_editor::TextPosition {
+    let line = text.matches('\n').count();
+    let column = text.rsplit('\n').next().unwrap_or("").len();
+    legion_editor::TextPosition::new(line, column)
+}
+
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
 pub use intent_routing::*;
@@ -19510,6 +19517,96 @@ impl AppComposition {
         .map_or_else(Vec::new, |operands| operands.values())
     }
 
+    /// Insert at every cursor when more than one is active.
+    ///
+    /// Returns `None` for the ordinary single-cursor case, which keeps going
+    /// through the normal routing path — multi-cursor is an addition to
+    /// editing, not a replacement for it, and diverting the common case
+    /// through this would put every keystroke on a rarely-exercised branch.
+    fn dispatch_multi_cursor_insert(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let CommandDispatchIntent::Insert {
+            buffer_id, text, ..
+        } = intent
+        else {
+            return Ok(None);
+        };
+        let cursors: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(*buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        if cursors.len() < 2 {
+            return Ok(None);
+        }
+
+        let before = self.editor.text(*buffer_id)?.to_string();
+        let (after, moved) = legion_editor::multi_cursor::insert_at_all(&before, &cursors, text);
+
+        // One edit replacing the whole buffer, rather than N edits: the
+        // positions in a multi-cursor insert are only valid against the text
+        // they were computed from, and applying them one at a time through the
+        // normal path would invalidate each other's offsets.
+        let edit = TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(0, 0),
+                end_position(&before),
+            ),
+            after,
+        );
+        let outcome = self.apply_vim_edit(*buffer_id, edit, event_context)?;
+        self.editor.set_cursors(
+            *buffer_id,
+            moved
+                .into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(outcome))
+    }
+
+    /// Handle a multi-cursor intent, or return `None` if it is not one.
+    fn dispatch_cursor_intent(
+        &mut self,
+        intent: &CommandDispatchIntent,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let (buffer_id, delta) = match intent {
+            CommandDispatchIntent::AddCursorAbove { buffer_id } => (*buffer_id, -1),
+            CommandDispatchIntent::AddCursorBelow { buffer_id } => (*buffer_id, 1),
+            CommandDispatchIntent::ClearExtraCursors { buffer_id } => {
+                // Keep the primary and drop the rest, so leaving a multi-cursor
+                // set does not also move the caret.
+                let primary = self.editor.primary_cursor(*buffer_id)?;
+                self.editor.set_cursors(
+                    *buffer_id,
+                    vec![legion_editor::Cursor { position: primary }],
+                )?;
+                return Ok(Some(AppCommandOutcome::CursorSet(*buffer_id)));
+            }
+            _ => return Ok(None),
+        };
+
+        let text = self.editor.text(buffer_id)?.to_string();
+        let existing: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        let next = legion_editor::multi_cursor::add_vertical(&text, &existing, delta);
+        self.editor.set_cursors(
+            buffer_id,
+            next.into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
+    }
+
     /// Handle a Vim modal-editing intent, or return `None` if it is not one.
     ///
     /// Separate from the pure router because resolving `w` needs the buffer's
@@ -19879,6 +19976,15 @@ impl AppComposition {
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
+        }
+
+        // Multi-cursor intents need the buffer's text to clamp a new cursor to
+        // a shorter line, which the pure router does not have.
+        if let Some(outcome) = self.dispatch_cursor_intent(&intent)? {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.dispatch_multi_cursor_insert(&intent, &event_context)? {
+            return Ok(outcome);
         }
 
         // Vim intents need the buffer's text and cursor, which the pure

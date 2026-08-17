@@ -4042,7 +4042,17 @@ fn render_code_lines(
                 if let Some(viewport) = viewport {
                     paint_code_selections(ui, line, &response, &viewport.selections, char_width);
                 }
-                paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                // Every cursor, not only the primary. The projection has
+                // carried the full set all along; painting one made a
+                // multi-cursor edit look like it came from nowhere.
+                match viewport {
+                    Some(viewport) if viewport.cursors.len() > 1 => {
+                        for cursor in &viewport.cursors {
+                            paint_code_cursor(ui, line, &response, *cursor, char_width);
+                        }
+                    }
+                    _ => paint_code_cursor(ui, line, &response, current_cursor, char_width),
+                }
                 paint_find_match_highlights(
                     ui,
                     line,
