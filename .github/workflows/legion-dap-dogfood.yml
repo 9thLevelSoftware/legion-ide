@@ -66,14 +66,28 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      # `xtask` links the whole workspace, so this job needs the same system
+      # libraries the standing gates install. Without them the build dies on
+      # `libdbus-sys` before the probe ever runs — which is how a job whose
+      # own comment says "report-only" went red on its first CI run.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev libdbus-1-dev
 
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
-      # Report-only: no `--require`. The whole point of this job is to record
-      # what the image has, including "nothing", without turning that into a
-      # red run. `--provenance shipped` is truthful only because no install
-      # step runs before it in this job — do not add one.
+      # Report-only in the sense that matters: no `--require`, so finding
+      # nothing is recorded rather than failed. It is not immune to going red —
+      # a build failure still fails the job, which is exactly what happened on
+      # the first run. `--provenance shipped` is truthful only because no
+      # adapter install runs before it in this job; the dependency step above
+      # installs system libraries, not debuggers. Do not add an adapter here.
       - name: Probe for DAP adapters (report-only)
         run: cargo run -p xtask -- dap-adapter-probe --provenance shipped
 
@@ -103,6 +117,18 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      # `xtask` links the whole workspace, so this job needs the same system
+      # libraries the standing gates install. Without them the build dies on
+      # `libdbus-sys` before the probe ever runs — which is how a job whose
+      # own comment says "report-only" went red on its first CI run.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev libdbus-1-dev
 
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2

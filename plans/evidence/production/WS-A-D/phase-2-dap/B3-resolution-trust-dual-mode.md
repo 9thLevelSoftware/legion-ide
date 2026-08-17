@@ -371,3 +371,63 @@ cargo run -p xtask -- verify-kanban-backlog
 cargo run -p xtask -- verify-readiness-consistency
 cargo run -p xtask -- dap-adapter-probe --provenance shipped
 ```
+
+---
+
+## First CI run of the adapter inventory — 2026-08-17
+
+Run: https://github.com/9thLevelSoftware/legion-ide/actions/runs/32042729908
+
+### The one reading that came back
+
+**macOS ships no adapter Legion can find.**
+
+```
+dap-adapter-probe: os=macos arch=aarch64 provenance=shipped
+  no adapter found under any of: lldb-dap, lldb-vscode, codelldb
+  resolvable_adapter_count=0
+```
+
+Green with count 0 is a finding, not a pass — as the apparatus's own reading
+guide says. `macos-latest` carries Xcode command-line tools and rustc reports
+LLVM 22.1.6, but neither puts an `lldb-dap` on `PATH` under any name the
+resolver searches. So the working assumption that "CI has adapters, the
+developer machine does not" is at best half true, and on macOS it is false.
+
+### Ubuntu and Windows: still unknown, for two different reasons
+
+**Ubuntu failed to build**, before the probe ran:
+
+```
+error: failed to run custom build command for `libdbus-sys v0.2.7`
+```
+
+`xtask` links the whole workspace, so the job needed the system libraries the
+standing gates install and did not have them. Fixed by adding the same
+dependency step to both jobs.
+
+This is worth naming precisely, because the job's own comment said it was
+"report-only … without turning that into a red run". That was true of the probe
+— no `--require`, so finding nothing is recorded rather than failed — and false
+of the job, which a build failure reds like any other. The comment now says
+which of the two it means. It is a small instance of the pattern this
+workstream keeps finding: a claim that is true of the part someone was thinking
+about and false of the thing it is attached to.
+
+**Windows never started.** GitHub returned `429 Too Many Requests` for the
+`Swatinem/rust-cache` action download, three attempts, then failed the job at
+*Set up job*. Nothing was compiled and nothing was probed. That is infrastructure
+back-pressure from the volume of CI driven today, not a result.
+
+### Not claimed
+
+**No debug adapter has still ever been launched for this card.** One of three
+inventories came back, and it came back empty. `P2.F3.T2` stays `in-progress`.
+
+The macOS reading is one run on one image version
+(`macos-latest`, aarch64). Runner images change; this is a dated observation,
+not a standing property, which is why the probe exists as a repeatable job
+rather than as a sentence in this file.
+
+Whether an adapter can be *provisioned* on macOS is untested — the `dogfood`
+job's macOS branch has not yet had a successful run to report on.
