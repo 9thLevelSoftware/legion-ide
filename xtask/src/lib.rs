@@ -1,5 +1,6 @@
 pub mod claim_audit;
 pub mod docs_hygiene;
+pub mod extract_before_modify;
 pub mod golden_path;
 pub mod golden_path_2;
 pub mod golden_path_3;

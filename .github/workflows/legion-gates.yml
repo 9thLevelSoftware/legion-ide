@@ -39,6 +39,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # extract-before-modify measures chokepoint files against the merge
+          # base. The default shallow clone has no merge base, so the gate would
+          # skip on every run and never say anything.
+          fetch-depth: 0
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
@@ -68,6 +73,9 @@ jobs:
 
       - name: xtask no-egui-textedit
         run: cargo run -p xtask -- no-egui-textedit
+
+      - name: xtask extract-before-modify
+        run: cargo run -p xtask -- extract-before-modify
 
       - name: xtask verify-kanban-backlog
         run: cargo run -p xtask -- verify-kanban-backlog

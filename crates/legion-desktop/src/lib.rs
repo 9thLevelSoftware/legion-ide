@@ -6,6 +6,8 @@
 
 #![warn(missing_docs)]
 
+mod diagnostic_underline;
+
 pub mod beta;
 pub mod bridge;
 /// Honest cut-line / fixture status copy for deferred or simulated surfaces (Tier 0).

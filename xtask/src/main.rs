@@ -30,6 +30,7 @@ const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/ph
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
 const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
+const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
@@ -487,6 +488,22 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH)]
         config: String,
     },
+    /// Fail when a chokepoint file grows instead of being extracted from.
+    ///
+    /// `crates/legion-app/src/lib.rs` and its siblings are where every feature
+    /// branch collides. The rule is to move the region you are about to change
+    /// into a module first, in its own commit, and change it there. This gate
+    /// enforces the consequence: measured against the merge base, a chokepoint
+    /// file must not have grown past its slack.
+    #[command(name = "extract-before-modify")]
+    ExtractBeforeModify {
+        /// Path to extract-before-modify TOML configuration.
+        #[arg(long, default_value = DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH)]
+        config: String,
+        /// Branch to measure against.
+        #[arg(long, default_value = "origin/main")]
+        base: String,
+    },
     /// Generate dry-run release pipeline installer descriptors.
     ReleasePipeline {
         /// Path to release pipeline TOML configuration.
@@ -869,6 +886,9 @@ fn main() {
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
         Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
+        Commands::ExtractBeforeModify { config, base } => {
+            run_extract_before_modify_command(&config, &base)
+        }
         Commands::ReleasePipeline {
             config,
             out,
@@ -1127,6 +1147,70 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
             }
         }
         1
+    }
+}
+
+fn run_extract_before_modify_command(config_path: &str, base_ref: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("extract-before-modify failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::extract_before_modify::ExtractBeforeModifyConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("extract-before-modify failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::extract_before_modify::run_extract_before_modify(
+        &workspace_root,
+        &config,
+        base_ref,
+    ) {
+        // A gate that fails when it cannot measure teaches people to switch it
+        // off. A shallow clone or an orphan branch is not a rule violation.
+        Err(xtask::extract_before_modify::GateSkip::NoMergeBase(why)) => {
+            println!("extract-before-modify skipped: {why}");
+            0
+        }
+        Ok(Ok(())) => {
+            println!("extract-before-modify: no chokepoint file grew past its slack");
+            0
+        }
+        Ok(Err(growths)) => {
+            eprintln!(
+                "extract-before-modify: {} chokepoint file(s) grew instead of being extracted from:",
+                growths.len()
+            );
+            for growth in &growths {
+                eprintln!(
+                    "  {}: {} -> {} lines (+{}, {} over the {}-line slack)",
+                    growth.path,
+                    growth.base_lines,
+                    growth.head_lines,
+                    growth.head_lines - growth.base_lines,
+                    growth.overage(),
+                    growth.allowed,
+                );
+                eprintln!(
+                    "      extract the region you changed into {}",
+                    growth.extract_to
+                );
+            }
+            eprintln!();
+            eprintln!("Move the region you are changing into a module in its own commit — a pure");
+            eprintln!(
+                "move, reviewable as one — then make the change there. This is the roadmap's"
+            );
+            eprintln!("cross-cutting rule 1; the gate only enforces its arithmetic.");
+            1
+        }
     }
 }
 
