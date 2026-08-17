@@ -14,7 +14,7 @@ mod vim_intent;
 mod vim_motion;
 
 pub use projection::{
-    LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
+    LayoutRegion, LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
     LegionWorkflowBoardRowProjection, LegionWorkflowBudgetUsageRowProjection,
     LegionWorkflowFleetCardProjection, legion_workflow_board_columns,
     legion_workflow_fleet_card_projections,
