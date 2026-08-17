@@ -4,6 +4,9 @@
 
 pub mod projection;
 pub mod ui;
+
+/// The command line: parses a typed string into one dispatch intent.
+mod shell_commands;
 pub mod vim;
 /// Turning a keystroke into a Vim intent.
 mod vim_intent;

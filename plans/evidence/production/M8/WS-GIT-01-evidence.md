@@ -415,3 +415,32 @@ above that exercises its acceptance, and each stop condition is covered by a
 test rather than by assertion. The `files` and `verification` fields were
 corrected to real paths and to the commands that actually cover the work.
 
+
+---
+
+## Accepted at merge, with a condition — 2026-08-17
+
+The consent-before-air-gap ordering above is accepted, and the reasoning for it
+is right *for the state the code is in*: `air_gap` defaults to `true` and
+nothing can author it, so ordering consent underneath would leave the grant
+inert and restore the fail-shut state it was built to fix. A feature that cannot
+be reached is not a safer feature.
+
+**The condition: this ordering is correct only while air-gap is a default nobody
+chose.** The moment a settings surface can author `air_gap`, turning it on
+becomes a deliberate act, and a deliberate air-gap must outrank a per-host
+consent — an operator who air-gaps a deployment is not asking to be overruled by
+whoever is at the keyboard. Whoever builds that surface owns this change too;
+the two are one piece of work, and shipping the setting without re-ordering the
+check would quietly turn air-gap into advice.
+
+What makes the present ordering defensible in the meantime is that consent is
+narrow in four ways that are each tested: it is a separate field from
+`allowlist`, so granting a git remote widens nothing else — not hosted AI, not
+telemetry; it names one host; the blocklist still outranks it; and it does not
+bypass workspace trust. It is also audited and revocable, and it does not
+persist, so a grant dies with the process.
+
+**Not claimed:** grants are in-memory only. Persistence belongs with the
+settings surface that does not exist yet, and faking it would have meant writing
+consent to a store nothing else can read or revoke.

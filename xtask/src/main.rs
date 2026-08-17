@@ -5616,15 +5616,34 @@ This document is Phase 8 scaffold evidence, not acceptance evidence yet.
     #[test]
     fn ui_shell_remains_projection_only() {
         let source = read_workspace_file("crates/legion-ui/src/ui.rs");
+        // The command line moved to its own module; the invariant did not move
+        // with it. Reading both means the guard follows the Shell rather than a
+        // file name, and it now also forbids the new module from reaching for
+        // the authority `ui.rs` is barred from.
+        let commands = read_workspace_file("crates/legion-ui/src/shell_commands.rs");
         let manifest = read_workspace_file("crates/legion-ui/Cargo.toml");
 
         assert!(source.contains("pub struct Shell"));
         assert!(source.contains("CommandDispatchIntent"));
-        assert!(source.contains("without mutating editor or workspace state"));
-        assert!(!source.contains("EditorSession"));
-        assert!(!source.contains("WorkspaceActor"));
-        assert!(!source.contains("EditorEngine"));
-        assert!(!source.contains("SaveWorkflowService"));
+        assert!(commands.contains("without mutating editor or workspace state"));
+        for (label, body) in [("ui.rs", &source), ("shell_commands.rs", &commands)] {
+            assert!(
+                !body.contains("EditorSession"),
+                "{label} reaches EditorSession"
+            );
+            assert!(
+                !body.contains("WorkspaceActor"),
+                "{label} reaches WorkspaceActor"
+            );
+            assert!(
+                !body.contains("EditorEngine"),
+                "{label} reaches EditorEngine"
+            );
+            assert!(
+                !body.contains("SaveWorkflowService"),
+                "{label} reaches SaveWorkflowService"
+            );
+        }
         assert!(!manifest.contains("legion-editor"));
         assert!(!manifest.contains("legion-project"));
         assert!(!manifest.contains("legion-storage"));
