@@ -24,8 +24,9 @@ use thiserror::Error;
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{
-    BatchRuntimeApplyPolicy, ProposalApplyGate, ProposalAutoApprovalPolicy,
-    approval_level_audit_metadata, derive_approval_level,
+    BatchRuntimeApplyPolicy, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy,
+    ProposalApplyGate, ProposalAutoApprovalPolicy, approval_level_audit_metadata,
+    derive_approval_level,
 };
 pub mod risk;
 
@@ -46,6 +47,19 @@ impl From<WorkspaceTrustState> for TrustState {
             WorkspaceTrustState::Trusted => Self::Trusted,
             WorkspaceTrustState::Untrusted => Self::Untrusted,
             WorkspaceTrustState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<TrustState> for WorkspaceTrustState {
+    /// Round-trips back to the protocol enum so policy types that take the
+    /// protocol trust state (e.g. [`DebugAdapterLaunchPolicy::allows_resolution`])
+    /// stay the single authority instead of the broker re-deriving the rule.
+    fn from(value: TrustState) -> Self {
+        match value {
+            TrustState::Trusted => Self::Trusted,
+            TrustState::Untrusted => Self::Untrusted,
+            TrustState::Unknown => Self::Unknown,
         }
     }
 }
@@ -536,28 +550,6 @@ impl Default for LspLaunchPolicy {
     }
 }
 
-/// Debug adapter launch policy controls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugAdapterLaunchPolicy {
-    /// Trusted workspaces only by default.
-    pub require_trusted_workspace: bool,
-}
-
-impl Default for DebugAdapterLaunchPolicy {
-    fn default() -> Self {
-        Self {
-            require_trusted_workspace: true,
-        }
-    }
-}
-
-impl DebugAdapterLaunchPolicy {
-    /// Returns true when adapter discovery is allowed for the given workspace trust.
-    pub fn allows_resolution(&self, trust: WorkspaceTrustState) -> bool {
-        !self.require_trusted_workspace || trust == WorkspaceTrustState::Trusted
-    }
-}
-
 /// Plugin capability policy controls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCapabilityPolicy {
@@ -908,6 +900,9 @@ pub struct SecurityPolicy {
     pub terminal_policy: TerminalPolicy,
     /// LSP launch policy.
     pub lsp_policy: LspLaunchPolicy,
+    /// Debug adapter launch policy (P2.F3.T2).
+    #[serde(default)]
+    pub debug_adapter_policy: DebugAdapterLaunchPolicy,
     /// Plugin capability policy.
     pub plugin_policy: PluginCapabilityPolicy,
     /// File write policy.
@@ -2147,6 +2142,54 @@ impl DenyByDefaultBroker {
             };
         }
 
+        if let Some(rest) = capability.strip_prefix("debug.") {
+            // P2.F3.T2: a debug adapter is a workspace-controlled process with the
+            // debuggee's authority, so trust is checked before the binary is even
+            // looked up on PATH.
+            if !self
+                .policy
+                .debug_adapter_policy
+                .allows_resolution(trust.into())
+            {
+                return SecurityDecision::deny(
+                    "debug adapter launch denied for untrusted workspace",
+                );
+            }
+
+            return match rest {
+                "adapter.launch" => {
+                    if self
+                        .policy
+                        .debug_adapter_policy
+                        .allowed_adapter_binaries
+                        .is_empty()
+                    {
+                        return SecurityDecision::deny(
+                            "no debug adapter binaries are allowlisted by policy",
+                        );
+                    }
+                    // The resolved binary is not known at request time (resolution
+                    // is what the grant authorizes), so callers that already hold a
+                    // concrete binary get it checked here as well.
+                    if let Some(binary) = context.command_binary.as_deref()
+                        && !self
+                            .policy
+                            .debug_adapter_policy
+                            .allows_adapter_binary(binary)
+                    {
+                        return SecurityDecision::deny(format!(
+                            "debug adapter binary {binary} not allowlisted by policy"
+                        ));
+                    }
+                    SecurityDecision::allow()
+                }
+                // Unknown debug.* subcommands are denied by default.
+                _ => SecurityDecision::deny(format!(
+                    "capability debug.{rest} denied by deny-by-default"
+                )),
+            };
+        }
+
         if let Some(rest) = capability.strip_prefix("network.") {
             if !self.policy.network_policy.allow_untrusted && trust != TrustState::Trusted {
                 return SecurityDecision::deny("network denied for untrusted workspace");
@@ -2192,6 +2235,7 @@ impl DenyByDefaultBroker {
         if capability.starts_with("fs.write")
             || capability.starts_with("terminal.")
             || capability.starts_with("lsp.")
+            || capability.starts_with("debug.")
             || capability.starts_with("network.")
             || capability.starts_with("plugin.")
             || capability.starts_with("ai.")
@@ -3853,6 +3897,93 @@ mod tests {
         assert!(policy.allows_resolution(WorkspaceTrustState::Trusted));
         assert!(!policy.allows_resolution(WorkspaceTrustState::Untrusted));
         assert!(!policy.allows_resolution(WorkspaceTrustState::Unknown));
+    }
+
+    #[test]
+    fn debug_adapter_launch_is_brokered_and_denied_for_untrusted_workspaces() {
+        // P2.F3.T2: the capability the app cites in its denial message is a real
+        // broker decision, not a label.
+        let mut broker = DenyByDefaultBroker::new(
+            SecurityPolicy::default(),
+            CapabilityNamespace("test".to_string()),
+        );
+        for trust in [TrustState::Untrusted, TrustState::Unknown] {
+            let decision = broker.decide(
+                trust,
+                PrincipalId("principal-debug".to_string()),
+                CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+                None,
+            );
+            assert!(
+                matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("untrusted")),
+                "{trust:?} must not launch a debug adapter, got {decision:?}"
+            );
+        }
+
+        let trusted = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-debug".to_string()),
+            CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            None,
+        );
+        assert!(matches!(trusted, SecurityDecision::Allow), "{trusted:?}");
+    }
+
+    #[test]
+    fn debug_adapter_launch_denies_non_allowlisted_binary_and_unknown_subcommands() {
+        let mut broker = DenyByDefaultBroker::new(
+            SecurityPolicy::default(),
+            CapabilityNamespace("test".to_string()),
+        );
+        let foreign_binary = broker.decide_with_request_context(
+            TrustState::Trusted,
+            PrincipalId("principal-debug".to_string()),
+            CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            None,
+            CapabilityRequestContext {
+                command_binary: Some("bash".to_string()),
+                ..CapabilityRequestContext::default()
+            },
+        );
+        assert!(
+            matches!(&foreign_binary, SecurityDecision::Deny(reason) if reason.contains("not allowlisted")),
+            "{foreign_binary:?}"
+        );
+
+        let unknown = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-debug".to_string()),
+            CapabilityId("debug.adapter.attach".to_string()),
+            None,
+        );
+        assert!(
+            matches!(&unknown, SecurityDecision::Deny(reason) if reason.contains("deny-by-default")),
+            "{unknown:?}"
+        );
+    }
+
+    #[test]
+    fn debug_adapter_launch_denied_when_policy_allowlist_is_empty() {
+        let mut broker = DenyByDefaultBroker::new(
+            SecurityPolicy {
+                debug_adapter_policy: DebugAdapterLaunchPolicy {
+                    require_trusted_workspace: true,
+                    allowed_adapter_binaries: Vec::new(),
+                },
+                ..SecurityPolicy::default()
+            },
+            CapabilityNamespace("test".to_string()),
+        );
+        let decision = broker.decide(
+            TrustState::Trusted,
+            PrincipalId("principal-debug".to_string()),
+            CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            None,
+        );
+        assert!(
+            matches!(&decision, SecurityDecision::Deny(reason) if reason.contains("allowlisted")),
+            "{decision:?}"
+        );
     }
 
     #[test]

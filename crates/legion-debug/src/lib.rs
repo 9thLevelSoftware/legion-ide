@@ -16,8 +16,8 @@ pub mod live_session;
 pub mod state;
 
 pub use adapter_resolve::{
-    DapMode, ResolvedAdapter, dogfood_requires_system_adapter, resolve_live_adapter,
-    resolve_system_adapter,
+    AdapterResolutionGrant, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DapMode, ResolvedAdapter,
+    dogfood_requires_system_adapter, resolve_live_adapter, resolve_system_adapter,
 };
 pub use dap::{DapClientConfig, DapClientError, DapClientOutcome, DapClientRuntime};
 pub use evidence::{

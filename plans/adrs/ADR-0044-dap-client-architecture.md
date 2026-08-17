@@ -66,8 +66,8 @@ Inspired by `ADR-0018`:
 ### 5. Security and trust
 
 - **Untrusted** workspaces: live launch **denied**; fixture path may still project simulated UI with honest banner.
-- Capability id (illustrative): `debug.adapter.launch` — must be deny-by-default and recognized by broker (same class of fix as Assist `ai.provider.invoke`).
-- Adapter binary resolution (CodeLLDB / `lldb-dap`): path config, `PATH`, documented install; **no** “trust all adapters” switch (`P2.F3.T2` stop condition).
+- Capability id: `debug.adapter.launch` — deny-by-default and recognized by the broker. Implemented in `P2.F3.T2`: `DenyByDefaultBroker` has a `debug.` branch, unknown `debug.*` subcommands deny by default, and unknown workspace trust denies (same class of fix as Assist `ai.provider.invoke`).
+- Adapter binary resolution (CodeLLDB / `lldb-dap`): path config, `PATH`, documented install; **no** “trust all adapters” switch (`P2.F3.T2` stop condition). Resolution requires an `AdapterResolutionGrant` minted from a granted decision, and every resolved program is filtered through the policy's adapter allowlist — `LEGION_DAP_ADAPTER` chooses where an adapter lives, not what may run.
 - Adapter stdout/stderr: metadata + bounded console rows; raw source payloads stay out of default retention (align with redaction).
 - Network: adapters may open ports for debugee; policy should document residual risk until sandbox wrap (Phase 3 optional B3.5).
 

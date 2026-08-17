@@ -81,6 +81,75 @@ impl BatchRuntimeApplyPolicy {
     }
 }
 
+/// Capability identifier a debug adapter launch must be granted under.
+///
+/// `legion-debug` refuses to resolve an adapter binary without a granted decision
+/// carrying exactly this id, so the string is part of the contract between the
+/// broker and the debug crate — not a log label.
+pub const DEBUG_ADAPTER_LAUNCH_CAPABILITY: &str = "debug.adapter.launch";
+
+/// Debug adapter launch policy controls (P2.F3.T2).
+///
+/// Two independent conditions must hold before an adapter process can exist:
+/// the workspace must be trusted, and the *resolved binary* must be named in
+/// [`Self::allowed_adapter_binaries`]. The second condition is what makes
+/// `LEGION_DAP_ADAPTER` safe to honor: an operator-supplied path that resolves
+/// to something other than a known debug adapter is refused.
+///
+/// There is deliberately no "trust every adapter" switch. Widening the set is
+/// done by naming binaries, which keeps the allowed set auditable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugAdapterLaunchPolicy {
+    /// Trusted workspaces only by default.
+    pub require_trusted_workspace: bool,
+    /// Adapter binaries that may be launched, matched on the file stem without
+    /// extension (`codelldb`, `codelldb.exe`, and `/opt/x/codelldb` all match
+    /// `codelldb`). An empty list denies every adapter.
+    #[serde(default = "default_allowed_adapter_binaries")]
+    pub allowed_adapter_binaries: Vec<String>,
+}
+
+/// Adapter binaries allowed out of the box: the two Microsoft-DAP stdio adapters
+/// that ship with LLDB, plus CodeLLDB.
+fn default_allowed_adapter_binaries() -> Vec<String> {
+    vec![
+        "lldb-dap".to_string(),
+        "lldb-vscode".to_string(),
+        "codelldb".to_string(),
+    ]
+}
+
+impl Default for DebugAdapterLaunchPolicy {
+    fn default() -> Self {
+        Self {
+            require_trusted_workspace: true,
+            allowed_adapter_binaries: default_allowed_adapter_binaries(),
+        }
+    }
+}
+
+impl DebugAdapterLaunchPolicy {
+    /// Returns true when adapter discovery is allowed for the given workspace trust.
+    pub fn allows_resolution(&self, trust: legion_protocol::WorkspaceTrustState) -> bool {
+        !self.require_trusted_workspace || trust == legion_protocol::WorkspaceTrustState::Trusted
+    }
+
+    /// Returns true when `binary` is an allowlisted adapter.
+    ///
+    /// `binary` is compared case-insensitively against the configured stems; an
+    /// empty allowlist denies everything rather than allowing everything, the
+    /// same vacuous-truth guard used by [`ProposalAutoApprovalPolicy::allows_rule_ids`].
+    pub fn allows_adapter_binary(&self, binary: &str) -> bool {
+        let binary = binary.trim();
+        if binary.is_empty() {
+            return false;
+        }
+        self.allowed_adapter_binaries
+            .iter()
+            .any(|allowed| allowed.trim().eq_ignore_ascii_case(binary))
+    }
+}
+
 /// Gate evaluated before a proposal may be applied to the workspace.
 #[derive(Debug, Clone)]
 pub struct ProposalApplyGate {
@@ -237,6 +306,39 @@ mod tests {
             allowed_rule_ids: vec!["rule-a".to_string()],
         };
         assert!(!policy.allows_rule_ids(&["rule-a".to_string()]));
+    }
+
+    #[test]
+    fn debug_adapter_policy_allowlists_known_adapters_only() {
+        let policy = DebugAdapterLaunchPolicy::default();
+        assert!(policy.allows_adapter_binary("lldb-dap"));
+        assert!(policy.allows_adapter_binary("codelldb"));
+        // Case folding matters on Windows, where the stem may arrive as `CodeLLDB`.
+        assert!(policy.allows_adapter_binary("CodeLLDB"));
+        assert!(!policy.allows_adapter_binary("bash"));
+        assert!(!policy.allows_adapter_binary("fake_dap_adapter"));
+    }
+
+    #[test]
+    fn debug_adapter_policy_empty_allowlist_denies_every_binary() {
+        // Vacuous-truth guard: an empty list must not mean "anything goes".
+        let policy = DebugAdapterLaunchPolicy {
+            require_trusted_workspace: true,
+            allowed_adapter_binaries: Vec::new(),
+        };
+        assert!(!policy.allows_adapter_binary("lldb-dap"));
+        assert!(!policy.allows_adapter_binary(""));
+    }
+
+    #[test]
+    fn debug_adapter_policy_rejects_blank_binary_names() {
+        let policy = DebugAdapterLaunchPolicy {
+            require_trusted_workspace: true,
+            allowed_adapter_binaries: vec![String::new(), "  ".to_string()],
+        };
+        assert!(!policy.allows_adapter_binary(""));
+        assert!(!policy.allows_adapter_binary("   "));
+        assert!(!policy.allows_adapter_binary("lldb-dap"));
     }
 
     #[test]
