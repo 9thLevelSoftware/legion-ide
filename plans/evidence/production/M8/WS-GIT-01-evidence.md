@@ -287,6 +287,26 @@ Recorded so this section is not read as broader than it is:
   rejected: they are arms of one large `match`, so relocating them is a
   behavioral refactor rather than a move, and that was outside these tasks.
 
+### Gate run (2026-08-16, Windows 11)
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all` | PASS (no diff after formatting) |
+| `cargo test --workspace --all-targets --no-fail-fast` | PASS — 255 test binaries, 2885 tests passed, 0 failed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | PASS (after fixing one `redundant_closure` in the new policy code) |
+| `cargo run -p xtask -- verify-kanban-backlog` | PASS — 10 epics, 41 features, 160 tasks |
+| `cargo run -p xtask -- docs-hygiene` | PASS |
+| `cargo run -p xtask -- claim-audit` | PASS |
+| `cargo run -p xtask -- verify-readiness-consistency` | PASS — 160 tasks cross-checked |
+| `cargo run -p xtask -- golden-path-1` | PASS (T1 acceptance names GP-1, so it was run explicitly) |
+
+One pre-existing guard caught a real regression during this work and is
+recorded rather than hidden: adding the three git remote palette specs tripped
+`palette_command_mode_covers_registered_command_catalog`, the catalog-drift
+guard in `crates/legion-app/tests/palette.rs`. That is the guard working as
+designed; the three commands were added to its allowlist alongside the other
+git mutations.
+
 ### Backlog status
 
 P2.F5.T1, T2, T3, and T4 are moved to `done`. Each has a passing test named

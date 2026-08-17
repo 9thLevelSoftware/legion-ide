@@ -456,7 +456,7 @@ pub fn decide_git_remote_operation(
     use super::{CommandClass, SecurityDecision, TrustState};
 
     let command_class = policy.command_taxonomy.classify(operation.command_line());
-    let target = remote_url.map_or(GitRemoteTarget::Local, |url| classify_git_remote_url(url));
+    let target = remote_url.map_or(GitRemoteTarget::Local, classify_git_remote_url);
 
     let decide = |decision: SecurityDecision, target: GitRemoteTarget| GitRemoteDecision {
         operation,
