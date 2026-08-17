@@ -609,3 +609,55 @@ host. No regression from the edits.
 `claim-audit` passes on the repaired wording without any change to the gate. The
 repairs narrow claims; they do not need the anti-overclaiming gate weakened to
 accommodate them.
+
+---
+
+## Reconciliation at merge — 2026-08-17
+
+This verification pass ran in an isolated worktree at commit `7609c775`. Three of
+its findings describe that commit and are no longer true of the merged tree.
+Recording that here rather than editing the findings, because a verification
+report that quietly updates itself is not a verification report.
+
+**Finding 2D — "there is no 100MB workload in the harness" — is now false.**
+`m9.large_file_100mb` exists, is part of the standard `perf-harness` run, and is
+gated on ADR-0048's 16 ms keypress p50. It was landed by P1.F4.T5 on a branch
+this pass could not see. Its evidence,
+`plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md`, also
+exists now; §"the 100MB finding" correctly said it did not exist *at that
+commit*, and that qualifier is what keeps the sentence honest.
+
+**Finding 2A — the `--no-default-features` build break — is fixed.** Two
+`#[cfg]` mismatches (`render_streaming_assistant_rows` called ungated in
+`view.rs`, and two test-only prebuild helpers re-exported unconditionally after
+the debug-workflow extraction). `legion-gates.yml` now checks
+`-p legion-desktop --no-default-features --features offline` beside the
+`legion-app` check whose absence let this survive.
+
+**The consequence of that fix is the finding that matters most here, and it
+sharpens rather than softens this report's verdict.** With the renderer building,
+`perf-harness --strict` stops failing open:
+
+```
+total=6 passed=4 failed=1 skipped=1   (exit 1)
+manual.renderer_input_to_paint  p50=3.3ms  p95=13.1ms  budget 32ms  passed
+m9.large_file_100mb             edit_p50=35.8ms        budget 16ms  FAILED
+```
+
+Two things follow. The renderer workload had never once been measured and passes
+comfortably — the roadmap's "make `--strict` enforce" item was never the real
+problem, exactly as this report argued; failing open was. And the 100MB keypress
+budget genuinely fails, now in a red gate rather than behind a `skipped` row.
+The independent measurements in Findings 2E/2F (21.72 ms editor p50, 44.22 ms
+single insert) corroborate it; the 35.8 ms above is the same defect on a busier
+machine.
+
+**The verdict is unchanged: PR-UI-001 cannot be promoted.** One blocker is
+closed, one is now measured red instead of hidden, and the accessibility legs
+remain. A 3-OS perf matrix cannot honestly claim ADR-0048 compliance while a
+budgeted workload fails on the developer machine.
+
+**Stale on arrival:** the numbers in Findings 2E/2F will be superseded when the
+typing-latency fix lands (`WS-MANUAL-02/large-file-typing-diagnosis.md` records
+the cause: every keystroke copies the whole line-metrics vector). Re-measure
+rather than cite them afterwards.
