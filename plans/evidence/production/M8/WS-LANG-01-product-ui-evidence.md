@@ -275,3 +275,60 @@ caught by a repo-wide marker sweep before any push, resolved, amended.
 | xtask perf-harness + verify-perf-harness | PASS |
 | cargo deny check | PASS |
 | xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
+
+---
+
+## P2.F1.T3 closure — 2026-08-16
+
+The task read "wire diagnostics to gutter/problems panel through desktop
+harness," with the stop condition "stop if diagnostics are wired only to the app
+API and not to the desktop harness." Three things had to be true, and only two
+were.
+
+**Acceptance — a real Rust diagnostic appears and clears after fixing.** GP-1
+step s3 does exactly this against a real rust-analyzer, on a throwaway copy of
+`fixtures/gp1-rust`:
+
+```
+cargo run -p xtask -- golden-path-1        # exit 0
+  s3 passed (31716ms): error introduced, detected, fixed, cleared
+```
+
+**Stop condition — reached through the desktop harness, not just the app API.**
+`crates/legion-desktop/tests/diagnostics_harness.rs::
+desktop_runtime_projects_publish_diagnostics_and_clears_them_again` drives a
+`DesktopRuntime`, not an `AppComposition`, so the projection is proven to reach
+the surface that paints.
+
+**The gutter had no test.** `paint_diagnostic_underlines` in
+`crates/legion-desktop/src/view.rs` decided, per line, which characters a
+diagnostic underlines — clamping multi-line ranges to the visible line, skipping
+empty spans — and nothing exercised it. A painter cannot be tested without a
+frame, so the decision was extracted to `diagnostic_underline_span(line_zero,
+line_chars, range) -> Option<(u32, u32)>`, a pure function the painter now calls.
+Five tests in `view.rs` cover it:
+
+```
+cargo test -p legion-desktop --lib
+test view::tests::a_single_line_diagnostic_underlines_its_own_columns ... ok
+test view::tests::a_diagnostic_on_another_line_underlines_nothing ... ok
+test view::tests::a_multi_line_diagnostic_is_clipped_to_each_line_it_crosses ... ok
+test view::tests::an_empty_span_is_not_painted ... ok
+test view::tests::a_range_ending_at_the_start_of_a_later_line_does_not_underline_it ... ok
+test result: ok. 79 passed; 0 failed
+```
+
+The clipping case is the one worth having: a range spanning lines 2–4 must
+underline from column 6 to end-of-line on line 2, the whole of line 3, and
+columns 0–3 on line 4. A range ending at character 0 of a later line underlines
+nothing on that line, which is the off-by-one that would otherwise have painted a
+stray mark under the first character of the line after an error.
+
+**Workspace state at closure:** `cargo test --workspace --all-targets
+--no-fail-fast` — 257 suites, 2963 passed, 0 failed. `cargo clippy --workspace
+--all-targets -- -D warnings` — clean.
+
+**Not claimed:** the underline geometry is measured in characters against a
+fixed `char_width`, which is correct for the monospace fonts the editor ships
+and wrong for proportional ones. That is the existing painter's assumption, not
+a new one, and it is unchanged here.

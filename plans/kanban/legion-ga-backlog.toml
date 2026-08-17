@@ -645,7 +645,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop --test headless_input", "cargo test -p legion-lsp"]
     acceptance = ["In the Legion repo, a real Rust diagnostic appears and clears after fixing."]
     stop_condition = "Stop if diagnostics are wired only to the app API and not to the desktop harness."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]
