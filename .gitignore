@@ -42,3 +42,4 @@ __pycache__/
 # counts, proposal audit log). User-local state, not project content.
 .legion/palette_usage.json
 .legion/proposal-audit/
+.legion/session.json

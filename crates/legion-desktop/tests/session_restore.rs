@@ -543,3 +543,182 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
         schema_version: 1,
     }
 }
+
+// --- Default session path -------------------------------------------------
+//
+// Every test above hands the runtime an explicit `session_state` path. That is
+// what let the whole feature pass its tests while doing nothing in the product:
+// `DesktopLaunchConfig` defaulted `session_state` to `None`, so
+// `save_session_state` returned immediately and a normal launch lost its layout
+// on every restart. These tests exercise the path the product actually takes —
+// argument parsing — rather than a path a test constructed.
+
+/// The launch config a bare `legion-desktop <workspace>` produces.
+fn config_from_args(args: &[&str]) -> DesktopLaunchConfig {
+    DesktopLaunchConfig::from_args(args.iter().map(std::ffi::OsString::from))
+        .expect("launch config should parse")
+}
+
+#[test]
+fn an_interactive_launch_persists_its_layout_by_default() {
+    let workspace = TempWorkspace::new("legion_desktop_session_default");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+
+    assert_eq!(
+        config.session_state,
+        Some(workspace.path().join(".legion").join("session.json")),
+        "a normal launch must persist its layout somewhere, or every restart \
+         silently discards the open tabs, the active buffer, the explorer \
+         expansion and the dock layout"
+    );
+}
+
+#[test]
+fn an_explicit_session_path_still_wins() {
+    let workspace = TempWorkspace::new("legion_desktop_session_explicit");
+    let chosen = workspace.path().join("chosen.json");
+    let config = config_from_args(&[
+        workspace.path().to_string_lossy().as_ref(),
+        "--session-state",
+        chosen.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(config.session_state, Some(chosen));
+}
+
+#[test]
+fn measurement_harnesses_do_not_inherit_the_workspace_session_path() {
+    // `--beta-smoke` reads `session_state` directly and substitutes its own
+    // default; defaulting before that branch would redirect beta evidence into
+    // the workspace. Smoke and perf runs are short-lived and write nothing.
+    let workspace = TempWorkspace::new("legion_desktop_session_harness");
+    let root = workspace.path().to_string_lossy().into_owned();
+
+    for args in [
+        vec![root.as_str(), "--smoke"],
+        vec![root.as_str(), "--beta-smoke"],
+        vec![root.as_str(), "--manual-perf"],
+    ] {
+        let config = config_from_args(&args);
+        assert_eq!(
+            config.session_state, None,
+            "{args:?} must not adopt the interactive session path"
+        );
+    }
+}
+
+#[test]
+fn a_default_launch_round_trips_open_tabs_across_a_restart() {
+    // The end-to-end claim P1.F2.T4 actually makes: restart restores the
+    // layout. Driven entirely through the default config — no test-supplied
+    // session path anywhere.
+    let workspace = TempWorkspace::new("legion_desktop_session_roundtrip");
+    let first_file = workspace.write("alpha.txt", "alpha\n");
+    workspace.write("beta.txt", "beta\n");
+
+    let session_path = {
+        let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+        let expected = config
+            .session_state
+            .clone()
+            .expect("interactive launch should default a session path");
+        let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+        runtime
+            .handle_action(DesktopAction::OpenPathText(
+                first_file.to_string_lossy().into_owned(),
+            ))
+            .expect("opening a file should succeed");
+        runtime
+            .save_session_state()
+            .expect("saving the session should succeed");
+        expected
+    };
+
+    assert!(
+        session_path.exists(),
+        "the default launch should have written {}",
+        session_path.display()
+    );
+
+    // Second launch: same arguments, nothing carried over in memory.
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let restored = DesktopRuntime::open(config).expect("runtime should reopen");
+    let titles = tab_titles(&restored);
+    assert!(
+        titles.iter().any(|title| title == "alpha.txt"),
+        "restarting must restore the open tabs, got {titles:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_session_is_not_rewritten() {
+    // `persist_session_if_configured` runs from the catch-all action arm, so
+    // this path is reached by every dispatched action — including each inserted
+    // character. `DesktopSessionStore::save` fsyncs and reads back to validate,
+    // so an unguarded write here would put a durable round-trip inside the
+    // ADR-0048 keypress budget. Proven by file mtime: a second save that
+    // changes nothing must not touch the file.
+    let workspace = TempWorkspace::new("legion_desktop_session_noop");
+    workspace.write("alpha.txt", "alpha\n");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    runtime.save_session_state().expect("first save");
+    let first = fs::metadata(&session_path)
+        .expect("session file should exist")
+        .modified()
+        .expect("mtime should be readable");
+
+    // Coarse filesystem timestamps would make an unchanged mtime meaningless
+    // if both writes landed inside the same tick, so separate them.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    runtime.save_session_state().expect("second save");
+    let second = fs::metadata(&session_path)
+        .expect("session file should still exist")
+        .modified()
+        .expect("mtime should be readable");
+
+    assert_eq!(
+        first, second,
+        "saving an unchanged session must not rewrite the file"
+    );
+}
+
+#[test]
+fn a_changed_session_is_written_again() {
+    // The other half: the guard must not be so eager that a real layout change
+    // is dropped. Without this, "skip when unchanged" could degrade to "skip".
+    let workspace = TempWorkspace::new("legion_desktop_session_changed");
+    let alpha = workspace.write("alpha.txt", "alpha\n");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    runtime.save_session_state().expect("first save");
+    let before = fs::read_to_string(&session_path).expect("session file should exist");
+
+    runtime
+        .handle_action(DesktopAction::OpenPathText(
+            alpha.to_string_lossy().into_owned(),
+        ))
+        .expect("opening a file should succeed");
+    runtime.save_session_state().expect("second save");
+    let after = fs::read_to_string(&session_path).expect("session file should exist");
+
+    assert_ne!(
+        before, after,
+        "opening a tab changes what a restart would restore and must be written"
+    );
+    assert!(
+        after.contains("alpha.txt"),
+        "the newly opened tab should be in the record, got {after}"
+    );
+}

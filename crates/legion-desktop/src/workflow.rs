@@ -25,8 +25,8 @@ use legion_protocol::{
     PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
     ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
     RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, ViewportScroll,
-    WorkspaceSessionRecord, WorkspaceTrustState,
+    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, TimestampMillis,
+    ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
@@ -111,6 +111,18 @@ impl DesktopLaunchConfig {
     pub fn with_session_state(mut self, path: PathBuf) -> Self {
         self.session_state = Some(path);
         self
+    }
+
+    /// Where an interactive launch keeps its layout metadata.
+    ///
+    /// Beside the workspace's other per-workspace state (`palette_usage.json`,
+    /// `proposal-audit/`), which `enable_workspace_state_persistence` already
+    /// creates, and which workspace scans already exclude. Per workspace rather
+    /// than per user on purpose: opening one repository must not restore
+    /// another's tabs.
+    #[must_use]
+    pub fn default_session_state_path(workspace_root: &Path) -> PathBuf {
+        workspace_root.join(".legion").join("session.json")
     }
 
     /// Attach a metadata-only diagnostics export path.
@@ -283,6 +295,23 @@ impl DesktopLaunchConfig {
         } else {
             None
         };
+
+        // An interactive launch persists its layout by default. Without this,
+        // `session_state` stayed `None` unless `--session-state` was passed,
+        // `save_session_state` returned immediately, and every restart lost the
+        // open tabs, the active buffer, the explorer expansion and the dock
+        // layout — while ten tests in `session_restore.rs` passed, because each
+        // one hands the runtime a path the product never supplied.
+        //
+        // Deliberately after `beta` is constructed: that branch reads
+        // `session_state` directly and substitutes its own default, so
+        // defaulting earlier would silently redirect beta-smoke evidence into
+        // the workspace. Smoke and perf runs are short-lived measurement
+        // harnesses and keep whatever they were given.
+        let session_state = session_state.or_else(|| {
+            (!smoke_enabled && !beta_enabled && !manual_perf_enabled)
+                .then(|| Self::default_session_state_path(&workspace_root))
+        });
 
         Ok(Self {
             workspace_root,
@@ -585,6 +614,9 @@ pub struct DesktopRuntime {
     selected_bottom_panel: BottomPanelTab,
     dock_layouts: Vec<DockLayout>,
     session_state_path: Option<PathBuf>,
+    /// Encoding of the last session record actually written, so an action that
+    /// changed nothing a restart would restore does not pay for a durable write.
+    last_saved_session_fingerprint: Option<String>,
     diagnostics_export_path: Option<PathBuf>,
     onboarding_visible: bool,
     quit_requested: bool,
@@ -705,6 +737,7 @@ impl DesktopRuntime {
             selected_bottom_panel,
             dock_layouts,
             session_state_path: config.session_state,
+            last_saved_session_fingerprint: None,
             diagnostics_export_path: config.diagnostics_export,
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
@@ -1511,12 +1544,36 @@ impl DesktopRuntime {
     }
 
     /// Save the current session to the configured session path.
-    pub fn save_session_state(&self) -> Result<()> {
-        let Some(path) = &self.session_state_path else {
+    ///
+    /// Skips the write when nothing a restart would restore has changed.
+    /// `persist_session_if_configured` runs from the catch-all action arm, so
+    /// this is reached by *every* dispatched action including each inserted
+    /// character — and `DesktopSessionStore::save` is deliberately expensive:
+    /// it writes a temp file, `sync_all`s it, reads it back and re-parses it to
+    /// validate, then atomically replaces the target. An fsync per keystroke
+    /// would not survive the ADR-0048 keypress budget.
+    ///
+    /// The comparison is on the serialized record with `saved_at` zeroed, since
+    /// that field changes on every capture and would defeat the check. Encoding
+    /// a small metadata record costs microseconds against milliseconds for the
+    /// durable write, and the guard is what makes saving on every action —
+    /// which is what makes the layout survive a crash — affordable.
+    pub fn save_session_state(&mut self) -> Result<()> {
+        let Some(path) = self.session_state_path.clone() else {
             return Ok(());
         };
         let record = self.capture_session_record()?;
-        DesktopSessionStore::save(path, &record)?;
+        let fingerprint = session_record_fingerprint(&record);
+        // A record that will not encode is one we cannot compare; fall through
+        // and let the store surface the real error rather than silently
+        // skipping the save.
+        if let Some(fingerprint) = &fingerprint
+            && self.last_saved_session_fingerprint.as_ref() == Some(fingerprint)
+        {
+            return Ok(());
+        }
+        DesktopSessionStore::save(&path, &record)?;
+        self.last_saved_session_fingerprint = fingerprint;
         Ok(())
     }
 
@@ -3267,6 +3324,18 @@ fn restore_status_messages(
         })
         .collect();
     (status, details)
+}
+
+/// A comparable encoding of everything a restart would restore.
+///
+/// `saved_at` is zeroed because it changes on every capture; leaving it in
+/// would make every record differ from the last one and defeat the write guard
+/// in [`DesktopRuntime::save_session_state`]. `None` means the record did not
+/// encode, which the caller treats as "cannot compare, so write".
+fn session_record_fingerprint(record: &WorkspaceSessionRecord) -> Option<String> {
+    let mut probe = record.clone();
+    probe.saved_at = TimestampMillis(0);
+    serde_json::to_string(&probe).ok()
 }
 
 fn session_workspace_matches(workspace_root: &Path, record: &WorkspaceSessionRecord) -> bool {

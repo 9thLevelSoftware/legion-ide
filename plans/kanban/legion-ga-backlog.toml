@@ -453,8 +453,23 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # `ctx.content_rect()` and egui `resizable`. Restart restores the *record*,
     # not the layout the user sees. Found while closing P1.F2.T2; verified by
     # inspection of every reader of both fields.
+    #
+    # 2026-08-17 (second pass): a *different* half of the same clause was also
+    # broken and is now fixed. The record was not being written at all in a
+    # normal launch — `session_state` had no default, so `--session-state` was
+    # the only way to enable persistence and `save_session_state` returned
+    # immediately. Ten tests passed throughout because each one hands the
+    # runtime a path the product never supplied. Interactive launches now
+    # default to `<workspace>/.legion/session.json`, and `save_session_state`
+    # skips unchanged records so the per-action durable write does not land
+    # inside the ADR-0048 keypress budget. Evidence below.
+    #
+    # Still in-progress for the original reason: the persisted splitter
+    # fractions are written and reloaded but no renderer applies them, so panel
+    # sizes still reset on restart. Tabs, active buffer, explorer expansion and
+    # workbench settings do now survive a real restart.
     status = "in-progress"
-    evidence = "crates/legion-desktop/tests/session_restore.rs"
+    evidence = "plans/evidence/production/WS-MANUAL-01/session-persistence-default-evidence.md"
 
   [[epics.features]]
   id = "P1.F3"
