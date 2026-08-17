@@ -576,7 +576,6 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     stop_condition = "Do not hide streaming-mode limitations from the user."
     status = "done"
     evidence = "crates/legion-desktop/tests/large_file_guardrails.rs"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
     [[epics.features.tasks]]
     id = "P1.F4.T5"
