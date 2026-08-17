@@ -25,8 +25,9 @@ use thiserror::Error;
 pub mod policy;
 pub use policy::{
     BatchRuntimeApplyPolicy, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy,
-    ProposalApplyGate, ProposalAutoApprovalPolicy, approval_level_audit_metadata,
-    derive_approval_level,
+    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, ProposalApplyGate,
+    ProposalAutoApprovalPolicy, approval_level_audit_metadata, classify_git_remote_url,
+    decide_git_remote_operation, derive_approval_level,
 };
 pub mod risk;
 
@@ -851,6 +852,17 @@ pub struct NetworkPolicy {
     pub air_gap: bool,
     /// Provider invocation is restricted to local or loopback targets.
     pub local_provider_only: bool,
+    /// Hosts the user has explicitly consented to for **git remote operations only**.
+    ///
+    /// Deliberately narrower than [`Self::allowlist`]: that field is operator
+    /// configuration covering every network capability, whereas this one records
+    /// a user consent event for one host and grants nothing outside the git
+    /// push/fetch/pull path. Consenting to a git remote must never widen hosted
+    /// AI provider, telemetry, or gateway egress.
+    ///
+    /// Empty by default — consent is something a user gives, never a default.
+    #[serde(default)]
+    pub consented_git_remote_hosts: Vec<String>,
 }
 
 impl Default for NetworkPolicy {
@@ -861,6 +873,7 @@ impl Default for NetworkPolicy {
             blocklist: vec!["example.exfiltration.invalid".to_string()],
             air_gap: true,
             local_provider_only: true,
+            consented_git_remote_hosts: Vec::new(),
         }
     }
 }
@@ -1189,6 +1202,45 @@ impl DenyByDefaultBroker {
         if Self::path_roots_auto_managed(&self.policy.path_policy.writable_roots) {
             self.policy.path_policy.writable_roots = vec![root, "./".to_string()];
         }
+    }
+
+    /// Record the user's consent to reach `host` for git remote operations.
+    ///
+    /// This is the write half of the git remote network gate. Without it the
+    /// policy is not fail-closed but fail-shut: the default `NetworkPolicy` is
+    /// air-gapped with a `localhost`-only allowlist, and if nothing can widen it
+    /// then no push can ever succeed and the denial is a missing feature wearing
+    /// a policy decision's clothes.
+    ///
+    /// Consent is scoped to git remotes and to this broker's lifetime. It never
+    /// touches [`NetworkPolicy::allowlist`], so it cannot widen hosted provider,
+    /// telemetry, or gateway egress. A host on the blocklist stays denied — an
+    /// operator block outranks user consent.
+    ///
+    /// Returns `true` when the host was newly consented, `false` when it was
+    /// already present or the host is blank.
+    pub fn consent_git_remote_host(&mut self, host: impl AsRef<str>) -> bool {
+        let host = host.as_ref().trim().to_ascii_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        let consented = &mut self.policy.network_policy.consented_git_remote_hosts;
+        if consented.iter().any(|known| known == &host) {
+            return false;
+        }
+        consented.push(host);
+        true
+    }
+
+    /// Withdraw consent for `host`, returning `true` when consent was present.
+    ///
+    /// Consent must be revocable or it is not consent.
+    pub fn revoke_git_remote_host(&mut self, host: impl AsRef<str>) -> bool {
+        let host = host.as_ref().trim().to_ascii_lowercase();
+        let consented = &mut self.policy.network_policy.consented_git_remote_hosts;
+        let before = consented.len();
+        consented.retain(|known| known != &host);
+        consented.len() != before
     }
 
     /// Returns true when a path-root list is the auto-managed default the broker
@@ -3273,6 +3325,7 @@ mod tests {
                     blocklist: vec!["example.exfiltration.invalid".to_string()],
                     air_gap: false,
                     local_provider_only: false,
+                    consented_git_remote_hosts: Vec::new(),
                 },
                 cloud_lane_policy: CloudLaneSecurityPolicy {
                     task_submission_enabled: true,

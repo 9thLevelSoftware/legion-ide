@@ -888,50 +888,52 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Wire live gutter diff/blame to desktop painter"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-project/src/git.rs"]
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P1.F3.T2"]
-    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project", "cargo run -p xtask -- golden-path-1"]
     acceptance = ["GP-1: open Legion repo, edit, see diff, stage hunk, commit, and optionally push."]
     stop_condition = "Stop if diff/blame data is read once and never refreshed."
-    status = "in-progress"
-    evidence = "crates/legion-desktop/tests/git_workflow.rs"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T2"
     title = "Add status panel, hunk/range staging, commit editor, push/fetch/pull actions"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-desktop/src/view/scm_panel.rs", "crates/legion-project/src/git.rs"]
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/bridge.rs", "crates/legion-app/src/lib.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P2.F5.T1"]
-    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project", "cargo test -p legion-app --test git_remote_policy_workflow"]
     acceptance = ["Hunk staging and commit work end-to-end through the UI."]
     stop_condition = "Do not bypass the workspace's path policy for push/fetch/pull."
-    status = "in-progress"
-    evidence = "crates/legion-app/tests/commit_validation_workflow.rs"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T3"
     title = "Add branch/worktree manager and agent worktree visibility"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-project/src/git.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-desktop/src/view/scm_panel.rs"]
+    files = ["crates/legion-project/src/lib.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-desktop/src/view.rs"]
     dependencies = ["P2.F5.T2", "P5.F2.T2"]
     verification = ["cargo test -p legion-project", "cargo test -p legion-agent", "cargo test -p legion-desktop"]
     acceptance = ["Agent worktrees are visible in the SCM panel; manual worktrees are managed by the user."]
     stop_condition = "Stop if agent worktrees are hidden from the user."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T4"
     title = "Keep network/auth operations policy-visible"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-project/src/git.rs", "crates/legion-security/src/policy.rs"]
+    files = ["crates/legion-security/src/policy.rs", "crates/legion-app/src/git_policy.rs", "crates/legion-app/src/lib.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P2.F5.T2"]
-    verification = ["cargo test -p legion-security", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-security --test git_remote_policy", "cargo test -p legion-app --test git_remote_policy_workflow", "cargo test -p legion-project"]
     acceptance = ["Every network/auth operation shows its policy decision to the user."]
     stop_condition = "Stop if a network operation is allowed without an audit row."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
 # ---------------------------------------------------------------------------
 # EPIC P3 — Proposal apply, checkpoints, and trust review

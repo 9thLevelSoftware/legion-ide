@@ -273,6 +273,18 @@ impl CommandDispatcher {
             CommandDispatchIntent::PushGitRemote { remote } => {
                 Ok(AppCommandRequest::PushGitRemote { remote })
             }
+            CommandDispatchIntent::FetchGitRemote { remote } => {
+                Ok(AppCommandRequest::FetchGitRemote { remote })
+            }
+            CommandDispatchIntent::PullGitRemote { remote } => {
+                Ok(AppCommandRequest::PullGitRemote { remote })
+            }
+            CommandDispatchIntent::GrantGitRemoteHost { host } => {
+                Ok(AppCommandRequest::GrantGitRemoteHost { host })
+            }
+            CommandDispatchIntent::RevokeGitRemoteHost { host } => {
+                Ok(AppCommandRequest::RevokeGitRemoteHost { host })
+            }
             CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
             CommandDispatchIntent::RemoveGitWorktree { path } => {
                 Ok(AppCommandRequest::RemoveGitWorktree { path })

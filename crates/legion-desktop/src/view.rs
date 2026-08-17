@@ -5161,12 +5161,34 @@ fn render_git_controls(
             actions.push(DesktopAction::RefreshGit);
         }
         if snapshot.git_projection.branch_label.is_some() {
+            // Remote verbs. Each dispatch is policy-gated in the app layer and
+            // records a verdict row, so a refusal appears in the panel body
+            // rather than failing silently.
+            if soft_button(ui, "Fetch").clicked() {
+                actions.push(DesktopAction::FetchGitRemote);
+            }
+            if soft_button(ui, "Pull").clicked() {
+                actions.push(DesktopAction::PullGitRemote);
+            }
             if soft_button(ui, "Push").clicked() {
                 actions.push(DesktopAction::PushGitRemote);
             }
             if soft_button(ui, "Open PR").clicked() {
                 actions.push(DesktopAction::OpenGitPullRequestUrl);
             }
+        }
+        // Offer the grant only while a host-naming denial is the standing
+        // verdict, so consent is asked for at the moment it is meaningful.
+        if let Some(host) = snapshot
+            .git_projection
+            .remote_policy_audit
+            .iter()
+            .rev()
+            .find(|row| !row.allowed && row.host.is_some())
+            .and_then(|row| row.host.as_deref())
+            && soft_button(ui, &format!("Allow {host}")).clicked()
+        {
+            actions.push(DesktopAction::GrantDeniedGitRemoteHost);
         }
     });
     if let Some(conflict) = snapshot.git_projection.conflicts.first() {
@@ -10550,6 +10572,20 @@ fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .iter()
             .take(8)
             .map(|diagnostic| format!("git diagnostic {diagnostic}")),
+    );
+    // Network/auth policy verdicts (P2.F5.T4). Newest last, so the tail of the
+    // list is the decision for the operation the user just attempted. Denied
+    // rows are prefixed distinctly so a refusal cannot be mistaken for success.
+    rows.extend(
+        git.remote_policy_audit
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(|row| {
+                let verdict = if row.allowed { "allowed" } else { "DENIED" };
+                format!("git policy {verdict}: {}", row.detail)
+            }),
     );
     // Commit validation errors (hard blockers) — shown near the commit action.
     rows.extend(
