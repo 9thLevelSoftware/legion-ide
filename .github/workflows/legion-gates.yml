@@ -112,6 +112,23 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets --no-fail-fast
 
+      # Measurement-configuration guard: LEGION_AI_GOVERNORS=off is the arm
+      # legion-bench's *raw baseline* runs under, and the Phase 2 exit gate is a
+      # governed-versus-raw comparison. Until 2026-08-17 nothing ran the suite
+      # that way and 13 tests failed in it — they asserted governed behavior
+      # unconditionally while the code branches on the seam. The numbers were
+      # never wrong, but the configuration they were measured in had never been
+      # verified.
+      #
+      # Only the crates that read the seam are re-run; they are already built by
+      # the step above, so this costs seconds. If that set ever grows, this list
+      # must grow with it:
+      #   grep -rl 'small_model_governors_enabled\|LEGION_AI_GOVERNORS' crates/
+      - name: cargo test (raw measurement arm)
+        env:
+          LEGION_AI_GOVERNORS: "off"
+        run: cargo test -p legion-ai -p legion-ai-providers -p legion-agent --all-targets --no-fail-fast
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
