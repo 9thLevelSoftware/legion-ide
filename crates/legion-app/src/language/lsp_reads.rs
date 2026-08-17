@@ -727,6 +727,35 @@ impl AppComposition {
         self.whole_document_utf16_range(buffer_id)
     }
 
+    /// Capability gate, target lookup, tag, send — the five lines every read
+    /// request shares.
+    ///
+    /// Written once because six copies of a capability check is how one of them
+    /// ends up checking the wrong capability, or none at all: the copies are
+    /// similar enough that a wrong one reads as right. Each public method is now
+    /// its capability, its method name, its kind and its params.
+    fn issue_lsp_read(
+        &mut self,
+        buffer_id: BufferId,
+        capability: &str,
+        method: &str,
+        kind: crate::language::LspReadKind,
+        params: impl FnOnce(&str) -> serde_json::Value,
+    ) -> bool {
+        if !self.lsp_server_supports_capability(capability) {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind,
+            snapshot_id,
+        };
+        self.lsp_session.issue_request(method, params(&uri), tag)
+    }
+
     /// Issues a non-blocking LSP references request on the worker thread.
     ///
     /// Returns `false` if the session is not Live, or if the server did not
@@ -741,24 +770,19 @@ impl AppComposition {
         position: TextCoordinate,
         include_declaration: bool,
     ) -> bool {
-        if !self.lsp_server_supports_capability("referencesProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": position.line, "character": position.character },
-            "context": { "includeDeclaration": include_declaration }
-        });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::References,
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/references", params, tag)
+            "referencesProvider",
+            "textDocument/references",
+            crate::language::LspReadKind::References,
+            |uri| {
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character },
+                    "context": { "includeDeclaration": include_declaration }
+                })
+            },
+        )
     }
 
     /// Issues a non-blocking LSP document-symbol request on the worker thread.
@@ -766,20 +790,13 @@ impl AppComposition {
     /// Returns `false` if the session is not Live, or if the server did not
     /// advertise `documentSymbolProvider` in the initialize response.
     pub fn issue_lsp_document_symbol_request(&mut self, buffer_id: BufferId) -> bool {
-        if !self.lsp_server_supports_capability("documentSymbolProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let params = serde_json::json!({ "textDocument": { "uri": uri } });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::Outline,
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/documentSymbol", params, tag)
+            "documentSymbolProvider",
+            "textDocument/documentSymbol",
+            crate::language::LspReadKind::Outline,
+            |uri| serde_json::json!({ "textDocument": { "uri": uri } }),
+        )
     }
 
     /// Issues a non-blocking LSP inlay-hint request for a range.
@@ -796,26 +813,21 @@ impl AppComposition {
         buffer_id: BufferId,
         range: legion_protocol::Utf16Range,
     ) -> bool {
-        if !self.lsp_server_supports_capability("inlayHintProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "range": {
-                "start": { "line": range.start.line, "character": range.start.character },
-                "end": { "line": range.end.line, "character": range.end.character }
-            }
-        });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::InlayHints,
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/inlayHint", params, tag)
+            "inlayHintProvider",
+            "textDocument/inlayHint",
+            crate::language::LspReadKind::InlayHints,
+            |uri| {
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": range.start.line, "character": range.start.character },
+                        "end": { "line": range.end.line, "character": range.end.character }
+                    }
+                })
+            },
+        )
     }
 
     /// Issues a non-blocking LSP code-lens request on the worker thread.
@@ -829,20 +841,13 @@ impl AppComposition {
     /// `experimental/runnables` request, which is not in the standard
     /// capability set and so is out of scope by this task's stop condition.
     pub fn issue_lsp_code_lens_request(&mut self, buffer_id: BufferId) -> bool {
-        if !self.lsp_server_supports_capability("codeLensProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let params = serde_json::json!({ "textDocument": { "uri": uri } });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::CodeLens,
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/codeLens", params, tag)
+            "codeLensProvider",
+            "textDocument/codeLens",
+            crate::language::LspReadKind::CodeLens,
+            |uri| serde_json::json!({ "textDocument": { "uri": uri } }),
+        )
     }
 
     /// The document URI for a buffer, or `None` if it has no metadata.
@@ -869,23 +874,18 @@ impl AppComposition {
     /// The result becomes a reviewable proposal like every other write-side
     /// action; nothing here writes.
     pub fn issue_lsp_formatting_request(&mut self, buffer_id: BufferId) -> bool {
-        if !self.lsp_server_supports_capability("documentFormattingProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "options": { "tabSize": 4, "insertSpaces": true }
-        });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::Formatting,
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/formatting", params, tag)
+            "documentFormattingProvider",
+            "textDocument/formatting",
+            crate::language::LspReadKind::Formatting,
+            |uri| {
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "options": { "tabSize": 4, "insertSpaces": true }
+                })
+            },
+        )
     }
 
     /// Issues a non-blocking LSP code-action request on the worker thread.
@@ -902,31 +902,26 @@ impl AppComposition {
         range: legion_protocol::Utf16Range,
         organize_imports: bool,
     ) -> bool {
-        if !self.lsp_server_supports_capability("codeActionProvider") {
-            return false;
-        }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
-        let mut context = serde_json::json!({ "diagnostics": [] });
-        if organize_imports {
-            context["only"] = serde_json::json!(["source.organizeImports"]);
-        }
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "range": {
-                "start": { "line": range.start.line, "character": range.start.character },
-                "end": { "line": range.end.line, "character": range.end.character }
-            },
-            "context": context
-        });
-        let tag = crate::language::LspRequestTag {
+        self.issue_lsp_read(
             buffer_id,
-            kind: crate::language::LspReadKind::CodeAction { organize_imports },
-            snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/codeAction", params, tag)
+            "codeActionProvider",
+            "textDocument/codeAction",
+            crate::language::LspReadKind::CodeAction { organize_imports },
+            |uri| {
+                let mut context = serde_json::json!({ "diagnostics": [] });
+                if organize_imports {
+                    context["only"] = serde_json::json!(["source.organizeImports"]);
+                }
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": range.start.line, "character": range.start.character },
+                        "end": { "line": range.end.line, "character": range.end.character }
+                    },
+                    "context": context
+                })
+            },
+        )
     }
 
     /// Issues a non-blocking LSP rename request on the worker thread

@@ -2005,10 +2005,9 @@ impl EditorEngine {
     ///
     /// The first cursor is the primary one — the same one viewport projection
     /// reports. A buffer is seeded with one at open and the set is never
-    /// emptied, so this returns a position rather than an option; the origin
-    /// fallback below is a default for an invariant that should hold, not a
-    /// case worth failing a keystroke over. Callers that need every cursor for
-    /// multi-cursor editing should use [`cursors`](Self::cursors).
+    /// emptied, so this returns a position rather than an option. Callers that
+    /// need every cursor for multi-cursor editing should use
+    /// [`cursors`](Self::cursors).
     pub fn primary_cursor(&self, buffer_id: BufferId) -> Result<TextPosition, EditorError> {
         let state = self
             .buffers

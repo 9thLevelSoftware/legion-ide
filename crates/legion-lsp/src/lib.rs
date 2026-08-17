@@ -2042,20 +2042,30 @@ fn code_lens_projection_for_item(
     })
 }
 
-/// The shell command line a rust-analyzer runnable lens describes, if it is one.
+/// The cargo command a rust-analyzer runnable lens describes, if it is one.
 ///
 /// rust-analyzer publishes Run and Debug as code lenses whose command is
 /// `rust-analyzer.runSingle` (or `debugSingle`) with a single argument carrying
 /// `args: { cargoArgs, executableArgs }`. Those arrays are the actual
 /// invocation; the command id is only a handle for a client that speaks
-/// rust-analyzer's private protocol.
+/// rust-analyzer's private protocol, and putting the handle in a field named
+/// `command_label` makes the lens describe itself wrongly wherever it is shown
+/// or recorded.
 ///
-/// The command is assembled from the arrays rather than from any free-form
-/// string, and every element is bounded, so a server cannot smuggle a longer
-/// command line through than the lens surface admits. It is still
-/// server-supplied text destined for a terminal — activation is gated by the
-/// same terminal policy every other launch goes through, and that gate, not
-/// this function, is what makes it safe.
+/// **Nothing executes this string today.** `ActivateLanguageCodeLens` and the
+/// test explorer both hand it to `TerminalWorkflow::launch`, which spawns the
+/// configured shell and uses the label only for display and audit. The value of
+/// building it correctly is that the lens says what it is; the value of the
+/// check below is that it stays safe on the day something does run it.
+///
+/// That check is a refusal, not an escape. Escaping shell metacharacters is a
+/// game the defender loses eventually, and a legitimate cargo argument contains
+/// none of them — so an element carrying a shell metacharacter or a control
+/// character means the lens is not a runnable, and it falls through to the
+/// ordinary path where the command id is displayed and nothing is claimed about
+/// it. The right long-term shape is an argv vector executed without a shell at
+/// all, which makes the question moot; until a caller exists to consume one,
+/// refusing is what can be proven.
 ///
 /// Returns `None` for any lens that is not a runnable, which is most of them.
 fn runnable_command_line(command: Option<&Value>) -> Option<String> {
@@ -2082,7 +2092,28 @@ fn runnable_command_line(command: Option<&Value>) -> Option<String> {
         parts.push("--".to_string());
         parts.extend(executable_args);
     }
+    if parts.iter().any(|part| !is_plain_command_argument(part)) {
+        return None;
+    }
     Some(bounded_lsp_label(&parts.join(" "), 240))
+}
+
+/// Whether an argument is one a shell would pass through untouched.
+///
+/// Deliberately a whitelist of what a cargo argument actually contains rather
+/// than a blacklist of what a shell reacts to: a blacklist is only as good as
+/// its author's memory of every metacharacter, and this one has to hold against
+/// a language server that may be hostile.
+///
+/// Rejects control characters (newline included, which is how one command
+/// becomes two) and every shell metacharacter. Accepts what real cargo
+/// arguments are made of: identifiers, paths, versions, feature lists,
+/// `--flags`, and the `::` of a Rust test path.
+fn is_plain_command_argument(argument: &str) -> bool {
+    !argument.is_empty()
+        && argument
+            .chars()
+            .all(|c| !c.is_control() && (c.is_ascii_alphanumeric() || "-_./:=+@,[]".contains(c)))
 }
 
 /// The string elements of a JSON array, bounded individually.

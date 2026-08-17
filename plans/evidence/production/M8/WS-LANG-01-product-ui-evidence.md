@@ -376,17 +376,16 @@ requires. Cross-cutting rule 1. The feature diff below is readable because of it
   exactly how completion, hover and definition already behaved.
 - Two new intents, `RefreshInlayHints` and `RefreshCodeLenses`, reachable as
   `:inlayhints` and `:codelens` and as `DesktopAction`s.
-- **Runnables had a real defect, not just a gap.** rust-analyzer publishes Run
-  and Debug as code lenses whose `command` is `rust-analyzer.runSingle` — a
-  handle into rust-analyzer's private protocol. `ActivateLanguageCodeLens` hands
-  `command_label` straight to the terminal, and `items_from_runnable_code_lenses`
-  hands it to the test explorer. Either would have launched the literal string
-  `rust-analyzer.runSingle` in a shell. `runnable_command_line` now assembles the
-  real invocation from the lens's `cargoArgs`/`executableArgs` — built from those
-  arrays element by element, each bounded, never from a free-form string — and
-  marks the lens `lsp.codelens.runnable`, which is the marker activation gates
-  on. A runnable command with no `cargoArgs` falls through to the ordinary path
-  rather than becoming launchable.
+- **Runnables were named wrongly.** rust-analyzer publishes Run and Debug as
+  code lenses whose `command` is `rust-analyzer.runSingle` — a handle into
+  rust-analyzer's private protocol, not a command. Putting the handle in a field
+  called `command_label` makes the lens describe itself wrongly everywhere it is
+  shown or written to the audit log. `runnable_command_line` now assembles the
+  real invocation from the lens's `cargoArgs`/`executableArgs`, element by
+  element, and marks the lens `lsp.codelens.runnable`, which is the marker
+  activation gates on. A runnable command with no `cargoArgs` falls through to
+  the ordinary path rather than advertising a Run action with nothing behind it.
+  See "Not claimed" below: this fixes the naming, not the execution.
 
 ### Tests
 
@@ -441,7 +440,27 @@ worker results through the real drain path, which proves the routing; GP-1 does
 not yet exercise inlay hints or runnables against a live rust-analyzer. Adding a
 GP-1 stage for them is separate work.
 
-**Runnable activation is server-supplied text reaching a terminal.** It was
-before this change too, and the terminal policy gate — not the projector — is
-what mediates it. The change narrows the surface (arrays, bounded elements)
-rather than introducing it.
+**Runnables are projected, not executed.** `ActivateLanguageCodeLens` and the
+test explorer both pass the lens's `command_label` to `TerminalWorkflow::launch`,
+which spawns the configured shell from `effective_shell_command()` and uses the
+label only for the projection message and the audit line. Activating a Run lens
+opens a terminal; it does not run the test. Wiring real execution is separate
+work, and its right shape is an argv vector handed to the process API without a
+shell — not this string.
+
+**The label is checked, not escaped.** Because a caller may one day run it,
+`is_plain_command_argument` refuses any argument carrying a control character or
+a shell metacharacter, and such a lens is not treated as runnable at all. A
+refusal rather than an escape on purpose: escaping is a game the defender
+eventually loses, and a real cargo argument contains none of those characters.
+`bounded_lsp_label` truncates by byte length and does nothing else.
+
+### Correction (2026-08-16, same day)
+
+An earlier draft of this section said that without this change
+`ActivateLanguageCodeLens` and the test explorer "would have launched the literal
+string `rust-analyzer.runSingle` in a shell," and that the terminal policy gate
+was "what mediates it." Both are wrong, and the error was mine — caught in
+review. Nothing executes `command_label`; there is no such mediation because
+there is no execution. The change fixes what a runnable lens is *called* and
+recorded as. It does not make runnables run, and the paragraph above now says so.

@@ -20151,10 +20151,12 @@ impl AppComposition {
                 ))
             }
             AppCommandRequest::RefreshInlayHints { buffer_id } => {
-                // Inlay hints have no index-backed answer worth returning — the
-                // lexical indexer does not infer types — so unlike references
-                // and outline this one is LSP-only, and the projection simply
-                // records the operation until the server replies.
+                // The index leg below runs and returns nothing useful: the
+                // lexical indexer does not infer types, so it has no inlay
+                // hints to offer. It is kept anyway because it is what records
+                // the operation and stamps the projection with this buffer's
+                // identity, so the surface has a row to update when the
+                // server's answer arrives rather than appearing from nowhere.
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_inlay_hint_request(buffer_id, range);
                 }
