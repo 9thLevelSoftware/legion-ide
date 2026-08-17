@@ -511,3 +511,49 @@ answered. It is deliberately not a merge gate — the same posture
 `legion-smoke.yml` carries per `T0-D-smoke-promotion-criteria.md`, for the same
 reason: a job that gathers evidence about the outside world must not be able to
 block unrelated work, and must not be made green to unblock it either.
+
+### Review findings — three fixed, one deferred with a reason
+
+Three were taken:
+
+- **The `paths:` filter did not include the files the command is wired up in.**
+  It named `xtask/src/dap_adapter_probe.rs` but not `main.rs` or `lib.rs`, so a
+  follow-up renaming a flag or moving the module would ship without the
+  apparatus that proves it — the failure this workflow exists to retire.
+- **`try_wait` errors were treated as fatal.** An `Err` there is overwhelmingly
+  `EINTR` from a signal arriving, not a vanished child, so a probe that spawned
+  the adapter successfully would report no version at all on the first signal
+  the OS delivered. Interrupted is now transient and the 10s budget is the real
+  bound, as the doc comment always claimed.
+- **TOML was rendered by hand.** A 55-line string builder with an escaper
+  covering `\n`, `\r`, `\t`, `"` and `\` and silently emitting invalid TOML for
+  `\0`, `\b`, `\f` and control characters — any of which a `--version` banner
+  can carry — into an artifact whose only purpose is being read back. `toml` was
+  already a dependency; serialization goes through it now and the escaping
+  question stops existing.
+
+**One was attempted and reverted: the duplicated `apt-get` block.** The review
+counted eight copies; there are eleven, across five workflows. It is a real
+problem and the proposed fix — one composite action — is the right shape.
+
+It is not landing here because the mechanical replacement corrupted the files:
+the substitution left orphaned continuation lines behind in every workflow it
+touched, including `legion-release.yml`. **`yaml.safe_load` parsed the result
+without complaint**, which is worth recording on its own — the validation step
+said yes to a broken pipeline, and only reading the diff caught it. That is the
+same false-green this workstream keeps finding, produced by my own tooling.
+
+Reverted rather than repaired in place, because a half-applied edit across the
+release pipeline is a worse outcome than a duplication that has been stable for
+months.
+
+Anyone taking it up should know the lists are **not** identical, so a blind
+collapse is wrong: eight copies share a base set, the two DAP jobs add
+`libdbus-1-dev`, and `legion-release.yml` has one copy with packaging extras
+(`dpkg-dev`, `libglib2.0-dev`, `librsvg2-dev`) and a second wrapped in
+conditional logic that detects whether the image wants `libfuse2` or
+`libfuse2t64`. That last one is not a copy-paste at all and should stay as it
+is. A composite action wants an `extra-packages` input, and each call site's
+divergence should be justified rather than carried forward — it is not
+established that the DAP jobs need `libdbus-1-dev` at all, only that they failed
+with no system packages whatsoever.

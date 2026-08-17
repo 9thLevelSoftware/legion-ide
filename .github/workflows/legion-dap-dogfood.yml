@@ -39,6 +39,11 @@ on:
       - '.github/workflows/legion-dap-dogfood.yml'
       - 'crates/legion-debug/**'
       - 'xtask/src/dap_adapter_probe.rs'
+      # The command is wired up in these two. Without them a follow-up that
+      # renames a flag or moves the module ships without the apparatus that
+      # proves it — the failure this workflow exists to retire.
+      - 'xtask/src/main.rs'
+      - 'xtask/src/lib.rs'
   schedule:
     # Weekly on Mondays at 07:00 UTC, an hour after legion-smoke.
     - cron: '0 7 * * 1'

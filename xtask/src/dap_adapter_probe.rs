@@ -37,7 +37,8 @@ pub const PROBE_NAMES: [&str; 3] = ["lldb-dap", "lldb-vscode", "codelldb"];
 /// The distinction matters for evidence: "the platform ships this" and "our
 /// workflow installed this" support different claims, and a report that
 /// conflates them cannot be read back later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Provenance {
     /// Nothing was installed by us before the probe ran: this is the image.
     Shipped,
@@ -71,7 +72,7 @@ impl Provenance {
 }
 
 /// One adapter binary found under a name the resolver searches for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AdapterFinding {
     /// Name that was searched for (`lldb-dap`, …), not the on-disk file name.
     pub name: String,
@@ -90,7 +91,7 @@ pub struct AdapterFinding {
 /// not accept its stem, so a runner can have a perfectly good adapter and still
 /// resolve nothing. Reporting these separately is the difference between
 /// "no adapter here" and "an adapter is here under a name we do not look for".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VariantFinding {
     /// On-disk file name, e.g. `lldb-dap-18`.
     pub file_name: String,
@@ -101,7 +102,7 @@ pub struct VariantFinding {
 }
 
 /// Everything one probe run observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProbeReport {
     /// `std::env::consts::OS` of the probing machine.
     pub os: String,
@@ -272,6 +273,11 @@ fn capture_version(program: &Path) -> Option<String> {
         match child.try_wait() {
             Ok(Some(_)) => break false,
             Ok(None) => {}
+            // Overwhelmingly `EINTR` from a signal arriving, not a vanished
+            // child. Bailing here would make a probe that spawned the adapter
+            // successfully report no version at all, on the first signal the
+            // OS happens to deliver. The 10s budget below is the real bound.
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return None,
         }
         if started.elapsed() >= VERSION_TIMEOUT {
@@ -301,63 +307,51 @@ fn capture_version(program: &Path) -> Option<String> {
 }
 
 /// Render a report as TOML for a CI artifact.
+///
+/// Through `toml` rather than by building the string by hand. The artifact
+/// exists to be read back, and a hand-rolled escaper is only as complete as
+/// its author remembered to be — the first one here covered `\n`, `\r`,
+/// `\t`, `"` and `\` and silently emitted invalid TOML for `\0`, `\b`,
+/// `\f` and control characters, any of which a `--version` banner may carry.
+/// `toml` is already a dependency of this package, so the escaping question
+/// simply stops being one.
+///
+/// Serialization of a plain data struct cannot realistically fail, but the
+/// probe is a diagnostic and must not take a CI job down with it, so an
+/// error is reported in-band rather than panicked.
 pub fn render_toml(report: &ProbeReport) -> String {
-    let mut out = String::new();
-    out.push_str("schema = \"legion.dap-adapter-probe/1\"\n");
-    out.push_str("generated_by = \"cargo run -p xtask -- dap-adapter-probe\"\n");
-    out.push_str(&format!("os = \"{}\"\n", toml_escape(&report.os)));
-    out.push_str(&format!("arch = \"{}\"\n", toml_escape(&report.arch)));
-    out.push_str(&format!(
-        "provenance = \"{}\"\n",
-        report.provenance.as_str()
-    ));
-    out.push_str(&format!(
-        "resolvable_adapter_count = {}\n",
-        report.resolvable().count()
-    ));
-    out.push_str(&format!("found_count = {}\n", report.adapters.len()));
-    out.push_str(&format!("variant_count = {}\n", report.variants.len()));
-
-    for found in &report.adapters {
-        out.push_str("\n[[adapter]]\n");
-        out.push_str(&format!("name = \"{}\"\n", toml_escape(&found.name)));
-        out.push_str(&format!(
-            "path = \"{}\"\n",
-            toml_escape(&found.path.display().to_string())
-        ));
-        out.push_str(&format!("allowlisted_stem = {}\n", found.allowlisted_stem));
-        match &found.version {
-            Some(version) => {
-                out.push_str(&format!("version = \"{}\"\n", toml_escape(version)));
-            }
-            None => out.push_str("version = \"\"\n"),
-        }
+    /// The report plus the one number that is derived rather than stored.
+    ///
+    /// `resolvable_adapter_count` is the headline a maintainer reads, and it is
+    /// computed from policy — so a plain derive on `ProbeReport` silently drops
+    /// it from the artifact, which is what happened when this function stopped
+    /// building its TOML by hand. Keeping it in a view preserves `resolvable()`
+    /// as the single source of truth rather than duplicating the count into a
+    /// field that can drift from it.
+    #[derive(serde::Serialize)]
+    struct ReportView<'a> {
+        os: &'a str,
+        arch: &'a str,
+        provenance: Provenance,
+        resolvable_adapter_count: usize,
+        adapters: &'a [AdapterFinding],
+        variants: &'a [VariantFinding],
     }
 
-    for variant in &report.variants {
-        out.push_str("\n[[variant]]\n");
-        out.push_str(&format!(
-            "file_name = \"{}\"\n",
-            toml_escape(&variant.file_name)
-        ));
-        out.push_str(&format!(
-            "base_name = \"{}\"\n",
-            toml_escape(&variant.base_name)
-        ));
-        out.push_str(&format!(
-            "path = \"{}\"\n",
-            toml_escape(&variant.path.display().to_string())
-        ));
-        out.push_str("resolvable = false\n");
-        out.push_str(
-            "note = \"versioned name: the resolver searches exact names only and the \
-             allowlist matches stems, so this binary is present but unreachable\"\n",
-        );
+    let view = ReportView {
+        os: &report.os,
+        arch: &report.arch,
+        provenance: report.provenance,
+        resolvable_adapter_count: report.resolvable().count(),
+        adapters: &report.adapters,
+        variants: &report.variants,
+    };
+    match toml::to_string_pretty(&view) {
+        Ok(rendered) => rendered,
+        Err(err) => format!("# dap-adapter-probe: report serialization failed: {err}\n"),
     }
-    out
 }
 
-/// Human-readable probe summary for the CI log.
 pub fn render_summary(report: &ProbeReport) -> String {
     let mut out = format!(
         "dap-adapter-probe: os={} arch={} provenance={}\n",
@@ -391,21 +385,6 @@ pub fn render_summary(report: &ProbeReport) -> String {
         "  resolvable_adapter_count={}\n",
         report.resolvable().count()
     ));
-    out
-}
-
-fn toml_escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other => out.push(other),
-        }
-    }
     out
 }
 
@@ -463,12 +442,22 @@ mod tests {
             variants: Vec::new(),
         };
         let rendered = render_toml(&report);
-        assert!(rendered.contains(r"C:\\Program Files\\LLVM\\bin\\lldb-dap.exe"));
-        assert!(rendered.contains(r#"\"quoted\""#));
         assert!(rendered.contains("resolvable_adapter_count = 1"));
         // Parses as TOML, which is the whole point of writing an artifact.
         let parsed: toml::Value = rendered.parse().expect("probe report must be valid TOML");
         assert_eq!(parsed["provenance"].as_str(), Some("shipped"));
+        // The property, not the encoding: whichever string form the serializer
+        // picks, a Windows path and an embedded quote must come back
+        // byte-identical. The earlier assertions pinned one hand-rolled escape
+        // spelling, which is precisely what makes a serializer unreplaceable.
+        assert_eq!(
+            parsed["adapters"][0]["path"].as_str(),
+            Some(r"C:\Program Files\LLVM\bin\lldb-dap.exe")
+        );
+        assert_eq!(
+            parsed["adapters"][0]["version"].as_str(),
+            Some(r#"lldb version 18.1.8 "quoted""#)
+        );
     }
 
     #[test]
