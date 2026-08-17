@@ -34,3 +34,6 @@ __pycache__/
 .legion/project/workflow/map/*/symbols.json
 .legion/project/workflow/map/*/search.md
 .legion/project/workflow/map/*/index.jsonl
+
+# Agent worktrees are checkouts of this repo, not content of it.
+.claude/worktrees/
