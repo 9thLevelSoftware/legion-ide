@@ -548,6 +548,11 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # 10MB-100MB scale tests landed (see AGENTS.md streaming note). The
     # renderer-level acceptance (scrolls without blocking typing) is unproven,
     # so this stays short of done.
+    # 2026-08-16: it is no longer unproven, it is disproven. P1.F4.T5 put the
+    # real 100MB workload in the perf harness and it misses ADR-0048's keypress
+    # p50 by 45% (23.2ms against 16ms). Open and scroll are within budget;
+    # typing is not. See
+    # plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md.
     status = "in-progress"
     evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
@@ -587,7 +592,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
     acceptance = ["100MB workload is in the standard perf-harness run, not a side script."]
     stop_condition = "Stop if the workload is hidden behind an opt-in flag in CI."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md"
 
 # ---------------------------------------------------------------------------
 # EPIC P2 — Language, terminal, debug, search, and git daily-driver loop

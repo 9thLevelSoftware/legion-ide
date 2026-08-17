@@ -1408,6 +1408,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         xtask::perf_harness::SkeletonDescriptor::m1_line_galley_shaping_cache(),
         xtask::perf_harness::SkeletonDescriptor::m2_memory_ceiling_1mb(),
         xtask::perf_harness::SkeletonDescriptor::m8_search_stream_50k(),
+        xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb(),
     ];
     for skeleton in &mut skeletons {
         xtask::perf_harness::apply_fail_on_budget_override(skeleton);
@@ -1416,6 +1417,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
     let mut report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
     append_manual_renderer_measurement(&workspace_root, &out_dir, &mut report);
+    append_large_file_measurement(&workspace_root, &out_dir, &mut report);
     let path = match xtask::perf_harness::write_report(&out_dir, &report) {
         Ok(path) => path,
         Err(err) => {
@@ -1449,6 +1451,93 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Run the real 100MB workload and replace its placeholder measurement.
+///
+/// A subprocess for the same reason the renderer measurement is one: `xtask`
+/// cannot depend on `legion-editor`, and a synthetic 100MB stand-in would
+/// measure the stand-in. It is part of the standard run rather than an opt-in
+/// flag — a budget nobody runs is not a budget — and costs about a minute.
+fn append_large_file_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+    report: &mut xtask::perf_harness::PerfReport,
+) {
+    let descriptor = xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb();
+    let report_path = out_dir.join("large-file-perf.toml");
+    let _ = std::fs::create_dir_all(out_dir);
+
+    let output = std::process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "legion-app",
+            "--bin",
+            "large_file_perf",
+            "--",
+            "--report",
+        ])
+        .arg(&report_path)
+        .output();
+
+    let measurement = match output {
+        Err(err) => placeholder_large_file_measurement(
+            &descriptor,
+            format!("100MB measurement blocked: cannot spawn subprocess: {err}"),
+        ),
+        Ok(output) if !output.status.success() => placeholder_large_file_measurement(
+            &descriptor,
+            format!(
+                "100MB measurement subprocess exited with status {}",
+                output.status
+            ),
+        ),
+        Ok(_) => match std::fs::read_to_string(&report_path)
+            .map_err(|err| err.to_string())
+            .and_then(|body| {
+                toml::from_str::<xtask::perf_harness::LargeFilePerfReport>(&body)
+                    .map_err(|err| err.to_string())
+            }) {
+            Ok(parsed) => xtask::perf_harness::large_file_perf_measurement(&descriptor, &parsed),
+            Err(err) => placeholder_large_file_measurement(
+                &descriptor,
+                format!("100MB measurement report unreadable: {err}"),
+            ),
+        },
+    };
+
+    // Replace the planned placeholder rather than appending beside it, so the
+    // report carries one row per workload and not a stale skipped twin.
+    report
+        .skeletons
+        .retain(|existing| existing.name != measurement.name);
+    let mut measurement = measurement;
+    xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
+    report.skeletons.push(measurement);
+    report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
+}
+
+/// A skipped measurement carrying why the real one could not be taken.
+fn placeholder_large_file_measurement(
+    descriptor: &xtask::perf_harness::SkeletonDescriptor,
+    message: String,
+) -> xtask::perf_harness::SkeletonMeasurement {
+    xtask::perf_harness::SkeletonMeasurement {
+        name: descriptor.name.clone(),
+        kind: descriptor.kind,
+        fixture_bytes: descriptor.fixture_bytes,
+        sample_count: descriptor.sample_count,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: descriptor.budget_millis,
+        status: xtask::perf_harness::SkeletonStatus::Skipped,
+        message,
     }
 }
 
