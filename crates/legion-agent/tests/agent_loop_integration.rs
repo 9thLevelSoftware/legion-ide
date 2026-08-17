@@ -1091,9 +1091,50 @@ fn repeated_malformed_tool_calls_hit_the_retry_budget() {
     }
 }
 
+// ─── Fragment edits: a governor-gated behavior, so every test below states
+//     what it expects in *both* arms ───────────────────────────────────────────
+
+/// Whether fragment-edit resolution is on — the default arm.
+///
+/// `LEGION_AI_GOVERNORS=off` reproduces pre-port behavior: an edit must supply
+/// the file's complete content, and an `old_str`/`new_str` fragment is refused.
+/// That is the arm `legion-bench`'s **raw baseline** runs under, so these tests
+/// assert its contract rather than assuming the default. Until 2026-08-17 they
+/// asserted only the governed contract, which left the raw configuration — the
+/// one half of the Phase 2 exit measurement — never verified.
+fn fragment_edits_resolve() -> bool {
+    legion_ai::governance::small_model_governors_enabled()
+}
+
+/// The raw-arm contract shared by every fragment edit below: the loop completes,
+/// nothing is proposed, and the file on disk is untouched.
+///
+/// The file check is not redundant with "no proposal". The failure this whole
+/// feature exists to prevent is a fragment being taken for the file's complete
+/// new content, and a raw arm that had regressed into doing that would still
+/// leave the worktree clean — so the two assertions catch different things, and
+/// the interesting one is that no *destructive* proposal was produced either.
+fn assert_fragment_edit_was_refused(result: &DelegatedTaskLoopResult, path: &Path, original: &str) {
+    let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
+        panic!("a refused fragment must still complete the run, got {result:?}");
+    };
+    assert!(
+        proposals.is_empty(),
+        "the raw baseline cannot resolve a fragment, so it must propose nothing: {proposals:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        original,
+        "edits stay proposals in either arm; the file is never written"
+    );
+}
+
 /// Fragment edits are resolved against the file rather than treated as whole
 /// content (ADR-0049). Without this, `old_str`/`new_str` would replace the
 /// entire file with the new fragment.
+///
+/// Raw: the fragment is refused outright — which is precisely why the raw arm
+/// scores worse on edit tasks, and why it is safe rather than destructive.
 #[test]
 fn fragment_edit_replaces_only_the_matched_text() {
     let dir = TempDir::new().unwrap();
@@ -1125,6 +1166,11 @@ fn fragment_edit_replaces_only_the_matched_text() {
     )
     .expect("loop must not error");
 
+    if !fragment_edits_resolve() {
+        assert_fragment_edit_was_refused(&result, &dir.path().join("main.rs"), original);
+        return;
+    }
+
     let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
         panic!("expected Completed, got {result:?}");
     };
@@ -1150,17 +1196,41 @@ fn fragment_edit_replaces_only_the_matched_text() {
 
 /// An ambiguous fragment is refused with retryable feedback, and the model can
 /// correct it in the same run — the loop must not die on a near-miss.
+///
+/// Raw: there is no "ambiguous" diagnostic to feed back, because the fragment
+/// was never resolved far enough to be found ambiguous. The script is built per
+/// arm for that reason: a scripted guard waiting on feedback the raw arm cannot
+/// produce would fail as a *provider* error and read like a loop bug.
 #[test]
 fn ambiguous_fragment_is_refused_then_corrected() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("cfg.rs"), "x = 1\nx = 1\n").unwrap();
+    let original = "x = 1\nx = 1\n";
+    std::fs::write(dir.path().join("cfg.rs"), original).unwrap();
+
+    let first_edit = serde_json::json!({"path": "cfg.rs", "old_str": "x = 1", "new_str": "x = 2"});
+
+    if !fragment_edits_resolve() {
+        let provider = ScriptedToolCallingProviderBuilder::new()
+            .tool_use("t1", "edit-as-proposal", first_edit)
+            .end_turn("Nothing staged.")
+            .build("test");
+        let config = default_config(&dir);
+        let mut sink = RecordingAuditSink::new();
+        let result = run_delegated_task_loop(
+            &config,
+            &provider,
+            &NoOpToolHost,
+            &mut sink,
+            &NeverCancelled,
+            &AllowAllBroker,
+        )
+        .expect("an unresolvable fragment must not error the loop in either arm");
+        assert_fragment_edit_was_refused(&result, &dir.path().join("cfg.rs"), original);
+        return;
+    }
 
     let provider = ScriptedToolCallingProviderBuilder::new()
-        .tool_use(
-            "t1",
-            "edit-as-proposal",
-            serde_json::json!({"path": "cfg.rs", "old_str": "x = 1", "new_str": "x = 2"}),
-        )
+        .tool_use("t1", "edit-as-proposal", first_edit)
         // Only reachable if the refusal was fed back as retryable feedback.
         .expect_prior_result_contains("ambiguous")
         .tool_use(
@@ -1199,24 +1269,27 @@ fn ambiguous_fragment_is_refused_then_corrected() {
 
 /// A fragment that does not match is refused with a diagnostic naming the
 /// nearest line, so the model can re-read rather than rewrite the file.
+///
+/// Raw: refused too, but with no locating diagnostic — nothing looked for a
+/// nearest line. The guard is therefore only scripted in the governed arm.
 #[test]
 fn unmatched_fragment_is_refused_with_a_locating_diagnostic() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("a.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+    let original = "fn alpha() {}\nfn beta() {}\n";
+    std::fs::write(dir.path().join("a.rs"), original).unwrap();
 
-    let provider = ScriptedToolCallingProviderBuilder::new()
-        .tool_use(
-            "t1",
-            "edit-as-proposal",
-            serde_json::json!({
-                "path": "a.rs",
-                "old_str": "fn beta( ) {}",
-                "new_str": "fn beta(x: u8) {}"
-            }),
-        )
-        .expect_prior_result_contains("closest line is 2")
-        .end_turn("Understood.")
-        .build("test");
+    let edit = serde_json::json!({
+        "path": "a.rs",
+        "old_str": "fn beta( ) {}",
+        "new_str": "fn beta(x: u8) {}"
+    });
+
+    let mut builder =
+        ScriptedToolCallingProviderBuilder::new().tool_use("t1", "edit-as-proposal", edit);
+    if fragment_edits_resolve() {
+        builder = builder.expect_prior_result_contains("closest line is 2");
+    }
+    let provider = builder.end_turn("Understood.").build("test");
 
     let config = default_config(&dir);
     let mut sink = RecordingAuditSink::new();
@@ -1229,6 +1302,11 @@ fn unmatched_fragment_is_refused_with_a_locating_diagnostic() {
         &AllowAllBroker,
     )
     .expect("a no-match fragment must not error the loop");
+
+    if !fragment_edits_resolve() {
+        assert_fragment_edit_was_refused(&result, &dir.path().join("a.rs"), original);
+        return;
+    }
 
     assert!(
         matches!(result, DelegatedTaskLoopResult::Completed { .. }),
@@ -1243,7 +1321,8 @@ fn unmatched_fragment_is_refused_with_a_locating_diagnostic() {
 #[test]
 fn successive_fragment_edits_to_one_file_compose() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("cfg.rs"), "let a = 1;\nlet b = 2;\n").unwrap();
+    let original = "let a = 1;\nlet b = 2;\n";
+    std::fs::write(dir.path().join("cfg.rs"), original).unwrap();
 
     let provider = ScriptedToolCallingProviderBuilder::new()
         .tool_use(
@@ -1271,6 +1350,11 @@ fn successive_fragment_edits_to_one_file_compose() {
     )
     .expect("loop must not error");
 
+    if !fragment_edits_resolve() {
+        assert_fragment_edit_was_refused(&result, &dir.path().join("cfg.rs"), original);
+        return;
+    }
+
     let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
         panic!("expected Completed, got {result:?}");
     };
@@ -1294,7 +1378,8 @@ fn successive_fragment_edits_to_one_file_compose() {
 #[test]
 fn a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("m.rs"), "fn main() {}\n").unwrap();
+    let original = "fn main() {}\n";
+    std::fs::write(dir.path().join("m.rs"), original).unwrap();
 
     let provider = ScriptedToolCallingProviderBuilder::new()
         .tool_use(
@@ -1326,10 +1411,19 @@ fn a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit() {
     )
     .expect("the second anchor exists only in staged content");
 
+    if !fragment_edits_resolve() {
+        assert_fragment_edit_was_refused(&result, &dir.path().join("m.rs"), original);
+        return;
+    }
+
     let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
         panic!("expected Completed, got {result:?}");
     };
-    let last = match &proposals[proposals.len() - 1].payload {
+    // `last()` rather than indexing on `len() - 1`: with no proposals that
+    // subtraction underflows and the test dies with "attempt to subtract with
+    // overflow" instead of saying what was actually missing. It did exactly
+    // that in the raw arm.
+    let last = match &proposals.last().expect("a proposal is staged").payload {
         ProposalPayload::CreateFile(create) => create.initial_content.clone().unwrap_or_default(),
         other => panic!("expected a file-content payload, got {other:?}"),
     };

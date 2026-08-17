@@ -27,7 +27,13 @@ Two things were inaccurate before this change and are worth naming:
 1. `LlamaCppProvider::capabilities()` delegates to its inner
    `OpenAiCompatibleProvider`, so it already advertised `tool_use: true` while
    not implementing `ToolCallingProvider`. The advertisement was not backed by
-   anything.
+   anything. It became unbacked on **2026-07-07** in `69872fd`
+   (*PKT-OPENAI-TOOLS*), which flipped `OpenAiCompatibleProvider`'s
+   `tool_use: false` → `true`; `LlamaCppProvider` inherited the claim through
+   delegation without gaining an implementation, and carried it for **six
+   weeks** until this change. Nothing consumed it — the delegated loop takes a
+   `ToolCallingProvider` directly rather than selecting on the capability
+   flag — which is why it went unnoticed rather than failing.
 2. `OllamaProvider::capabilities()` advertised `tool_use: false`, which was
    accurate, and is now `true`.
 
@@ -144,9 +150,11 @@ under both settings; see the table below.
 
 Run on 2026-08-17, Windows 11, exit codes read directly (not through a pipe).
 
+### Default arm
+
 | Command | Exit | Result |
 | --- | --- | --- |
-| `cargo fmt --all` | 0 | clean |
+| `cargo fmt --all` | 0 | clean (`--check` also 0) |
 | `cargo test --workspace --all-targets --no-fail-fast` | 0 | **3019 passed / 0 failed / 19 ignored across 263 suites** |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | 0 warnings, 0 errors |
 | `cargo run -p xtask -- extract-before-modify` | 0 | `no chokepoint file grew past its slack` |
@@ -155,34 +163,108 @@ Run on 2026-08-17, Windows 11, exit codes read directly (not through a pipe).
 | `cargo run -p xtask -- claim-audit` | 0 | `claim audit passed` |
 | `cargo run -p xtask -- verify-kanban-backlog` | 0 | `10 epic(s), 41 feature(s), 161 task(s)` |
 | `cargo run -p xtask -- verify-readiness-consistency` | 0 | `161 backlog task(s) cross-checked` |
-| `cargo test -p legion-ai-providers --all-targets` | 0 | 59 unit + 11 `local_provider_tool_calling` + 25 other integration = 95 passed / 0 failed / 1 ignored |
-| `LEGION_AI_GOVERNORS=off cargo test -p legion-ai-providers --test local_provider_tool_calling` | 0 | 11 passed / 0 failed |
+
+### Raw measurement arm (`LEGION_AI_GOVERNORS=off`)
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `LEGION_AI_GOVERNORS=off cargo test -p legion-ai -p legion-ai-providers -p legion-agent --all-targets --no-fail-fast` | 0 | **367 passed / 0 failed / 1 ignored across 32 suites** |
+
+Before this change the same command failed with 13 failures across two crates.
+This is the command the new CI step runs, and the one to run locally when
+touching anything behind the seam.
 
 The workspace count moved from 2745 (the 2026-08-15 tool-normalizer evidence)
 to 3019 across the intervening work; this change contributes 24 of them
-(13 unit + 11 integration).
+(13 unit + 11 integration). The 13 repaired tests are not new — they already
+existed and already passed in the default arm.
 
-## Pre-existing problem found, not introduced here
+## The raw measurement arm was never verified — 13 tests, now fixed
 
-Five `legion-ai-providers` unit tests fail when `LEGION_AI_GOVERNORS=off` is
-set in the environment:
+`LEGION_AI_GOVERNORS=off` is the seam `legion-bench`'s **raw baseline** runs
+under. The Phase 2 exit gate is a ≥20% governed-versus-raw improvement, so half
+that comparison was being measured in a configuration where the workspace's own
+tests did not pass. These are test assertions rather than product defects, so
+the recorded numbers are not thereby wrong — but the configuration had never
+been shown sound, which is not a footing to defend a benchmark claim from.
 
+I first reported five failures in `legion-ai-providers`. Running the other two
+crates that read the seam found **eight more**, in `legion-agent` — 13 in total
+across two crates:
+
+| Suite | Count | Tests |
+| --- | --- | --- |
+| `legion-ai-providers` (lib) | 5 | `openai_malformed_arguments_*`, `openai_recovered_call_with_unparseable_arguments_is_not_dispatchable`, `openai_recovers_prose_call_under_a_near_miss_name`, `openai_recovers_tagged_call_written_as_prose`, `recovered_calls_report_tool_use_even_when_the_model_said_stop` |
+| `legion-agent` `agent_loop_integration` | 5 | `fragment_edit_replaces_only_the_matched_text`, `ambiguous_fragment_is_refused_then_corrected`, `unmatched_fragment_is_refused_with_a_locating_diagnostic`, `successive_fragment_edits_to_one_file_compose`, `a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit` |
+| `legion-agent` `openai_tool_loop_cross_check` | 3 | `prose_embedded_call_is_recovered_and_dispatched_end_to_end`, `prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back`, `block_format_edit_written_as_prose_reaches_the_edit_tool` |
+
+`legion-ai`'s own tests, including the 58-vector normalizer corpus, were already
+green in both arms.
+
+**Every one now asserts the contract for the arm it is in**, and the raw
+assertions are load-bearing rather than filler — in each case the raw arm's
+behavior *is* the baseline being measured:
+
+- prose containing a call is passed through untouched (the tag is asserted to
+  still be present), nothing is dispatched, and the model's `stop` stands;
+- unparseable structured arguments fail the completion hard, carrying the raw
+  text — the pre-port behavior;
+- a fragment edit is refused: no proposal, and the file on disk untouched. The
+  file check is not redundant with "no proposal": a raw arm that had regressed
+  into treating a fragment as whole content would still leave the worktree
+  clean, so the two catch different failures;
+- a block-format edit is read as prose and lost, which is the cost the governor
+  exists to remove.
+
+Two tests were scripted per arm rather than branched at the end, because their
+premise does not exist in the raw arm: a scripted guard waiting on an
+"ambiguous" or "closest line is 2" diagnostic that is never produced fails as a
+*provider* error and reads like a loop bug.
+
+Three renames, because the old names asserted a governed-only outcome and would
+have been false in the raw arm:
+
+| Was | Now |
+| --- | --- |
+| `openai_malformed_arguments_yield_non_dispatchable_block` | `openai_malformed_arguments_never_reach_dispatch` |
+| `openai_recovers_prose_call_under_a_near_miss_name` | `openai_near_miss_prose_call_follows_the_governor_arm` |
+| `openai_recovers_tagged_call_written_as_prose` | `tagged_prose_call_recovery_follows_the_governor_arm` |
+| `recovered_calls_report_tool_use_even_when_the_model_said_stop` | `stop_reason_for_a_prose_call_follows_the_governor_arm` |
+
+**One real test bug, not just an assertion.**
+`a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit` indexed
+`proposals[proposals.len() - 1]`, which underflows on an empty vector: in the
+raw arm it died with `attempt to subtract with overflow` rather than saying what
+was missing. Now `last().expect(...)`.
+
+### Guard against recurrence
+
+One CI step, in `.github/workflows/legion-gates.yml` immediately after
+`cargo test`:
+
+```yaml
+- name: cargo test (raw measurement arm)
+  env:
+    LEGION_AI_GOVERNORS: "off"
+  run: cargo test -p legion-ai -p legion-ai-providers -p legion-agent --all-targets --no-fail-fast
 ```
-tests::openai_malformed_arguments_yield_non_dispatchable_block
-tests::openai_recovered_call_with_unparseable_arguments_is_not_dispatchable
-tests::openai_recovers_prose_call_under_a_near_miss_name
-tests::openai_recovers_tagged_call_written_as_prose
-tests::recovered_calls_report_tool_use_even_when_the_model_said_stop
-```
 
-They assert the governed behavior unconditionally while the code they exercise
-branches on that seam, so they encode an assumption about the environment
-rather than about the code. They predate this change and are untouched by it —
-the standing gate set does not set the variable, so they are green in CI — but
-they are the same class of defect as the three machine-dependent failures
-recorded on 2026-08-14, and the bench runner is exactly the thing that sets
-this variable. Recorded rather than fixed, because fixing them is a change to
-tests outside this task's file list.
+Only the three crates that read the seam are re-run, and they are already built
+by the preceding step, so the cost is seconds rather than a second full
+workspace run. The step carries the grep that regenerates the crate list
+(`grep -rl 'small_model_governors_enabled\|LEGION_AI_GOVERNORS' crates/`), since
+a fourth reader would otherwise be silently unguarded.
+
+Deliberately **not** done: a tenth standing xtask gate. The nine-gate local
+sequence is a contract, the failure mode is a PR-time regression, and CI is
+where PRs are checked — a new gate would be ceremony on top of a step that
+already does the job. Locally the same check is one command, recorded in the
+verification table below.
+
+Secondary, and free rather than a mechanism: tests whose result differs by arm
+now carry `governor_arm` in the name, so `grep -rn governor_arm crates/` lists
+the seam-dependent set. That is a convention, not enforcement; the CI step is
+the enforcement.
 
 ## Backlog
 

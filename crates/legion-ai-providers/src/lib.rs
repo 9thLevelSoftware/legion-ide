@@ -5784,16 +5784,32 @@ mod tests {
 
     // --- Malformed arguments → typed, non-dispatchable block ---
 
-    /// Unparseable arguments must never reach tool dispatch.
+    /// Whether the tolerant governors are on — the default arm.
     ///
-    /// This previously failed the whole completion. That upheld the safety
-    /// invariant but ended the turn, giving the model no way to correct
-    /// itself — costly with small local models, which get JSON wrong often.
-    /// The invariant is now carried by the type: `MalformedToolCall` has no
-    /// `input` field, so it cannot be dispatched, and the agent loop feeds the
-    /// diagnostic back as text (ADR-0049).
+    /// Tests that behave differently on either side of this seam assert the
+    /// contract for the arm they are actually in, and carry `governor_arm` in
+    /// their name so the set is greppable. `LEGION_AI_GOVERNORS=off` is the
+    /// arm `legion-bench`'s **raw baseline** runs under; a test that silently
+    /// assumed the default left that configuration unverified, which is what
+    /// it was until 2026-08-17.
+    fn governed() -> bool {
+        legion_ai::governance::small_model_governors_enabled()
+    }
+
+    /// Unparseable arguments must never reach tool dispatch — in either arm.
+    ///
+    /// Governed: the invariant is carried by the type. `MalformedToolCall` has
+    /// no `input` field, so it cannot be dispatched, and the agent loop feeds
+    /// the diagnostic back as text (ADR-0049). This replaced failing the whole
+    /// completion, which upheld the invariant but ended the turn and gave the
+    /// model no way to correct itself — costly with small local models.
+    ///
+    /// Raw (`LEGION_AI_GOVERNORS=off`): the pre-port behavior is reproduced —
+    /// the completion fails hard, carrying the raw text in the message. The
+    /// safety property is identical either way, which is why it is asserted
+    /// before the arms diverge.
     #[test]
-    fn openai_malformed_arguments_yield_non_dispatchable_block() {
+    fn openai_malformed_arguments_never_reach_dispatch() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5808,10 +5824,24 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let resp = openai_tool_provider(response)
-            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
-            .expect("malformed arguments are recoverable, not a transport failure");
+        let outcome = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"));
 
+        if !governed() {
+            let error = outcome.expect_err("the raw arm fails hard on unparseable arguments");
+            let message = format!("{error}");
+            assert!(
+                matches!(error, ProviderError::RequestFailed { .. }),
+                "expected RequestFailed, got {error:?}"
+            );
+            assert!(
+                message.contains("not valid json"),
+                "the raw text must survive into the error: {message}"
+            );
+            return;
+        }
+
+        let resp = outcome.expect("malformed arguments are recoverable, not a transport failure");
         assert!(
             !resp
                 .blocks
@@ -5855,11 +5885,19 @@ mod tests {
         );
     }
 
-    /// A prose call under a near-miss name must reach the offered tool.
-    /// Registry names are canonical, so filtering on the raw name alone would
-    /// silently drop exactly the calls small models get wrong most often.
+    /// A prose call under a near-miss name, in both arms.
+    ///
+    /// Governed: it must reach the offered tool. Registry names are canonical,
+    /// so filtering on the raw name alone would silently drop exactly the calls
+    /// small models get wrong most often.
+    ///
+    /// Raw: it must **not** be recovered. That is not an incidental
+    /// consequence — it is the baseline `legion-bench` measures the governed
+    /// arm against, so "prose stays prose" is the assertion that keeps the
+    /// comparison honest. A leak here would inflate the raw arm and shrink the
+    /// improvement the Phase 2 exit gate rests on.
     #[test]
-    fn openai_recovers_prose_call_under_a_near_miss_name() {
+    fn openai_near_miss_prose_call_follows_the_governor_arm() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5887,7 +5925,24 @@ mod tests {
         };
         let resp = openai_tool_provider(response)
             .complete_with_tools(request)
-            .expect("near-miss call is recovered");
+            .expect("a prose reply is never a transport failure in either arm");
+
+        if !governed() {
+            assert!(
+                !resp
+                    .blocks
+                    .iter()
+                    .any(ToolTurnBlock::is_dispatchable_tool_use),
+                "the raw baseline must not recover a call written as prose: {:?}",
+                resp.blocks
+            );
+            assert_eq!(
+                resp.stop_reason,
+                ToolCompletionStopReason::EndTurn,
+                "with nothing recovered, the model's own `stop` stands"
+            );
+            return;
+        }
 
         let use_block = resp
             .blocks
@@ -5903,8 +5958,14 @@ mod tests {
         }
     }
 
-    /// A recovered call whose arguments never parsed must not reach dispatch
-    /// with a null input — it is as undispatchable as a structured one.
+    /// A prose call whose arguments never parsed must not reach dispatch with a
+    /// null input — it is as undispatchable as a structured one.
+    ///
+    /// The invariant holds in both arms, by different routes: governed, it is
+    /// surfaced as a malformed block carrying the raw text; raw, the call is
+    /// never recovered at all, so there is nothing to dispatch. Asserting the
+    /// invariant first and the arm second is deliberate — the safety property
+    /// is the point, and the mechanism is the detail.
     #[test]
     fn openai_recovered_call_with_unparseable_arguments_is_not_dispatchable() {
         let response = json!({
@@ -5927,6 +5988,18 @@ mod tests {
                 .any(ToolTurnBlock::is_dispatchable_tool_use),
             "a recovered call with unparseable arguments must not be dispatchable"
         );
+
+        if !governed() {
+            assert!(
+                !resp
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ToolTurnBlock::MalformedToolCall { .. })),
+                "the raw baseline recovers nothing, so there is no call to call malformed"
+            );
+            return;
+        }
+
         assert!(
             resp.blocks.iter().any(|block| matches!(
                 block,
@@ -5936,11 +6009,17 @@ mod tests {
         );
     }
 
-    /// A recovered call must arrive as a tool-use turn even though the model
-    /// reported `stop` — the agent loop returns immediately on `EndTurn`, so
-    /// reporting it would strand the recovered call undispatched.
+    /// What a model's `stop` means depends on the arm.
+    ///
+    /// Governed: a recovered call must arrive as a tool-use turn even though
+    /// the model reported `stop` — the agent loop returns immediately on
+    /// `EndTurn`, so reporting it would strand the recovered call undispatched.
+    ///
+    /// Raw: nothing is recovered, so `stop` is reported as `EndTurn` for all
+    /// three shapes. That is the pre-port behavior, and the reason the raw
+    /// baseline scores worse: the run ends with the call unmade.
     #[test]
-    fn recovered_calls_report_tool_use_even_when_the_model_said_stop() {
+    fn stop_reason_for_a_prose_call_follows_the_governor_arm() {
         let valid = json!({
             "choices": [{
                 "message": {
@@ -5950,12 +6029,19 @@ mod tests {
                 "finish_reason": "stop"
             }]
         });
+        // With nothing recovered, every shape below is plain text and reports
+        // the model's own `stop`.
+        let expected_for_a_prose_call = if governed() {
+            ToolCompletionStopReason::ToolUse
+        } else {
+            ToolCompletionStopReason::EndTurn
+        };
+
         let resp = openai_tool_provider(valid)
             .complete_with_tools(simple_openai_request("gpt-4o-mini"))
             .expect("recovered call");
         assert_eq!(
-            resp.stop_reason,
-            ToolCompletionStopReason::ToolUse,
+            resp.stop_reason, expected_for_a_prose_call,
             "a recovered call must not be reported as the end of the turn"
         );
 
@@ -5972,8 +6058,7 @@ mod tests {
             .complete_with_tools(simple_openai_request("gpt-4o-mini"))
             .expect("recovered malformed call");
         assert_eq!(
-            resp.stop_reason,
-            ToolCompletionStopReason::ToolUse,
+            resp.stop_reason, expected_for_a_prose_call,
             "the diagnostic must reach the loop rather than ending the run"
         );
 
@@ -5990,10 +6075,19 @@ mod tests {
         assert_eq!(resp.stop_reason, ToolCompletionStopReason::EndTurn);
     }
 
-    /// Recovery of prose-embedded calls happens only when the provider
-    /// returned none of its own, so a call is never counted twice.
+    /// A tagged call surrounded by prose, in both arms.
+    ///
+    /// Governed: recovered exactly once — recovery runs only when the provider
+    /// returned no structured calls of its own, so a call is never
+    /// double-counted — and the surrounding prose survives with the consumed
+    /// span removed.
+    ///
+    /// Raw: the whole message stays a single text block, tag and all. Asserting
+    /// the tag is still *there* matters more than it looks: it is the direct
+    /// evidence that the raw arm sends the model's output through untouched,
+    /// which is the premise of the governed-versus-raw comparison.
     #[test]
-    fn openai_recovers_tagged_call_written_as_prose() {
+    fn tagged_prose_call_recovery_follows_the_governor_arm() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -6012,6 +6106,21 @@ mod tests {
             .iter()
             .filter(|block| block.is_dispatchable_tool_use())
             .collect();
+
+        if !governed() {
+            assert!(uses.is_empty(), "the raw baseline recovers nothing");
+            assert!(
+                resp.blocks.iter().any(|block| matches!(
+                    block,
+                    ToolTurnBlock::Text(text)
+                        if text.starts_with("Listing files.") && text.contains("<tool_call>")
+                )),
+                "the raw arm must pass the model's output through untouched: {:?}",
+                resp.blocks
+            );
+            return;
+        }
+
         assert_eq!(uses.len(), 1, "the embedded call is recovered exactly once");
         assert!(
             matches!(uses[0], ToolTurnBlock::ToolUse { name, .. } if name == "read"),
