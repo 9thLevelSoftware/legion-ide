@@ -24,8 +24,9 @@ use thiserror::Error;
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{
-    BatchRuntimeApplyPolicy, ProposalApplyGate, ProposalAutoApprovalPolicy,
-    approval_level_audit_metadata, derive_approval_level,
+    BatchRuntimeApplyPolicy, GitRemoteDecision, GitRemoteOperation, GitRemoteTarget,
+    ProposalApplyGate, ProposalAutoApprovalPolicy, approval_level_audit_metadata,
+    classify_git_remote_url, decide_git_remote_operation, derive_approval_level,
 };
 pub mod risk;
 
