@@ -661,3 +661,30 @@ budgeted workload fails on the developer machine.
 typing-latency fix lands (`WS-MANUAL-02/large-file-typing-diagnosis.md` records
 the cause: every keystroke copies the whole line-metrics vector). Re-measure
 rather than cite them afterwards.
+
+### One more blocker closed, and one that is not the same thing
+
+`scale_100mb_viewport_slice_under_budget` was recorded above as **failing** at
+1.1086 ms against its own 1 ms budget, invisible behind `#[ignore]`. Re-run
+after the line-table change:
+
+```
+cargo test -p legion-text --release --test large_scale_100mb \
+  scale_100mb_viewport_slice_under_budget -- --ignored --nocapture
+visible_line_slices elapsed: 24.1µs      # was 1108.6µs
+test result: ok. 1 passed
+```
+
+Forty-five times faster, and it now passes. That measurement was taken at the
+pre-fix commit, so the failure was real and the fix closed it — the same
+line-metrics copy that cost 22.8 ms per keystroke was also being paid by every
+viewport slice.
+
+**This is not the viewport regression carried forward from the typing fix.**
+That one is `perf-harness`'s `viewport_millis` moving 2.9 ms → 5.6 ms, and it
+remains open: the current harness run reports 6.1 ms. The two are different
+layers, and the numbers say so — isolated probes of `visible_line_slices` measure
+110 µs, three orders of magnitude below the harness figure, which is dominated by
+the editor projection above it. Fixing one did not cause the other, and the
+regression still has no explanation. It sits at 19% of the 32 ms scroll budget,
+so it is not urgent, but it is unexplained rather than understood-and-accepted.
