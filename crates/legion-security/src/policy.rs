@@ -442,8 +442,13 @@ impl GitRemoteDecision {
 ///    cannot see, mirroring the "network target metadata required" rule.
 /// 4. Filesystem remotes short-circuit to allow: they cannot egress, so
 ///    allowlist and air-gap checks do not apply to them.
-/// 5. Host remotes are checked against the blocklist, then air-gap, then the
-///    allowlist.
+/// 5. Host remotes are checked against the blocklist, then explicit user
+///    consent, then air-gap, then the operator allowlist.
+///
+/// Consent sits above air-gap on purpose. Air-gap's job is to stop egress the
+/// user did not ask for; a host the user named and granted is the opposite of
+/// that, and it stays recorded and revocable. The blocklist is checked first so
+/// an operator block still outranks any user grant.
 ///
 /// [`CommandTaxonomy`]: super::CommandTaxonomy
 pub fn decide_git_remote_operation(
@@ -524,6 +529,20 @@ pub fn decide_git_remote_operation(
             SecurityDecision::Deny(format!("host `{host}` is blocked by network policy")),
             target,
         );
+    }
+
+    // Explicit user consent for this host, checked before air-gap and recorded
+    // as its own verdict. Air-gap exists to stop egress nobody asked for; this
+    // egress was asked for by name, granted deliberately, audited, and can be
+    // revoked. The blocklist above still outranks consent, so an operator can
+    // hard-block a host that no user grant can reopen.
+    if policy
+        .network_policy
+        .consented_git_remote_hosts
+        .iter()
+        .any(|consented| consented.eq_ignore_ascii_case(&host))
+    {
+        return decide(SecurityDecision::Allow, target);
     }
 
     if policy.network_policy.air_gap && !is_loopback_host(&host) {

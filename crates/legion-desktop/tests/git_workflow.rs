@@ -480,6 +480,7 @@ fn desktop_git_rows_renders_remote_policy_verdicts() {
             operation: "fetch".to_string(),
             remote: "origin".to_string(),
             target: "local-path".to_string(),
+            host: None,
             allowed: true,
             detail: "git fetch remote=origin target=local-path class=Network decision=allow"
                 .to_string(),
@@ -488,6 +489,7 @@ fn desktop_git_rows_renders_remote_policy_verdicts() {
             operation: "push".to_string(),
             remote: "origin".to_string(),
             target: "ssh://github.com".to_string(),
+            host: Some("github.com".to_string()),
             allowed: false,
             detail: "git push remote=origin target=ssh://github.com class=Network \
                      decision=deny (air-gap mode denies non-loopback git push to `github.com`)"
@@ -513,6 +515,58 @@ fn desktop_git_rows_renders_remote_policy_verdicts() {
     assert!(
         denied.contains("air-gap"),
         "the denial reason must reach the user; got: {denied}"
+    );
+}
+
+/// P2.F5.T4 — the grant is reachable from the UI and targets exactly the host
+/// that was denied, so a user never has to retype it (or mistype it into
+/// consenting to a different host).
+#[test]
+fn desktop_bridge_grants_consent_for_the_denied_host() {
+    let mut snapshot = Shell::empty("git-consent-test").projection_snapshot();
+    let bridge = DesktopCommandBridge::new();
+
+    // With no denial on record there is nothing to grant.
+    assert_eq!(
+        bridge.translate(DesktopAction::GrantDeniedGitRemoteHost, &snapshot),
+        DesktopBridgeOutput::Error(
+            legion_desktop::bridge::DesktopBridgeError::MissingDeniedGitRemoteHost
+        )
+    );
+
+    // An allowed row is not a reason to ask for consent either.
+    snapshot.git_projection.remote_policy_audit = vec![GitRemotePolicyProjection {
+        operation: "fetch".to_string(),
+        remote: "origin".to_string(),
+        target: "local-path".to_string(),
+        host: None,
+        allowed: true,
+        detail: String::new(),
+    }];
+    assert_eq!(
+        bridge.translate(DesktopAction::GrantDeniedGitRemoteHost, &snapshot),
+        DesktopBridgeOutput::Error(
+            legion_desktop::bridge::DesktopBridgeError::MissingDeniedGitRemoteHost
+        )
+    );
+
+    // Once a denial names a host, the grant targets that host.
+    snapshot
+        .git_projection
+        .remote_policy_audit
+        .push(GitRemotePolicyProjection {
+            operation: "push".to_string(),
+            remote: "origin".to_string(),
+            target: "ssh://github.com".to_string(),
+            host: Some("github.com".to_string()),
+            allowed: false,
+            detail: "decision=deny (air-gap …)".to_string(),
+        });
+    assert_eq!(
+        bridge.translate(DesktopAction::GrantDeniedGitRemoteHost, &snapshot),
+        DesktopBridgeOutput::Intent(legion_ui::CommandDispatchIntent::GrantGitRemoteHost {
+            host: "github.com".to_string(),
+        })
     );
 }
 

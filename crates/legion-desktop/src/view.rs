@@ -5177,6 +5177,19 @@ fn render_git_controls(
                 actions.push(DesktopAction::OpenGitPullRequestUrl);
             }
         }
+        // Offer the grant only while a host-naming denial is the standing
+        // verdict, so consent is asked for at the moment it is meaningful.
+        if let Some(host) = snapshot
+            .git_projection
+            .remote_policy_audit
+            .iter()
+            .rev()
+            .find(|row| !row.allowed && row.host.is_some())
+            .and_then(|row| row.host.as_deref())
+            && soft_button(ui, &format!("Allow {host}")).clicked()
+        {
+            actions.push(DesktopAction::GrantDeniedGitRemoteHost);
+        }
     });
     if let Some(conflict) = snapshot.git_projection.conflicts.first() {
         ui.horizontal_wrapped(|ui| {

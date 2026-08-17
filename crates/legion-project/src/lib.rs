@@ -3066,6 +3066,25 @@ impl WorkspaceActor {
             .unwrap_or_default()
     }
 
+    /// Record user consent to reach `host` for git remote operations.
+    ///
+    /// Returns `true` when the host was newly consented. A poisoned broker lock
+    /// returns `false` (fail closed: no grant is recorded).
+    pub fn consent_git_remote_host(&self, host: impl AsRef<str>) -> bool {
+        self.security
+            .lock()
+            .map(|mut broker| broker.consent_git_remote_host(host))
+            .unwrap_or(false)
+    }
+
+    /// Withdraw consent for `host`, returning `true` when consent was present.
+    pub fn revoke_git_remote_host(&self, host: impl AsRef<str>) -> bool {
+        self.security
+            .lock()
+            .map(|mut broker| broker.revoke_git_remote_host(host))
+            .unwrap_or(false)
+    }
+
     fn now_sequence(state: &mut WorkspaceState) -> EventSequence {
         state.watcher_sequence = state.watcher_sequence.saturating_add(1);
         EventSequence(state.watcher_sequence)

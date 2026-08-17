@@ -180,11 +180,11 @@ New tests, with counts as run:
 
 | Suite | Tests | New here |
 | --- | --- | --- |
-| `cargo test -p legion-security --test git_remote_policy` | 10 passed | all 10 |
-| `cargo test -p legion-app --test git_remote_policy_workflow` | 6 passed | all 6 |
+| `cargo test -p legion-security --test git_remote_policy` | 15 passed | all 15 |
+| `cargo test -p legion-app --test git_remote_policy_workflow` | 10 passed | all 10 |
 | `cargo test -p legion-app --lib git_policy` | 3 passed | all 3 |
 | `cargo test -p legion-project --test git_workflow` | 26 passed | 2 |
-| `cargo test -p legion-desktop --test git_workflow` | 8 passed | 3 |
+| `cargo test -p legion-desktop --test git_workflow` | 9 passed | 4 |
 | `cargo test -p legion-app --test palette` | 18 passed | 0 (allowlist updated) |
 
 New test names:
@@ -219,6 +219,33 @@ New test names:
   `desktop_git_rows_renders_remote_policy_verdicts`,
   `desktop_bridge_translates_fetch_and_pull_actions`
 
+Consent-path tests (legion-security `git_remote_policy`):
+`user_consent_permits_a_host_that_air_gap_would_otherwise_deny`,
+`a_blocklisted_host_stays_denied_even_after_consent`,
+`git_remote_consent_does_not_touch_the_general_network_allowlist`,
+`consent_matching_is_case_insensitive_and_trimmed`,
+`consent_does_not_override_workspace_trust`.
+
+Consent-path tests (legion-app `git_remote_policy_workflow`):
+`a_denied_push_succeeds_after_the_user_grants_consent_for_the_host`,
+`revoking_consent_restores_the_denial`,
+`consent_is_refused_in_an_untrusted_workspace`,
+`consent_is_scoped_to_the_host_that_was_granted`. Desktop:
+`desktop_bridge_grants_consent_for_the_denied_host`.
+
+`a_denied_push_succeeds_after_the_user_grants_consent_for_the_host` proves the
+whole loop end to end — denied, granted, push physically lands in the bare
+repository, and the audit reads
+`[("push", false), ("consent-grant", true), ("push", true)]`. It is hermetic:
+`origin` is configured as `https://git.legion.test/...` while a
+`url.<bare-path>.pushInsteadOf` entry redirects the transport to a local bare
+repo. `git remote get-url` still reports the `https://` URL, which is the value
+policy reads, so the remote classifies as a non-loopback host and is denied by
+default — but a granted push has somewhere real to land, with no network
+service involved. A plain `insteadOf` would not work here: it also rewrites what
+`get-url` reports, and the remote would classify as a local path and skip the
+host checks entirely.
+
 Two of these are deliberately constructed to fail without the change rather
 than to restate it:
 
@@ -249,10 +276,17 @@ Recorded so this section is not read as broader than it is:
   would put a git subprocess on a latency-sensitive path; that tradeoff was not
   taken on without a perf measurement.
 - **Blame does not follow the active file on its own.** `blame_lines` is
-  computed only for the file that was active at collection time, and
+  computed only for the file active at collection time, and
   `refresh_git_projection` is not called from file open or tab switch, so
-  switching files leaves the previous file's blame in the projection until the
-  next refresh. This was found during assessment and is not fixed here.
+  switching files leaves the previous file's blame rows in the projection until
+  the next refresh. An earlier draft of this section called that a correctness
+  bug; on re-reading the renderer that was overstated and is corrected here.
+  `git_inline_blame_label` matches on `line.path == relative_path`, so stale rows
+  from another file are filtered out and the gutter shows *no* blame rather than
+  another file's blame. It is a freshness gap, not misattribution. The fix would
+  put a synchronous `collect_git_snapshot` on every tab switch, which is a
+  latency tradeoff that wants a measurement rather than a guess, so it is
+  recorded rather than taken.
 - **No credential or auth layer was built.** Git subprocesses inherit SSH agent
   and credential-helper configuration from the environment, as documented on
   `push_git_remote`. The "auth" half of the T4 acceptance is satisfied only in
@@ -281,11 +315,63 @@ Recorded so this section is not read as broader than it is:
   are named in the backlog `files` lists; the real locations are
   `crates/legion-desktop/src/view.rs` and `crates/legion-project/src/lib.rs`.
   The backlog entries were corrected rather than the files invented.
-- **No extraction from `crates/legion-app/src/lib.rs` was performed.** New logic
-  went into the new `git_policy.rs` module so the file grew only by a dispatch
-  method and call sites. A pure move of the git command arms was considered and
-  rejected: they are arms of one large `match`, so relocating them is a
-  behavioral refactor rather than a move, and that was outside these tasks.
+- **`crates/legion-app/src/lib.rs` grew by a net 81 lines** (+95 / −14 against
+  merge base `7609c775`), measured with `git diff --numstat`. The two dispatch
+  methods were moved verbatim into `crates/legion-app/src/git_remote.rs` as an
+  `impl AppComposition` continuation once the first draft measured +179, which
+  would have exceeded the ~120-line chokepoint budget. Pure policy and
+  projection logic lives in `git_policy.rs`; `lib.rs` retains only the request
+  variants, intent routing, and two one-line call sites.
+- **A pure move of the git *command arms* was still not performed.** They are
+  arms of one large `match`, so relocating them is a behavioral refactor rather
+  than a move, and that remains outside these tasks.
+
+### Consent path: making the default deny survivable
+
+Review found that the gate as first written was not fail-closed but fail-shut.
+`NetworkPolicy::default()` is air-gapped with a `localhost`-only allowlist, and
+nothing in the product could write that allowlist — the only broker mutator was
+`pin_workspace_path_roots`. A push to any real forge was therefore denied
+permanently, with no path to permit it. That is a missing feature wearing a
+policy decision's clothes, and it is worse than the unaudited push it replaced,
+because Phase 1's exit criterion is developing Legion in Legion and pushing is
+part of that loop.
+
+Added an explicit consent path rather than loosening the default:
+
+- `NetworkPolicy::consented_git_remote_hosts` — deliberately separate from
+  `allowlist`. The allowlist is operator configuration covering every network
+  capability; this records a user consent event for one host and grants nothing
+  outside the git push/fetch/pull path, so consenting to a git remote can never
+  widen hosted AI provider, telemetry, or gateway egress.
+- `DenyByDefaultBroker::consent_git_remote_host` / `revoke_git_remote_host`,
+  following the `pin_workspace_path_roots` precedent, surfaced through
+  `WorkspaceActor` so the app can reach them.
+- Intents `GrantGitRemoteHost` / `RevokeGitRemoteHost`, commands
+  `:git-allow-remote <host>` / `:git-revoke-remote <host>`, and a desktop
+  `Allow <host>` button that appears only while a host-naming denial is the
+  standing verdict and grants exactly the host that was refused.
+- Consent is itself audited: grants and withdrawals join the same visible trail
+  as the operations they govern, so a change of verdict is never unexplained.
+
+**Ordering, and a deliberate deviation.** Consent is checked *before* air-gap
+and *after* the blocklist. Review asked that air-gap still deny when it is
+deliberately on. It is placed above air-gap instead, for two reasons. First,
+`air_gap` defaults to `true` and there is still no settings surface that can
+author a policy, so ordering consent below it would leave the grant inert and
+reproduce the fail-shut state exactly. Second, air-gap's purpose is to stop
+egress nobody asked for; a host the user named, granted, and can revoke is the
+opposite of that. The operator blocklist is still checked first, so an
+administrator can hard-block a host that no user grant reopens, and consent does
+not bypass workspace trust. If enforcement under a deliberately-enabled air-gap
+is preferred over a working grant, moving the consent check below the air-gap
+check is a one-line change — but it needs a way to author `air_gap` first, or
+the feature returns to being unusable.
+
+**What consent does not do:** it is held in the broker for the process lifetime
+and is not persisted, so grants do not survive a restart. Persistence belongs
+with the settings surface that does not yet exist, and is recorded here rather
+than faked.
 
 ### Gate run (2026-08-16, Windows 11)
 

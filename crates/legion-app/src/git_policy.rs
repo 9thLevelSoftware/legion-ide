@@ -11,7 +11,8 @@
 //! allow path while skipping the record.
 
 use legion_security::{
-    GitRemoteDecision, GitRemoteOperation, SecurityPolicy, TrustState, decide_git_remote_operation,
+    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, SecurityPolicy, TrustState,
+    decide_git_remote_operation,
 };
 use legion_ui::GitRemotePolicyProjection;
 
@@ -59,8 +60,36 @@ fn projection_row(decision: &GitRemoteDecision) -> GitRemotePolicyProjection {
         operation: decision.operation.label().to_string(),
         remote: decision.remote_name.clone(),
         target: decision.target.label(),
+        host: match &decision.target {
+            GitRemoteTarget::Host { host, .. } if !host.is_empty() => Some(host.clone()),
+            _ => None,
+        },
         allowed: decision.is_allowed(),
         detail: decision.audit_row(),
+    }
+}
+
+/// Build the audit row for a consent grant or withdrawal.
+///
+/// Consent is itself a policy event, so it joins the same visible trail as the
+/// operations it governs: the user sees the grant and the subsequent allow as
+/// consecutive rows rather than an unexplained change of verdict.
+pub fn consent_row(host: &str, granted: bool, changed: bool) -> GitRemotePolicyProjection {
+    let action = if granted { "grant" } else { "revoke" };
+    let effect = match (granted, changed) {
+        (true, true) => "consent recorded",
+        (true, false) => "consent already recorded",
+        (false, true) => "consent withdrawn",
+        (false, false) => "no consent was recorded",
+    };
+    GitRemotePolicyProjection {
+        operation: format!("consent-{action}"),
+        remote: String::new(),
+        target: host.to_string(),
+        host: (!host.is_empty()).then(|| host.to_string()),
+        // A grant is an allow-shaped event; a revoke removes permission.
+        allowed: granted && changed,
+        detail: format!("git consent {action} host={host} result={effect}"),
     }
 }
 
@@ -133,6 +162,7 @@ mod tests {
                     operation: "push".to_string(),
                     remote: format!("remote-{index}"),
                     target: "local-path".to_string(),
+                    host: None,
                     allowed: true,
                     detail: String::new(),
                 },

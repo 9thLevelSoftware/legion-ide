@@ -50,6 +50,9 @@ pub mod diagnostics;
 
 /// Policy gate and audit trail for git push/fetch/pull.
 pub mod git_policy;
+
+/// Git remote dispatch on `AppComposition`, moved out of this file.
+mod git_remote;
 pub mod test_explorer;
 
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
@@ -11184,6 +11187,16 @@ pub enum AppCommandRequest {
         /// Remote name entered by the user.
         remote: String,
     },
+    /// Record user consent to reach a host for git remote operations.
+    GrantGitRemoteHost {
+        /// Host to consent to.
+        host: String,
+    },
+    /// Withdraw consent for a git remote host.
+    RevokeGitRemoteHost {
+        /// Host to revoke.
+        host: String,
+    },
     /// Prune orphaned worktree metadata.
     PruneGitWorktrees,
     /// Remove a projected worktree by path.
@@ -11803,6 +11816,8 @@ impl CommandExecutionService {
             | AppCommandRequest::PushGitRemote { .. }
             | AppCommandRequest::FetchGitRemote { .. }
             | AppCommandRequest::PullGitRemote { .. }
+            | AppCommandRequest::GrantGitRemoteHost { .. }
+            | AppCommandRequest::RevokeGitRemoteHost { .. }
             | AppCommandRequest::PruneGitWorktrees
             | AppCommandRequest::RemoveGitWorktree { .. }
             | AppCommandRequest::CreateGitWorktree { .. }
@@ -12163,6 +12178,12 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::PullGitRemote { remote } => {
                 Ok(AppCommandRequest::PullGitRemote { remote })
+            }
+            CommandDispatchIntent::GrantGitRemoteHost { host } => {
+                Ok(AppCommandRequest::GrantGitRemoteHost { host })
+            }
+            CommandDispatchIntent::RevokeGitRemoteHost { host } => {
+                Ok(AppCommandRequest::RevokeGitRemoteHost { host })
             }
             CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
             CommandDispatchIntent::RemoveGitWorktree { path } => {
@@ -20900,6 +20921,12 @@ impl AppComposition {
             AppCommandRequest::PullGitRemote { remote } => {
                 self.dispatch_git_remote_operation(GitRemoteOperation::Pull, &remote)
             }
+            AppCommandRequest::GrantGitRemoteHost { host } => {
+                self.dispatch_git_remote_consent(&host, true)
+            }
+            AppCommandRequest::RevokeGitRemoteHost { host } => {
+                self.dispatch_git_remote_consent(&host, false)
+            }
             AppCommandRequest::PruneGitWorktrees => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
@@ -28282,67 +28309,6 @@ impl AppComposition {
             added = added.saturating_add(1);
         }
         Ok(added)
-    }
-
-    /// Run a git operation that contacts a remote, after a policy decision.
-    ///
-    /// Push, fetch, and pull are the only git verbs that can leave the machine,
-    /// so each one is evaluated against the workspace network policy and records
-    /// its verdict in the projection before anything is executed (P2.F5.T4). A
-    /// denial is *not* an error: the projection carries the reason, so the SCM
-    /// surface can show it instead of raising an opaque failure.
-    fn dispatch_git_remote_operation(
-        &mut self,
-        operation: GitRemoteOperation,
-        remote: &str,
-    ) -> Result<AppCommandOutcome, AppCompositionError> {
-        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
-            return Err(AppCompositionError::WorkspaceNotOpen);
-        };
-        let root_path = root_path.to_string();
-
-        // Resolve the branch first: a push with no branch label cannot be
-        // described in an audit row, let alone executed.
-        let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
-            git_protocol_error(
-                "git_branch_missing",
-                format!("git branch label unavailable for {}", operation.label()),
-            )
-        })?;
-
-        let remote_url = legion_project::git_remote_configured_url(Path::new(&root_path), remote);
-        let trust = self
-            .active_documents
-            .active_workspace_trust
-            .clone()
-            .map_or(TrustState::Unknown, TrustState::from);
-        let outcome = git_policy::evaluate(
-            &self.workspace.security_policy(),
-            trust,
-            operation,
-            remote,
-            remote_url.as_deref(),
-        );
-        git_policy::record(&mut self.git_remote_policy_audit, outcome.audit);
-
-        if !outcome.allowed {
-            // Refresh so the caller sees the audit row alongside current status.
-            return Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()));
-        }
-
-        let result = match operation {
-            GitRemoteOperation::Push => {
-                push_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
-            }
-            GitRemoteOperation::Fetch => {
-                legion_project::fetch_git_remote(Path::new(&root_path), remote).map(|_| ())
-            }
-            GitRemoteOperation::Pull => {
-                legion_project::pull_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
-            }
-        };
-        result.map_err(git_inspection_protocol_error)?;
-        Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
     }
 
     /// Refresh app-owned git projection data for the active workspace.

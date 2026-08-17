@@ -20,6 +20,11 @@ use legion_ui::CommandDispatchIntent;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Host-shaped origin used to exercise the network path without a network.
+const REWRITTEN_ORIGIN: &str = "https://git.legion.test/legion/example.git";
+/// The host policy matches on for [`REWRITTEN_ORIGIN`].
+const REWRITTEN_ORIGIN_HOST: &str = "git.legion.test";
+
 /// Returns true if a working `git` binary is available on PATH. Checked once.
 fn git_available() -> bool {
     use std::sync::OnceLock;
@@ -97,6 +102,30 @@ impl RemotePair {
                 "git@github.com:legion/example.git",
             ],
         );
+    }
+
+    /// Point `origin` at a network host that git actually delivers to the local
+    /// bare repository.
+    ///
+    /// `git remote get-url` reports the configured `https://…` URL, so policy
+    /// classifies the remote as a non-loopback host and denies it by default,
+    /// while `pushInsteadOf` rewrites the transport target to the bare repo. That
+    /// makes it possible to prove a *granted* push physically lands without any
+    /// network service, which a plain path remote cannot show because a path
+    /// remote is never subject to the host checks in the first place.
+    fn use_rewritten_network_origin(&self) {
+        run_git(&self.work, &["remote", "add", "origin", REWRITTEN_ORIGIN]);
+        run_git(
+            &self.work,
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", self.bare.to_str().expect("utf8")),
+                REWRITTEN_ORIGIN,
+            ],
+        );
+        // Only `pushInsteadOf` — a plain `insteadOf` would also rewrite what
+        // `git remote get-url` reports, which is exactly the value policy reads,
+        // and the remote would classify as a local path instead of a host.
     }
 
     /// Whether the bare repository has received any commit on `master`.
@@ -321,6 +350,172 @@ fn fetch_from_a_local_remote_is_allowed_and_runs() {
         refs.contains("refs/remotes/origin/master"),
         "an allowed fetch must create the remote-tracking ref; got: {refs}"
     );
+}
+
+/// The full consent loop: denied by default, granted, push succeeds, and the
+/// audit shows both decisions.
+///
+/// This is the test that proves the default-deny has a way out. Without the
+/// grant path the first denial would be permanent, which is a missing feature
+/// wearing a policy decision's clothes rather than a policy decision.
+#[test]
+fn a_denied_push_succeeds_after_the_user_grants_consent_for_the_host() {
+    let repo = RemotePair::new();
+    repo.use_rewritten_network_origin();
+    let mut app = repo.open_app(legion_protocol::WorkspaceTrustState::Trusted);
+
+    // 1. Denied by default: the host is non-loopback and the default policy is
+    //    air-gapped with a localhost-only allowlist.
+    let denied = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        },
+    );
+    let denial = denied
+        .remote_policy_audit
+        .last()
+        .expect("the denial must be recorded");
+    assert!(!denial.allowed, "default policy should deny: {denial:?}");
+    assert_eq!(denial.host.as_deref(), Some(REWRITTEN_ORIGIN_HOST));
+    assert!(denial.detail.contains("air-gap"));
+    assert!(
+        !repo.bare_has_commits(),
+        "the denied push must not have reached the remote"
+    );
+
+    // 2. The user grants consent for exactly that host.
+    let granted = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::GrantGitRemoteHost {
+            host: REWRITTEN_ORIGIN_HOST.to_string(),
+        },
+    );
+    let consent = granted
+        .remote_policy_audit
+        .last()
+        .expect("the grant must be recorded");
+    assert_eq!(consent.operation, "consent-grant");
+    assert!(consent.allowed);
+    assert!(consent.detail.contains("consent recorded"));
+
+    // 3. The same push now succeeds and physically reaches the remote.
+    let allowed = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        },
+    );
+    let allow_row = allowed
+        .remote_policy_audit
+        .last()
+        .expect("the allow must be recorded");
+    assert_eq!(allow_row.operation, "push");
+    assert!(allow_row.allowed, "consented push should be allowed");
+    assert!(
+        repo.bare_has_commits(),
+        "the granted push must actually reach the remote"
+    );
+
+    // 4. The audit carries the whole story, in order, not just the latest verdict.
+    let trail: Vec<(&str, bool)> = allowed
+        .remote_policy_audit
+        .iter()
+        .map(|row| (row.operation.as_str(), row.allowed))
+        .collect();
+    assert_eq!(
+        trail,
+        vec![("push", false), ("consent-grant", true), ("push", true)],
+        "the audit must show the denial, the grant, and the allow"
+    );
+}
+
+/// Consent is only consent if it can be taken back.
+#[test]
+fn revoking_consent_restores_the_denial() {
+    let repo = RemotePair::new();
+    repo.use_rewritten_network_origin();
+    let mut app = repo.open_app(legion_protocol::WorkspaceTrustState::Trusted);
+
+    dispatch_git(
+        &mut app,
+        CommandDispatchIntent::GrantGitRemoteHost {
+            host: REWRITTEN_ORIGIN_HOST.to_string(),
+        },
+    );
+    dispatch_git(
+        &mut app,
+        CommandDispatchIntent::RevokeGitRemoteHost {
+            host: REWRITTEN_ORIGIN_HOST.to_string(),
+        },
+    );
+
+    let projection = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        },
+    );
+    let row = projection
+        .remote_policy_audit
+        .last()
+        .expect("push must record a row");
+    assert!(!row.allowed, "revoked consent must deny again");
+    assert!(
+        !repo.bare_has_commits(),
+        "a push denied after revocation must not reach the remote"
+    );
+}
+
+/// An untrusted workspace cannot grant itself egress.
+#[test]
+fn consent_is_refused_in_an_untrusted_workspace() {
+    let repo = RemotePair::new();
+    repo.use_rewritten_network_origin();
+    let mut app = repo.open_app(legion_protocol::WorkspaceTrustState::Untrusted);
+
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::GrantGitRemoteHost {
+            host: REWRITTEN_ORIGIN_HOST.to_string(),
+        })
+        .expect_err("an untrusted workspace must not be able to grant consent");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("untrusted"),
+        "the refusal should name workspace trust; got: {rendered}"
+    );
+}
+
+/// Consent for one host must not open a different host.
+#[test]
+fn consent_is_scoped_to_the_host_that_was_granted() {
+    let repo = RemotePair::new();
+    repo.use_network_origin();
+    let mut app = repo.open_app(legion_protocol::WorkspaceTrustState::Trusted);
+
+    dispatch_git(
+        &mut app,
+        CommandDispatchIntent::GrantGitRemoteHost {
+            host: REWRITTEN_ORIGIN_HOST.to_string(),
+        },
+    );
+
+    // origin still points at github.com, which was never granted.
+    let projection = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        },
+    );
+    let row = projection
+        .remote_policy_audit
+        .last()
+        .expect("push must record a row");
+    assert!(
+        !row.allowed,
+        "a grant for another host must not allow this one"
+    );
+    assert_eq!(row.host.as_deref(), Some("github.com"));
 }
 
 #[test]

@@ -1754,6 +1754,12 @@ pub struct GitRemotePolicyProjection {
     pub remote: String,
     /// Classified target (`ssh://github.com`, `local-path`).
     pub target: String,
+    /// Host that policy matched on, when the target was a network host.
+    ///
+    /// `None` for filesystem remotes and for consent rows. The SCM surface uses
+    /// this to offer a grant for exactly the host that was denied, so the user
+    /// never has to retype it.
+    pub host: Option<String>,
     /// Whether policy permitted the operation.
     pub allowed: bool,
     /// Display-safe audit row: metadata only, never credentials or command output.
@@ -3072,6 +3078,16 @@ pub enum CommandDispatchIntent {
     PullGitRemote {
         /// Remote name.
         remote: String,
+    },
+    /// Record user consent to reach a host for git remote operations.
+    GrantGitRemoteHost {
+        /// Host to consent to (`github.com`).
+        host: String,
+    },
+    /// Withdraw consent for a git remote host.
+    RevokeGitRemoteHost {
+        /// Host to revoke.
+        host: String,
     },
     /// Prune orphaned worktree metadata.
     PruneGitWorktrees,
@@ -5050,6 +5066,20 @@ impl Shell {
                     },
                 )));
             }
+        }
+        if let Some(host) = trimmed.strip_prefix(":git-allow-remote ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::GrantGitRemoteHost {
+                    host: host.trim().to_string(),
+                },
+            )));
+        }
+        if let Some(host) = trimmed.strip_prefix(":git-revoke-remote ") {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RevokeGitRemoteHost {
+                    host: host.trim().to_string(),
+                },
+            )));
         }
         if let Some(branch) = trimmed.strip_prefix(":git-switch-branch ") {
             return Ok(Some(self.push_intent(

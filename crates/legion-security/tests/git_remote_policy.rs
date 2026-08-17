@@ -7,8 +7,9 @@
 //! proves the check is actually running.
 
 use legion_security::{
-    CommandClass, GitRemoteOperation, GitRemoteTarget, NetworkPolicy, SecurityDecision,
-    SecurityPolicy, TrustState, classify_git_remote_url, decide_git_remote_operation,
+    CommandClass, DenyByDefaultBroker, GitRemoteOperation, GitRemoteTarget, NetworkPolicy,
+    SecurityDecision, SecurityPolicy, TrustState, classify_git_remote_url,
+    decide_git_remote_operation,
 };
 
 /// A policy that permits egress to exactly the supplied hosts.
@@ -248,6 +249,138 @@ fn reclassifying_git_push_away_from_network_denies_instead_of_bypassing() {
         "got: {}",
         decision.audit_row()
     );
+}
+
+/// Consent is what makes the default deny survivable: it must flip the verdict
+/// for the consented host under the otherwise-unchanged default policy.
+#[test]
+fn user_consent_permits_a_host_that_air_gap_would_otherwise_deny() {
+    let mut broker = DenyByDefaultBroker::default();
+    let host = "github.com";
+
+    let before = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Trusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("git@github.com:legion/example.git"),
+    );
+    assert!(!before.is_allowed(), "default policy should deny");
+
+    assert!(broker.consent_git_remote_host(host), "grant should be new");
+    assert!(
+        !broker.consent_git_remote_host(host),
+        "granting twice should report no change"
+    );
+
+    let after = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Trusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("git@github.com:legion/example.git"),
+    );
+    assert!(after.is_allowed(), "consented host should be allowed");
+    assert!(after.audit_row().contains("decision=allow"));
+
+    assert!(broker.revoke_git_remote_host(host), "revoke should apply");
+    let revoked = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Trusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("git@github.com:legion/example.git"),
+    );
+    assert!(!revoked.is_allowed(), "revoked consent should deny again");
+}
+
+/// An operator blocklist outranks a user grant — consent widens, never overrides.
+#[test]
+fn a_blocklisted_host_stays_denied_even_after_consent() {
+    let mut broker = DenyByDefaultBroker::default();
+    broker.policy.network_policy.blocklist = vec!["blocked.example.test".to_string()];
+    assert!(broker.consent_git_remote_host("blocked.example.test"));
+
+    let decision = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Trusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("https://blocked.example.test/legion/example.git"),
+    );
+
+    assert!(!decision.is_allowed());
+    assert!(
+        decision.audit_row().contains("blocked by network policy"),
+        "got: {}",
+        decision.audit_row()
+    );
+}
+
+/// Consent must not widen anything other than the git remote path.
+#[test]
+fn git_remote_consent_does_not_touch_the_general_network_allowlist() {
+    let mut broker = DenyByDefaultBroker::default();
+    let allowlist_before = broker.policy.network_policy.allowlist.clone();
+    let air_gap_before = broker.policy.network_policy.air_gap;
+
+    broker.consent_git_remote_host("github.com");
+
+    assert_eq!(
+        broker.policy.network_policy.allowlist, allowlist_before,
+        "granting a git remote must not extend the general allowlist"
+    );
+    assert_eq!(
+        broker.policy.network_policy.air_gap, air_gap_before,
+        "granting a git remote must not clear air-gap globally"
+    );
+    assert_eq!(
+        broker.policy.network_policy.consented_git_remote_hosts,
+        vec!["github.com".to_string()]
+    );
+}
+
+/// Consent is stored normalized so case and padding cannot smuggle a duplicate
+/// or miss a match.
+#[test]
+fn consent_matching_is_case_insensitive_and_trimmed() {
+    let mut broker = DenyByDefaultBroker::default();
+    assert!(broker.consent_git_remote_host("  GitHub.COM  "));
+    assert!(
+        !broker.consent_git_remote_host("github.com"),
+        "the same host in another spelling is not a second grant"
+    );
+    assert!(
+        !broker.consent_git_remote_host("   "),
+        "blank is not a host"
+    );
+
+    let decision = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Trusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("git@GITHUB.com:legion/example.git"),
+    );
+    assert!(decision.is_allowed());
+}
+
+/// Consent does not bypass the checks that run before it.
+#[test]
+fn consent_does_not_override_workspace_trust() {
+    let mut broker = DenyByDefaultBroker::default();
+    broker.consent_git_remote_host("github.com");
+
+    let decision = decide_git_remote_operation(
+        &broker.policy,
+        TrustState::Untrusted,
+        GitRemoteOperation::Push,
+        "origin",
+        Some("git@github.com:legion/example.git"),
+    );
+
+    assert!(!decision.is_allowed());
+    assert!(decision.audit_row().contains("trusted workspace"));
 }
 
 #[test]
