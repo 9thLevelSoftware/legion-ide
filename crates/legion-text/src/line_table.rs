@@ -239,7 +239,11 @@ impl PartialEq for LineTable {
         if Arc::ptr_eq(&self.base, &other.base) && self.overlay == other.overlay {
             return true;
         }
-        self.materialize() == other.materialize()
+        // Resolved line by line rather than through `materialize`, which would allocate
+        // two copies of the whole table — tens of megabytes for a large buffer — just to
+        // answer a comparison. A `LineMetric` is plain `usize` fields, so this allocates
+        // nothing.
+        (0..self.len()).all(|line| self.metric(line) == other.metric(line))
     }
 }
 
@@ -377,8 +381,8 @@ mod tests {
         apply_directly(&mut direct, 1, 2, 2);
 
         assert_eq!(deferred.materialize(), direct);
-        for line in 0..direct.len() {
-            assert_eq!(deferred.metric(line), Some(direct[line].clone()));
+        for (line, expected) in direct.iter().enumerate() {
+            assert_eq!(deferred.metric(line), Some(expected.clone()));
         }
     }
 
@@ -400,8 +404,8 @@ mod tests {
         }
 
         assert_eq!(deferred.materialize(), direct);
-        for line in 0..direct.len() {
-            assert_eq!(deferred.metric(line), Some(direct[line].clone()));
+        for (line, expected) in direct.iter().enumerate() {
+            assert_eq!(deferred.metric(line), Some(expected.clone()));
         }
     }
 

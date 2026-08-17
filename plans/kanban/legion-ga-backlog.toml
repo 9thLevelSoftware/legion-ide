@@ -553,8 +553,16 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # p50 by 45% (23.2ms against 16ms). Open and scroll are within budget;
     # typing is not. See
     # plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md.
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    # 2026-08-16: closed. The per-keystroke clone of the whole line-metrics
+    # vector is gone (crates/legion-text/src/line_table.rs shares an immutable
+    # base and defers the offset shift), and m9.large_file_100mb now reports
+    # edit p50 0.3ms / p95 0.5ms against the 16ms / 32ms budgets, status=passed.
+    # Scope of the claim: the harness measures the text model and the viewport
+    # projection, not the renderer. Renderer-backed large-file UX evidence is
+    # still outstanding for PR-UI-002 promotion and is not claimed here. See
+    # plans/evidence/production/WS-MANUAL-02/large-file-typing-fix.md.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-02/large-file-typing-fix.md"
 
     [[epics.features.tasks]]
     id = "P1.F4.T3"
