@@ -3842,6 +3842,7 @@ dependencies = [
  "legion-debug",
  "legion-platform",
  "legion-protocol",
+ "legion-security",
  "legion-tracker",
  "regex",
  "serde_json",

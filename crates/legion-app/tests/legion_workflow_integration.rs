@@ -2502,7 +2502,7 @@ fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_pro
 }
 
 #[test]
-fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
+fn legion_workflow_shared_kill_switch_cancels_inflight_worker() {
     let mut app = automate_app();
     let root = temp_workspace("kill-switch-mid-run");
     app.open_workspace(

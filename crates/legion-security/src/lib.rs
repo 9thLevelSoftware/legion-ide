@@ -21,6 +21,51 @@ use legion_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Credential-shaped strings for tests, generated rather than written down.
+///
+/// Behind the `test-helpers` feature because `#[cfg(test)]` items are not
+/// visible across crate boundaries, and four crates need these: without a
+/// shared home the generator gets copy-pasted, which is what happened —
+/// `legion-agent`, `legion-ai`, `legion-retention` and `legion-terminal` each
+/// grew their own with a different seed constant, so a reviewer reading all
+/// four had to work out which was authoritative. None of them was.
+///
+/// The generated-not-literal property is the point. A test that needs a
+/// credential-shaped string must not contain one: GitGuardian scans every
+/// push, and a literal that matches a live provider pattern is a finding
+/// whatever the surrounding comment says.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod synthetic_credentials {
+    /// One step of a linear congruential generator.
+    ///
+    /// Deterministic on purpose: a fixture that differs between runs turns a
+    /// detector regression into a flake.
+    fn next_state(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    /// An uppercase-alphanumeric body — the AWS access-key-id charset.
+    pub fn upper_alnum_body(len: usize, seed: u64) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| ALPHABET[next_state(&mut state) as usize % ALPHABET.len()] as char)
+            .collect()
+    }
+
+    /// An AWS-access-key-id-shaped value, without committing one.
+    ///
+    /// The seed is fixed so the same string comes back every run; callers that
+    /// need two distinguishable values should use [`upper_alnum_body`] with
+    /// seeds of their own rather than reaching for a literal.
+    pub fn synthetic_access_key_id() -> String {
+        format!("AKIA{}", upper_alnum_body(16, 0x5eed_1234_9abc_def1))
+    }
+}
+
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{

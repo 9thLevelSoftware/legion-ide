@@ -19,6 +19,9 @@ globset = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Test-only, for the shared synthetic-credential generator; see
+# plans/dependency-policy.md. No production edge.
+legion-security = { workspace = true, features = ["test-helpers"] }
 tempfile = { workspace = true }
 legion-ai-providers = { workspace = true }
 serde_json = { workspace = true }

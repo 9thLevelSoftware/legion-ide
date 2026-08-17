@@ -2252,23 +2252,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// Builds an AWS access key id shaped credential without committing one.
-    ///
-    /// The value is generated from a fixed seed rather than written as a literal
-    /// so that no string in this repository has the shape of a live credential.
-    fn synthetic_access_key_id() -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let mut state: u64 = 0x5eed_1234_9abc_def1;
-        let body: String = (0..16)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                ALPHABET[((state >> 33) as usize) % ALPHABET.len()] as char
-            })
-            .collect();
-        format!("AKIA{body}")
-    }
+    /// Re-exported rather than re-implemented: four crates grew their own
+    /// copy of this generator, each with a different seed, so none was
+    /// authoritative. See `legion_security::synthetic_credentials`.
+    use legion_security::synthetic_credentials::synthetic_access_key_id;
 
     #[test]
     fn file_backed_vault_refuses_to_retain_detected_credentials() {

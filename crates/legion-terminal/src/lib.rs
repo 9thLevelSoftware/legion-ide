@@ -2271,20 +2271,10 @@ mod tests {
         assert_eq!(clean, "hello world output");
     }
 
-    /// Builds an AWS access key id shaped credential without committing one.
-    fn synthetic_access_key_id() -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let mut state: u64 = 0x1357_9bdf_2468_ace0;
-        let body: String = (0..16)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                ALPHABET[((state >> 33) as usize) % ALPHABET.len()] as char
-            })
-            .collect();
-        format!("AKIA{body}")
-    }
+    /// Re-exported rather than re-implemented: four crates grew their own
+    /// copy of this generator, each with a different seed, so none was
+    /// authoritative. See `legion_security::synthetic_credentials`.
+    use legion_security::synthetic_credentials::synthetic_access_key_id;
 
     #[test]
     fn terminal_projection_redacts_credentials_the_marker_pass_cannot_see() {

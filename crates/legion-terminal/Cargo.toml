@@ -18,4 +18,6 @@ default = []
 windows = ["legion-platform/windows"]
 
 [dev-dependencies]
+# Activates the shared synthetic-credential generator for tests.
+legion-security = { workspace = true, features = ["test-helpers"] }
 serde_json = { workspace = true }
