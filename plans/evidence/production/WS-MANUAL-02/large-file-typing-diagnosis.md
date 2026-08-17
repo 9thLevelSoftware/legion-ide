@@ -87,13 +87,23 @@ structure and the smaller code.
 
 **It carries one hazard that would not announce itself.** ropey 1.6 enables
 `unicode_lines` by default, so it breaks lines on lone `\r`, `\v`, `\f`, U+0085,
-U+2028 and U+2029. `scan_line_metrics_from_byte` breaks only on `\n` and treats
-`\r\n` as a single ending. Any file containing one of those characters would
-silently renumber, putting every diagnostic, breakpoint, LSP position and
-proposal range on the wrong line — with no test failing unless a fixture happens
-to contain one. Taking this route means building ropey without default features
-(or with `cr_lines` only) and proving the line-break rule with a fixture
-containing each of those characters.
+U+2028 and U+2029. Legion's scanner breaks on `\n` and on a lone `\r`, treating
+`\r\n` as a single ending — so it agrees with ropey about `\r` and disagrees
+about the other four. Any file containing one of those four would silently
+renumber, putting every diagnostic, breakpoint, LSP position and proposal range
+on the wrong line, with no test failing unless a fixture happens to contain one.
+Taking this route means building ropey with `cr_lines` and *not* `unicode_lines`
+— neither the defaults nor `default-features = false` is correct — and proving
+the rule with a fixture containing every one of those characters.
+
+> **Correction, 2026-08-17.** This paragraph originally said the scanner "breaks
+> only on `\n`". That was wrong: `scan_line_metrics_from_byte` also ends a line
+> on a lone `\r`. The error mattered, because it made `default-features = false`
+> look like the safe configuration when it would have silently merged
+> classic-Mac line endings. Caught by the engineer who implemented the fix, and
+> it is part of why they rejected the rope design: a correctness argument
+> resting on a feature flag matched against a written line rule that was itself
+> incorrect is not an argument worth betting a core data structure on.
 
 ## Not claimed
 
