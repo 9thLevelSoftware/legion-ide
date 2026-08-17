@@ -876,6 +876,31 @@ impl LineIndex {
         ))
     }
 
+    /// Convert an absolute byte offset to an absolute UTF-16 code-unit offset.
+    ///
+    /// Counted from the start of the buffer, so line endings before `offset` are
+    /// included. Callers that need this previously summed [`Self::line_utf16_len`] and
+    /// [`Self::line_ending_bytes`] over every preceding line, which is O(lines) and made
+    /// a viewport projection cost more the further down the file it was taken. The rope
+    /// answers the same question in O(log n).
+    ///
+    /// Line endings are `\n`, `\r\n` and a lone `\r`, all ASCII, so each one's byte
+    /// length equals its UTF-16 length — which is why the two formulations agree. Note
+    /// this uses the rope only to count code units, never to decide where a line ends,
+    /// so ropey's `unicode_lines` line-breaking rule is not involved.
+    ///
+    /// An offset inside a CRLF pair clamps to the end of the line's content, matching
+    /// [`Self::utf16_position`].
+    pub fn utf16_offset(&self, offset: usize) -> TextResult<usize> {
+        self.ensure_valid_offset(offset)?;
+        self.ensure_char_boundary(offset)?;
+        let line_index = self.line_for_offset(offset)?;
+        let line = self.line(line_index)?;
+        let clamped = offset.min(line.content_end_byte);
+        let rope = self.inner.rope.as_ref();
+        Ok(rope.char_to_utf16_cu(rope.byte_to_char(clamped)))
+    }
+
     /// Convert an LSP UTF-16 position to an absolute byte offset.
     pub fn byte_offset_from_utf16(&self, pos: Utf16Position) -> TextResult<usize> {
         let line = self.line(pos.line)?;

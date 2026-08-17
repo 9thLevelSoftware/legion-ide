@@ -67,6 +67,17 @@ subprocess directly, three samples per revision, removes that:
 | edit p50 | 22.56, 22.61, 22.49 ms | 0.246, 0.242, 0.261, 0.275, 0.271 ms | p50 < 16 ms |
 | edit p95 | 23.32, 24.24, 23.75 ms | 0.281, 0.337, 0.309 ms | p95 < 32 ms |
 
+> **Resolved 2026-08-17 — see `viewport-depth-regression.md`.** The regression was
+> real and reproducible, and the cause was not in this change's data structure.
+> `EditorEngine::viewport_projection` summed per-line metrics from the start of the
+> buffer to compute its visible range's UTF-16 offset — an O(scroll depth) loop,
+> run twice per projection, making two million line lookups at `top_line` 500,000.
+> This change made each lookup ~1.4 ns dearer (`LineIndex::line` returns by value
+> rather than by reference), which is 2.8 ms across two million of them. The loop
+> has been replaced with an O(log n) rope conversion; the viewport measurement is
+> now 0.05 ms. The heap-layout hypothesis below is **disproved** — the cost is
+> linear in scroll depth, which heap layout would not be.
+
 Open is unchanged. Typing is about 90× faster. **The viewport measurement is
 consistently about 2.7 ms slower, and that is a real regression I have not been
 able to explain.** It reproduces across five post-change runs taken both before
