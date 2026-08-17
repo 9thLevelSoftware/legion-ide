@@ -194,17 +194,17 @@ use legion_protocol::{
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
     Utf16Position, Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection,
-    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay, WorkbenchSettingsRecord, WorkbenchTelemetryConsent,
-    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
-    WorkspaceTextEdit, WorkspaceTrustState, delegated_task_tool_permission_request,
-    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
-    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
-    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
-    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
-    validate_terminal_input, validate_terminal_kill_request, validate_terminal_resize,
+    ViewportScroll, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    WorkbenchSettingsRecord, WorkbenchTelemetryConsent, WorkspaceCloseRequest,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
+    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
+    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
+    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
+    validate_mcp_registry_snapshot, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -11913,7 +11913,7 @@ fn add_semantic_token_overlays(
     full_text: Option<&str>,
     viewport: &mut ViewportProjection,
 ) {
-    if viewport.mode == ViewportProjectionMode::DegradedLargeFile
+    if viewport.mode.defers_whole_file_work()
         || viewport.large_file_status.is_some()
         || viewport.line_slices.is_empty()
     {

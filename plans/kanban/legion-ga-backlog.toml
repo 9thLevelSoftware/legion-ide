@@ -556,13 +556,13 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     title = "Update ActiveBufferProjection to distinguish full, degraded, and streaming states"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-protocol/src/projection.rs", "crates/legion-ui/src/projection.rs", "crates/legion-editor/src/buffer_view.rs"]
+    files = ["crates/legion-protocol/src/lib.rs", "crates/legion-editor/src/lib.rs", "crates/legion-editor/tests/streaming_projection.rs"]
     dependencies = ["P1.F4.T2"]
     verification = ["cargo test -p legion-protocol", "cargo test -p legion-editor"]
     acceptance = ["Projection explicitly enumerates the three states and consumers branch on it."]
     stop_condition = "Do not add a fourth implicit state without updating tests."
-    status = "todo"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    status = "done"
+    evidence = "crates/legion-editor/tests/streaming_projection.rs"
 
     [[epics.features.tasks]]
     id = "P1.F4.T4"

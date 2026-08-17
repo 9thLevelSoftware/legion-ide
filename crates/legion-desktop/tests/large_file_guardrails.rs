@@ -89,7 +89,7 @@ fn large_file_guardrails_degraded_rendering_uses_viewport() {
         .viewport
         .as_ref()
         .expect("degraded viewport projection");
-    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
+    assert_eq!(viewport.mode, ViewportProjectionMode::StreamingLargeFile);
     assert!(viewport.large_file_status.is_some());
     assert!(!viewport.line_slices.is_empty());
 

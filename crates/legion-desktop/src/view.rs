@@ -1100,7 +1100,7 @@ impl DesktopProjectionViewModel {
             || active
                 .viewport
                 .as_ref()
-                .is_some_and(|viewport| viewport.mode == ViewportProjectionMode::DegradedLargeFile)
+                .is_some_and(|viewport| viewport.mode.defers_whole_file_work())
         {
             flags.push("degraded".to_string());
         }
@@ -9013,7 +9013,13 @@ fn editor_status_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .map(|path| path.0.as_str())
         .unwrap_or("<untitled>");
     let dirty = if active.dirty { "dirty" } else { "clean" };
-    let mode = if active.degraded {
+    let mode = if active
+        .viewport
+        .as_ref()
+        .is_some_and(|viewport| viewport.mode == ViewportProjectionMode::StreamingLargeFile)
+    {
+        "StreamingLargeFile"
+    } else if active.degraded {
         "DegradedLargeFile"
     } else if active.viewport.is_some() {
         "viewport"
