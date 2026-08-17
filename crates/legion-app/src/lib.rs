@@ -76,6 +76,12 @@ mod debug_workflow;
 use debug_workflow::{DebugBreakpointToggleInput, DebugWorkflow};
 /// Re-exported so the pre-build helpers keep their `legion_app::…` paths after
 /// the debug workflow moved out of `lib.rs`.
+///
+/// Gated to match the definitions: both are test-only, and re-exporting them
+/// unconditionally broke `--no-default-features`, which nothing built until the
+/// perf harness silently downgraded its only budgeted workload to `skipped`
+/// over it.
+#[cfg(any(test, feature = "test-helpers"))]
 pub use debug_workflow::{live_dap_should_prebuild, run_live_dap_prebuild};
 
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.

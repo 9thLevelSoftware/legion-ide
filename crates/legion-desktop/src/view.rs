@@ -6991,6 +6991,12 @@ fn render_activity_stream(
                     ""
                 }
             )));
+            // The renderer lives behind the `ai` feature; the label above does
+            // not. Without this gate the call fails to resolve in an
+            // AI-less build — which is how `--no-default-features` broke, and
+            // how the perf harness came to report a green `--strict` run with
+            // its only budgeted workload silently downgraded to `skipped`.
+            #[cfg(feature = "ai")]
             if !model.product_ai_stream_chunks.is_empty() {
                 // Join SSE deltas into one markdown document for the rail.
                 let body = model.product_ai_stream_chunks.join("");
