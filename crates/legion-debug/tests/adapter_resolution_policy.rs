@@ -44,8 +44,18 @@ fn explicit_adapter_path_is_refused_unless_the_binary_is_allowlisted() {
     unsafe { std::env::set_var("LEGION_DAP_ADAPTER", &this_exe) };
 
     let denied = grant_allowing(&["lldb-dap", "codelldb"]);
+    // The claim is that the *refused path* does not launch — not that nothing
+    // resolves. Resolution falls through to a PATH search after rejecting
+    // `LEGION_DAP_ADAPTER`, and a machine with a real lldb-dap installed will
+    // legitimately find one there. Asserting `is_none()` quietly required "no
+    // debug adapter is installed", which is an environment assumption rather
+    // than a policy claim, and it failed on the CI Windows image that ships
+    // LLVM.
+    let resolved = resolve_system_adapter(&denied, "lldb-dap");
     assert!(
-        resolve_system_adapter(&denied, "lldb-dap").is_none(),
+        resolved
+            .as_ref()
+            .is_none_or(|found| found.program != this_exe),
         "LEGION_DAP_ADAPTER must not launch {} — it is not an allowlisted adapter",
         this_exe.display()
     );
