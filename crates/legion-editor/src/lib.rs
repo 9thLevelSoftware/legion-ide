@@ -2018,7 +2018,7 @@ impl EditorEngine {
             .cursors
             .first()
             .map(|cursor| cursor.position)
-            .unwrap_or_else(TextPosition::zero))
+            .expect("BufferState is constructed with one cursor and never empties them"))
     }
 
     /// Whether a buffer's text was streamed from disk.

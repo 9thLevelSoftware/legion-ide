@@ -4512,6 +4512,20 @@ fn projected_scroll(snapshot: &ShellProjectionSnapshot) -> ViewportScroll {
 /// Escape, as the Vim parser expects it.
 const ESCAPE_KEY: char = '\u{1b}';
 
+/// The character a Ctrl-modified key should reach the Vim parser as.
+///
+/// Only letters, and only because that is the whole of what the parser reads
+/// under Ctrl today. Mapping every key would hand the parser combinations it
+/// answers `Unknown` to, which is the same as dropping them but costs a
+/// dispatch — and would swallow Ctrl shortcuts the surrounding editor owns.
+fn vim_ctrl_key_char(key: egui::Key) -> Option<char> {
+    key.name()
+        .chars()
+        .next()
+        .filter(|c| c.is_ascii_alphabetic() && key.name().len() == 1)
+        .map(|c| c.to_ascii_lowercase())
+}
+
 fn editor_text_input_actions(
     ui: &egui::Ui,
     events: &[egui::Event],
@@ -4543,6 +4557,18 @@ fn editor_text_input_actions(
                     key: ESCAPE_KEY,
                     ctrl: false,
                 }),
+                // A Ctrl-modified key produces no `Text` event, so without this
+                // arm it never reaches the parser at all. That silently costs
+                // Ctrl+R — redo — which is the one command a person reaches for
+                // precisely when something has already gone wrong.
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl || modifiers.command => {
+                    vim_ctrl_key_char(*key).map(|key| DesktopAction::VimKey { key, ctrl: true })
+                }
                 _ => None,
             })
             .collect();
@@ -5634,6 +5660,73 @@ mod tests {
                     "nothing may reach the buffer as text"
                 );
             }
+        });
+    }
+
+    /// Ctrl+R has no text event either, and without a route it silently does
+    /// nothing — costing redo, the command a person reaches for precisely when
+    /// something has already gone wrong.
+    #[test]
+    fn ctrl_r_reaches_the_vim_parser_as_a_ctrl_key() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            let events = vec![egui::Event::Key {
+                key: egui::Key::R,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }];
+            let actions =
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, true);
+            assert_eq!(
+                actions.len(),
+                1,
+                "Ctrl+R must produce exactly one action: {actions:?}"
+            );
+            assert!(
+                matches!(
+                    actions[0],
+                    DesktopAction::VimKey {
+                        key: 'r',
+                        ctrl: true
+                    }
+                ),
+                "the parser reads `ctrl` to tell redo from replace-char, so a                  Ctrl+R arriving as a plain `r` replaces a character instead of                  undoing an undo: {:?}",
+                actions[0]
+            );
+        });
+    }
+
+    /// A Ctrl combination the Vim parser does not read must not be swallowed.
+    ///
+    /// Forwarding every Ctrl key would take Ctrl+S and Ctrl+P away from the
+    /// editor around it and hand the parser an `Unknown` in exchange.
+    #[test]
+    fn an_unread_ctrl_combination_is_left_for_the_editor() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            let events = vec![egui::Event::Key {
+                key: egui::Key::F5,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }];
+            let actions =
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, true);
+            assert!(
+                actions.is_empty(),
+                "a non-letter Ctrl key belongs to the surrounding editor: {actions:?}"
+            );
         });
     }
 
