@@ -418,7 +418,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-desktop", "cargo run -p xtask -- no-egui-textedit"]
     acceptance = ["Every layout region has a projection and an integration test."]
     stop_condition = "Do not introduce egui::TextEdit in the code canvas."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/gui-productization/phase-3-daily-editing-mvp.md"
 
     [[epics.features.tasks]]

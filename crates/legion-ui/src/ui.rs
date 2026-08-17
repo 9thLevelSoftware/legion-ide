@@ -782,7 +782,13 @@ impl DockLayout {
                     0.52,
                     false,
                 ),
-                bottom: DockSideLayout::new(Terminal, vec![AgentLogs, Diagnostics], 0.34, false),
+                // AgentLogs is deliberately absent: it declares the Automation
+                // runtime surface, which Delegate does not grant, so placing it
+                // here only produced a placement the registry always filtered
+                // out. Dropping the placement is the fail-closed half of the
+                // fix — granting Delegate the Automation surface instead would
+                // widen a mode boundary and is not a layout decision.
+                bottom: DockSideLayout::new(Terminal, vec![Diagnostics], 0.34, false),
             },
             DockMode::Automate => Self {
                 mode,
