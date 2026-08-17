@@ -658,7 +658,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-desktop"]
     acceptance = ["Each LSP feature is reachable from the editor and is covered by a test."]
     stop_condition = "Do not implement features that are not requested by the LSP server's capability set."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]

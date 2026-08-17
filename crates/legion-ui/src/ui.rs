@@ -3238,6 +3238,19 @@ pub enum CommandDispatchIntent {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Refresh inlay hints for the active document through app-owned language tooling.
+    RefreshInlayHints {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Refresh code lenses for the active document through app-owned language tooling.
+    ///
+    /// This is also how runnables arrive: rust-analyzer publishes Run and Debug
+    /// as code lenses, and `ActivateLanguageCodeLens` executes the one you pick.
+    RefreshCodeLenses {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Request a formatting proposal preview through app authority.
     RequestFormattingProposal {
         /// Target buffer identifier.
@@ -4949,6 +4962,18 @@ impl Shell {
             return Ok(Some(
                 self.push_intent(CommandDispatchIntent::RefreshOutline { buffer_id }),
             ));
+        }
+        if trimmed == ":inlayhints" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RefreshInlayHints { buffer_id },
+            )));
+        }
+        if trimmed == ":codelens" {
+            let buffer_id = self.active_buffer_id()?;
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::RefreshCodeLenses { buffer_id },
+            )));
         }
         if trimmed == ":format" {
             let buffer_id = self.active_buffer_id()?;

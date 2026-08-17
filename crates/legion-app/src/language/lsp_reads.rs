@@ -84,6 +84,38 @@ impl AppComposition {
                     None,
                 );
             }
+            LspReadKind::References => {
+                let _ = self.ingest_lsp_references_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+            LspReadKind::Outline => {
+                let _ = self.ingest_lsp_document_symbol_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+            LspReadKind::InlayHints => {
+                let source = self.lsp_read_source_label();
+                let _ = self.ingest_lsp_inlay_hint_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    &source,
+                    None,
+                );
+            }
+            LspReadKind::CodeLens => {
+                let source = self.lsp_read_source_label();
+                let _ = self.ingest_lsp_code_lens_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    &source,
+                    None,
+                );
+            }
             LspReadKind::Rename { new_name } => {
                 self.ingest_lsp_rename_result(tag.buffer_id, new_name, &lsp_outcome.result);
             }
@@ -495,6 +527,232 @@ impl AppComposition {
         };
         self.lsp_session
             .issue_request("textDocument/definition", params, tag)
+    }
+
+    /// Names the server a hint or lens came from, for display beside it.
+    ///
+    /// Inlay hints and code lenses are the two read results that get attributed
+    /// in the UI — a hint sitting inside your code should say who put it there.
+    /// Falls back to `"lsp"` before `initialize` has answered, rather than
+    /// inventing a server name.
+    pub(crate) fn lsp_read_source_label(&self) -> String {
+        self.lsp_session
+            .health_record()
+            .map(|record| record.language_id.0)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "lsp".to_string())
+    }
+
+    /// Shared preamble for the position-free read requests.
+    ///
+    /// Returns the document URI and the snapshot the request is being issued
+    /// against, or `None` if the buffer has no metadata or no readable
+    /// snapshot. Every read request needs both and none of them can proceed
+    /// without them, so the four callers below say it once.
+    fn lsp_read_target(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<(String, legion_protocol::SnapshotId)> {
+        let meta = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()?;
+        let snapshot = self.editor.current_snapshot(buffer_id).ok()?;
+        Some((
+            canonical_path_to_uri(&meta.identity.canonical_path.0),
+            snapshot.snapshot_id,
+        ))
+    }
+
+    /// The UTF-16 range covering the whole of a buffer.
+    ///
+    /// Inlay hints are requested per-range, and the editor does not yet plumb
+    /// its visible line range down to this layer. Asking for the whole document
+    /// is correct but not cheap on a large file; narrowing it to the viewport
+    /// is a refinement this signature already allows, and the reason
+    /// `issue_lsp_inlay_hint_request` takes a range rather than computing one.
+    pub(crate) fn whole_document_utf16_range(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<legion_protocol::Utf16Range> {
+        let snapshot = self.editor.current_snapshot(buffer_id).ok()?;
+        Some(legion_protocol::Utf16Range {
+            start: legion_protocol::Utf16Position {
+                line: 0,
+                character: 0,
+            },
+            // One line past the last, at character zero. The snapshot
+            // descriptor carries `line_count` but not the text, and reading the
+            // whole document back just to find the final column would be an
+            // absurd cost for a range every server clamps anyway. LSP positions
+            // past the end of a document are defined to clamp to it.
+            end: legion_protocol::Utf16Position {
+                line: u32::try_from(snapshot.line_count).unwrap_or(u32::MAX),
+                character: 0,
+            },
+        })
+    }
+
+    /// Test-only: the snapshot id a request issued now would carry.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn current_snapshot_id_for_test(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<legion_protocol::SnapshotId> {
+        self.editor
+            .current_snapshot(buffer_id)
+            .ok()
+            .map(|snapshot| snapshot.snapshot_id)
+    }
+
+    /// Test-only: put the session Live and hand back the worker's result
+    /// channel, so a test can inject a read result and watch `drain_lsp_session`
+    /// route it.
+    ///
+    /// This is the only way to exercise the drain-side routing without a real
+    /// language server: the routing decides which of seven ingest methods a
+    /// result reaches, and getting it wrong silently drops a feature rather
+    /// than failing anything.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_lsp_result_sender_for_test(
+        &mut self,
+        health: legion_protocol::LspServerHealthRecord,
+    ) -> std::sync::mpsc::SyncSender<crate::language::LspWorkerResult> {
+        self.lsp_session
+            .set_live_with_result_sender_for_test(health)
+    }
+
+    /// Test-only: the label that would be attached to hints and lenses now.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn lsp_read_source_label_for_test(&self) -> String {
+        self.lsp_read_source_label()
+    }
+
+    /// Test-only: the range an inlay-hint refresh would ask for.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn whole_document_utf16_range_for_test(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<legion_protocol::Utf16Range> {
+        self.whole_document_utf16_range(buffer_id)
+    }
+
+    /// Issues a non-blocking LSP references request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `referencesProvider` in the initialize response (silent skip).
+    ///
+    /// `include_declaration` follows the LSP parameter of the same name: the
+    /// declaration site itself is usually wanted in a "find all references"
+    /// result and usually not wanted when the caller is about to rename.
+    pub fn issue_lsp_references_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        include_declaration: bool,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("referencesProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": position.line, "character": position.character },
+            "context": { "includeDeclaration": include_declaration }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::References,
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/references", params, tag)
+    }
+
+    /// Issues a non-blocking LSP document-symbol request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `documentSymbolProvider` in the initialize response.
+    pub fn issue_lsp_document_symbol_request(&mut self, buffer_id: BufferId) -> bool {
+        if !self.lsp_server_supports_capability("documentSymbolProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let params = serde_json::json!({ "textDocument": { "uri": uri } });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Outline,
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/documentSymbol", params, tag)
+    }
+
+    /// Issues a non-blocking LSP inlay-hint request for a range.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `inlayHintProvider` in the initialize response.
+    ///
+    /// The range is the caller's, and should be the visible viewport rather
+    /// than the whole document: inlay hints are computed per-range by the
+    /// server precisely so that a large file does not have to pay for hints
+    /// nobody can see.
+    pub fn issue_lsp_inlay_hint_request(
+        &mut self,
+        buffer_id: BufferId,
+        range: legion_protocol::Utf16Range,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("inlayHintProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": range.start.line, "character": range.start.character },
+                "end": { "line": range.end.line, "character": range.end.character }
+            }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::InlayHints,
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/inlayHint", params, tag)
+    }
+
+    /// Issues a non-blocking LSP code-lens request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `codeLensProvider` in the initialize response.
+    ///
+    /// This is also how runnables reach the editor. rust-analyzer publishes
+    /// "Run"/"Debug" as code lenses carrying a `rust-analyzer.runSingle`
+    /// command, which is a capability it actually advertises — unlike its
+    /// `experimental/runnables` request, which is not in the standard
+    /// capability set and so is out of scope by this task's stop condition.
+    pub fn issue_lsp_code_lens_request(&mut self, buffer_id: BufferId) -> bool {
+        if !self.lsp_server_supports_capability("codeLensProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let params = serde_json::json!({ "textDocument": { "uri": uri } });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::CodeLens,
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/codeLens", params, tag)
     }
 
     /// Issues a non-blocking LSP rename request on the worker thread

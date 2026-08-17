@@ -332,3 +332,116 @@ stray mark under the first character of the line after an error.
 fixed `char_width`, which is correct for the monospace fonts the editor ships
 and wrong for proportional ones. That is the existing painter's assumption, not
 a new one, and it is unchanged here.
+
+---
+
+## P2.F1.T4 closure — 2026-08-16
+
+The task named eight features: completion, hover, definition, references,
+symbols, inlay hints, code lenses, runnables. Acceptance: "each LSP feature is
+reachable from the editor and is covered by a test." Stop condition: "do not
+implement features that are not requested by the LSP server's capability set."
+
+### What was and was not already true
+
+Three of the eight — completion, hover, definition — reached the live language
+server, via `issue_lsp_*_request`, gated on the capability the server advertised
+at `initialize`. That is the pattern this task extends.
+
+References and outline were reachable from the editor (`:references`,
+`:outline`, and `DesktopAction::RefreshOutline`) but were answered entirely by
+Legion's own `LexicalIndexer` — the language server was never asked. Inlay hints
+and code lenses had a protocol DTO, a projector in `legion-lsp`, an ingest
+method in `legion-app`, and no way whatsoever to ask for them: nothing in the
+shell, the intent enum, or the desktop bridge could reach them.
+
+### The extraction commit came first
+
+`3146bef` moved 556 lines — `drain_lsp_session` through
+`issue_lsp_rename_request_inner` — from `lib.rs` into
+`crates/legion-app/src/language/lsp_reads.rs`, unchanged except for widening one
+method to `pub(crate)`, which a child module calling into the crate root
+requires. Cross-cutting rule 1. The feature diff below is readable because of it.
+
+### What changed
+
+- Four `LspReadKind` variants (`References`, `Outline`, `InlayHints`,
+  `CodeLens`) and four `issue_lsp_*_request` methods, each gated on its own
+  advertised capability — `referencesProvider`, `documentSymbolProvider`,
+  `inlayHintProvider`, `codeLensProvider`.
+- Drain-side routing for all four to the ingest methods that already existed.
+- `:references` and `:outline` now ask the server as well as the index. The
+  index answer still returns synchronously so the panel is never empty while the
+  server thinks; the server's answer merges in on the next drain. This is
+  exactly how completion, hover and definition already behaved.
+- Two new intents, `RefreshInlayHints` and `RefreshCodeLenses`, reachable as
+  `:inlayhints` and `:codelens` and as `DesktopAction`s.
+- **Runnables had a real defect, not just a gap.** rust-analyzer publishes Run
+  and Debug as code lenses whose `command` is `rust-analyzer.runSingle` — a
+  handle into rust-analyzer's private protocol. `ActivateLanguageCodeLens` hands
+  `command_label` straight to the terminal, and `items_from_runnable_code_lenses`
+  hands it to the test explorer. Either would have launched the literal string
+  `rust-analyzer.runSingle` in a shell. `runnable_command_line` now assembles the
+  real invocation from the lens's `cargoArgs`/`executableArgs` — built from those
+  arrays element by element, each bounded, never from a free-form string — and
+  marks the lens `lsp.codelens.runnable`, which is the marker activation gates
+  on. A runnable command with no `cargoArgs` falls through to the ordinary path
+  rather than becoming launchable.
+
+### Tests
+
+```
+cargo test -p legion-app --test app_lsp_composition        # 22 passed
+  t4_new_reads_skip_when_the_server_does_not_advertise_them
+  t4_new_reads_fire_only_for_their_own_advertised_capability
+  t4_inlay_hint_range_runs_one_line_past_the_last
+  t4_read_source_label_does_not_invent_a_server_name
+
+cargo test -p legion-app --test lsp_read_drain_routing     # 6 passed
+  a_references_result_lands_in_the_projection_as_locations
+  a_document_symbol_result_lands_in_the_projection_as_an_outline
+  an_inlay_hint_result_lands_in_the_projection_attributed_to_the_server
+  a_code_lens_result_lands_in_the_projection_and_carries_its_command
+  a_result_does_not_leak_into_a_feature_it_was_not_tagged_for
+  the_new_refresh_intents_dispatch_and_are_recorded_as_their_own_operations
+
+cargo test -p legion-ui --test lsp_read_commands           # 4 passed
+cargo test -p legion-lsp --test code_lens_runnables        # 5 passed
+```
+
+Two of those are worth naming. `a_result_does_not_leak_into_a_feature_it_was_not_tagged_for`
+feeds an outline-shaped payload under the references tag and asserts the outline
+stays empty — without it, four tests each asserting only their own field would
+still pass if the routing collapsed every kind into one ingest, which is the
+failure mode that silently kills a feature.
+`t4_new_reads_fire_only_for_their_own_advertised_capability` advertises three of
+four capabilities and withholds the fourth, proving the gate reads its own key
+rather than merely checking that some capability list is non-empty. That gate is
+the stop condition.
+
+### Workspace state at closure
+
+`cargo test --workspace --all-targets --no-fail-fast` — 260 suites, 2982 passed,
+0 failed. `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+`docs-hygiene`, `claim-audit`, `verify-kanban-backlog`,
+`verify-readiness-consistency`, `check-deps`, `no-egui-textedit` — all exit 0.
+
+### Not claimed
+
+**Inlay hints are requested for the whole document, not the viewport.** The
+editor does not plumb its visible line range down to this layer, so
+`whole_document_utf16_range` asks for everything. That is correct and, on a
+large file, wasteful — inlay hints are range-scoped by the server precisely so a
+client need not pay for hints nobody can see. `issue_lsp_inlay_hint_request`
+takes a range rather than computing one so that narrowing it later is a caller
+change, not a redesign.
+
+**No real-server run of the four new features.** They are covered by injected
+worker results through the real drain path, which proves the routing; GP-1 does
+not yet exercise inlay hints or runnables against a live rust-analyzer. Adding a
+GP-1 stage for them is separate work.
+
+**Runnable activation is server-supplied text reaching a terminal.** It was
+before this change too, and the terminal policy gate — not the projector — is
+what mediates it. The change narrows the surface (arrays, bounded elements)
+rather than introducing it.

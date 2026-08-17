@@ -449,6 +449,14 @@ impl CommandDispatcher {
                     position,
                 })
             }
+            CommandDispatchIntent::RefreshInlayHints { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RefreshInlayHints { buffer_id })
+            }
+            CommandDispatchIntent::RefreshCodeLenses { buffer_id } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RefreshCodeLenses { buffer_id })
+            }
             CommandDispatchIntent::RefreshOutline { buffer_id } => {
                 Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
                 Ok(AppCommandRequest::RefreshOutline { buffer_id })

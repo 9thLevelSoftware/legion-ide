@@ -1997,24 +1997,38 @@ fn code_lens_projection_for_item(
         .and_then(Value::as_str)
         .map(|title| bounded_lsp_label(title, 120))
         .unwrap_or_else(|| "lsp code lens".to_string());
-    let command_label = command
-        .and_then(|command| command.get("command"))
-        .and_then(Value::as_str)
-        .map(|command| bounded_lsp_label(command, 120))
-        .unwrap_or_else(|| "lsp.codelens.unresolved".to_string());
+    // A runnable lens is the one case where `command_label` must not be the LSP
+    // command id: `ActivateLanguageCodeLens` hands that label to the terminal,
+    // and "rust-analyzer.runSingle" is not something a shell can run. When the
+    // lens carries runnable arguments, the label becomes the cargo invocation
+    // they describe.
+    let runnable = runnable_command_line(command);
+    let command_label = runnable.clone().unwrap_or_else(|| {
+        command
+            .and_then(|command| command.get("command"))
+            .and_then(Value::as_str)
+            .map(|command| bounded_lsp_label(command, 120))
+            .unwrap_or_else(|| "lsp.codelens.unresolved".to_string())
+    });
     let data_kind = lens
         .get("data")
         .and_then(|data| data.get("kind"))
         .and_then(Value::as_str);
-    let kind_label = data_kind
-        .map(|kind| format!("lsp.codelens.{}", bounded_lsp_label(kind, 80)))
-        .unwrap_or_else(|| {
-            if command.is_some() {
-                "lsp.codelens.command".to_string()
-            } else {
-                "lsp.codelens.unresolved".to_string()
-            }
-        });
+    let kind_label = if runnable.is_some() {
+        // The marker `AppComposition::ActivateLanguageCodeLens` gates on before
+        // it will launch anything.
+        "lsp.codelens.runnable".to_string()
+    } else {
+        data_kind
+            .map(|kind| format!("lsp.codelens.{}", bounded_lsp_label(kind, 80)))
+            .unwrap_or_else(|| {
+                if command.is_some() {
+                    "lsp.codelens.command".to_string()
+                } else {
+                    "lsp.codelens.unresolved".to_string()
+                }
+            })
+    };
     let data_label = code_lens_data_label(lens.get("data"));
     Some(LanguageCodeLensProjection {
         lens_id: format!("lsp-codelens-{index}-{:016x}", stable_hash(&title)),
@@ -2026,6 +2040,64 @@ fn code_lens_projection_for_item(
         source_label: bounded_lsp_label(source_label, 80),
         schema_version: 1,
     })
+}
+
+/// The shell command line a rust-analyzer runnable lens describes, if it is one.
+///
+/// rust-analyzer publishes Run and Debug as code lenses whose command is
+/// `rust-analyzer.runSingle` (or `debugSingle`) with a single argument carrying
+/// `args: { cargoArgs, executableArgs }`. Those arrays are the actual
+/// invocation; the command id is only a handle for a client that speaks
+/// rust-analyzer's private protocol.
+///
+/// The command is assembled from the arrays rather than from any free-form
+/// string, and every element is bounded, so a server cannot smuggle a longer
+/// command line through than the lens surface admits. It is still
+/// server-supplied text destined for a terminal — activation is gated by the
+/// same terminal policy every other launch goes through, and that gate, not
+/// this function, is what makes it safe.
+///
+/// Returns `None` for any lens that is not a runnable, which is most of them.
+fn runnable_command_line(command: Option<&Value>) -> Option<String> {
+    let command = command?;
+    let name = command.get("command").and_then(Value::as_str)?;
+    if !name.starts_with("rust-analyzer.run") && !name.starts_with("rust-analyzer.debug") {
+        return None;
+    }
+    let args = command
+        .get("arguments")
+        .and_then(Value::as_array)?
+        .first()?
+        .get("args")?;
+
+    let cargo_args = string_list(args.get("cargoArgs"));
+    if cargo_args.is_empty() {
+        return None;
+    }
+    let executable_args = string_list(args.get("executableArgs"));
+
+    let mut parts = vec!["cargo".to_string()];
+    parts.extend(cargo_args);
+    if !executable_args.is_empty() {
+        parts.push("--".to_string());
+        parts.extend(executable_args);
+    }
+    Some(bounded_lsp_label(&parts.join(" "), 240))
+}
+
+/// The string elements of a JSON array, bounded individually.
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|item| bounded_lsp_label(item, 80))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn code_lens_data_label(data: Option<&Value>) -> Option<String> {

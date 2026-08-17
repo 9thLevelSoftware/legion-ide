@@ -743,6 +743,10 @@ pub enum DesktopAction {
     },
     /// Refresh the active buffer outline.
     RefreshOutline,
+    /// Refresh inlay hints for the active buffer.
+    RefreshInlayHints,
+    /// Refresh code lenses (and therefore runnables) for the active buffer.
+    RefreshCodeLenses,
     /// Request a formatting proposal preview.
     RequestFormattingProposal,
     /// Request a rename proposal preview.
@@ -2181,6 +2185,12 @@ impl DesktopCommandBridge {
                     }
                 })
             }
+            DesktopAction::RefreshInlayHints => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::RefreshInlayHints { buffer_id }
+            }),
+            DesktopAction::RefreshCodeLenses => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::RefreshCodeLenses { buffer_id }
+            }),
             DesktopAction::RefreshOutline => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::RefreshOutline { buffer_id }
             }),

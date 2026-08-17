@@ -11286,6 +11286,16 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Refresh inlay hints for the active document through app-owned language tooling.
+    RefreshInlayHints {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Refresh code lenses for the active document through app-owned language tooling.
+    RefreshCodeLenses {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Request a formatting proposal preview through app-owned language tooling.
     RequestFormattingProposal {
         /// Target buffer identifier.
@@ -11834,6 +11844,8 @@ impl CommandExecutionService {
             | AppCommandRequest::GoToDefinition { .. }
             | AppCommandRequest::FindReferences { .. }
             | AppCommandRequest::RefreshOutline { .. }
+            | AppCommandRequest::RefreshInlayHints { .. }
+            | AppCommandRequest::RefreshCodeLenses { .. }
             | AppCommandRequest::RequestFormattingProposal { .. }
             | AppCommandRequest::RequestRenameProposal { .. }
             | AppCommandRequest::RequestOrganizeImportsProposal { .. }
@@ -20112,21 +20124,68 @@ impl AppComposition {
             AppCommandRequest::FindReferences {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
-            )),
-            AppCommandRequest::RefreshOutline { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_read(
-                    buffer_id,
-                    LanguageReadKind::Outline,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                )?),
-            ),
+            } => {
+                // Issue async LSP references (non-blocking; result arrives next
+                // frame via drain). The index answer below is returned now so
+                // the panel is never empty while the server thinks.
+                self.issue_lsp_references_request(buffer_id, position, true);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
+                ))
+            }
+            AppCommandRequest::RefreshOutline { buffer_id } => {
+                // Issue async LSP documentSymbol (non-blocking; result arrives
+                // next frame via drain).
+                self.issue_lsp_document_symbol_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::Outline,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
+            AppCommandRequest::RefreshInlayHints { buffer_id } => {
+                // Inlay hints have no index-backed answer worth returning — the
+                // lexical indexer does not infer types — so unlike references
+                // and outline this one is LSP-only, and the projection simply
+                // records the operation until the server replies.
+                if let Some(range) = self.whole_document_utf16_range(buffer_id) {
+                    self.issue_lsp_inlay_hint_request(buffer_id, range);
+                }
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::InlayHints,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
+            AppCommandRequest::RefreshCodeLenses { buffer_id } => {
+                self.issue_lsp_code_lens_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::CodeLens,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
             AppCommandRequest::RequestFormattingProposal { buffer_id } => Ok(
                 AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
                     buffer_id,
