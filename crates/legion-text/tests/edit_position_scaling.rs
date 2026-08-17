@@ -101,3 +101,57 @@ fn keystroke_cost_by_position_in_the_file() {
          per-edit shift of every line below the cursor."
     );
 }
+
+/// The line table amortizes, so a median describes only the cheap case.
+///
+/// Most keystrokes just append to a bounded overlay; one in `COMPACTION_THRESHOLD` folds
+/// that overlay into a fresh base and pays the full O(lines) copy. Reporting the median
+/// alone would hide the expensive keystroke entirely, so this prints the distribution and
+/// the maximum — the figure that has to be checked against the p95 budget rather than the
+/// p50 one.
+#[test]
+#[ignore = "diagnostic: reports timings rather than asserting; run with --ignored --nocapture"]
+fn keystroke_cost_amortized_versus_compaction() {
+    let mut buffer = buffer_with_lines(1_000_000);
+    let line = 500_000;
+    let mut timings = Vec::new();
+
+    // Both halves are timed. Timing only the insert hides the compaction entirely when it
+    // happens to land on the delete, which is exactly what an earlier version of this
+    // measurement did — it reported a 1.8ms worst case for a path that cost 97ms.
+    for _ in 0..512 {
+        let at = TextPosition::new(line, 0);
+
+        let start = Instant::now();
+        buffer
+            .try_apply_edit(&TextEdit {
+                range: TextRange::new(at, at),
+                new_text: "x".to_string(),
+            })
+            .expect("insert");
+        timings.push(start.elapsed().as_micros());
+
+        let start = Instant::now();
+        buffer
+            .try_apply_edit(&TextEdit {
+                range: TextRange::new(at, TextPosition::new(line, 1)),
+                new_text: String::new(),
+            })
+            .expect("delete");
+        timings.push(start.elapsed().as_micros());
+    }
+
+    let samples = timings.len();
+    timings.sort_unstable();
+    println!(
+        "1,000,000 lines, {samples} timed keystrokes: p50={}us p95={}us p99={}us max={}us",
+        timings[samples / 2],
+        timings[samples * 95 / 100],
+        timings[samples * 99 / 100],
+        timings[samples - 1]
+    );
+    println!(
+        "p50 is the overlay path; max is a compaction. Both matter, and the second is the \
+         one to check against the p95 budget."
+    );
+}
