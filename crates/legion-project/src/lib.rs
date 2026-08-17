@@ -1027,13 +1027,31 @@ pub fn collect_git_snapshot(
     collect_git_snapshot_with_backend(root, active_file, options, GitInspectionBackend::Gix)
 }
 
-fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
-    let path = path.to_string_lossy();
-    if path.contains("target/delegated-tasks/task-") {
+/// Classify a worktree path as agent-owned or human-managed.
+///
+/// Agent worktrees are the delegated-task sandboxes created under
+/// `target/delegated-tasks/task-<run-id>`; everything else belongs to the user.
+/// The classification is by path convention because git itself records nothing
+/// about who created a worktree.
+///
+/// Separators are normalized before matching. `git worktree list --porcelain`
+/// reports forward slashes even on Windows, but callers may also classify a
+/// `PathBuf` they built themselves, which on Windows carries backslashes.
+///
+/// This is public because agent worktrees must stay visible to the user
+/// (P2.F5.T3); a classification the SCM surface depends on should be directly
+/// testable rather than only reachable through a full repository snapshot.
+pub fn git_worktree_kind_for_path(path: &Path) -> ProjectGitWorktreeKind {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.contains("target/delegated-tasks/task-") {
         ProjectGitWorktreeKind::Agent
     } else {
         ProjectGitWorktreeKind::Manual
     }
+}
+
+fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
+    git_worktree_kind_for_path(path)
 }
 
 fn git_remote_url(root: &Path, remote: &str) -> Option<String> {
@@ -1041,6 +1059,16 @@ fn git_remote_url(root: &Path, remote: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Read the configured URL for a named remote, or `None` when it has none.
+///
+/// The snapshot's `remote_url` only ever describes `origin`. Callers that must
+/// make a policy decision about a *specific* remote need that remote's own URL —
+/// authorizing an operation against one remote using another remote's target
+/// would be a policy bypass.
+pub fn git_remote_configured_url(root: impl AsRef<Path>, remote: &str) -> Option<String> {
+    git_remote_url(root.as_ref(), remote)
 }
 
 fn git_remote_default_branch(root: &Path, remote: &str) -> Option<String> {
@@ -3021,6 +3049,21 @@ impl WorkspaceActor {
             },
             event_sink,
         }
+    }
+
+    /// Snapshot the security policy this workspace enforces.
+    ///
+    /// Decisions taken outside the capability-broker path — such as the git
+    /// remote network gate — must evaluate against the *same* policy the
+    /// workspace enforces, not a freshly defaulted one, or the two surfaces can
+    /// disagree about what is permitted. Returns the default policy if the
+    /// broker lock is poisoned, which is the fail-closed choice: the default
+    /// `NetworkPolicy` is air-gapped.
+    pub fn security_policy(&self) -> legion_security::SecurityPolicy {
+        self.security
+            .lock()
+            .map(|broker| broker.policy.clone())
+            .unwrap_or_default()
     }
 
     fn now_sequence(state: &mut WorkspaceState) -> EventSequence {

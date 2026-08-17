@@ -1741,6 +1741,25 @@ pub struct GitWorktreeProjection {
     pub prunable: bool,
 }
 
+/// One projected policy decision for a git operation that contacts a remote.
+///
+/// P2.F5.T4: a network operation may not run without the user being able to see
+/// the verdict, so the app layer records one of these for every push/fetch/pull
+/// it evaluates — allowed or denied — and the SCM surface renders them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemotePolicyProjection {
+    /// Operation label (`push`, `fetch`, `pull`).
+    pub operation: String,
+    /// Configured remote name (`origin`).
+    pub remote: String,
+    /// Classified target (`ssh://github.com`, `local-path`).
+    pub target: String,
+    /// Whether policy permitted the operation.
+    pub allowed: bool,
+    /// Display-safe audit row: metadata only, never credentials or command output.
+    pub detail: String,
+}
+
 /// One local history entry for the active file, projected for the panel surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalHistoryEntryProjection {
@@ -1797,6 +1816,10 @@ pub struct GitProjection {
     /// Local history entries for the currently active file, newest first.
     /// Populated by `RequestLocalHistoryEntries`; empty on idle.
     pub local_history_entries: Vec<LocalHistoryEntryProjection>,
+    /// Policy decisions for git operations that contacted a remote, newest last.
+    /// Retained across refreshes so the verdict stays visible after the
+    /// projection rebuilds; empty until a push/fetch/pull is attempted.
+    pub remote_policy_audit: Vec<GitRemotePolicyProjection>,
 }
 
 impl GitProjection {
@@ -1821,6 +1844,7 @@ impl GitProjection {
             commit_validation_warnings: Vec::new(),
             commit_validation_errors: Vec::new(),
             local_history_entries: Vec::new(),
+            remote_policy_audit: Vec::new(),
         }
     }
 }
@@ -3036,6 +3060,16 @@ pub enum CommandDispatchIntent {
     },
     /// Push the current branch to a remote.
     PushGitRemote {
+        /// Remote name.
+        remote: String,
+    },
+    /// Fetch refs from a remote without touching the working tree.
+    FetchGitRemote {
+        /// Remote name.
+        remote: String,
+    },
+    /// Pull the current branch from a remote.
+    PullGitRemote {
         /// Remote name.
         remote: String,
     },
@@ -5049,6 +5083,20 @@ impl Shell {
         if trimmed == ":git-push" {
             return Ok(Some(self.push_intent(
                 CommandDispatchIntent::PushGitRemote {
+                    remote: "origin".to_string(),
+                },
+            )));
+        }
+        if trimmed == ":git-fetch" {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::FetchGitRemote {
+                    remote: "origin".to_string(),
+                },
+            )));
+        }
+        if trimmed == ":git-pull" {
+            return Ok(Some(self.push_intent(
+                CommandDispatchIntent::PullGitRemote {
                     remote: "origin".to_string(),
                 },
             )));

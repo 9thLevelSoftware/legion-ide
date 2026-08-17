@@ -332,7 +332,11 @@ pub fn classify_git_remote_url(remote_url: &str) -> GitRemoteTarget {
 /// Split `scheme://rest`, returning the lowercased scheme and the remainder.
 fn split_scheme(value: &str) -> Option<(String, &str)> {
     let (scheme, rest) = value.split_once("://")?;
-    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+') {
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+')
+    {
         return None;
     }
     Some((scheme.to_ascii_lowercase(), rest))
@@ -541,7 +545,9 @@ pub fn decide_git_remote_operation(
         decide(SecurityDecision::Allow, target)
     } else {
         decide(
-            SecurityDecision::Deny(format!("host `{host}` is not allowlisted by network policy")),
+            SecurityDecision::Deny(format!(
+                "host `{host}` is not allowlisted by network policy"
+            )),
             target,
         )
     }

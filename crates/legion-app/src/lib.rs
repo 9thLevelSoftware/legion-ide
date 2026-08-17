@@ -47,6 +47,9 @@ pub mod proposal;
 
 /// App-side support-bundle surface: list crash reports, build metadata-only or raw exports.
 pub mod diagnostics;
+
+/// Policy gate and audit trail for git push/fetch/pull.
+pub mod git_policy;
 pub mod test_explorer;
 
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
@@ -197,8 +200,9 @@ use legion_remote::{
     default_remote_capabilities, plan_devcontainer_session_from_json, plan_ssh_session,
 };
 use legion_security::{
-    BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy,
-    ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState, mcp_tool_permission_request,
+    BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, GitRemoteOperation,
+    NetworkPolicy, ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState,
+    mcp_tool_permission_request,
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, OsKeyringSecretStore,
@@ -11170,6 +11174,16 @@ pub enum AppCommandRequest {
         /// Remote name entered by the user.
         remote: String,
     },
+    /// Fetch refs from the selected remote.
+    FetchGitRemote {
+        /// Remote name entered by the user.
+        remote: String,
+    },
+    /// Pull the current branch from the selected remote.
+    PullGitRemote {
+        /// Remote name entered by the user.
+        remote: String,
+    },
     /// Prune orphaned worktree metadata.
     PruneGitWorktrees,
     /// Remove a projected worktree by path.
@@ -11787,6 +11801,8 @@ impl CommandExecutionService {
             | AppCommandRequest::DeleteGitBranch { .. }
             | AppCommandRequest::StashGitChanges { .. }
             | AppCommandRequest::PushGitRemote { .. }
+            | AppCommandRequest::FetchGitRemote { .. }
+            | AppCommandRequest::PullGitRemote { .. }
             | AppCommandRequest::PruneGitWorktrees
             | AppCommandRequest::RemoveGitWorktree { .. }
             | AppCommandRequest::CreateGitWorktree { .. }
@@ -12141,6 +12157,12 @@ impl CommandDispatcher {
             }
             CommandDispatchIntent::PushGitRemote { remote } => {
                 Ok(AppCommandRequest::PushGitRemote { remote })
+            }
+            CommandDispatchIntent::FetchGitRemote { remote } => {
+                Ok(AppCommandRequest::FetchGitRemote { remote })
+            }
+            CommandDispatchIntent::PullGitRemote { remote } => {
+                Ok(AppCommandRequest::PullGitRemote { remote })
             }
             CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
             CommandDispatchIntent::RemoveGitWorktree { path } => {
@@ -15553,6 +15575,7 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         commit_validation_warnings: Vec::new(),
         commit_validation_errors: Vec::new(),
         local_history_entries: Vec::new(),
+        remote_policy_audit: Vec::new(),
     }
 }
 
@@ -15908,6 +15931,26 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Stash local changes with an optional message",
             shortcut_label: None,
         },
+        // Remote verbs. Each one is policy-gated at dispatch (P2.F5.T4); the
+        // palette entry only makes them reachable.
+        PaletteCommandSpec {
+            id: "git-push",
+            title: "Git: Push",
+            detail: "Push the current branch to origin",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-fetch",
+            title: "Git: Fetch",
+            detail: "Fetch refs from origin",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-pull",
+            title: "Git: Pull",
+            detail: "Pull the current branch from origin",
+            shortcut_label: None,
+        },
         PaletteCommandSpec {
             id: "git-prune-worktrees",
             title: "Git: Prune Worktrees",
@@ -16014,6 +16057,12 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "git-delete-branch" => None,
         "git-stash" => None,
         "git-push" => Some(CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        }),
+        "git-fetch" => Some(CommandDispatchIntent::FetchGitRemote {
+            remote: "origin".to_string(),
+        }),
+        "git-pull" => Some(CommandDispatchIntent::PullGitRemote {
             remote: "origin".to_string(),
         }),
         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
@@ -16895,6 +16944,12 @@ pub struct AppComposition {
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
+    /// Policy decisions for git push/fetch/pull, oldest first (P2.F5.T4).
+    ///
+    /// App-owned rather than snapshot-derived: `refresh_git_projection` rebuilds
+    /// the projection from git, which would otherwise erase the verdict the user
+    /// needs to read after a denied operation.
+    git_remote_policy_audit: Vec<legion_ui::GitRemotePolicyProjection>,
     /// In-memory local history metadata store (content blobs live on disk).
     local_history_store: legion_storage::local_history::LocalHistoryMetadataStore,
     /// Last blob-write error, if any, propagated as a degraded-mode diagnostic.
@@ -17222,6 +17277,7 @@ impl AppComposition {
             git_projection: GitProjection::idle(),
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
+            git_remote_policy_audit: Vec::new(),
             local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
             local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
@@ -20836,18 +20892,13 @@ impl AppComposition {
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
             AppCommandRequest::PushGitRemote { remote } => {
-                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
-                    return Err(AppCompositionError::WorkspaceNotOpen);
-                };
-                let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
-                    git_protocol_error(
-                        "git_branch_missing",
-                        "git branch label unavailable for push",
-                    )
-                })?;
-                push_git_remote(Path::new(root_path), &remote, &branch)
-                    .map_err(git_inspection_protocol_error)?;
-                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+                self.dispatch_git_remote_operation(GitRemoteOperation::Push, &remote)
+            }
+            AppCommandRequest::FetchGitRemote { remote } => {
+                self.dispatch_git_remote_operation(GitRemoteOperation::Fetch, &remote)
+            }
+            AppCommandRequest::PullGitRemote { remote } => {
+                self.dispatch_git_remote_operation(GitRemoteOperation::Pull, &remote)
             }
             AppCommandRequest::PruneGitWorktrees => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -28233,6 +28284,67 @@ impl AppComposition {
         Ok(added)
     }
 
+    /// Run a git operation that contacts a remote, after a policy decision.
+    ///
+    /// Push, fetch, and pull are the only git verbs that can leave the machine,
+    /// so each one is evaluated against the workspace network policy and records
+    /// its verdict in the projection before anything is executed (P2.F5.T4). A
+    /// denial is *not* an error: the projection carries the reason, so the SCM
+    /// surface can show it instead of raising an opaque failure.
+    fn dispatch_git_remote_operation(
+        &mut self,
+        operation: GitRemoteOperation,
+        remote: &str,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        let root_path = root_path.to_string();
+
+        // Resolve the branch first: a push with no branch label cannot be
+        // described in an audit row, let alone executed.
+        let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
+            git_protocol_error(
+                "git_branch_missing",
+                format!("git branch label unavailable for {}", operation.label()),
+            )
+        })?;
+
+        let remote_url = legion_project::git_remote_configured_url(Path::new(&root_path), remote);
+        let trust = self
+            .active_documents
+            .active_workspace_trust
+            .clone()
+            .map_or(TrustState::Unknown, TrustState::from);
+        let outcome = git_policy::evaluate(
+            &self.workspace.security_policy(),
+            trust,
+            operation,
+            remote,
+            remote_url.as_deref(),
+        );
+        git_policy::record(&mut self.git_remote_policy_audit, outcome.audit);
+
+        if !outcome.allowed {
+            // Refresh so the caller sees the audit row alongside current status.
+            return Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()));
+        }
+
+        let result = match operation {
+            GitRemoteOperation::Push => {
+                push_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
+            }
+            GitRemoteOperation::Fetch => {
+                legion_project::fetch_git_remote(Path::new(&root_path), remote).map(|_| ())
+            }
+            GitRemoteOperation::Pull => {
+                legion_project::pull_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
+            }
+        };
+        result.map_err(git_inspection_protocol_error)?;
+        Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+    }
+
     /// Refresh app-owned git projection data for the active workspace.
     pub fn refresh_git_projection(&mut self) -> GitProjection {
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -28277,6 +28389,9 @@ impl AppComposition {
         // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
         // not in the project snapshot, so it must be injected after each build.
         self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        // Same for the remote-policy audit trail: a denied push refreshes the
+        // projection, and the user must still be able to read why it was denied.
+        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
         // Propagate any local-history blob-write degradation as a diagnostic.
         if let Some(ref err) = self.local_history_last_write_error {
             self.git_projection

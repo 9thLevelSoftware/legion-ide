@@ -275,6 +275,10 @@ pub enum DesktopAction {
     },
     /// Push the current branch to the default remote.
     PushGitRemote,
+    /// Fetch refs from the default remote.
+    FetchGitRemote,
+    /// Pull the current branch from the default remote.
+    PullGitRemote,
     /// Open the branch's forge pull-request URL.
     OpenGitPullRequestUrl,
     /// Prune orphaned worktree metadata.
@@ -1558,6 +1562,16 @@ impl DesktopCommandBridge {
             }
             DesktopAction::PushGitRemote => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {
+                    remote: "origin".to_string(),
+                })
+            }
+            DesktopAction::FetchGitRemote => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::FetchGitRemote {
+                    remote: "origin".to_string(),
+                })
+            }
+            DesktopAction::PullGitRemote => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::PullGitRemote {
                     remote: "origin".to_string(),
                 })
             }

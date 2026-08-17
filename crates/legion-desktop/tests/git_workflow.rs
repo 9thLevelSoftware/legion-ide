@@ -11,7 +11,7 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
     workflow::{DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_ui::{GitHunkStageProjection, Shell};
+use legion_ui::{GitHunkStageProjection, GitRemotePolicyProjection, Shell};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -408,5 +408,132 @@ fn desktop_git_rows_includes_commit_validation_warnings_and_errors() {
         "git_rows must include a 'git commit-error:' row when commit_validation_errors is set; \
          got: {:?}",
         model.git_rows
+    );
+}
+
+/// P2.F5.T1 — the gutter's diff data must be re-read, not captured once.
+///
+/// The stop condition for this task is "diff/blame data is read once and never
+/// refreshed". A single refresh cannot distinguish a live projection from a
+/// cached one, so this drives two refreshes across a second edit and asserts the
+/// projection moved.
+#[test]
+fn desktop_git_refresh_reflects_edits_made_after_the_first_refresh() {
+    let repo = TempGitRepo::new();
+    let source = repo.write("src/lib.rs", "pub fn alpha() {\n    first();\n}\n");
+    repo.write("src/other.rs", "pub fn gamma() {}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    repo.write("src/lib.rs", "pub fn alpha() {\n    first_changed();\n}\n");
+
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        repo.path().to_path_buf(),
+        Some(source.to_string_lossy().into_owned()),
+    ))
+    .expect("desktop runtime should open git workspace");
+
+    runtime
+        .handle_action(DesktopAction::RefreshGit)
+        .expect("first git refresh should route");
+    let first = runtime.projection_snapshot().git_projection;
+    assert_eq!(
+        first.changed_files.len(),
+        1,
+        "only src/lib.rs is modified at this point; got {:?}",
+        first.changed_files
+    );
+
+    // Change the working tree behind the projection's back.
+    repo.write("src/other.rs", "pub fn gamma() {\n    added();\n}\n");
+
+    runtime
+        .handle_action(DesktopAction::RefreshGit)
+        .expect("second git refresh should route");
+    let second = runtime.projection_snapshot().git_projection;
+
+    assert_eq!(
+        second.changed_files.len(),
+        2,
+        "the second refresh must observe the new edit; got {:?}",
+        second.changed_files
+    );
+    assert!(
+        second
+            .changed_files
+            .iter()
+            .any(|file| file.path == "src/other.rs"),
+        "src/other.rs must appear after the second refresh"
+    );
+    assert_ne!(
+        first.hunks.len(),
+        second.hunks.len(),
+        "hunk set must change with the working tree, not stay pinned to the first read"
+    );
+}
+
+/// P2.F5.T4 — a denied network operation is rendered distinctly in the SCM rows.
+#[test]
+fn desktop_git_rows_renders_remote_policy_verdicts() {
+    let mut snapshot = Shell::empty("git-remote-policy-test").projection_snapshot();
+    snapshot.git_projection.remote_policy_audit = vec![
+        GitRemotePolicyProjection {
+            operation: "fetch".to_string(),
+            remote: "origin".to_string(),
+            target: "local-path".to_string(),
+            allowed: true,
+            detail: "git fetch remote=origin target=local-path class=Network decision=allow"
+                .to_string(),
+        },
+        GitRemotePolicyProjection {
+            operation: "push".to_string(),
+            remote: "origin".to_string(),
+            target: "ssh://github.com".to_string(),
+            allowed: false,
+            detail: "git push remote=origin target=ssh://github.com class=Network \
+                     decision=deny (air-gap mode denies non-loopback git push to `github.com`)"
+                .to_string(),
+        },
+    ];
+
+    let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
+
+    assert!(
+        model
+            .git_rows
+            .iter()
+            .any(|row| row.starts_with("git policy allowed:")),
+        "an allowed verdict must be rendered; got: {:?}",
+        model.git_rows
+    );
+    let denied = model
+        .git_rows
+        .iter()
+        .find(|row| row.starts_with("git policy DENIED:"))
+        .expect("a denied verdict must be rendered distinctly");
+    assert!(
+        denied.contains("air-gap"),
+        "the denial reason must reach the user; got: {denied}"
+    );
+}
+
+/// P2.F5.T2 — fetch and pull reach the app layer as intents.
+///
+/// These verbs existed in the git engine with no caller at all before this task.
+#[test]
+fn desktop_bridge_translates_fetch_and_pull_actions() {
+    let snapshot = Shell::empty("git-remote-verbs-test").projection_snapshot();
+    let bridge = DesktopCommandBridge::new();
+
+    assert_eq!(
+        bridge.translate(DesktopAction::FetchGitRemote, &snapshot),
+        DesktopBridgeOutput::Intent(legion_ui::CommandDispatchIntent::FetchGitRemote {
+            remote: "origin".to_string(),
+        })
+    );
+    assert_eq!(
+        bridge.translate(DesktopAction::PullGitRemote, &snapshot),
+        DesktopBridgeOutput::Intent(legion_ui::CommandDispatchIntent::PullGitRemote {
+            remote: "origin".to_string(),
+        })
     );
 }
