@@ -2176,15 +2176,16 @@ impl EditorEngine {
         }
     }
 
+    /// Absolute UTF-16 offset of `byte_offset` from the start of the buffer.
+    ///
+    /// Delegated to the line index, which answers this in O(log n) against the rope.
+    /// This summed `line_utf16_len` and `line_ending_bytes` over every preceding line
+    /// until 2026-08-17, which made it O(scroll depth): `viewport_projection` calls it
+    /// twice per projection, so a viewport at line 500,000 walked two million line
+    /// lookups and cost milliseconds that had nothing to do with the twenty-four lines
+    /// being projected. See `plans/evidence/production/WS-MANUAL-02/`.
     fn absolute_utf16_offset(buffer: &TextBuffer, byte_offset: usize) -> Result<u64, EditorError> {
-        let utf16_position = buffer.utf16_position(byte_offset)?;
-        let mut total = utf16_position.character as u64;
-        for line in 0..utf16_position.line {
-            total = total
-                .saturating_add(buffer.line_index().line_utf16_len(line)? as u64)
-                .saturating_add(buffer.line_index().line_ending_bytes(line)? as u64);
-        }
-        Ok(total)
+        Ok(buffer.line_index().utf16_offset(byte_offset)? as u64)
     }
 
     fn completion_byte_offset(
