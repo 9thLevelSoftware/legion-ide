@@ -418,7 +418,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-desktop", "cargo run -p xtask -- no-egui-textedit"]
     acceptance = ["Every layout region has a projection and an integration test."]
     stop_condition = "Do not introduce egui::TextEdit in the code canvas."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/gui-productization/phase-3-daily-editing-mvp.md"
 
     [[epics.features.tasks]]
@@ -444,7 +444,16 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-storage", "cargo test -p legion-app"]
     acceptance = ["Restart restores the layout; nothing AI-relevant is persisted."]
     stop_condition = "If AI context is ever persisted, revert the change and add a regression test."
-    status = "done"
+    # 2026-08-17: reverted from `done`. The second clause holds — nothing
+    # AI-relevant is persisted, and `session_restore` proves the record round
+    # trips. The first does not. `splitter_fraction` and `collapsed` are
+    # persisted, validated by legion-storage, and reloaded, but no renderer
+    # reads either: in `legion-desktop/src/view.rs` both appear only inside the
+    # `dock side:` evidence string, while the real panels size themselves from
+    # `ctx.content_rect()` and egui `resizable`. Restart restores the *record*,
+    # not the layout the user sees. Found while closing P1.F2.T2; verified by
+    # inspection of every reader of both fields.
+    status = "in-progress"
     evidence = "crates/legion-desktop/tests/session_restore.rs"
 
   [[epics.features]]

@@ -2176,15 +2176,16 @@ impl EditorEngine {
         }
     }
 
+    /// Absolute UTF-16 offset of `byte_offset` from the start of the buffer.
+    ///
+    /// Delegated to the line index, which answers this in O(log n) against the rope.
+    /// This summed `line_utf16_len` and `line_ending_bytes` over every preceding line
+    /// until 2026-08-17, which made it O(scroll depth): `viewport_projection` calls it
+    /// twice per projection, so a viewport at line 500,000 walked two million line
+    /// lookups and cost milliseconds that had nothing to do with the twenty-four lines
+    /// being projected. See `plans/evidence/production/WS-MANUAL-02/`.
     fn absolute_utf16_offset(buffer: &TextBuffer, byte_offset: usize) -> Result<u64, EditorError> {
-        let utf16_position = buffer.utf16_position(byte_offset)?;
-        let mut total = utf16_position.character as u64;
-        for line in 0..utf16_position.line {
-            total = total
-                .saturating_add(buffer.line_index().line_utf16_len(line)? as u64)
-                .saturating_add(buffer.line_index().line_ending_bytes(line)? as u64);
-        }
-        Ok(total)
+        Ok(buffer.line_index().utf16_offset(byte_offset)? as u64)
     }
 
     fn completion_byte_offset(
@@ -2209,33 +2210,37 @@ impl EditorEngine {
         Self::byte_offset_from_absolute_utf16(&state.buffer, requested)
     }
 
+    /// Resolve an absolute UTF-16 offset to a byte offset.
+    ///
+    /// This walked lines from the start of the buffer until 2026-08-17, subtracting each
+    /// line's content and ending lengths. That was O(document length) on the completion
+    /// path — and because `completion` resolves the position before it decides it cannot
+    /// serve a large file, the walk was longest on exactly the buffers whose result is
+    /// then discarded. The line is now found in O(log n).
+    ///
+    /// The walk also had an off-by-one that the rewrite removes: it could never leave a
+    /// residual of zero for any line after the first, because an offset landing on a line
+    /// ending was clamped to that line's content end before the next line was considered.
+    /// A UTF-16 offset addressing the *start* of a line therefore resolved to the end of
+    /// the previous one — and LSP positions are UTF-16, so that was every completion
+    /// requested at column 0. `utf16_and_byte_encodings_agree_on_a_line_start` pins it.
+    ///
+    /// An offset inside a line ending still clamps to the end of that line's content,
+    /// which is what `LineIndex::utf16_position` does and what the walk did; and an offset
+    /// inside a surrogate pair is still rejected rather than rounded, by
+    /// `byte_offset_from_utf16`.
     fn byte_offset_from_absolute_utf16(
         buffer: &TextBuffer,
         requested: usize,
     ) -> Result<usize, EditorError> {
         let line_index = buffer.line_index();
-        let mut remaining = requested;
-        for line in 0..line_index.line_count() {
-            let line_utf16_len = line_index.line_utf16_len(line)?;
-            if remaining <= line_utf16_len {
-                return buffer
-                    .byte_offset_from_utf16(Utf16Position::new(line, remaining))
-                    .map_err(EditorError::from);
-            }
-            remaining -= line_utf16_len;
-
-            let line_ending_len = line_index.line_ending_bytes(line)?;
-            if remaining <= line_ending_len {
-                return buffer
-                    .byte_offset_from_utf16(Utf16Position::new(line, line_utf16_len))
-                    .map_err(EditorError::from);
-            }
-            remaining -= line_ending_len;
-        }
-
-        Err(EditorError::InvalidCompletionPosition(
-            "utf16 offset outside buffer",
-        ))
+        let (line, within_line) = line_index.utf16_offset_to_line(requested).ok_or(
+            EditorError::InvalidCompletionPosition("utf16 offset outside buffer"),
+        )?;
+        let column = within_line.min(line_index.line_utf16_len(line)?);
+        buffer
+            .byte_offset_from_utf16(Utf16Position::new(line, column))
+            .map_err(EditorError::from)
     }
 
     fn enqueue_transaction_event(&mut self, record: &TransactionRecord) {

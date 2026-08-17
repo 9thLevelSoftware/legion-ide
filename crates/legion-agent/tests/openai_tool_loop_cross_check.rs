@@ -266,13 +266,36 @@ fn openai_provider_compatible_with_agent_loop_read_then_end() {
     }
 }
 
+/// Whether tolerant recovery is on — the default arm.
+///
+/// The three tests below assert an end-to-end contract in *both* arms.
+/// `LEGION_AI_GOVERNORS=off` is what `legion-bench`'s raw baseline runs under,
+/// and the raw contract here is not a formality: "a call written as prose is
+/// never dispatched" is the measured behavior the governed arm is compared
+/// against. If recovery ever leaked into the raw arm, the improvement the
+/// Phase 2 exit gate rests on would shrink without anyone noticing.
+fn governed() -> bool {
+    legion_ai::governance::small_model_governors_enabled()
+}
+
+/// Count audit steps that dispatched a named tool.
+fn tool_dispatch_count(steps: &[DelegatedTaskLoopStepRecord], tool: &str) -> usize {
+    steps
+        .iter()
+        .filter(|step| step.tool_name.as_deref() == Some(tool))
+        .count()
+}
+
 /// Provider-to-loop contract for prose-embedded calls (ADR-0049).
 ///
-/// A model that writes its call as prose reports `finish_reason: "stop"`,
-/// because the provider only saw text. Both halves have to agree for recovery
-/// to do anything: the provider must report the turn as tool use, and the loop
-/// must dispatch the recovered call. If either half regresses, the run ends
-/// after turn one with the file never read.
+/// Governed: a model that writes its call as prose reports
+/// `finish_reason: "stop"`, because the provider only saw text. Both halves
+/// have to agree for recovery to do anything: the provider must report the turn
+/// as tool use, and the loop must dispatch the recovered call. If either half
+/// regresses, the run ends after turn one with the file never read.
+///
+/// Raw: that is exactly what happens, and it is the baseline. The run completes
+/// having dispatched nothing.
 #[test]
 fn prose_embedded_call_is_recovered_and_dispatched_end_to_end() {
     let dir = TempDir::new().unwrap();
@@ -325,23 +348,39 @@ fn prose_embedded_call_is_recovered_and_dispatched_end_to_end() {
 
     // The decisive assertion: the recovered call actually reached dispatch,
     // under Legion's registry name rather than the name the model wrote.
-    let read_calls = sink
-        .steps
-        .iter()
-        .filter(|step| step.tool_name.as_deref() == Some("read"))
-        .count();
-    assert!(
-        read_calls > 0,
-        "the prose-embedded call must be dispatched as `read`; audit steps: {:?}",
+    let read_calls = tool_dispatch_count(&sink.steps, "read");
+    let audit = || {
         sink.steps
             .iter()
             .map(|s| (s.kind, s.tool_name.clone()))
             .collect::<Vec<_>>()
+    };
+
+    if !governed() {
+        assert_eq!(
+            read_calls,
+            0,
+            "the raw baseline must dispatch nothing from prose; audit steps: {:?}",
+            audit()
+        );
+        return;
+    }
+
+    assert!(
+        read_calls > 0,
+        "the prose-embedded call must be dispatched as `read`; audit steps: {:?}",
+        audit()
     );
 }
 
-/// The same contract for a call whose arguments cannot be parsed: the
-/// diagnostic has to reach the model instead of ending the run silently.
+/// The same contract for a call whose arguments cannot be parsed.
+///
+/// Governed: the diagnostic has to reach the model instead of ending the run
+/// silently, and the corrected call on turn 2 proves the run kept going.
+///
+/// Raw: nothing is recovered, so there is nothing to call malformed — the run
+/// ends after turn one having audited no such rejection. The scripted turn-2
+/// correction is simply never requested.
 #[test]
 fn prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back() {
     let dir = TempDir::new().unwrap();
@@ -404,12 +443,27 @@ fn prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back() {
         matches!(result, DelegatedTaskLoopResult::Completed { .. }),
         "expected Completed after correction, got {result:?}"
     );
+    let malformed_audits = sink
+        .steps
+        .iter()
+        .filter(|step| step.reason.as_deref() == Some("malformed_tool_arguments"))
+        .count();
+
+    if !governed() {
+        assert_eq!(
+            malformed_audits, 0,
+            "the raw baseline never recovers the call, so it never rejects one"
+        );
+        assert_eq!(
+            tool_dispatch_count(&sink.steps, "read"),
+            0,
+            "and it dispatches nothing, so the corrected turn is never reached"
+        );
+        return;
+    }
+
     assert_eq!(
-        sink.steps
-            .iter()
-            .filter(|step| step.reason.as_deref() == Some("malformed_tool_arguments"))
-            .count(),
-        1,
+        malformed_audits, 1,
         "the malformed recovered call is audited"
     );
 }
@@ -418,10 +472,15 @@ fn prose_embedded_call_with_bad_arguments_feeds_the_diagnostic_back() {
 /// at all — must still produce an edit proposal. Models trained on that format
 /// emit it unprompted, and without recovery the edit reads as prose and is
 /// lost (ADR-0049).
+///
+/// Raw: the edit *is* lost — no proposal, file untouched. That loss is the
+/// baseline cost this governor was added to remove, so asserting it here is
+/// asserting the thing the comparison measures.
 #[test]
 fn block_format_edit_written_as_prose_reaches_the_edit_tool() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("lib.rs"), "fn old_name() {}\n").unwrap();
+    let original = "fn old_name() {}\n";
+    std::fs::write(dir.path().join("lib.rs"), original).unwrap();
 
     let transport = SequentialOpenAiTransport::from_responses(vec![
         json!({
@@ -463,6 +522,20 @@ fn block_format_edit_written_as_prose_reaches_the_edit_tool() {
     let DelegatedTaskLoopResult::Completed { proposals, .. } = result else {
         panic!("expected Completed, got {result:?}");
     };
+
+    if !governed() {
+        assert!(
+            proposals.is_empty(),
+            "the raw baseline reads a block-format edit as prose and proposes nothing: {proposals:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
+            original,
+            "and it certainly never writes the file"
+        );
+        return;
+    }
+
     assert_eq!(
         proposals.len(),
         1,
