@@ -422,6 +422,14 @@ mod tests {
     fn grant_permits_only_allowlisted_binaries() {
         let grant = test_grant();
         assert!(grant.permits_program(Path::new("/usr/bin/lldb-dap")));
+        // Case-insensitive, and the extension is not part of the name. Written
+        // without a separator so it means the same thing everywhere: off
+        // Windows a backslash is an ordinary filename character, so
+        // `C:\tools\CodeLLDB.exe` has no directory part and its stem is the
+        // entire string — which is how this assertion passed on Windows and
+        // failed on Linux.
+        assert!(grant.permits_program(Path::new("CodeLLDB.exe")));
+        #[cfg(windows)]
         assert!(grant.permits_program(Path::new("C:\\tools\\CodeLLDB.exe")));
         // The whole point of the allowlist: an arbitrary executable handed to
         // LEGION_DAP_ADAPTER is not launchable just because it exists.

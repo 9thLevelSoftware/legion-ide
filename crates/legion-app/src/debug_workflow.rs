@@ -1276,6 +1276,12 @@ mod adapter_policy_tests {
             !grant.permits_program(Path::new("fake_dap_adapter.exe")),
             "the in-tree CI fake must not be launchable under the shipped policy"
         );
+        // Written without a separator so the assertion means the same thing on
+        // every platform. Off Windows a backslash is an ordinary filename
+        // character, so a `C:\Windows\…` literal has no directory part and this
+        // would pass for the wrong reason — proving nothing about the allowlist.
+        assert!(!grant.permits_program(Path::new("cmd.exe")));
+        #[cfg(windows)]
         assert!(!grant.permits_program(Path::new("C:\\Windows\\System32\\cmd.exe")));
     }
 
