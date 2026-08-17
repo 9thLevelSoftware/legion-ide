@@ -901,6 +901,34 @@ impl LineIndex {
         Ok(rope.char_to_utf16_cu(rope.byte_to_char(clamped)))
     }
 
+    /// Locate the line holding an absolute UTF-16 offset.
+    ///
+    /// Returns the line and how many UTF-16 units into that line the offset sits, or
+    /// `None` when the offset is past the end of the buffer. The returned unit count can
+    /// exceed the line's content length when the offset falls inside a line ending, and
+    /// can land inside a surrogate pair; deciding what to do about either is the
+    /// caller's, because [`Self::byte_offset_from_utf16`] already rejects the second and
+    /// callers differ on the first.
+    ///
+    /// Answered against the rope in O(log n). The alternative — walking lines from the
+    /// start of the buffer subtracting each one's length — is O(document length), which
+    /// is what made a completion request cost more the further down the file it was
+    /// made.
+    pub fn utf16_offset_to_line(&self, utf16_offset: usize) -> Option<(usize, usize)> {
+        let rope = self.inner.rope.as_ref();
+        if utf16_offset > rope.len_utf16_cu() {
+            return None;
+        }
+
+        // Rounds down to the start of the character when `utf16_offset` splits a
+        // surrogate pair, so the residual below still reports the split position.
+        let byte = rope.char_to_byte(rope.utf16_cu_to_char(utf16_offset));
+        let line = self.inner.lines.index_for_offset(byte)?;
+        let start_byte = self.inner.lines.metric(line)?.start_byte;
+        let line_start_utf16 = rope.char_to_utf16_cu(rope.byte_to_char(start_byte));
+        Some((line, utf16_offset.saturating_sub(line_start_utf16)))
+    }
+
     /// Convert an LSP UTF-16 position to an absolute byte offset.
     pub fn byte_offset_from_utf16(&self, pos: Utf16Position) -> TextResult<usize> {
         let line = self.line(pos.line)?;
