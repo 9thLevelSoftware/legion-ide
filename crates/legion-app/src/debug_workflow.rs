@@ -6,6 +6,11 @@
 //! it did before the move; nothing else changed in this commit.
 
 use super::*;
+use legion_security::DEBUG_ADAPTER_LAUNCH_CAPABILITY;
+
+/// File stem of the in-tree CI fake adapter (`legion-debug`'s `fake_dap_adapter`
+/// bin). Only test seams add it to the adapter allowlist.
+const FAKE_DAP_ADAPTER_BINARY: &str = "fake_dap_adapter";
 
 /// Owned live DAP adapter process (B5); not Clone — process handles.
 pub(crate) struct LiveDebugSession {
@@ -50,6 +55,10 @@ pub(crate) struct DebugWorkflow {
     pub(crate) live: Option<LiveDebugSession>,
     /// In-flight continue-until-stop worker (B7).
     pub(crate) awaiting_stop: Option<LiveAwaitingStop>,
+    /// P2.F3.T2: authority for `debug.adapter.launch`. The workflow asks this
+    /// broker before an adapter binary is resolved — the capability the denial
+    /// message cites is a real decision, not a label.
+    pub(crate) security_broker: DenyByDefaultBroker,
 }
 
 #[derive(Debug)]
@@ -79,6 +88,10 @@ impl Default for DebugWorkflow {
             dap_mode_for_tests: None,
             live: None,
             awaiting_stop: None,
+            security_broker: DenyByDefaultBroker::new(
+                SecurityPolicy::default(),
+                CapabilityNamespace("app.debug".to_string()),
+            ),
         }
     }
 }
@@ -109,6 +122,13 @@ impl DebugWorkflow {
     pub(crate) fn enable_live_fake_for_tests(&mut self) {
         self.enable_runtime();
         self.prefer_live_fake_for_tests = true;
+        // The CI fake is not allowlisted by the shipped policy, so the seam has
+        // to widen policy explicitly. Nothing in the product path does this.
+        self.security_broker
+            .policy
+            .debug_adapter_policy
+            .allowed_adapter_binaries
+            .push(FAKE_DAP_ADAPTER_BINARY.to_string());
     }
 
     pub(crate) fn set_dap_mode_for_tests(&mut self, mode: legion_debug::DapMode) {
@@ -261,12 +281,20 @@ impl DebugWorkflow {
         configuration_id: DebugConfigurationId,
         event_context: EventContext,
     ) -> DebugProjection {
-        // Trust gate (B3): untrusted workspaces never spawn adapters.
-        if context.trust != WorkspaceTrustState::Trusted {
-            return self.deny(
-                "debug.adapter.launch denied: requires a trusted workspace (capability debug.adapter.launch)"
-                    .to_string(),
-            );
+        // Trust gate (B3, brokered in P2.F3.T2): untrusted workspaces never
+        // spawn adapters, and the decision is what authorizes resolution below.
+        let decision = self.adapter_launch_decision(&context, event_context);
+        if !decision.granted {
+            // Surface the broker's own reason: "requires a trusted workspace" is
+            // only one of the ways this can deny, and a fixed string would
+            // misreport the others (empty allowlist, unknown trust).
+            return self.deny(format!(
+                "{DEBUG_ADAPTER_LAUNCH_CAPABILITY} denied: {}",
+                decision
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "requires a trusted workspace".to_string())
+            ));
         }
         if !self.runtime_enabled {
             return self.deny("Debug runtime is disabled".to_string());
@@ -290,7 +318,7 @@ impl DebugWorkflow {
         // Wire is Microsoft DAP (B4); resolution: LEGION_DAP_ADAPTER, PATH, or USE_FAKE.
         let mode = self.effective_dap_mode();
         if mode.allows_live() {
-            match self.resolve_adapter_for_launch(&config.adapter_type) {
+            match self.resolve_adapter_for_launch(&decision, &config.adapter_type) {
                 Some(resolved) => {
                     match self.launch_live(&context, &config, &resolved, event_context) {
                         Ok(projection) => return projection,
@@ -361,21 +389,75 @@ impl DebugWorkflow {
         }
     }
 
+    /// Ask the broker whether this workspace may launch a debug adapter.
+    ///
+    /// Runs before resolution, not after: a denied workspace must not even learn
+    /// whether an adapter binary is installed.
+    pub(crate) fn adapter_launch_decision(
+        &self,
+        context: &ActiveWorkspaceContext,
+        event_context: EventContext,
+    ) -> CapabilityDecision {
+        let denied = |reason: String| CapabilityDecision {
+            decision_id: CapabilityDecisionId(1),
+            granted: false,
+            capability: CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            reason: Some(reason),
+        };
+        match self.security_broker.handle(CapabilityRequest::Request {
+            principal_id: context.principal.clone(),
+            capability_id: CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            workspace_trust_state: context.trust.clone(),
+            target_path: None,
+            decision_id: None,
+            context: CapabilityRequestContext::default(),
+            correlation_id: event_context.correlation_id,
+        }) {
+            Ok(CapabilityResponse::Decision(decision)) => decision,
+            Ok(other) => denied(format!(
+                "debug policy returned unexpected response: {other:?}"
+            )),
+            Err(error) => denied(format!("debug policy request failed: {error:?}")),
+        }
+    }
+
+    /// Mint the resolution grant from a granted decision.
+    ///
+    /// Returns [`None`] whenever policy would refuse, so a caller holding a
+    /// denied decision cannot reach [`resolve_live_adapter`] at all.
+    pub(crate) fn adapter_resolution_grant(
+        &self,
+        decision: &CapabilityDecision,
+    ) -> Option<legion_debug::AdapterResolutionGrant> {
+        legion_debug::AdapterResolutionGrant::from_decision(
+            decision,
+            &self
+                .security_broker
+                .policy
+                .debug_adapter_policy
+                .allowed_adapter_binaries,
+        )
+    }
+
     pub(crate) fn resolve_adapter_for_launch(
         &self,
+        decision: &CapabilityDecision,
         preferred_type: &str,
     ) -> Option<legion_debug::ResolvedAdapter> {
+        let grant = self.adapter_resolution_grant(decision)?;
         if self.prefer_live_fake_for_tests {
-            return legion_debug::fake_dap_adapter_path().map(|program| {
-                legion_debug::ResolvedAdapter {
+            // The test seam builds its own ResolvedAdapter, so it has to run the
+            // program past the same allowlist or it would be a hole in the gate.
+            return legion_debug::fake_dap_adapter_path()
+                .filter(|program| grant.permits_program(program))
+                .map(|program| legion_debug::ResolvedAdapter {
                     program,
                     args: Vec::new(),
                     adapter_type: "legion-fake".to_string(),
                     is_fake: true,
-                }
-            });
+                });
         }
-        resolve_live_adapter(preferred_type)
+        resolve_live_adapter(&grant, preferred_type)
     }
 
     pub(crate) fn launch_live(
@@ -1137,5 +1219,78 @@ fn run_live_dap_prebuild_impl(
                 return Err(format!("cargo prebuild wait failed: {err}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod adapter_policy_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn decision(granted: bool, capability: &str) -> CapabilityDecision {
+        CapabilityDecision {
+            decision_id: CapabilityDecisionId(3),
+            granted,
+            capability: CapabilityId(capability.to_string()),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn capability_id_matches_between_security_policy_and_debug_crate() {
+        // The two crates cannot depend on each other, so the shared id is only
+        // as good as this assertion: if either side renames it, the grant stops
+        // minting and every launch silently falls back to the fixture.
+        assert_eq!(
+            DEBUG_ADAPTER_LAUNCH_CAPABILITY,
+            legion_debug::DEBUG_ADAPTER_LAUNCH_CAPABILITY
+        );
+    }
+
+    #[test]
+    fn denied_decision_mints_no_resolution_grant() {
+        let workflow = DebugWorkflow::default();
+        assert!(
+            workflow
+                .adapter_resolution_grant(&decision(false, DEBUG_ADAPTER_LAUNCH_CAPABILITY))
+                .is_none(),
+            "a denied decision must not authorize adapter resolution"
+        );
+        assert!(
+            workflow
+                .adapter_resolution_grant(&decision(true, "terminal.launch"))
+                .is_none(),
+            "a grant for another capability must not authorize adapter resolution"
+        );
+    }
+
+    #[test]
+    fn shipped_policy_allows_rust_adapters_but_not_the_ci_fake() {
+        let workflow = DebugWorkflow::default();
+        let grant = workflow
+            .adapter_resolution_grant(&decision(true, DEBUG_ADAPTER_LAUNCH_CAPABILITY))
+            .expect("granted decision mints a grant under the shipped policy");
+        assert!(grant.permits_program(Path::new("lldb-dap")));
+        assert!(grant.permits_program(Path::new("/opt/codelldb/codelldb")));
+        assert!(
+            !grant.permits_program(Path::new("fake_dap_adapter.exe")),
+            "the in-tree CI fake must not be launchable under the shipped policy"
+        );
+        assert!(!grant.permits_program(Path::new("C:\\Windows\\System32\\cmd.exe")));
+    }
+
+    #[test]
+    fn live_fake_test_seam_widens_policy_rather_than_bypassing_it() {
+        let mut workflow = DebugWorkflow::default();
+        workflow.enable_live_fake_for_tests();
+        let grant = workflow
+            .adapter_resolution_grant(&decision(true, DEBUG_ADAPTER_LAUNCH_CAPABILITY))
+            .expect("grant");
+        assert!(
+            grant.permits_program(Path::new("fake_dap_adapter")),
+            "the seam is supposed to allowlist the fake, not skip the allowlist"
+        );
+        // Still a policy, not an open door.
+        assert!(!grant.permits_program(Path::new("bash")));
     }
 }

@@ -12,13 +12,36 @@
 
 use std::time::Duration;
 
-use legion_debug::{LiveDapSession, dogfood_requires_system_adapter, resolve_system_adapter};
+use legion_debug::{
+    AdapterResolutionGrant, DEBUG_ADAPTER_LAUNCH_CAPABILITY, LiveDapSession,
+    dogfood_requires_system_adapter, resolve_system_adapter,
+};
+use legion_protocol::{CapabilityDecision, CapabilityDecisionId, CapabilityId};
+
+/// Stand-in for the app's brokered decision: dogfood exercises the adapter, not
+/// the policy, so it mints a grant for the binaries the shipped default allows.
+fn dogfood_grant() -> AdapterResolutionGrant {
+    AdapterResolutionGrant::from_decision(
+        &CapabilityDecision {
+            decision_id: CapabilityDecisionId(1),
+            granted: true,
+            capability: CapabilityId(DEBUG_ADAPTER_LAUNCH_CAPABILITY.to_string()),
+            reason: None,
+        },
+        &[
+            "lldb-dap".to_string(),
+            "lldb-vscode".to_string(),
+            "codelldb".to_string(),
+        ],
+    )
+    .expect("granted decision mints a grant")
+}
 
 #[test]
 fn system_adapter_initialize_handshake_dogfood() {
     let require = dogfood_requires_system_adapter();
 
-    let Some(adapter) = resolve_system_adapter("lldb-dap") else {
+    let Some(adapter) = resolve_system_adapter(&dogfood_grant(), "lldb-dap") else {
         if require {
             panic!(
                 "LEGION_DAP_DOGFOOD=1 requires a system adapter \

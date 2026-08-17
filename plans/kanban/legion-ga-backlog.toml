@@ -747,11 +747,21 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Wire CodeLLDB for Rust with policy-gated adapter resolution"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-debug/src/adapters/codelldb.rs", "crates/legion-security/src/policy.rs"]
+    # `adapters/codelldb.rs` was never created: CodeLLDB is one allowlisted name in
+    # the shared resolver, not a per-adapter module. Files list reflects reality.
+    files = ["crates/legion-debug/src/adapter_resolve.rs", "crates/legion-security/src/policy.rs", "crates/legion-app/src/debug_workflow.rs"]
     dependencies = ["P2.F3.T1"]
     verification = ["cargo test -p legion-debug", "cargo test -p legion-security"]
     acceptance = ["Adapter binary resolution is policy-gated; untrusted workspaces cannot launch debug adapters."]
     stop_condition = "Do not add a 'trust all adapters' switch."
+    # 2026-08-16: the acceptance sentence is met and tested — resolution requires a
+    # granted `debug.adapter.launch` decision and an adapter-binary allowlist
+    # (`explicit_adapter_path_is_refused_unless_the_binary_is_allowlisted` carries a
+    # negative case and a positive control), and untrusted/unknown trust is denied by
+    # the broker. Held at in-progress because the card's *title* names CodeLLDB and no
+    # CodeLLDB or lldb-dap binary has ever been run for it: both system-adapter dogfood
+    # tests report ok via their soft-skip branch, and a clean skip is not proof. To
+    # close: install an adapter and run the dogfood tests with LEGION_DAP_DOGFOOD=1.
     status = "in-progress"
     evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B3-resolution-trust-dual-mode.md"
 
