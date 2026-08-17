@@ -377,8 +377,8 @@ than faked.
 
 | Gate | Result |
 | --- | --- |
-| `cargo fmt --all` | PASS (no diff after formatting) |
-| `cargo test --workspace --all-targets --no-fail-fast` | PASS — 255 test binaries, 2885 tests passed, 0 failed |
+| `cargo fmt --all --check` | PASS (exit 0) |
+| `cargo test --workspace --all-targets --no-fail-fast` | PASS — 255 test binaries, 2895 tests passed, 0 failed |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS (after fixing one `redundant_closure` in the new policy code) |
 | `cargo run -p xtask -- verify-kanban-backlog` | PASS — 10 epics, 41 features, 160 tasks |
 | `cargo run -p xtask -- docs-hygiene` | PASS |
@@ -386,12 +386,27 @@ than faked.
 | `cargo run -p xtask -- verify-readiness-consistency` | PASS — 160 tasks cross-checked |
 | `cargo run -p xtask -- golden-path-1` | PASS (T1 acceptance names GP-1, so it was run explicitly) |
 
-One pre-existing guard caught a real regression during this work and is
-recorded rather than hidden: adding the three git remote palette specs tripped
+Two pre-existing guards caught real regressions during this work and are
+recorded rather than hidden. Adding the three git remote palette specs tripped
 `palette_command_mode_covers_registered_command_catalog`, the catalog-drift
-guard in `crates/legion-app/tests/palette.rs`. That is the guard working as
-designed; the three commands were added to its allowlist alongside the other
-git mutations.
+guard in `crates/legion-app/tests/palette.rs`; the three commands were added to
+its allowlist alongside the other git mutations. Adding
+`consented_git_remote_hosts` to `NetworkPolicy` broke an exhaustive struct
+literal in the org-policy-bundle fixture, which the workspace build caught.
+
+Chokepoint growth against merge base `7609c775`, by `git diff --numstat`:
+
+| File | Added | Removed | Net |
+| --- | --- | --- | --- |
+| `crates/legion-app/src/lib.rs` | 95 | 14 | +81 |
+| `crates/legion-ui/src/ui.rs` | 78 | 0 | +78 |
+| `crates/legion-project/src/lib.rs` | 65 | 3 | +62 |
+| `crates/legion-desktop/src/bridge.rs` | 44 | 0 | +44 |
+| `crates/legion-desktop/src/view.rs` | 36 | 0 | +36 |
+
+`lib.rs` first measured +179, over the ~120-line chokepoint budget. The two
+dispatch methods were then moved verbatim into
+`crates/legion-app/src/git_remote.rs`, bringing it to +81.
 
 ### Backlog status
 
