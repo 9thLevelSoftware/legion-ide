@@ -4137,6 +4137,7 @@ dependencies = [
  "chacha20poly1305",
  "keyring",
  "legion-protocol",
+ "legion-security",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -4160,10 +4161,12 @@ name = "legion-security"
 version = "0.1.0"
 dependencies = [
  "legion-protocol",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]
@@ -4199,6 +4202,7 @@ version = "0.1.0"
 dependencies = [
  "legion-platform",
  "legion-protocol",
+ "legion-security",
  "serde_json",
  "thiserror 2.0.18",
  "unicode-width",

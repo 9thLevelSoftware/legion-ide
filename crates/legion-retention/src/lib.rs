@@ -25,6 +25,7 @@ use legion_protocol::{
     validate_raw_source_retention_access_audit, validate_raw_source_vault_envelope,
     validate_raw_source_vault_recovery_report,
 };
+use legion_security::{ScanPosture, SecretRuleId, scan_text_for_secrets};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -102,6 +103,68 @@ pub struct RawSourceVaultFile {
     pub bytes: Vec<u8>,
 }
 
+/// Metadata-only result of scanning a capture request for credentials.
+///
+/// Carries rule identifiers and counts, never matched bytes: this record is safe
+/// to place in an audit trail, which the scanned content is not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RawSourceCaptureSecretScan {
+    /// Number of files that produced at least one finding.
+    pub affected_file_count: usize,
+    /// Total findings across every scanned file.
+    pub finding_count: usize,
+    /// Distinct rule identifiers that fired, sorted and deduplicated.
+    pub rule_ids: Vec<SecretRuleId>,
+}
+
+impl RawSourceCaptureSecretScan {
+    /// Returns true when nothing was detected.
+    pub fn is_clean(&self) -> bool {
+        self.finding_count == 0
+    }
+
+    /// Renders a display-safe reason string for a denial or audit record.
+    pub fn display_safe_summary(&self) -> String {
+        let rules = self
+            .rule_ids
+            .iter()
+            .map(|rule| rule.stable_id())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "files={} findings={} rules=[{rules}]",
+            self.affected_file_count, self.finding_count
+        )
+    }
+}
+
+/// Scan a set of capture files for credentials before they are sealed.
+///
+/// Bytes that are not valid UTF-8 are scanned lossily: a credential embedded in
+/// an otherwise binary file is still ASCII, and skipping non-UTF-8 files would
+/// give an attacker a trivial bypass (append one invalid byte).
+///
+/// The posture is [`ScanPosture::EgressRecall`]. A retained bundle is a bundle
+/// that a later consent grant can export to a hosted endpoint, so the decision
+/// about what is safe to keep must be made under the same recall-first rules as
+/// the decision about what is safe to send.
+pub fn scan_raw_source_capture_files(files: &[RawSourceVaultFile]) -> RawSourceCaptureSecretScan {
+    let mut scan = RawSourceCaptureSecretScan::default();
+    for file in files {
+        let text = String::from_utf8_lossy(&file.bytes);
+        let report = scan_text_for_secrets(&text);
+        if !report.requires_redaction(ScanPosture::EgressRecall) {
+            continue;
+        }
+        scan.affected_file_count += 1;
+        scan.finding_count += report.findings.len();
+        scan.rule_ids.extend(report.rule_ids());
+    }
+    scan.rule_ids.sort_unstable();
+    scan.rule_ids.dedup();
+    scan
+}
+
 /// Raw-source vault configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawSourceVaultConfig {
@@ -109,6 +172,13 @@ pub struct RawSourceVaultConfig {
     pub enabled: bool,
     /// Maximum encrypted bytes per bundle.
     pub max_bundle_bytes: u64,
+    /// Refuse to retain a bundle whose plaintext contains detected credentials.
+    ///
+    /// Defaults to `true`. Consent to retain source is not consent to retain the
+    /// credentials that happen to be sitting in it, and a retained bundle is an
+    /// exportable bundle. Failing the capture closed keeps the credential out of
+    /// the vault, the vault index, and any future hosted export in one decision.
+    pub deny_capture_on_detected_secrets: bool,
 }
 
 impl RawSourceVaultConfig {
@@ -126,6 +196,7 @@ impl Default for RawSourceVaultConfig {
         Self {
             enabled: false,
             max_bundle_bytes: 5 * 1024 * 1024,
+            deny_capture_on_detected_secrets: true,
         }
     }
 }
@@ -654,6 +725,20 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
                 reason: err.message,
             }
         })?;
+        // Scan before sealing. Once the bundle is encrypted the plaintext is gone
+        // from this process, so this is the only point at which the vault can
+        // refuse to retain a credential.
+        if self.config.deny_capture_on_detected_secrets {
+            let secret_scan = scan_raw_source_capture_files(&files);
+            if !secret_scan.is_clean() {
+                return Err(RawSourceVaultError::Denied {
+                    reason: format!(
+                        "raw-source capture contains detected credentials: {}",
+                        secret_scan.display_safe_summary()
+                    ),
+                });
+            }
+        }
         let plaintext = Zeroizing::new(self.pack_files(&request, files)?);
         if plaintext.is_empty() || plaintext.len() as u64 > self.config.max_bundle_bytes {
             return Err(RawSourceVaultError::Denied {
@@ -2164,6 +2249,86 @@ mod tests {
             vault.capture_bundle(grant(), request(), files()),
             Err(RawSourceVaultError::Denied { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Builds an AWS access key id shaped credential without committing one.
+    ///
+    /// The value is generated from a fixed seed rather than written as a literal
+    /// so that no string in this repository has the shape of a live credential.
+    fn synthetic_access_key_id() -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut state: u64 = 0x5eed_1234_9abc_def1;
+        let body: String = (0..16)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ALPHABET[((state >> 33) as usize) % ALPHABET.len()] as char
+            })
+            .collect();
+        format!("AKIA{body}")
+    }
+
+    #[test]
+    fn file_backed_vault_refuses_to_retain_detected_credentials() {
+        let root = temp_vault_root("secret-scan");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+
+        let key_id = synthetic_access_key_id();
+        let files = vec![RawSourceVaultFile {
+            path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+            bytes: format!("fn main() {{ connect(\"{key_id}\"); }}").into_bytes(),
+        }];
+
+        let scan = scan_raw_source_capture_files(&files);
+        assert!(!scan.is_clean());
+        assert_eq!(scan.affected_file_count, 1);
+
+        let error = vault
+            .capture_bundle(grant(), request(), files)
+            .expect_err("capture must fail closed when credentials are detected");
+        match error {
+            RawSourceVaultError::Denied { reason } => {
+                assert!(reason.contains("detected credentials"));
+                // The denial reason travels into audit records, so it must stay
+                // metadata-only: rule identifiers and counts, never the value.
+                assert!(!reason.contains(key_id.as_str()));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn credential_free_capture_still_succeeds_after_scanning() {
+        let root = temp_vault_root("secret-scan-clean");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+
+        vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() { println!(\"hello\"); }".to_vec(),
+                }],
+            )
+            .expect("clean capture must still succeed");
+
         let _ = fs::remove_dir_all(root);
     }
 
