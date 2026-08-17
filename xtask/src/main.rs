@@ -30,6 +30,7 @@ const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/ph
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
 const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
+const DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH: &str = "target/dap-adapter/probe_report.toml";
 const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
@@ -482,6 +483,33 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_CLAIM_AUDIT_LEDGER_PATH)]
         ledger: String,
     },
+    /// Report which DAP adapter binaries this machine has (P2.F3.T2).
+    ///
+    /// The dogfood tests for policy-gated adapter resolution were reporting
+    /// `ok` through a soft-skip on every runner, which proves nothing about a
+    /// real adapter. This command establishes the precondition: what each
+    /// machine actually ships, under which names, at which versions. It is
+    /// report-only unless `--require` is passed.
+    #[command(name = "dap-adapter-probe")]
+    DapAdapterProbe {
+        /// How these binaries got here: shipped (image default), installed
+        /// (a workflow step put them there), or unknown. Recorded verbatim —
+        /// "the platform ships this" and "we installed this" support different
+        /// claims and must not be conflated in evidence.
+        #[arg(long, default_value = "unknown")]
+        provenance: String,
+        /// Fail when no adapter the resolver could return is present. Use
+        /// after an install step so a failed install is reported there instead
+        /// of as a confusing dogfood-test failure.
+        #[arg(long)]
+        require: bool,
+        /// Skip running each found binary with `--version`.
+        #[arg(long)]
+        no_versions: bool,
+        /// Where to write the TOML report.
+        #[arg(long, default_value = DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH)]
+        out: String,
+    },
     /// Forbid egui::TextEdit in the desktop code-canvas/editor render path.
     NoEguiTextedit {
         /// Path to no-egui-textedit TOML configuration.
@@ -885,6 +913,12 @@ fn main() {
         }
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
         Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
+        Commands::DapAdapterProbe {
+            provenance,
+            require,
+            no_versions,
+            out,
+        } => run_dap_adapter_probe_command(&provenance, require, !no_versions, &out),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
         Commands::ExtractBeforeModify { config, base } => {
             run_extract_before_modify_command(&config, &base)
@@ -1212,6 +1246,55 @@ fn run_extract_before_modify_command(config_path: &str, base_ref: &str) -> i32 {
             1
         }
     }
+}
+
+fn run_dap_adapter_probe_command(
+    provenance: &str,
+    require: bool,
+    capture_versions: bool,
+    out_path: &str,
+) -> i32 {
+    let provenance = match xtask::dap_adapter_probe::Provenance::parse(provenance) {
+        Ok(provenance) => provenance,
+        Err(err) => {
+            eprintln!("dap-adapter-probe failed: {err}");
+            return 1;
+        }
+    };
+
+    let report = xtask::dap_adapter_probe::probe(provenance, capture_versions);
+    print!("{}", xtask::dap_adapter_probe::render_summary(&report));
+
+    let out_path = Path::new(out_path);
+    if let Some(parent) = out_path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "dap-adapter-probe failed: create {}: {err}",
+            parent.display()
+        );
+        return 1;
+    }
+    let rendered = xtask::dap_adapter_probe::render_toml(&report);
+    if let Err(err) = fs::write(out_path, rendered) {
+        eprintln!(
+            "dap-adapter-probe failed: write {}: {err}",
+            out_path.display()
+        );
+        return 1;
+    }
+    println!("dap-adapter-probe report: {}", out_path.display());
+
+    if require && !report.has_resolvable_adapter() {
+        eprintln!(
+            "dap-adapter-probe --require: no adapter the resolver can return is on PATH. \
+             Searched {}. Install one (or expose an existing versioned binary under an \
+             exact name) before running the LEGION_DAP_DOGFOOD=1 tests.",
+            xtask::dap_adapter_probe::PROBE_NAMES.join(", ")
+        );
+        return 1;
+    }
+    0
 }
 
 fn run_no_egui_textedit_command(config_path: &str) -> i32 {

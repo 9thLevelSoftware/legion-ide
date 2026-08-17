@@ -1,0 +1,274 @@
+name: Legion DAP Dogfood
+
+# P2.F3.T2: turn the debugger's clean skip into actual proof.
+#
+# `system_adapter_dogfood` and `system_adapter_launch_step_dogfood` have always
+# reported `ok` on every runner — through their soft-skip branch, because no
+# lldb-dap/codelldb binary was ever present. A clean skip is not proof. This
+# workflow removes the excuse in both directions:
+#
+#   inventory: what does each runner image ACTUALLY ship, before we touch it?
+#              Report-only, never fails, uploads a TOML artifact per OS.
+#   dogfood:   install an adapter when the image has none, then run the two
+#              dogfood tests with LEGION_DAP_DOGFOOD=1, which the tests already
+#              honour to FAIL CLOSED instead of skipping.
+#
+# The two jobs are separate on purpose. `inventory` answers "the platform ships
+# this" and `dogfood` answers "an adapter we may have installed works". Those
+# support different claims and an evidence file that merges them is lying by
+# omission — hence the `provenance` field in every probe report.
+#
+# NOTHING HERE WIDENS THE POLICY GATE. The adapter allowlist
+# (`AdapterResolutionGrant`) is untouched: where a distro ships a versioned
+# `lldb-dap-18`, the install step exposes it under the exact filename the
+# resolver already searches for. That is a filename, not a trust decision, and
+# a binary that is not an allowlisted adapter still cannot be launched.
+#
+# This is an INDEPENDENT workflow: its failures do NOT block pull-request merges
+# unless the team explicitly adds it to a branch-protection required-check set.
+# Same rationale as legion-smoke.yml — it is new, it installs toolchains, and it
+# has no proven stable history yet.
+
+on:
+  workflow_dispatch:
+  # Also run on pull requests that touch the adapter-resolution surface or this
+  # workflow itself, so the PR that changes the gate carries its own real-adapter
+  # evidence instead of a maintainer having to remember to dispatch it.
+  pull_request:
+    paths:
+      - '.github/workflows/legion-dap-dogfood.yml'
+      - 'crates/legion-debug/**'
+      - 'xtask/src/dap_adapter_probe.rs'
+  schedule:
+    # Weekly on Mondays at 07:00 UTC, an hour after legion-smoke.
+    - cron: '0 7 * * 1'
+
+concurrency:
+  group: legion-dap-dogfood-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inventory:
+    name: Adapter inventory, pre-install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      # Report-only: no `--require`. The whole point of this job is to record
+      # what the image has, including "nothing", without turning that into a
+      # red run. `--provenance shipped` is truthful only because no install
+      # step runs before it in this job — do not add one.
+      - name: Probe for DAP adapters (report-only)
+        run: cargo run -p xtask -- dap-adapter-probe --provenance shipped
+
+      - name: Upload adapter inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dap-adapter-inventory-${{ matrix.os }}
+          path: target/dap-adapter/probe_report.toml
+          if-no-files-found: warn
+
+  dogfood:
+    name: System adapter dogfood, fail-closed (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      # Each provisioning step below sets LEGION_DAP_PROVENANCE so the probe
+      # report records whether the adapter was already on the image or whether
+      # this step put it there.
+      - name: Provision an adapter (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$HOME/.legion-dap-bin"
+          echo "$HOME/.legion-dap-bin" >> "$GITHUB_PATH"
+
+          if command -v lldb-dap >/dev/null 2>&1; then
+            echo "LEGION_DAP_PROVENANCE=shipped" >> "$GITHUB_ENV"
+            echo "image already provides lldb-dap at $(command -v lldb-dap)"
+            exit 0
+          fi
+
+          echo "LEGION_DAP_PROVENANCE=installed" >> "$GITHUB_ENV"
+          sudo apt-get update
+          # The `lldb` metapackage pulls the distro-default versioned LLVM,
+          # which lands lldb-dap (or lldb-vscode on older LLVM) under a
+          # VERSIONED name that the resolver does not search for.
+          sudo apt-get install -y lldb
+
+          target=""
+          for candidate in \
+            /usr/lib/llvm-*/bin/lldb-dap \
+            /usr/bin/lldb-dap-* \
+            /usr/lib/llvm-*/bin/lldb-vscode \
+            /usr/bin/lldb-vscode-*
+          do
+            if [ -x "$candidate" ]; then
+              target="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$target" ]; then
+            echo "::error::no lldb-dap/lldb-vscode binary after installing the lldb package"
+            echo "--- lldb-like binaries present ---"
+            find /usr/bin /usr/lib/llvm-*/bin -maxdepth 1 -name '*lldb*' -print 2>/dev/null
+            exit 1
+          fi
+
+          # Expose under the exact filename the resolver searches for. This
+          # changes a NAME, not the allowlist: `lldb-dap` was already an
+          # allowlisted adapter, and nothing else became launchable.
+          ln -sf "$target" "$HOME/.legion-dap-bin/lldb-dap"
+          echo "exposed $target as \$HOME/.legion-dap-bin/lldb-dap"
+
+      - name: Provision an adapter (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$HOME/.legion-dap-bin"
+          echo "$HOME/.legion-dap-bin" >> "$GITHUB_PATH"
+
+          if command -v lldb-dap >/dev/null 2>&1; then
+            echo "LEGION_DAP_PROVENANCE=shipped" >> "$GITHUB_ENV"
+            echo "image already provides lldb-dap at $(command -v lldb-dap)"
+            exit 0
+          fi
+
+          # Xcode command line tools ship lldb; recent versions include
+          # lldb-dap next to it but not on PATH. Finding it there is still
+          # "shipped" — nothing was installed.
+          xcrun_path="$(xcrun -f lldb-dap 2>/dev/null)"
+          if [ -n "$xcrun_path" ] && [ -x "$xcrun_path" ]; then
+            echo "LEGION_DAP_PROVENANCE=shipped" >> "$GITHUB_ENV"
+            ln -sf "$xcrun_path" "$HOME/.legion-dap-bin/lldb-dap"
+            echo "exposed Xcode-provided $xcrun_path on PATH"
+            exit 0
+          fi
+
+          echo "LEGION_DAP_PROVENANCE=installed" >> "$GITHUB_ENV"
+          brew install llvm
+          prefix="$(brew --prefix llvm)"
+          if [ -x "$prefix/bin/lldb-dap" ]; then
+            ln -sf "$prefix/bin/lldb-dap" "$HOME/.legion-dap-bin/lldb-dap"
+            echo "exposed $prefix/bin/lldb-dap on PATH"
+            exit 0
+          fi
+
+          echo "::error::brew llvm did not provide lldb-dap under $prefix/bin"
+          ls -1 "$prefix/bin" 2>/dev/null | grep -i lldb
+          exit 1
+
+      - name: Provision an adapter (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -uo pipefail
+          if command -v lldb-dap >/dev/null 2>&1; then
+            echo "LEGION_DAP_PROVENANCE=shipped" >> "$GITHUB_ENV"
+            echo "image already provides lldb-dap at $(command -v lldb-dap)"
+            exit 0
+          fi
+
+          # The windows-latest image ships LLVM under Program Files but does
+          # not always put its bin directory on PATH. Finding it there is
+          # "shipped" — chocolatey is only the fallback.
+          for dir in "/c/Program Files/LLVM/bin" "/c/Program Files (x86)/LLVM/bin"; do
+            if [ -x "$dir/lldb-dap.exe" ] || [ -x "$dir/lldb-vscode.exe" ]; then
+              echo "LEGION_DAP_PROVENANCE=shipped" >> "$GITHUB_ENV"
+              # Windows symlinks need privileges; add the directory instead.
+              cygpath -w "$dir" >> "$GITHUB_PATH"
+              echo "added $dir to PATH"
+              exit 0
+            fi
+          done
+
+          echo "LEGION_DAP_PROVENANCE=installed" >> "$GITHUB_ENV"
+          choco install llvm --yes --no-progress
+          if [ -x "/c/Program Files/LLVM/bin/lldb-dap.exe" ]; then
+            cygpath -w "/c/Program Files/LLVM/bin" >> "$GITHUB_PATH"
+            echo "added chocolatey LLVM bin to PATH"
+            exit 0
+          fi
+
+          echo "::error::no lldb-dap.exe after installing LLVM"
+          ls -1 "/c/Program Files/LLVM/bin" 2>/dev/null | grep -i lldb
+          exit 1
+
+      # `--require` here so a failed provisioning step is reported as exactly
+      # that, instead of surfacing later as a confusing dogfood-test panic.
+      - name: Probe for DAP adapters (post-provisioning, required)
+        run: >
+          cargo run -p xtask -- dap-adapter-probe
+          --provenance ${{ env.LEGION_DAP_PROVENANCE || 'unknown' }}
+          --require
+          --out target/dap-adapter/probe_report_dogfood.toml
+
+      - name: Upload post-provisioning probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dap-adapter-dogfood-probe-${{ matrix.os }}
+          path: target/dap-adapter/probe_report_dogfood.toml
+          if-no-files-found: warn
+
+      # B9 scope: resolve, spawn, initialize, disconnect. LEGION_DAP_DOGFOOD=1
+      # is what makes this fail instead of skip. This proves the adapter
+      # LAUNCHES and speaks Microsoft DAP; it is not a debug session.
+      - name: Dogfood — initialize handshake against the system adapter
+        env:
+          LEGION_DAP_DOGFOOD: "1"
+        run: cargo test -p legion-debug --test system_adapter_dogfood -- --nocapture
+
+      # B13 scope: build a tiny Rust debugee, setBreakpoints, launch with
+      # stopOnEntry, one step over, disconnect. This is a debug SESSION against
+      # a real adapter. It is still not zero-config Rust debugging in the
+      # product UI (roadmap 1.9) — no Legion UI is involved anywhere here.
+      - name: Dogfood — launch and step a real Rust debugee
+        env:
+          LEGION_DAP_DOGFOOD: "1"
+        run: cargo test -p legion-debug --test system_adapter_launch_step_dogfood -- --nocapture
+
+      # Control: the policy gate must still refuse a non-allowlisted binary on a
+      # machine that HAS a real adapter installed. This is the case that used to
+      # be untestable locally, and the exact scenario that broke this test once
+      # before (it asserted "nothing resolves", which silently required that no
+      # debugger be present).
+      - name: Policy gate still refuses non-allowlisted binaries
+        run: cargo test -p legion-debug --test adapter_resolution_policy -- --nocapture

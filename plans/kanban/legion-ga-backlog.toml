@@ -789,6 +789,19 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     # CodeLLDB or lldb-dap binary has ever been run for it: both system-adapter dogfood
     # tests report ok via their soft-skip branch, and a clean skip is not proof. To
     # close: install an adapter and run the dogfood tests with LEGION_DAP_DOGFOOD=1.
+    #
+    # 2026-08-17: that close-out path now has machinery but still no result.
+    # `.github/workflows/legion-dap-dogfood.yml` inventories each runner image
+    # (`cargo run -p xtask -- dap-adapter-probe`, report-only, artifact per OS),
+    # then provisions an adapter and runs both dogfood tests with
+    # LEGION_DAP_DOGFOOD=1 so they fail closed instead of skipping. The allowlist
+    # is untouched — where a distro ships a versioned `lldb-dap-18`, the workflow
+    # symlinks it to the already-allowlisted name `lldb-dap`; it does not teach
+    # policy to accept versioned stems. Still in-progress because no CI run has
+    # happened: the developer machine has no adapter, nothing has been resolved,
+    # spawned or handshaken, and CodeLLDB itself remains unexercised (the runners
+    # provide lldb-dap via LLVM). To close: dispatch that workflow and record the
+    # per-platform result in the evidence file's 2026-08-17 section.
     status = "in-progress"
     evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B3-resolution-trust-dual-mode.md"
 
