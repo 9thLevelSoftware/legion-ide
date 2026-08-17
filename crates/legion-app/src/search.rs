@@ -699,8 +699,15 @@ impl AppComposition {
                     .saturating_add(batch.omitted_hit_count);
                 result.diagnostics.extend(batch.diagnostics);
                 for hit in batch.hits {
-                    let byte_start = hit.byte_range.start as usize;
-                    let byte_end = hit.byte_range.end as usize;
+                    // `byte_range` is absolute within the file but `line_text` is
+                    // one line, so the column has to be measured from the start
+                    // of that line.  Indexing `line_text` with the absolute
+                    // offset saturates to the line length on every line after
+                    // the first, which reported each match as starting and
+                    // ending at the end of its line.
+                    let byte_start =
+                        hit.byte_range.start.saturating_sub(hit.line_byte_start) as usize;
+                    let byte_end = hit.byte_range.end.saturating_sub(hit.line_byte_start) as usize;
                     let character_start = count_chars_up_to(&hit.line_text, byte_start) as u32;
                     let character_end = count_chars_up_to(&hit.line_text, byte_end) as u32;
                     result.results.push(SearchResultProjection {
