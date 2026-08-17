@@ -522,3 +522,86 @@ fn slash_opens_the_editors_own_find_bar() {
         "`/` reuses the find bar rather than growing a second search UI"
     );
 }
+
+// ─── Keystrokes through the app ─────────────────────────────────────────────
+
+fn key(app: &mut AppComposition, key: char) {
+    app.dispatch_vim_key(key, false).expect("key dispatches");
+}
+
+#[test]
+fn typing_dw_deletes_a_word() {
+    let (mut app, buffer_id) = app_with_text(
+        "fn main() {}
+",
+    );
+    enable_vim(&mut app);
+    key(&mut app, 'd');
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "fn main() {}
+",
+        "`d` alone must not delete anything"
+    );
+    key(&mut app, 'w');
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "main() {}
+"
+    );
+}
+
+#[test]
+fn a_count_prefix_survives_the_round_trip() {
+    let (mut app, buffer_id) = app_with_text(
+        "one two three four
+",
+    );
+    enable_vim(&mut app);
+    key(&mut app, '3');
+    key(&mut app, 'w');
+    assert_eq!(
+        cursor(&app, buffer_id),
+        (0, 14),
+        "3w reaches the fourth word"
+    );
+}
+
+#[test]
+fn keys_are_ignored_entirely_while_vim_is_disabled() {
+    let (mut app, buffer_id) = app_with_text(
+        "word
+",
+    );
+    key(&mut app, 'd');
+    key(&mut app, 'd');
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "word
+"
+    );
+    assert!(
+        !app.vim_consumes_text_input(),
+        "a disabled session must let the shell insert the keys as text"
+    );
+}
+
+#[test]
+fn normal_mode_consumes_keys_and_insert_mode_releases_them() {
+    let (mut app, _) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    assert!(
+        app.vim_consumes_text_input(),
+        "in normal mode a `j` is a command, and inserting it too would be the          loudest possible bug"
+    );
+
+    key(&mut app, 'i');
+    assert!(
+        !app.vim_consumes_text_input(),
+        "insert mode passes characters through to the buffer"
+    );
+    assert_eq!(app.vim_display_mode(), Some(EditorInputMode::Insert));
+}

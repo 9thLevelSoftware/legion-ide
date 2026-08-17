@@ -19830,6 +19830,42 @@ impl AppComposition {
         Ok(AppCommandOutcome::Edited(descriptor))
     }
 
+    /// Feed one keystroke to the Vim parser and dispatch what it resolves to.
+    ///
+    /// The desktop layer forwards raw keys rather than intents because the
+    /// parser is stateful — `d` then `w` is one command — and its state lives
+    /// here with the rest of the session. A shell that owned a second copy
+    /// would drift from this one the moment anything else changed the mode.
+    ///
+    /// A key that completes nothing returns `Noop`: a count digit or a pending
+    /// operator is the parser working, not a failure.
+    pub fn dispatch_vim_key(
+        &mut self,
+        key: char,
+        ctrl: bool,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        if !self.vim.enabled {
+            return Ok(AppCommandOutcome::Noop);
+        }
+        let Some(intent) = legion_ui::key_to_intent(&mut self.vim.state, key, ctrl) else {
+            return Ok(AppCommandOutcome::Noop);
+        };
+        self.dispatch_ui_intent(intent)
+    }
+
+    /// Whether keystrokes are Vim commands rather than typed text.
+    ///
+    /// The desktop layer asks before inserting a character: in normal mode a
+    /// `j` moves the cursor and must not also appear in the buffer.
+    pub fn vim_consumes_text_input(&self) -> bool {
+        !legion_ui::key_is_text_input(&self.vim.state, self.vim.enabled)
+    }
+
+    /// The Vim mode to display, or `None` when modal editing is off.
+    pub fn vim_display_mode(&self) -> Option<legion_ui::EditorInputMode> {
+        self.vim.display_mode()
+    }
+
     /// Whether the buffer find bar is showing.
     pub fn find_bar_visible(&self) -> bool {
         self.buffer_search_state.find_bar_visible
