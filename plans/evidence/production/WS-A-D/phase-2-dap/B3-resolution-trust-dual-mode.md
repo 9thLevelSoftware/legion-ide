@@ -198,3 +198,176 @@ cargo run -p xtask -- docs-hygiene
 cargo run -p xtask -- claim-audit
 cargo run -p xtask -- verify-readiness-consistency
 ```
+
+---
+
+# P2.F3.T2 — Making the skip falsifiable: CI adapter inventory + fail-closed dogfood
+
+**Date:** 2026-08-17
+**Task:** `P2.F3.T2` — "Wire CodeLLDB for Rust with policy-gated adapter resolution"
+**Backlog status after this change:** still `in-progress`. Read *Not claimed* before
+reading anything else here.
+
+## The problem this addresses
+
+The 2026-08-16 section above records the honest reason the card stayed open: both
+system-adapter dogfood tests report `ok` on every machine, through their **soft-skip**
+branch, because no `lldb-dap` / `lldb-vscode` / `codelldb` binary has ever been present
+when they ran. A clean skip is not proof. Closing the card needs a real adapter, and the
+developer machine does not have one.
+
+The opening is that a CI runner might. A test that asserted
+`resolve_system_adapter(...).is_none()` failed on `windows-latest`, which means the gate
+correctly refused a non-allowlisted explicit path and then found a genuinely allowlisted
+adapter on `PATH`. That is one data point on one image, and it was an accident. This
+change turns it into something deliberate and repeatable.
+
+## What was built
+
+| Item | Location |
+| --- | --- |
+| Adapter inventory command | `xtask/src/dap_adapter_probe.rs`, `cargo run -p xtask -- dap-adapter-probe` |
+| CLI wiring | `xtask/src/main.rs` (`DapAdapterProbe`, `run_dap_adapter_probe_command`) |
+| CI workflow | `.github/workflows/legion-dap-dogfood.yml` (`inventory` + `dogfood` jobs, 3 OSes) |
+
+`dap-adapter-probe` searches `PATH` for exactly the names the resolver searches for,
+records where each was found, whether the shipped allowlist would accept its stem, and its
+`--version` banner, then writes `target/dap-adapter/probe_report.toml`. It also reports
+**versioned variants** (`lldb-dap-18`) separately, because those are present-but-unreachable
+and the difference matters. It is report-only unless `--require` is passed.
+
+Flags: `--provenance shipped|installed|unknown` (recorded verbatim in the report),
+`--require` (exit 1 when nothing the resolver could return is present), `--no-versions`,
+`--out`.
+
+## The two jobs, and why they are two
+
+`inventory` runs **before anything is installed** and never fails. It answers "what does
+this runner image ship". `dogfood` provisions an adapter when the image has none and then
+runs the dogfood tests with `LEGION_DAP_DOGFOOD=1`. Merging them would produce a report
+that cannot distinguish *the platform ships a debugger* from *we installed a debugger*,
+which are different claims about what a user gets out of the box. The `provenance` field
+carries the distinction into the artifact; the provisioning steps set it from which branch
+they actually took, not from which OS they are on.
+
+## The gate was not weakened
+
+The adapter allowlist is untouched. No "trust all adapters" switch, no env override of
+policy, no new allowlist entry, no test seam in `legion-debug` at all.
+
+The one place this came close is Linux: `apt-get install lldb` leaves a **versioned**
+`lldb-dap-18`, which the resolver does not search for and whose stem the allowlist does not
+accept. The fix taken is a symlink exposing that binary under the exact filename
+`lldb-dap`, which is already allowlisted. That changes a *filename*, not a trust decision —
+a binary that is not an allowlisted adapter is no more launchable after this than before.
+The alternative fix (teach the resolver to search versioned names, and the allowlist to
+accept versioned stems) is a real policy widening and was deliberately not done here.
+
+The `dogfood` job also runs `adapter_resolution_policy` as a control, because that test's
+negative case — a non-allowlisted explicit `LEGION_DAP_ADAPTER` path is refused — is only
+fully meaningful on a machine that *has* a real adapter to fall through to.
+
+## What ran locally, and what it proves
+
+Local runs on the developer Windows machine, which has **no debug adapter**:
+
+| Command | Result |
+| --- | --- |
+| `cargo run -p xtask -- dap-adapter-probe --provenance shipped` | exit 0; `resolvable_adapter_count=0`; report written |
+| `cargo run -p xtask -- dap-adapter-probe --require` | exit 1, with the "install one" message |
+| same, with a synthetic `lldb-dap.exe` and `lldb-dap-18.exe` on `PATH` | exit 0; adapter found with `allowlisted_stem=true` and a `--version` banner; the versioned file reported as a non-resolvable variant |
+| `cargo test -p xtask --lib dap_adapter_probe` | 6 passed |
+
+The synthetic binary was a copy of `xtask.exe` renamed. It proves the **probe's** found-path,
+version capture, variant detection and TOML escaping work. It proves nothing whatsoever
+about a debugger, and it is not on any code path a dogfood test uses.
+
+The six unit tests are machine-independent by construction — they operate on synthetic
+paths and rendered strings, never on what this machine happens to have installed. That is
+deliberate: `explicit_adapter_path_is_refused_unless_the_binary_is_allowlisted` broke CI by
+quietly requiring that *no* adapter be installed, and the mirror-image bug (requiring one to
+be present) would break every developer machine instead.
+
+One of the six is a drift guard. `xtask` may not depend on `legion-debug`
+(`plans/dependency-policy.md`), so `PROBE_NAMES` is a copy of the resolver's alias list;
+`probe_names_match_the_resolver_alias_list` reads
+`crates/legion-debug/src/adapter_resolve.rs` and fails if the two diverge. Without it, a new
+alias in the resolver would make the probe silently under-report — reintroducing exactly the
+"looks fine, proves nothing" failure this work exists to remove.
+
+## Not claimed
+
+**Nothing here has yet run a debug adapter.** This section must be re-read after the first
+CI run; until then every row below is still open.
+
+1. **No CI run has happened.** The workflow is code, not evidence. No adapter binary has
+   been resolved, spawned, or handshaken by this change on any machine. The developer
+   machine still has no debugger and the local test suite still takes the soft-skip branch.
+2. **What each runner ships is still unknown.** The `windows-latest` LLVM data point is an
+   inference from one failed assertion, not an inventory. `ubuntu-latest` and `macos-latest`
+   are unmeasured. Producing that inventory is what the `inventory` job is for, and it has
+   not run.
+3. **Whether the dogfood tests pass under `LEGION_DAP_DOGFOOD=1` is unknown on all three
+   platforms.** The `system_adapter_dogfood` doc comment already records that some runners
+   ship an `lldb-dap.exe` without a working LLDB runtime; a fail-closed run is exactly what
+   would expose that, and it may well be what the first run reports on Windows.
+4. **Three different things are being kept apart here and must not be collapsed:**
+   - *resolution* — the resolver returns a policy-permitted path. Tested, including
+     negative cases; does not require a real adapter.
+   - *launch* — that binary spawns and completes a Microsoft-DAP `initialize`.
+     `system_adapter_dogfood` covers this and has never run against a real adapter.
+   - *a working debug session* — breakpoints, launch, stop, step.
+     `system_adapter_launch_step_dogfood` covers this and has never run against a real
+     adapter either.
+
+   None of the three is *zero-config Rust debugging*, which is what roadmap item 1.9 names.
+   That additionally requires launch-configuration discovery, and the 2026-08-16 section
+   above records `discover_cargo_debug_configurations` as a text parse that misses autobins,
+   workspace members and examples. No Legion UI is involved anywhere in this workflow.
+5. **The `apt` finding is a real product gap, recorded not fixed.** A Linux user who runs
+   `apt install lldb` gets a working debug adapter that Legion will not find, because the
+   resolver searches exact names and the allowlist matches exact stems. The CI workflow
+   sidesteps this with a symlink; a user has no symlink. Fixing it properly is two coupled
+   decisions — which names to search, and which stems policy accepts — and belongs in its
+   own task with its own tests, not smuggled in under this one.
+6. **CodeLLDB specifically is still unverified.** `codelldb` remains an allowlisted,
+   `PATH`-searched name. None of the provisioning steps install CodeLLDB (they install LLVM,
+   which provides `lldb-dap`), and whether the `codelldb` binary speaks Microsoft DAP over
+   stdio without a `--port` argument is still untested. The card's title says CodeLLDB; the
+   evidence, if the first run is green, will say `lldb-dap`.
+
+## What a maintainer should look for in the first run
+
+1. **`inventory` job, all three OSes** — read `dap-adapter-inventory-<os>` and the step log.
+   The answer to "what does each runner have" is `resolvable_adapter_count` plus the
+   `[[adapter]]` and `[[variant]]` tables. Expect this job to be green regardless of what it
+   finds; a green `inventory` with `resolvable_adapter_count = 0` is a *finding*, not a pass.
+2. **`dogfood` job, provisioning step** — which branch it took. The log line is either
+   "image already provides lldb-dap at …" or an install. Cross-check against
+   `LEGION_DAP_PROVENANCE` in the uploaded `dap-adapter-dogfood-probe-<os>` report. If those
+   disagree, the report is wrong and must be fixed before its numbers are quoted anywhere.
+3. **A red `Probe for DAP adapters (post-provisioning, required)` step** means provisioning
+   failed, not that the debugger failed. Its error names what was searched.
+4. **A red `Dogfood — initialize handshake` step** is the interesting failure: an adapter
+   resolved and spawned but did not complete `initialize`. That is the broken-LLVM-install
+   case, and it is a genuine result about that platform.
+5. **A red `Dogfood — launch and step`** with the handshake green means the adapter works
+   and the debug *session* does not — likely codesigning/ptrace permissions on macOS or
+   Linux. Also a genuine result.
+6. **Green on any platform** is the first time a real adapter has been launched for this
+   card. Record it here per-platform, with the version banner from the probe report, and
+   only then flip the card.
+
+## Verification
+
+```text
+cargo fmt --all
+cargo test --workspace --all-targets --no-fail-fast
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p xtask -- extract-before-modify
+cargo run -p xtask -- docs-hygiene
+cargo run -p xtask -- claim-audit
+cargo run -p xtask -- verify-kanban-backlog
+cargo run -p xtask -- verify-readiness-consistency
+cargo run -p xtask -- dap-adapter-probe --provenance shipped
+```
