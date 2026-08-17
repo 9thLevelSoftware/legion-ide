@@ -431,3 +431,83 @@ rather than as a sentence in this file.
 
 Whether an adapter can be *provisioned* on macOS is untested — the `dogfood`
 job's macOS branch has not yet had a successful run to report on.
+
+---
+
+## The inventory, complete — and the first real adapter launch — 2026-08-17
+
+Run: https://github.com/9thLevelSoftware/legion-ide/actions/runs/32046416145
+(after adding the Linux system dependencies the first attempt lacked)
+
+### All three images
+
+```
+linux   x86_64   no adapter found under any of: lldb-dap, lldb-vscode, codelldb
+                 variant lldb-dap-18 at /usr/bin/lldb-dap-18
+                   — not resolvable (resolver searches `lldb-dap` exactly)
+                 resolvable_adapter_count=0
+
+windows x86_64   found lldb-dap at C:\Program Files\LLVM\bin\lldb-dap.exe
+                   (allowlisted_stem=true) version=(none)
+                 resolvable_adapter_count=1
+
+macos   aarch64  no adapter found under any of: lldb-dap, lldb-vscode, codelldb
+                 resolvable_adapter_count=0
+```
+
+### The versioned-name gap is not hypothetical
+
+It was recorded earlier as a predicted consequence of `apt install lldb`. It is
+better than that: **the stock `ubuntu-latest` image already ships a working
+`lldb-dap-18` at `/usr/bin/lldb-dap-18`, and Legion cannot see it.** The
+resolver searches exact names and the allowlist matches exact stems, so a Linux
+user with a perfectly good debugger installed gets "no adapter found".
+
+That moves it from a design smell to a defect with a reproduction on a platform
+image anyone can pull. It still belongs in its own task — it is both a
+resolution decision (which names to search) and an allowlist decision (which
+stems to trust), and widening either casually is how a trust boundary erodes.
+
+### The first launch attempt, and what it says
+
+Windows had an adapter, so the dogfood test ran for real rather than skipping:
+
+```
+initialize handshake failed against C:\Program Files\LLVM\bin\lldb-dap.exe:
+  DAP session I/O failed: malformed DAP frame: unexpected EOF in headers
+```
+
+This is the fourth outcome the apparatus's reading guide anticipated — "adapter
+spawned but did not complete `initialize`" — and the test's own module doc
+predicted it too ("some runners ship a non-functional adapter").
+
+**But anticipating a failure mode is not diagnosing it.** "Unexpected EOF in
+headers" means the child produced no well-formed DAP frame: it may have exited
+immediately, written to stderr, or needed arguments Legion does not pass. Three
+candidate causes, and the evidence does not yet choose between them:
+
+1. the runner's `lldb-dap.exe` is non-functional as installed;
+2. Legion spawns it incorrectly — wrong arguments, wrong working directory, or
+   a stdio handle it does not set up;
+3. Legion's DAP framing is wrong on Windows.
+
+Cause 2 or 3 would be a product defect and the more important answer. Nothing
+here distinguishes them, and the honest reading is "the handshake does not
+complete", not "the runner's adapter is broken" — the second is a guess that
+happens to be the most comfortable of the three.
+
+### Not claimed
+
+**Still no working debug session, and now a known failure with an unknown
+cause.** `P2.F3.T2` stays `in-progress`.
+
+What genuinely advanced: resolution is exercised against a real binary on a real
+image, the inventory question is answered for all three platforms, and the
+Linux gap is confirmed rather than predicted. What did not: launch, session,
+breakpoints, and anything resembling roadmap 1.9's zero-config Rust debugging.
+
+The `dogfood` job is red and should stay red until the handshake question is
+answered. It is deliberately not a merge gate — the same posture
+`legion-smoke.yml` carries per `T0-D-smoke-promotion-criteria.md`, for the same
+reason: a job that gathers evidence about the outside world must not be able to
+block unrelated work, and must not be made green to unblock it either.
