@@ -449,3 +449,242 @@ mod tests {
         );
     }
 }
+
+// ─── Operator ranges ────────────────────────────────────────────────────────
+
+/// A character-space range an operator acts on.
+///
+/// Both ends are `(line, character)`; `end` is exclusive, which is how a text
+/// edit wants it even though Vim itself thinks in inclusive and exclusive
+/// *motions*. Converting that distinction here means the caller never has to
+/// know which motions are which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VimRange {
+    /// First character in the range.
+    pub start: (usize, usize),
+    /// One past the last character.
+    pub end: (usize, usize),
+    /// Whether the range covers whole lines.
+    ///
+    /// `dd` and `dw` both delete text, but a linewise range takes the line
+    /// terminator with it and pastes back as a new line rather than inline.
+    pub linewise: bool,
+}
+
+/// Whether a motion includes the character it lands on.
+///
+/// Vim splits motions into inclusive and exclusive, and operators behave
+/// differently for each: `dw` stops *before* the next word, `de` deletes the
+/// word's last character. Getting this wrong is off-by-one on every operator
+/// that uses the motion, so it is stated once here rather than at each call.
+fn is_inclusive(motion: VimMotionKind) -> bool {
+    matches!(
+        motion,
+        VimMotionKind::WordEnd
+            | VimMotionKind::FindChar(_)
+            | VimMotionKind::TillChar(_)
+            | VimMotionKind::LineEnd
+    )
+}
+
+/// The range `operator` + `motion` acts on, from `cursor`.
+///
+/// Returns `None` when the motion does not move: an operator over an empty
+/// range is not an edit, and applying one would delete nothing while still
+/// costing an undo entry.
+pub fn resolve_operator_range(
+    text: &str,
+    cursor: TextCoordinate,
+    motion: VimMotionKind,
+    count: usize,
+) -> Option<VimRange> {
+    let lines = line_chars(text);
+    let from = clamp_to_text(&lines, cursor);
+    let to = resolve_motion(text, cursor, motion, count);
+
+    let a = (from.line as usize, from.character as usize);
+    let b = (to.line as usize, to.character as usize);
+    if a == b {
+        return None;
+    }
+
+    let (mut start, mut end) = if a <= b { (a, b) } else { (b, a) };
+    // An inclusive motion takes the character it landed on, but only when the
+    // motion ran forward — `de` includes the word end, `db` does not include
+    // the character the cursor started on.
+    if is_inclusive(motion) && a <= b {
+        end = (end.0, end.1 + 1);
+    }
+    // Backward motions leave the starting character out: `db` deletes up to
+    // the cursor, not through it.
+    if a > b {
+        start = (start.0, start.1);
+    }
+    Some(VimRange {
+        start,
+        end,
+        linewise: false,
+    })
+}
+
+/// The range a line-wise operator acts on: `count` whole lines from `cursor`.
+///
+/// The range runs to the start of the line *after* the last one, so the line
+/// terminator goes with it and `dd` leaves no blank behind. On the final line
+/// there is no following line, so it ends at that line's end instead.
+pub fn resolve_linewise_range(text: &str, cursor: TextCoordinate, count: usize) -> VimRange {
+    let lines = line_chars(text);
+    let from = clamp_to_text(&lines, cursor);
+    let first = from.line as usize;
+    let last = (first + count.max(1) - 1).min(lines.len().saturating_sub(1));
+
+    let end = if last + 1 < lines.len() {
+        (last + 1, 0)
+    } else {
+        (last, line_len(&lines, last))
+    };
+    VimRange {
+        start: (first, 0),
+        end,
+        linewise: true,
+    }
+}
+
+/// The text `range` covers.
+pub fn range_text(text: &str, range: VimRange) -> String {
+    let lines = line_chars(text);
+    let mut out = String::new();
+    let (start_line, start_col) = range.start;
+    let (end_line, end_col) = range.end;
+
+    let last = end_line.min(lines.len().saturating_sub(1));
+    for (line, chars) in lines.iter().enumerate().take(last + 1).skip(start_line) {
+        let from = if line == start_line { start_col } else { 0 };
+        let to = if line == end_line {
+            end_col
+        } else {
+            chars.len()
+        };
+        for c in chars.iter().take(to.min(chars.len())).skip(from) {
+            out.push(*c);
+        }
+        if line < end_line {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+
+    const TEXT: &str = "fn main() {\n    let x = 1;\n}\n";
+
+    fn at(line: u32, character: u32) -> TextCoordinate {
+        TextCoordinate {
+            line,
+            character,
+            byte_offset: None,
+            utf16_offset: None,
+        }
+    }
+
+    #[test]
+    fn dw_stops_before_the_next_word() {
+        let range = resolve_operator_range(TEXT, at(0, 0), VimMotionKind::WordForward, 1).unwrap();
+        assert_eq!(range.start, (0, 0));
+        assert_eq!(range.end, (0, 3));
+        assert_eq!(range_text(TEXT, range), "fn ");
+    }
+
+    #[test]
+    fn de_includes_the_word_end() {
+        let range = resolve_operator_range(TEXT, at(0, 0), VimMotionKind::WordEnd, 1).unwrap();
+        assert_eq!(
+            range_text(TEXT, range),
+            "fn",
+            "an inclusive motion takes the character it lands on"
+        );
+    }
+
+    #[test]
+    fn df_includes_the_matched_character() {
+        let range =
+            resolve_operator_range(TEXT, at(0, 0), VimMotionKind::FindChar('('), 1).unwrap();
+        assert_eq!(range_text(TEXT, range), "fn main(");
+    }
+
+    #[test]
+    fn a_backward_motion_stops_at_the_cursor() {
+        let range = resolve_operator_range(TEXT, at(0, 3), VimMotionKind::WordBackward, 1).unwrap();
+        assert_eq!(range.start, (0, 0));
+        assert_eq!(
+            range.end,
+            (0, 3),
+            "`db` deletes up to the cursor, not through it"
+        );
+        assert_eq!(range_text(TEXT, range), "fn ");
+    }
+
+    #[test]
+    fn d_dollar_takes_the_last_character() {
+        let range = resolve_operator_range(TEXT, at(1, 4), VimMotionKind::LineEnd, 1).unwrap();
+        assert_eq!(
+            range_text(TEXT, range),
+            "let x = 1;",
+            "`d$` clears to the end of the line inclusive"
+        );
+    }
+
+    #[test]
+    fn a_motion_that_does_not_move_is_not_an_edit() {
+        assert!(
+            resolve_operator_range(TEXT, at(0, 0), VimMotionKind::Left, 1).is_none(),
+            "an empty range would cost an undo entry and change nothing"
+        );
+        assert!(resolve_operator_range(TEXT, at(0, 0), VimMotionKind::FindChar('z'), 1).is_none());
+    }
+
+    #[test]
+    fn dd_takes_the_line_terminator_with_it() {
+        let range = resolve_linewise_range(TEXT, at(0, 5), 1);
+        assert_eq!(range.start, (0, 0));
+        assert_eq!(
+            range.end,
+            (1, 0),
+            "ending at the next line's start is what stops `dd` leaving a blank"
+        );
+        assert!(range.linewise);
+        assert_eq!(range_text(TEXT, range), "fn main() {\n");
+    }
+
+    #[test]
+    fn a_count_takes_that_many_lines() {
+        let range = resolve_linewise_range(TEXT, at(0, 0), 2);
+        assert_eq!(range_text(TEXT, range), "fn main() {\n    let x = 1;\n");
+    }
+
+    #[test]
+    fn dd_on_the_last_line_has_no_following_line_to_reach() {
+        let range = resolve_linewise_range("only\n", at(1, 0), 1);
+        assert_eq!(range.start.0, range.end.0, "the trailing empty line");
+    }
+
+    #[test]
+    fn a_count_past_the_end_stops_at_the_last_line() {
+        let range = resolve_linewise_range(TEXT, at(0, 0), 99);
+        assert!(range.end.0 <= 3);
+    }
+
+    #[test]
+    fn ranges_are_measured_in_characters() {
+        let text = "let café = 1;\n";
+        let range = resolve_operator_range(text, at(0, 4), VimMotionKind::WordEnd, 1).unwrap();
+        assert_eq!(
+            range_text(text, range),
+            "café",
+            "measuring in bytes would cut the é in half"
+        );
+    }
+}

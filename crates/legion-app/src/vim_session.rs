@@ -34,6 +34,25 @@ pub struct VimSession {
     pub enabled: bool,
     /// Key-parser state, carried across keystrokes so multi-key commands work.
     pub state: VimState,
+    /// The unnamed register: what `y` and `d` last took, and what `p` puts.
+    ///
+    /// Vim's delete is a cut, not a discard, so `dd` then `p` moves a line —
+    /// treating delete as a discard would make the most common way to move
+    /// text silently lose it.
+    pub register: Option<VimRegister>,
+}
+
+/// Text held in the unnamed register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VimRegister {
+    /// The text itself.
+    pub text: String,
+    /// Whether it was taken line-wise.
+    ///
+    /// `p` puts a line-wise register on a new line below and a char-wise one
+    /// after the cursor. Losing this makes `dd`/`p` splice a whole line into
+    /// the middle of another.
+    pub linewise: bool,
 }
 
 impl VimSession {

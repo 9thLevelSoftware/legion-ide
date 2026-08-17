@@ -8,7 +8,7 @@
 
 use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{PrincipalId, WorkspaceTrustState};
-use legion_ui::{CommandDispatchIntent, EditorInputMode, VimMotionKind};
+use legion_ui::{CommandDispatchIntent, EditorInputMode, VimMotionKind, VimOperatorKind};
 
 /// Open a workspace with one file and return the app plus its buffer id.
 fn app_with_text(text: &str) -> (AppComposition, legion_protocol::BufferId) {
@@ -162,5 +162,234 @@ fn disabling_vim_clears_a_half_typed_command() {
             AppCommandOutcome::VimModeChanged(Some(EditorInputMode::Normal))
         ),
         "re-enabling starts in Normal with nothing pending"
+    );
+}
+
+// ─── Operators ──────────────────────────────────────────────────────────────
+
+fn text_of(app: &AppComposition, buffer_id: legion_protocol::BufferId) -> String {
+    app.editor()
+        .text(buffer_id)
+        .expect("buffer text")
+        .to_string()
+}
+
+fn operator_motion(
+    app: &mut AppComposition,
+    operator: VimOperatorKind,
+    motion: VimMotionKind,
+    count: usize,
+) {
+    app.dispatch_ui_intent(CommandDispatchIntent::VimOperatorMotion {
+        operator,
+        count,
+        motion,
+    })
+    .expect("operator dispatches");
+}
+
+fn linewise(app: &mut AppComposition, operator: VimOperatorKind, count: usize) {
+    app.dispatch_ui_intent(CommandDispatchIntent::VimLinewiseOperator { operator, count })
+        .expect("linewise operator dispatches");
+}
+
+#[test]
+fn dw_deletes_up_to_the_next_word() {
+    let (mut app, buffer_id) = app_with_text(
+        "fn main() {}
+",
+    );
+    enable_vim(&mut app);
+    operator_motion(
+        &mut app,
+        VimOperatorKind::Delete,
+        VimMotionKind::WordForward,
+        1,
+    );
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "main() {}
+"
+    );
+}
+
+#[test]
+fn dd_removes_the_whole_line_and_leaves_no_blank() {
+    let (mut app, buffer_id) = app_with_text(
+        "one
+two
+three
+",
+    );
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::Down, 1);
+    linewise(&mut app, VimOperatorKind::Delete, 1);
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "one
+three
+",
+        "taking the line terminator with it is what stops a blank being left"
+    );
+}
+
+#[test]
+fn a_delete_fills_the_register_so_put_moves_text() {
+    let (mut app, buffer_id) = app_with_text(
+        "one
+two
+",
+    );
+    enable_vim(&mut app);
+    linewise(&mut app, VimOperatorKind::Delete, 1);
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "two
+"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::VimPut)
+        .expect("put dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "two
+one
+",
+        "Vim's delete is a cut; dd then p is how a line gets moved"
+    );
+}
+
+#[test]
+fn a_yank_copies_without_touching_the_buffer() {
+    let (mut app, buffer_id) = app_with_text(
+        "one
+two
+",
+    );
+    enable_vim(&mut app);
+    linewise(&mut app, VimOperatorKind::Yank, 1);
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "one
+two
+",
+        "a yank must not edit, and must not cost an undo entry"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::VimPut)
+        .expect("put dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "one
+one
+two
+"
+    );
+}
+
+#[test]
+fn change_deletes_and_enters_insert_mode() {
+    let (mut app, buffer_id) = app_with_text(
+        "fn main() {}
+",
+    );
+    enable_vim(&mut app);
+    operator_motion(
+        &mut app,
+        VimOperatorKind::Change,
+        VimMotionKind::WordForward,
+        1,
+    );
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "main() {}
+"
+    );
+
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::VimChangeMode(
+            EditorInputMode::Insert,
+        ))
+        .expect("dispatches");
+    assert!(
+        matches!(
+            outcome,
+            AppCommandOutcome::VimModeChanged(Some(EditorInputMode::Insert))
+        ),
+        "change is delete plus insert mode — that is the whole difference from d"
+    );
+}
+
+#[test]
+fn an_operator_over_an_empty_range_changes_nothing() {
+    let (mut app, buffer_id) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    // `b` at the start of the buffer cannot move.
+    operator_motion(
+        &mut app,
+        VimOperatorKind::Delete,
+        VimMotionKind::WordBackward,
+        1,
+    );
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "word
+"
+    );
+}
+
+#[test]
+fn put_with_an_empty_register_is_harmless() {
+    let (mut app, buffer_id) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimPut)
+        .expect("put with nothing yanked is not an error");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "word
+"
+    );
+}
+
+#[test]
+fn operators_do_nothing_while_vim_is_disabled() {
+    let (mut app, buffer_id) = app_with_text(
+        "fn main() {}
+",
+    );
+    operator_motion(
+        &mut app,
+        VimOperatorKind::Delete,
+        VimMotionKind::WordForward,
+        1,
+    );
+    linewise(&mut app, VimOperatorKind::Delete, 1);
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "fn main() {}
+"
+    );
+}
+
+#[test]
+fn an_operator_over_multibyte_text_cuts_on_character_boundaries() {
+    let (mut app, buffer_id) = app_with_text(
+        "let café = 1;
+",
+    );
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::WordForward, 1);
+    operator_motion(&mut app, VimOperatorKind::Delete, VimMotionKind::WordEnd, 1);
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "let  = 1;
+",
+        "cutting on byte offsets would split the é and corrupt the buffer"
     );
 }

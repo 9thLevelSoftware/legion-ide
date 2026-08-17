@@ -16,7 +16,9 @@ pub use projection::{
 };
 
 pub use vim::{EditorInputMode, VimAction, VimMotionKind, VimOperatorKind, VimState};
-pub use vim_motion::resolve_motion;
+pub use vim_motion::{
+    VimRange, range_text, resolve_linewise_range, resolve_motion, resolve_operator_range,
+};
 
 pub use ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,

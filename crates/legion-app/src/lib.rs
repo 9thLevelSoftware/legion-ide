@@ -19522,6 +19522,7 @@ impl AppComposition {
     fn dispatch_vim_intent(
         &mut self,
         intent: &CommandDispatchIntent,
+        event_context: &EventContext,
     ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
         use crate::vim_session::{byte_to_character_column, character_to_byte_column};
 
@@ -19572,8 +19573,171 @@ impl AppComposition {
                     .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
                 Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
             }
+            CommandDispatchIntent::VimOperatorMotion {
+                operator,
+                count,
+                motion,
+            } => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let Some(range) = legion_ui::resolve_operator_range(&text, from, *motion, *count)
+                else {
+                    // The motion did not move, so there is nothing to operate
+                    // on. Emitting an empty edit would cost an undo entry and
+                    // change nothing.
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
+            }
+            CommandDispatchIntent::VimLinewiseOperator { operator, count } => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let range = legion_ui::resolve_linewise_range(&text, from, *count);
+                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
+            }
+            CommandDispatchIntent::VimPut => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let Some(register) = self.vim.register.clone() else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                self.apply_vim_put(buffer_id, &text, from, &register, event_context)
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Buffer, text and character-space cursor for a Vim command.
+    ///
+    /// `None` when modal editing is off or nothing is open — both are ordinary
+    /// states, not errors, so every Vim arm can bail the same way.
+    #[allow(clippy::type_complexity)]
+    fn vim_cursor_context(
+        &self,
+    ) -> Result<Option<(BufferId, String, legion_protocol::TextCoordinate)>, AppCompositionError>
+    {
+        use crate::vim_session::byte_to_character_column;
+        if !self.vim.enabled {
+            return Ok(None);
+        }
+        let Some(buffer_id) = self.active_documents.active_buffer_id else {
+            return Ok(None);
+        };
+        let text = self.editor.text(buffer_id)?.to_string();
+        let position = self.editor.primary_cursor(buffer_id)?;
+        let cursor = legion_protocol::TextCoordinate {
+            line: position.line as u32,
+            character: byte_to_character_column(&text, position.line, position.column) as u32,
+            byte_offset: None,
+            utf16_offset: None,
+        };
+        Ok(Some((buffer_id, text, cursor)))
+    }
+
+    /// Apply a Vim operator to an already-resolved range.
+    ///
+    /// Delete and change both fill the register first: Vim's delete is a cut,
+    /// so `dd` then `p` moves a line. Change additionally leaves the session in
+    /// insert mode, which is the whole difference between `c` and `d`.
+    fn apply_vim_operator(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        range: legion_ui::VimRange,
+        operator: legion_ui::VimOperatorKind,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::{VimRegister, character_to_byte_column};
+        use legion_ui::VimOperatorKind;
+
+        self.vim.register = Some(VimRegister {
+            text: legion_ui::range_text(text, range),
+            linewise: range.linewise,
+        });
+
+        if matches!(operator, VimOperatorKind::Yank) {
+            // A yank copies and leaves the buffer alone, so there is no edit
+            // and no undo entry.
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+
+        let edit = legion_editor::TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(
+                    range.start.0,
+                    character_to_byte_column(text, range.start.0, range.start.1),
+                ),
+                legion_editor::TextPosition::new(
+                    range.end.0,
+                    character_to_byte_column(text, range.end.0, range.end.1),
+                ),
+            ),
+            String::new(),
+        );
+        let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
+
+        if matches!(operator, VimOperatorKind::Change) {
+            self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+        }
+        Ok(Some(outcome))
+    }
+
+    /// Put the register at the cursor.
+    ///
+    /// A line-wise register lands on its own line below; a char-wise one lands
+    /// after the cursor. Ignoring that distinction splices a whole line into
+    /// the middle of another, which is what makes `dd`/`p` useless.
+    fn apply_vim_put(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        cursor: legion_protocol::TextCoordinate,
+        register: &crate::vim_session::VimRegister,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::character_to_byte_column;
+
+        let line = cursor.line as usize;
+        let (position, payload) = if register.linewise {
+            let next_line_start = legion_editor::TextPosition::new(line + 1, 0);
+            (next_line_start, register.text.clone())
+        } else {
+            let column = character_to_byte_column(text, line, cursor.character as usize + 1);
+            (
+                legion_editor::TextPosition::new(line, column),
+                register.text.clone(),
+            )
+        };
+        let edit = legion_editor::TextEdit::new(
+            legion_editor::TextRange::new(position, position),
+            payload,
+        );
+        Ok(Some(self.apply_vim_edit(buffer_id, edit, event_context)?))
+    }
+
+    /// Apply a Vim-produced edit through the ordinary transaction path.
+    ///
+    /// Not `editor.apply_edit` directly: that skips the transaction
+    /// descriptor, the event emission and the LSP change notification, so a
+    /// buffer edited by Vim would be invisible to undo grouping and to the
+    /// language server while every other edit was not.
+    fn apply_vim_edit(
+        &mut self,
+        buffer_id: BufferId,
+        edit: TextEdit,
+        event_context: &EventContext,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        let descriptor = self.apply_edit_to_buffer_with_correlation(
+            buffer_id,
+            edit,
+            event_context.correlation_id,
+        )?;
+        self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(buffer_id, &descriptor);
+        Ok(AppCommandOutcome::Edited(descriptor))
     }
 
     /// Route a UI dispatch intent through editor and workspace authorities.
@@ -19589,7 +19753,7 @@ impl AppComposition {
         // Vim intents need the buffer's text and cursor, which the pure
         // router does not have, so they are handled here for the same reason
         // find/replace is.
-        if let Some(outcome) = self.dispatch_vim_intent(&intent)? {
+        if let Some(outcome) = self.dispatch_vim_intent(&intent, &event_context)? {
             return Ok(outcome);
         }
 
