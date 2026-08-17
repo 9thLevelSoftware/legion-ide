@@ -3,6 +3,12 @@
 #![warn(missing_docs)]
 
 pub mod capabilities;
+/// Native Ollama `/api/chat` tool calling.
+///
+/// Lives in its own module rather than here: Ollama's wire format diverges
+/// from OpenAI's in four separate places, and this file is already the
+/// crate's chokepoint.
+mod ollama_tools;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
@@ -550,7 +556,8 @@ where
             embedding: true,
             batch: false,
             inline_prediction: false,
-            tool_use: false,
+            // Native `/api/chat` tools — see `ollama_tools`.
+            tool_use: true,
         }
     }
 
@@ -1091,6 +1098,37 @@ fn schema_constrained_tools_enabled() -> bool {
     std::env::var("LEGION_AI_TOOL_TRANSPORT").is_ok_and(|v| v.eq_ignore_ascii_case("schema"))
 }
 
+/// Build the action grammar for a tool set, or `None` when there is nothing to
+/// constrain.
+///
+/// Shared by every provider that can carry a grammar, so the alternatives an
+/// edit is allowed to take are stated once. Duplicating them per provider is
+/// how one runtime quietly ends up permitting an edit the executor rejects.
+fn schema_constrained_tool_schema(tools: &[ToolDefinition]) -> Option<Value> {
+    legion_ai::schema_tools::build_action_schema(
+        &tools
+            .iter()
+            .map(|t| legion_ai::schema_tools::SchemaTool {
+                name: t.name.clone(),
+                parameters: t.input_schema.clone(),
+                // An edit is either a whole-file `replacement` or an
+                // `old_str`/`new_str` fragment. Legion's schema cannot say
+                // that — it requires only `path` and checks the rest where a
+                // failure can be explained — but a grammar has to, or it
+                // permits an edit with no content at all.
+                required_groups: if t.name == "edit-as-proposal" {
+                    vec![
+                        vec!["replacement".to_string()],
+                        vec!["old_str".to_string(), "new_str".to_string()],
+                    ]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// Turn a grammar-constrained reply into loop blocks.
 ///
 /// A response that does not parse is reported as text rather than as a
@@ -1197,29 +1235,7 @@ where
         // rather than repairable. Opt-in: a model with working native tool use
         // must not be downgraded to this.
         let schema_tools: Option<Value> = if schema_constrained_tools_enabled() {
-            legion_ai::schema_tools::build_action_schema(
-                &request
-                    .tools
-                    .iter()
-                    .map(|t| legion_ai::schema_tools::SchemaTool {
-                        name: t.name.clone(),
-                        parameters: t.input_schema.clone(),
-                        // An edit is either a whole-file `replacement` or an
-                        // `old_str`/`new_str` fragment. Legion's schema cannot
-                        // say that — it requires only `path` and checks the
-                        // rest where a failure can be explained — but a grammar
-                        // has to, or it permits an edit with no content at all.
-                        required_groups: if t.name == "edit-as-proposal" {
-                            vec![
-                                vec!["replacement".to_string()],
-                                vec!["old_str".to_string(), "new_str".to_string()],
-                            ]
-                        } else {
-                            Vec::new()
-                        },
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            schema_constrained_tool_schema(&request.tools)
         } else {
             None
         };
@@ -1512,6 +1528,29 @@ where
             request.provider,
             "llama.cpp inline prediction provider is not configured",
         ))
+    }
+}
+
+/// llama.cpp's `llama-server` serves the OpenAI chat-completions dialect,
+/// tool calls included, so this delegates rather than reimplementing it.
+///
+/// The delegation is total on purpose. Every reliability behavior the
+/// OpenAI-compatible path carries — tolerant recovery of calls written as
+/// prose, non-dispatchable malformed blocks, the `LEGION_AI_GOVERNORS`
+/// measurement seam, schema-constrained transport — is exactly what a small
+/// model behind `llama-server` needs, and a parallel implementation would
+/// drift from it the first time one side is fixed. `capabilities()` already
+/// delegated and therefore already advertised `tool_use`; before this impl
+/// existed that advertisement was not backed by anything.
+impl<T> ToolCallingProvider for LlamaCppProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        self.inner.complete_with_tools(request)
     }
 }
 
