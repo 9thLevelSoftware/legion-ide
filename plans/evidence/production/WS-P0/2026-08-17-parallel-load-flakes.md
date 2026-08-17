@@ -466,3 +466,35 @@ not a source defect, and it is unrelated to this change (the failing targets do
 not depend on the modified files). It cleared after `cargo clean -p
 legion-desktop` and a rebuild at `-j 6`. Recorded because it is a real hazard
 for anyone running the workspace gates on a 32-thread machine.
+
+---
+
+## A build constraint on the development machine — 2026-08-17
+
+Recorded here because it was mistaken for a test problem twice before being
+recognised.
+
+`cargo test --workspace --all-targets` at default parallelism **dies while
+compiling `legion-desktop`** on this machine. Two runs were killed mid-compile
+with no test output, and the failure was initially read as a slow build hitting
+a wall-clock limit. It is not: the flake investigation independently hit
+`rustc STATUS_STACK_BUFFER_OVERRUN` and an internal compiler error while linking
+the same crate at `-j 32`, and ran everything at `-j 6`.
+
+At `-j 6` the same tree completes: **275 suites, 3,146 tests, 0 failures.**
+
+Two consequences worth carrying:
+
+- A run that dies during compilation produces **zero** `test result:` lines, so
+  any tooling that summarises the log reports `suites=0 passed=0 failed=0`.
+  That is indistinguishable at a glance from "nothing ran yet" and is easy to
+  mistake for a timeout. It is not a test failure and must not be counted as one.
+- The threshold is unmeasured. `-j 6` works and `-j 32` does not; nothing
+  between them has been tried, and the cause has not been established beyond
+  "linking `legion-desktop` under memory pressure". Hosted CI runners have not
+  shown this — they run the default and pass — so this is a property of this
+  machine, not of the workspace.
+
+**Not claimed:** no fix, and no investigation of whether the ICE is a rustc bug,
+a `legion-desktop` link-unit size problem, or ordinary memory exhaustion. The
+mitigation is a flag, not a repair.
