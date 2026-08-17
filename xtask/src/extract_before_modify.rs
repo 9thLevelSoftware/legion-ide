@@ -178,9 +178,9 @@ fn count_lines_at_revision(workspace_root: &Path, revision: &str, path: &str) ->
 
 /// Count lines the way a person would: a trailing newline does not add one.
 ///
-/// Written out rather than using `lines().count()` alone so the two sides of
-/// the comparison cannot disagree about a final newline — a one-line phantom
-/// difference in a gate that trips at small numbers is worse than no gate.
+/// Named rather than inlined so both sides of the comparison — the working tree
+/// and the merge base — provably count the same way. A gate that trips at small
+/// numbers cannot afford a one-line disagreement between its two measurements.
 fn count_lines(body: &str) -> i64 {
     body.lines().count() as i64
 }
