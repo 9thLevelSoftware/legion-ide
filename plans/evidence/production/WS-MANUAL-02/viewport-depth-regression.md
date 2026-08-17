@@ -231,6 +231,15 @@ its own before/after on a path I have not characterized, and folding it in would
 have widened this diff past what the measurement supports. **It is a real
 O(document length) cost on completion requests, unmeasured.**
 
+> **Measured and fixed 2026-08-17 — see `completion-utf16-offset.md`.** It cost
+> 5.65 ms at a completion request on line 999,000 of a 1,000,000-line buffer,
+> linear in depth, now under 1 µs. Measuring it also turned up a correctness bug
+> in the same function: its clamping made a residual of zero unreachable, so a
+> UTF-16 offset addressing the start of any line but the first resolved to the
+> end of the previous line. LSP positions are UTF-16, so that was every
+> completion at column 0. Both are fixed in one change, with the behaviour
+> difference proved bounded to exactly the line-start offsets.
+
 ## Gate results
 
 `cargo fmt --all` clean · `cargo test --workspace --all-targets --no-fail-fast`
