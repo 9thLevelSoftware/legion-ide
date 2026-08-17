@@ -840,7 +840,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-project"]
     acceptance = ["Replace never mutates files outside proposal review."]
     stop_condition = "Stop if any replace path writes without going through a proposal."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T3"

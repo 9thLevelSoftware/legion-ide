@@ -194,7 +194,15 @@ pub struct WorkspaceSearchHit {
     pub canonical_path: CanonicalPath,
     /// One-based line number of the match (matches the blame convention).
     pub line_number: u32,
+    /// Match range as absolute byte offsets from the start of the file.
     pub byte_range: Range<u64>,
+    /// Absolute byte offset of the first byte of `line_text`.
+    ///
+    /// Callers that need a position *within* the line (a column, a UTF-16
+    /// offset) must subtract this from `byte_range`; indexing `line_text` with
+    /// the absolute offset silently yields the wrong column on every line but
+    /// the first.
+    pub line_byte_start: u64,
     pub line_text: String,
     pub snippet: String,
     pub snippet_truncated: bool,
@@ -3366,6 +3374,7 @@ impl WorkspaceActor {
                             canonical_path: file_identity.canonical_path.clone(),
                             line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
+                            line_byte_start: line_start,
                             line_text: line.to_string(),
                             snippet,
                             snippet_truncated,
@@ -5033,6 +5042,7 @@ impl WorkspaceActor {
                             canonical_path: file_identity.canonical_path.clone(),
                             line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
+                            line_byte_start: line_start,
                             line_text: line.to_string(),
                             snippet,
                             snippet_truncated,
