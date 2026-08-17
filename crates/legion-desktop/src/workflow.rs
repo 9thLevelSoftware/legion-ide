@@ -1950,6 +1950,37 @@ impl DesktopRuntime {
                 self.set_status(StatusSeverity::Info, format!("Explorer toggled {path}"));
                 Ok(DesktopWorkflowOutcome::ExplorerPathToggled(path))
             }
+            DesktopAppRequest::SaveAndCloseTab { buffer_id } => {
+                let saved = self.dispatch_intent(CommandDispatchIntent::Save { buffer_id })?;
+                if let DesktopWorkflowOutcome::Error(message) = saved {
+                    // Leave the tab open and the prompt answerable: a failed
+                    // save followed by a close would discard the very edits the
+                    // user just asked to keep.
+                    return Ok(DesktopWorkflowOutcome::Error(message));
+                }
+                self.dispatch_intent(CommandDispatchIntent::CloseTab { buffer_id })
+            }
+            DesktopAppRequest::ActivateExplorerFile {
+                file_id,
+                path,
+                is_directory,
+            } => {
+                if is_directory {
+                    // A directory row activates the same way its chevron does.
+                    // Requiring the chevron makes the wide, obvious part of the
+                    // row inert, which reads as a broken tree.
+                    return self.handle_app_request(DesktopAppRequest::ToggleExplorerPath { path });
+                }
+                // Open first, then reveal. `open_file` sets the app's
+                // `active_file_id`, but the explorer projection is only rebuilt
+                // by the reveal outcome, so reversing these leaves the tree
+                // highlighting the row the user clicked *before* this one.
+                let opened = self.dispatch_intent(CommandDispatchIntent::OpenPath { path })?;
+                if let DesktopWorkflowOutcome::Error(message) = opened {
+                    return Ok(DesktopWorkflowOutcome::Error(message));
+                }
+                self.dispatch_intent(CommandDispatchIntent::RevealInExplorer { file_id })
+            }
             DesktopAppRequest::OpenExternalUrl { url } => {
                 open_url_in_system_browser(&url)?;
                 self.set_status(StatusSeverity::Info, format!("Opened {url}"));
@@ -3651,9 +3682,19 @@ impl DesktopEframeApp {
         let mut actions = Vec::new();
         let snapshot = self.runtime.projection_snapshot();
         // Interactive TextEdit widgets (BYOK, terminal input) keep focus across
-        // frames. While any widget owns keyboard focus, do not also dispatch
+        // frames. While one of them owns keyboard focus, do not also dispatch
         // typed characters / Backspace into the code canvas (key leakage).
-        let interactive_widget_focused = ui.memory(|mem| mem.focused().is_some());
+        //
+        // The test is specifically "a text field has focus", not "something has
+        // focus". egui hands focus to buttons too — clicking the Settings gear
+        // or Setup button parks it on a plain `Button`, which never surrenders
+        // it — and the broader check (`mem.focused().is_some()`, which is also
+        // what `Context::egui_wants_keyboard_input` returns) turned that into a
+        // trap: every subsequent keystroke was silently discarded, the state
+        // survived closing the overlay, and nothing on screen said why. Typing
+        // stopping forever after clicking a settings icon is most of what "the
+        // app doesn't work" means to someone using it.
+        let interactive_widget_focused = ui.ctx().text_edit_focused();
         let terminal_input_focused = ui.memory(|mem| {
             mem.focused() == Some(crate::view::interactive_fields::terminal_input_widget_id())
         });
@@ -3676,6 +3717,32 @@ impl DesktopEframeApp {
                 });
                 ui.input_mut(|state| {
                     state.consume_key(input.modifiers, egui::Key::Escape);
+                });
+            }
+        } else if let Some(prompt) = snapshot
+            .daily_editing_projection
+            .close_dirty_prompt
+            .as_ref()
+        {
+            // The unsaved-changes prompt disables editor input while it is up,
+            // so it must be dismissable from the keyboard. Without this the
+            // only way out was the two buttons — which, until this was fixed,
+            // rendered below the bottom of the window. A modal that blocks
+            // typing and cannot be answered is indistinguishable from a hang.
+            if input.key_pressed(egui::Key::Escape) {
+                actions.push(DesktopAction::CancelDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Escape);
+                });
+            }
+            if input.key_pressed(egui::Key::Enter) {
+                actions.push(DesktopAction::SaveDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Enter);
                 });
             }
         } else if snapshot.palette_projection.open {

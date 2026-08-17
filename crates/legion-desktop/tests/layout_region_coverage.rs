@@ -46,6 +46,7 @@ fn populated_snapshot() -> ShellProjectionSnapshot {
         canonical_path: CanonicalPath("src/region.rs".to_string()),
         name: "region.rs".to_string(),
         children: Vec::new(),
+        is_directory: false,
     }];
 
     // Editor tabs.

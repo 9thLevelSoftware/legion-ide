@@ -202,12 +202,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("Cargo.toml".to_string()),
                 name: "Cargo.toml".to_string(),
                 children: vec![FileId(8)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(8),
                 canonical_path: CanonicalPath("src/lib.rs".to_string()),
                 name: "lib.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
@@ -249,13 +251,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
             ],
             active_buffer_id: Some(BufferId(3)),
         },
-        close_dirty_prompt: Some(CloseDirtyPromptProjection {
-            buffer_id: BufferId(3),
-            file_id: Some(FileId(2)),
-            file_path: Some(CanonicalPath("Cargo.toml".to_string())),
-            title: "Cargo.toml".to_string(),
-            message: "Save changes before closing Cargo.toml?".to_string(),
-        }),
+        // Deliberately `None`. The unsaved-changes prompt is a modal: while it
+        // is raised it blocks interaction with the whole shell, which is what a
+        // modal is for. Leaving it set in the shared fixture meant every test
+        // in this file rendered a shell no one could click, and the tests only
+        // passed because the prompt used to be inert flow content laid out off
+        // the bottom of the window. Tests that want the prompt raise it
+        // themselves; see `close_dirty_prompt_snapshot`.
+        close_dirty_prompt: None,
         viewport_states: vec![EditorViewportStateProjection {
             buffer_id: BufferId(3),
             scroll: ViewportScroll {
@@ -965,8 +968,20 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("scroll=2:4"))
     );
+    // The prompt is not part of the shared fixture (it is a modal and would
+    // block every other surface), so raise it here to check the row it
+    // produces.
+    let mut prompted = populated_snapshot();
+    prompted.daily_editing_projection.close_dirty_prompt = Some(CloseDirtyPromptProjection {
+        buffer_id: BufferId(3),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+        title: "Cargo.toml".to_string(),
+        message: "Save changes before closing Cargo.toml?".to_string(),
+    });
+    let prompted_model = DesktopProjectionViewModel::from_snapshot(&prompted);
     assert!(
-        model
+        prompted_model
             .close_prompt_rows
             .iter()
             .any(|row| row.contains("close_dirty"))

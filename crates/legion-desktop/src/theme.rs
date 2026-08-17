@@ -629,6 +629,15 @@ pub(crate) fn install(ctx: &egui::Context, theme: &Theme) {
         Stroke::new(1.0_f32, theme.controls.disabled_foreground);
     visuals.widgets.inactive.bg_fill = theme.controls.rest;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, theme.text.secondary);
+    // A resting control needs an edge. Without this stroke egui draws buttons
+    // and text fields as bare filled rectangles, distinguished only by whether
+    // their fill is a little lighter or a little darker than the panel behind
+    // them — which is not a distinction anyone can be expected to make, and is
+    // why the shell read as an undifferentiated field of boxes. `subtle` is
+    // lighter than `controls.rest`, so a button gets a raised edge, while a
+    // text field (filled from `extreme_bg_color`, darker than the panel) gets
+    // the same edge around an inset well. Same border, opposite depth.
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, theme.border.subtle);
     visuals.widgets.hovered.bg_fill = theme.controls.hover;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, theme.border.strong);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, theme.text.primary);

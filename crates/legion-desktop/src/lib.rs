@@ -20,6 +20,7 @@ pub mod health;
 pub mod manual_perf;
 pub mod metrics;
 pub mod package;
+pub mod path_display;
 pub mod platform;
 pub mod search;
 pub mod session;

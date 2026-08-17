@@ -381,7 +381,12 @@ pub enum DesktopAction {
         /// Canonical path represented by the explorer row.
         path: String,
     },
-    /// Select/reveal an explorer file through app authority.
+    /// The user activated an explorer row (clicked it).
+    ///
+    /// Named for the gesture, not the effect, because the effect depends on
+    /// what the row is: a file opens and is revealed, a directory expands.
+    /// The variant used to mean "reveal only", which is why clicking a file
+    /// used to do nothing a user could see.
     SelectExplorerFile {
         /// Projected workspace file identifier.
         file_id: FileId,
@@ -1019,6 +1024,31 @@ pub enum DesktopAppRequest {
         /// Canonical path represented by the explorer row.
         path: String,
     },
+    /// Answer the unsaved-changes prompt by saving, then closing the tab.
+    ///
+    /// Two dispatches, so this is adapter sequencing rather than one intent.
+    /// The prompt used to emit a bare `Save`, which saved the file and left the
+    /// tab open — the close the user had asked for never happened, and the
+    /// prompt's own button was therefore lying about what it did.
+    SaveAndCloseTab {
+        /// Buffer to save and then close.
+        buffer_id: BufferId,
+    },
+    /// Activate an explorer row: open the file, or expand the directory.
+    ///
+    /// Activation is two app dispatches for a file — open the buffer, then
+    /// reveal the row — because the explorer projection is push-updated by the
+    /// reveal outcome and would otherwise keep highlighting the previous
+    /// selection after the new file opened. Sequencing them is adapter work,
+    /// so this arrives as an app *request* rather than a single intent.
+    ActivateExplorerFile {
+        /// File identifier of the activated row.
+        file_id: FileId,
+        /// Canonical path represented by the activated row.
+        path: String,
+        /// Whether the row is a directory.
+        is_directory: bool,
+    },
     /// Open an external URL in the system browser.
     OpenExternalUrl {
         /// URL to open.
@@ -1439,7 +1469,9 @@ impl DesktopCommandBridge {
             }),
             DesktopAction::SaveDirtyClose { buffer_id } => {
                 self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })
+                    DesktopBridgeOutput::AppRequest(DesktopAppRequest::SaveAndCloseTab {
+                        buffer_id,
+                    })
                 })
             }
             DesktopAction::CancelDirtyClose { buffer_id } => {
@@ -1768,10 +1800,17 @@ impl DesktopCommandBridge {
                 None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPathInput),
             },
             DesktopAction::SelectExplorerFile { file_id } => {
-                if explorer_contains_file(snapshot, file_id) {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id })
-                } else {
-                    DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile { file_id })
+                match explorer_node(snapshot, file_id) {
+                    Some(node) => {
+                        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+                            file_id,
+                            path: node.canonical_path.0.clone(),
+                            is_directory: node.is_directory,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile {
+                        file_id,
+                    }),
                 }
             }
             DesktopAction::PreviewProposal { proposal_id } => {
@@ -3025,12 +3064,20 @@ fn tab_is_known(snapshot: &ShellProjectionSnapshot, buffer_id: BufferId) -> bool
     tabs.iter().any(|tab| tab.buffer_id == buffer_id)
 }
 
-fn explorer_contains_file(snapshot: &ShellProjectionSnapshot, file_id: FileId) -> bool {
+/// The projected explorer row for `file_id`, if the tree still holds one.
+///
+/// Rows are addressed by `FileId` rather than by path because the renderer
+/// only ever has what the projection gave it, and a stale id must fail loudly
+/// rather than resolve to whatever now sits at the same path.
+fn explorer_node(
+    snapshot: &ShellProjectionSnapshot,
+    file_id: FileId,
+) -> Option<&legion_ui::ExplorerNodeProjection> {
     snapshot
         .explorer_projection
         .nodes
         .iter()
-        .any(|node| node.file_id == file_id)
+        .find(|node| node.file_id == file_id)
 }
 
 fn proposal_is_known(snapshot: &ShellProjectionSnapshot, proposal_id: ProposalId) -> bool {
