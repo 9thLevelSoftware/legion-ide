@@ -8785,12 +8785,30 @@ fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     };
 
     let size_mb = status.byte_len as f64 / (1024.0 * 1024.0);
-    // Name the degraded state and capability reduction explicitly so the banner
-    // makes clear which editor features are unavailable for the large file.
-    let mut rows = vec![format!(
-        "\u{26a0} large-file degraded mode ({:.1} MB) \u{2014} capabilities reduced",
-        size_mb
-    )];
+    // Name the state and the capability reduction explicitly, and distinguish
+    // the two large-file modes. They cost the user different things: a degraded
+    // buffer holds the whole file and defers overlays, a streamed one never
+    // held it at all, so anything needing the entire text is not slow — it is
+    // unavailable. One banner for both would promise something.
+    let mut rows = vec![match viewport.mode {
+        ViewportProjectionMode::StreamingLargeFile => format!(
+            "\u{26a0} large-file streaming mode ({:.1} MB) \u{2014} capabilities reduced",
+            size_mb
+        ),
+        _ => format!(
+            "\u{26a0} large-file degraded mode ({:.1} MB) \u{2014} capabilities reduced",
+            size_mb
+        ),
+    }];
+    if viewport.mode == ViewportProjectionMode::StreamingLargeFile {
+        rows.push(
+            "This file is read from disk in chunks and is never held in memory in full."
+                .to_string(),
+        );
+        rows.push(
+            "  \u{2022} capability reduced: operations needing the whole file at once".to_string(),
+        );
+    }
     if !status.message.is_empty() {
         rows.push(status.message.clone());
     }

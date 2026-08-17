@@ -117,11 +117,24 @@ fn large_file_guardrails_degraded_banner_names_capability_reduction() {
     let snapshot = runtime.projection_snapshot();
     let model = DesktopProjectionViewModel::from_snapshot(&snapshot);
 
+    // The app opens through the streaming path, so this is the streaming
+    // banner. It has to say so: a streamed file is not merely slower at
+    // whole-file work, it cannot do it, and one banner for both modes would
+    // promise something.
     assert!(
         model
             .large_file_banner_rows
             .iter()
-            .any(|row| row.contains("large-file degraded"))
+            .any(|row| row.contains("large-file streaming mode")),
+        "banner rows: {:?}",
+        model.large_file_banner_rows
+    );
+    assert!(
+        model
+            .large_file_banner_rows
+            .iter()
+            .any(|row| row.contains("never held in memory in full")),
+        "the streaming limitation must be stated in plain language, not implied"
     );
     assert!(
         model
