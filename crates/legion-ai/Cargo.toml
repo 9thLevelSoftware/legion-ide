@@ -15,4 +15,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# Activates the shared synthetic-credential generator for tests.
+legion-security = { workspace = true, features = ["test-helpers"] }
 uuid = { workspace = true }

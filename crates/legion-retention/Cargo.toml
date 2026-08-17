@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 chacha20poly1305 = "0.10"
 legion-protocol = { workspace = true }
+legion-security = { workspace = true }
 keyring = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { workspace = true }
@@ -16,3 +17,6 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 zeroize = "1"
+
+[dev-dependencies]
+legion-security = { workspace = true, features = ["test-helpers"] }

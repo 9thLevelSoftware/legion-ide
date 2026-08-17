@@ -12,6 +12,16 @@ use legion_ui::CommandDispatchIntent;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Upper bound on the wait for a deliberately short-lived child process to exit.
+///
+/// A hang detector, not a performance budget: `cmd /C exit` always terminates, so this
+/// bound only exists so a genuine regression (a child that never exits, or cleanup that
+/// never notices) fails the run instead of wedging CI. It is sized far above any
+/// plausible process-startup delay rather than near the expected duration, because a
+/// bound near the expected duration is an assertion about the machine. The replaced
+/// constant was 400ms.
+const ORPHAN_EXIT_HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Drop-guarded temporary workspace root. Removes the directory on drop with a prefix/location
 /// check (legion-terminal-workflow- + pid) so a panic mid-test never leaks the temp root.
 struct TempWorkspace {
@@ -657,7 +667,12 @@ fn terminal_resize_propagates_to_projection() {
 /// registry and the runtime sessions map because no `TerminalOutputPoll` was dispatched.
 /// `cleanup_terminal_orphans()` must then (a) detect the exited session, (b) return a
 /// non-empty audit record with the expected session id and state=Exited, and (c) leave
-/// no orphan on a second call.
+/// no orphan on the call after that.
+///
+/// Cleanup is called in a poll loop rather than once after a fixed sleep, because when
+/// the child has exited is a fact about the OS scheduler and not something the test may
+/// assume. Every call before the child exits returns an empty record set and changes
+/// nothing, so polling costs only the wait it replaces.
 #[test]
 fn terminal_orphan_cleanup_kills_and_records_evidence() {
     let root = create_root();
@@ -686,13 +701,31 @@ fn terminal_orphan_cleanup_kills_and_records_evidence() {
         .expect("short-lived launch must succeed");
     let expected_session_id = launched.audit.session_id;
 
-    // Give the process time to exit naturally.
-    std::thread::sleep(std::time::Duration::from_millis(400));
-
-    // First cleanup call: must detect the exited session and return an audit record.
-    let records = app
-        .cleanup_terminal_orphans()
-        .expect("orphan cleanup must not fail");
+    // Wait for the child to exit by observing that it has, not by sleeping a fixed
+    // interval and assuming. `cleanup_terminal_orphans()` is itself the observation:
+    // underneath it is a `try_wait`/`GetExitCodeProcess` poll that reaps only processes
+    // which have already exited and is a no-op on a live one, so calling it repeatedly
+    // is safe and does not disturb the state under test.
+    //
+    // This replaces `sleep(400ms)` followed by an immediate assertion that the process
+    // had exited. 400ms is ample on an idle machine and not ample under
+    // `cargo test --workspace --all-targets`, where process creation competes with
+    // every other test binary — so the assertion was about the load on the machine,
+    // not about the cleanup path it was supposed to be testing.
+    let orphan_deadline = std::time::Instant::now() + ORPHAN_EXIT_HANG_LIMIT;
+    let records = loop {
+        let records = app
+            .cleanup_terminal_orphans()
+            .expect("orphan cleanup must not fail");
+        if !records.is_empty() {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < orphan_deadline,
+            "short-lived terminal child never exited, or orphan cleanup never saw it"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
 
     assert_eq!(
         records.len(),

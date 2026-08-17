@@ -175,6 +175,15 @@ Phase 3 semantic fabric activation for `crates/legion-index/Cargo.toml` is limit
   - `legion-protocol`
   - `legion-tracker`
 
+  `legion-agent` may additionally use `legion-security` as a **test-only**
+  dependency (`[dev-dependencies]`, `test-helpers` feature) solely to consume
+  the shared `synthetic_credentials` generator. This is the same carve-out
+  shape and the same rationale as `legion-platform` below: four crates had
+  independently written the same credential-shaped-string generator, each with
+  its own seed, so none was authoritative. No production edge is created and no
+  authority is added — the module exists only under `cfg(test)` or the
+  `test-helpers` feature.
+
   (`legion-platform` is permitted solely to consume the shared `resolve_existing_prefix` path-canonicalization helper — the unified replacement for three independently-written copies that previously duplicated the same defect-class fix across agent, app, and project crates. No PTY, process, or filesystem mutation authority is added.)
 
 Phase 4 activates `legion-agent`, `legion-tracker`, and `legion-memory` only for metadata-only local-provider planning, tracker ledger records, memory candidate review, and proposal-only agent outputs. These crates must not depend on app/UI/editor/workspace internals and must not gain direct filesystem, process, network, terminal, storage, settings, or buffer mutation authority.

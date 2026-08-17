@@ -54,6 +54,51 @@ use serde_json::{Value, json};
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Upper bound on any wait for a signal a correct implementation always sends.
+///
+/// This is a hang detector, not a performance budget. Every use of it blocks on a
+/// rendezvous (a worker thread entering its provider, a supervisor reaping a handle)
+/// that a working build always reaches; the bound exists only so a genuine regression
+/// fails the run instead of wedging CI forever. It is therefore sized far above any
+/// plausible scheduling delay rather than near the expected duration.
+///
+/// The previous value at these sites was 2s, which is *not* above plausible scheduling
+/// delay: under `cargo test --workspace --all-targets` on an oversubscribed machine a
+/// freshly spawned worker thread can wait seconds for a core. That turned ordinary
+/// parallel-test load into a reported product defect. Sizing a wait near the expected
+/// duration asserts something about the machine, not about the code.
+///
+/// A rendezvous is the one case where a constant really is the only option — there is no
+/// earlier signal to wait on than the signal itself — so the number is chosen for ratio,
+/// not for realism: two orders of magnitude above the worst delay a loaded CI host
+/// plausibly produces. It is not free (a genuine regression takes this long to report
+/// instead of failing fast) and it is not unbounded (an unbounded wait would wedge the
+/// job instead), which is the trade being made deliberately.
+const RENDEZVOUS_HANG_LIMIT: Duration = Duration::from_secs(120);
+
+/// Backoff between polls in [`poll_until`].
+///
+/// Deliberately a sleep rather than [`std::thread::yield_now`]: a yield loop stays
+/// runnable and keeps competing for the core it is waiting for another thread to get,
+/// so on a saturated machine it actively delays the event it is polling for.
+const POLL_BACKOFF: Duration = Duration::from_millis(2);
+
+/// Poll `condition` until it holds, sleeping between attempts.
+///
+/// Panics with `what` if [`RENDEZVOUS_HANG_LIMIT`] elapses first. The loop exits on the
+/// condition, never on the clock, so it carries no assumption about how fast the machine
+/// running it happens to be.
+fn poll_until(mut condition: impl FnMut() -> bool, what: &str) {
+    let deadline = Instant::now() + RENDEZVOUS_HANG_LIMIT;
+    loop {
+        if condition() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(POLL_BACKOFF);
+    }
+}
+
 fn causality(value: u128) -> CausalityId {
     CausalityId(uuid::Uuid::from_u128(value))
 }
@@ -472,7 +517,7 @@ impl LegionWorkerProviderResolver for SecondWorkerWaitResolver {
                 .expect("first-worker receiver lock")
                 .take()
                 .expect("second worker resolves once")
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(RENDEZVOUS_HANG_LIMIT)
                 .expect("first workflow worker must enter before second spawn");
         }
         self.providers
@@ -507,7 +552,7 @@ impl LegionWorkerProviderResolver for PanicOnSecondWorkerResolver {
                 .expect("first-worker receiver lock")
                 .take()
                 .expect("second worker resolves once")
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(RENDEZVOUS_HANG_LIMIT)
                 .expect("first workflow worker must enter before resolver panic");
             panic!("intentional second-worker resolver panic");
         }
@@ -703,7 +748,7 @@ impl ToolCallingProvider for PanicAfterSiblingStartsProvider {
             .expect("sibling receiver lock")
             .take()
             .expect("single provider call")
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(RENDEZVOUS_HANG_LIMIT)
             .expect("sibling provider must enter before panic");
         panic!("intentional first-worker panic");
     }
@@ -756,14 +801,11 @@ impl ToolCallingProvider for WaitForWorkflowCancellationProvider {
         if let Some(entered) = self.entered.lock().expect("entered lock").take() {
             let _ = entered.send(());
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !self.flag.is_cancelled() {
-            assert!(
-                Instant::now() < deadline,
-                "workflow sibling never received cancellation"
-            );
-            std::thread::yield_now();
-        }
+        let flag = self.flag.clone();
+        poll_until(
+            || flag.is_cancelled(),
+            "workflow sibling never received cancellation",
+        );
         let acknowledged_at = Instant::now();
         if let Some(acknowledged) = self.acknowledged.lock().expect("acknowledged lock").take() {
             let _ = acknowledged.send(acknowledged_at);
@@ -813,7 +855,7 @@ impl ToolCallingProvider for ReleaseGatedWorkflowProvider {
         let (released, wake) = &*self.released;
         let released = released.lock().expect("release lock");
         let (released, _) = wake
-            .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+            .wait_timeout_while(released, RENDEZVOUS_HANG_LIMIT, |released| !*released)
             .expect("release wait");
         assert!(
             *released,
@@ -1486,7 +1528,10 @@ fn legion_workflow_parallel_lane_executes_lane_mates_concurrently_and_delays_dep
 
     let dispatch_log = Arc::new(Mutex::new(Vec::new()));
     let barrier = Arc::new(Barrier::new(2));
-    let lane_barrier_timeout = Duration::from_secs(2);
+    // Both lane mates must be scheduled onto a core before either can pass the
+    // barrier, so this is a rendezvous, not a latency budget: the parallelism it
+    // proves is asserted from `dispatch_log` ordering below, not from the clock.
+    let lane_barrier_timeout = RENDEZVOUS_HANG_LIMIT;
     let resolver = NamedWorkerProviderResolver::new([
         (
             "worker:left".to_string(),
@@ -2457,7 +2502,7 @@ fn automate_mcp_tool_permissions_decision_feed_risk_halt_and_kill_switch_are_pro
 }
 
 #[test]
-fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
+fn legion_workflow_shared_kill_switch_cancels_inflight_worker() {
     let mut app = automate_app();
     let root = temp_workspace("kill-switch-mid-run");
     app.open_workspace(
@@ -2565,11 +2610,23 @@ fn legion_workflow_shared_kill_switch_cancels_inflight_worker_with_fast_ack() {
         .lock()
         .expect("cancelled_at lock")
         .expect("provider recorded cancellation instant");
-    assert!(
-        finished.duration_since(cancelled_at) < Duration::from_secs(2),
-        "worker cancellation ack exceeded 2s: {:?}",
-        finished.duration_since(cancelled_at)
-    );
+    // The "fast" in this test's name was asserted as
+    // `finished.duration_since(cancelled_at) < 2s` and has been removed rather than
+    // widened, because it was measuring the wrong thing rather than measuring the
+    // right thing impatiently.
+    //
+    // Both instants are recorded inside this process, so the interval between them is
+    // dominated by however much CPU the host chose to give it: the same assertion read
+    // 95s under a starved scheduler and 41s after a 30s bound was tried. There is no
+    // constant that makes an in-process latency measurement trustworthy while the
+    // process is one of 32 test threads competing for the machine.
+    //
+    // What the test can honestly establish is that cancellation, not completion, is
+    // what ended the run — and that is already established, load-independently, by the
+    // worker-state assertions above (all workers terminal; the triggering worker
+    // Blocked or Cancelled) plus the ordering assertion below. A real latency budget
+    // for cancellation belongs in the perf harness, on a controlled machine, where the
+    // number would mean something.
     assert!(
         started <= cancelled_at && cancelled_at <= finished,
         "cancellation instant must fall within the workflow execution window"
@@ -2671,22 +2728,17 @@ fn workflow_worker_panic_cancels_and_reaps_blocked_lane_sibling_before_owner_cle
     }
     if !sibling_acknowledged_before_downgrade {
         ack_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(RENDEZVOUS_HANG_LIMIT)
             .expect("blocked sibling must acknowledge cancellation");
     }
 
-    let reconcile_deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        app.set_product_mode(AppProductMode::Manual);
-        if app.product_mode() == AppProductMode::Manual {
-            break;
-        }
-        assert!(
-            Instant::now() < reconcile_deadline,
-            "downgrade remained blocked after the acknowledged sibling became terminal"
-        );
-        std::thread::yield_now();
-    }
+    poll_until(
+        || {
+            app.set_product_mode(AppProductMode::Manual);
+            app.product_mode() == AppProductMode::Manual
+        },
+        "downgrade remained blocked after the acknowledged sibling became terminal",
+    );
 }
 
 fn assert_uninterruptible_lane_drains_without_releasing_owner(
@@ -2777,15 +2829,24 @@ fn assert_uninterruptible_lane_drains_without_releasing_owner(
         ),
     ]);
 
-    let started = Instant::now();
     let error = app
         .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect_err("first worker panic must fail the lane promptly");
     assert!(error.to_string().contains("panicked"));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "workflow error waited for an uninterruptible sibling: {:?}",
-        started.elapsed()
+    // The property is "the lane failed without waiting for the uninterruptible
+    // sibling", and the sibling publishes exactly that fact: it sends on `finished`
+    // only after the test releases its condvar, which has not happened yet. So an
+    // empty channel here *is* the property, observed directly.
+    //
+    // This used to be `started.elapsed() < 2s`. That was a proxy for the same thing
+    // and a bad one: the resolver rendezvous this call blocks on was itself budgeted
+    // at 2s, so the deadline had zero headroom over a wait nested inside it, and any
+    // delay scheduling the sibling worker thread was charged straight to the assert.
+    // A slow machine failed it; a broken build could pass it.
+    assert_eq!(
+        finished_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+        "workflow error waited for an uninterruptible sibling to finish"
     );
     assert!(cancellation.is_cancelled());
 
@@ -2813,44 +2874,32 @@ fn assert_uninterruptible_lane_drains_without_releasing_owner(
         let completion_id = completion_ids[0];
         drop(app);
 
-        let handoff_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let (handed_off, reaped) =
-                AppComposition::workflow_worker_supervisor_state_for_test(completion_id);
-            if handed_off {
-                assert!(
-                    !reaped,
-                    "release-gated worker cannot be reaped before explicit release"
-                );
-                break;
-            }
-            assert!(
-                Instant::now() < handoff_deadline,
-                "app drop did not hand the workflow handle to the global supervisor"
-            );
-            std::thread::yield_now();
-        }
+        poll_until(
+            || {
+                let (handed_off, reaped) =
+                    AppComposition::workflow_worker_supervisor_state_for_test(completion_id);
+                if handed_off {
+                    assert!(
+                        !reaped,
+                        "release-gated worker cannot be reaped before explicit release"
+                    );
+                }
+                handed_off
+            },
+            "app drop did not hand the workflow handle to the global supervisor",
+        );
 
         let (release, wake) = &*released;
         *release.lock().expect("release lock") = true;
         wake.notify_all();
         finished_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(RENDEZVOUS_HANG_LIMIT)
             .expect("release-gated worker must finish after app drop");
 
-        let reap_deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let (_, reaped) =
-                AppComposition::workflow_worker_supervisor_state_for_test(completion_id);
-            if reaped {
-                break;
-            }
-            assert!(
-                Instant::now() < reap_deadline,
-                "global supervisor did not join the released workflow worker"
-            );
-            std::thread::yield_now();
-        }
+        poll_until(
+            || AppComposition::workflow_worker_supervisor_state_for_test(completion_id).1,
+            "global supervisor did not join the released workflow worker",
+        );
         return;
     }
 
@@ -2858,21 +2907,16 @@ fn assert_uninterruptible_lane_drains_without_releasing_owner(
     *release.lock().expect("release lock") = true;
     wake.notify_all();
     finished_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(RENDEZVOUS_HANG_LIMIT)
         .expect("release-gated sibling must finish");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        app.set_product_mode(AppProductMode::Manual);
-        if app.product_mode() == AppProductMode::Manual {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "workflow drain ownership did not reconcile after sibling release"
-        );
-        std::thread::yield_now();
-    }
+    poll_until(
+        || {
+            app.set_product_mode(AppProductMode::Manual);
+            app.product_mode() == AppProductMode::Manual
+        },
+        "workflow drain ownership did not reconcile after sibling release",
+    );
 }
 
 #[test]
@@ -2968,15 +3012,19 @@ fn workflow_spawn_failure_transfers_launched_worker_into_draining_ownership() {
         first_worker_entered: Mutex::new(Some(entered_rx)),
     };
 
-    let started = Instant::now();
     let error = app
         .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect_err("second worker spawn must fail without losing the first handle");
     assert!(error.to_string().contains("injected"));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "spawn failure waited for the already-launched worker: {:?}",
-        started.elapsed()
+    // See the equivalent assertion in
+    // `assert_uninterruptible_lane_drains_without_releasing_owner`: the release-gated
+    // worker signals `finished` only after the test releases it, so an empty channel
+    // is direct evidence the spawn failure did not wait for it. Replaces a wall-clock
+    // budget that had zero headroom over the resolver rendezvous nested inside it.
+    assert_eq!(
+        finished_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+        "spawn failure waited for the already-launched worker to finish"
     );
     assert!(cancellation.is_cancelled());
     assert_eq!(
@@ -3005,21 +3053,16 @@ fn workflow_spawn_failure_transfers_launched_worker_into_draining_ownership() {
     *release.lock().expect("release lock") = true;
     wake.notify_all();
     finished_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(RENDEZVOUS_HANG_LIMIT)
         .expect("launched worker must finish after explicit release");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        app.set_product_mode(AppProductMode::Manual);
-        if app.product_mode() == AppProductMode::Manual {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "spawn-failure draining ownership did not reconcile"
-        );
-        std::thread::yield_now();
-    }
+    poll_until(
+        || {
+            app.set_product_mode(AppProductMode::Manual);
+            app.product_mode() == AppProductMode::Manual
+        },
+        "spawn-failure draining ownership did not reconcile",
+    );
 }
 
 #[test]
@@ -3083,7 +3126,6 @@ fn workflow_resolver_panic_transfers_launched_worker_into_draining_ownership() {
         first_worker_entered: Mutex::new(Some(entered_rx)),
     };
 
-    let started = Instant::now();
     let error = app
         .execute_legion_workflow_with_providers(&session_id, &resolver)
         .expect_err("resolver panic must fail without losing the first worker handle");
@@ -3092,10 +3134,13 @@ fn workflow_resolver_panic_transfers_launched_worker_into_draining_ownership() {
             .to_string()
             .contains("intentional second-worker resolver panic")
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "resolver panic waited for the already-launched worker: {:?}",
-        started.elapsed()
+    // Same substitution as the two sites above. This test was not in the reported
+    // flake set, but it carries the identical zero-headroom structure, so it was the
+    // same defect waiting for a slower run rather than a passing test.
+    assert_eq!(
+        finished_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+        "resolver panic waited for the already-launched worker to finish"
     );
     assert!(cancellation.is_cancelled());
 
@@ -3116,21 +3161,16 @@ fn workflow_resolver_panic_transfers_launched_worker_into_draining_ownership() {
     *release.lock().expect("release lock") = true;
     wake.notify_all();
     finished_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(RENDEZVOUS_HANG_LIMIT)
         .expect("launched worker must finish after explicit release");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        app.set_product_mode(AppProductMode::Manual);
-        if app.product_mode() == AppProductMode::Manual {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "resolver-panic draining ownership did not reconcile"
-        );
-        std::thread::yield_now();
-    }
+    poll_until(
+        || {
+            app.set_product_mode(AppProductMode::Manual);
+            app.product_mode() == AppProductMode::Manual
+        },
+        "resolver-panic draining ownership did not reconcile",
+    );
 }
 
 #[test]

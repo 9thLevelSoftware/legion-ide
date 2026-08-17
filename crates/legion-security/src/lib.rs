@@ -21,6 +21,51 @@ use legion_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Credential-shaped strings for tests, generated rather than written down.
+///
+/// Behind the `test-helpers` feature because `#[cfg(test)]` items are not
+/// visible across crate boundaries, and four crates need these: without a
+/// shared home the generator gets copy-pasted, which is what happened —
+/// `legion-agent`, `legion-ai`, `legion-retention` and `legion-terminal` each
+/// grew their own with a different seed constant, so a reviewer reading all
+/// four had to work out which was authoritative. None of them was.
+///
+/// The generated-not-literal property is the point. A test that needs a
+/// credential-shaped string must not contain one: GitGuardian scans every
+/// push, and a literal that matches a live provider pattern is a finding
+/// whatever the surrounding comment says.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod synthetic_credentials {
+    /// One step of a linear congruential generator.
+    ///
+    /// Deterministic on purpose: a fixture that differs between runs turns a
+    /// detector regression into a flake.
+    fn next_state(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    /// An uppercase-alphanumeric body — the AWS access-key-id charset.
+    pub fn upper_alnum_body(len: usize, seed: u64) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| ALPHABET[next_state(&mut state) as usize % ALPHABET.len()] as char)
+            .collect()
+    }
+
+    /// An AWS-access-key-id-shaped value, without committing one.
+    ///
+    /// The seed is fixed so the same string comes back every run; callers that
+    /// need two distinguishable values should use [`upper_alnum_body`] with
+    /// seeds of their own rather than reaching for a literal.
+    pub fn synthetic_access_key_id() -> String {
+        format!("AKIA{}", upper_alnum_body(16, 0x5eed_1234_9abc_def1))
+    }
+}
+
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{
@@ -30,6 +75,15 @@ pub use policy::{
     decide_git_remote_operation, derive_approval_level,
 };
 pub mod risk;
+
+/// Regex + entropy secret detection for proposal, terminal, and retained text.
+pub mod secrets;
+pub use secrets::{
+    ProposalSecretScan, ProposalSecretSite, RedactedText, ScanPosture, SecretConfidence,
+    SecretFinding, SecretRuleId, SecretScanReport, SecretSeverity, SecretSpan,
+    redact_secrets_in_text, scan_proposal_for_secrets, scan_proposal_payload_for_secrets,
+    scan_text_for_secrets,
+};
 
 /// Trust state accepted by policy for workspace-sensitive decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +369,21 @@ impl RedactionScanReport {
 }
 
 /// Conservatively scans trace, diff, or log text for raw payload and secret markers.
+///
+/// Two independent detectors run here and both contribute findings:
+///
+/// 1. The structural marker list below, which catches DTO field names that must
+///    never appear in a metadata-only record (`proposal_content`, `source_body`,
+///    ...). These are schema violations, not credentials.
+/// 2. [`secrets::scan_text_for_secrets`], which catches actual credentials by
+///    provider shape, credential-named assignment, and entropy.
+///
+/// The marker list alone cannot see an AWS key or a JWT, and the secret ruleset
+/// alone cannot see a raw-payload schema violation, so neither replaces the other.
+///
+/// This entry point is the pre-retention and pre-export boundary, so it evaluates
+/// secret findings under [`ScanPosture::EgressRecall`]: a leak past this point is
+/// unrecoverable, which makes over-redaction the cheaper error.
 pub fn scan_payload_for_sensitive_markers(
     payload_kind: RedactionPayloadKind,
     payload: &str,
@@ -360,6 +429,17 @@ pub fn scan_payload_for_sensitive_markers(
                 byte_offset,
             });
         }
+    }
+
+    // EgressRecall posture: every confidence tier, including the entropy
+    // heuristic, contributes a finding at this boundary.
+    let secret_report = scan_text_for_secrets(payload);
+    for finding in &secret_report.findings {
+        findings.push(RedactionScanFinding {
+            payload_kind,
+            marker_label: finding.rule_id.stable_id().to_string(),
+            byte_offset: finding.span.start,
+        });
     }
 
     RedactionScanReport {

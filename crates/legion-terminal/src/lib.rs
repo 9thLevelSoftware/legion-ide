@@ -36,6 +36,7 @@ use legion_protocol::{
     validate_terminal_kill_request, validate_terminal_launch_policy_contract,
     validate_terminal_output_chunk, validate_terminal_resize,
 };
+use legion_security::{ScanPosture, redact_secrets_in_text};
 use thiserror::Error;
 
 static TERMINAL_SESSION_COUNTER: AtomicU64 = AtomicU64::new(10_000);
@@ -1291,8 +1292,24 @@ fn missing_session_error(session_id: TerminalSessionId) -> TerminalRuntimeError 
     }
 }
 
+/// Redact credentials from terminal output and bound it to `limit` bytes.
+///
+/// Two passes run in order. [`redact_secrets`] below is the original hand-rolled
+/// pass and is kept as-is so its exact, already-proven behaviour on
+/// `Authorization:` headers and `NAME=value` assignments is preserved. The shared
+/// [`legion_security::redact_secrets_in_text`] pass then removes the credential
+/// shapes that pass has no rule for — AWS key ids, GitHub and Slack tokens, JWTs,
+/// PEM headers, URL-embedded credentials.
+///
+/// The posture is [`ScanPosture::DisplayPrecision`]: this text is rendered into a
+/// terminal pane a person is reading. The entropy heuristic is deliberately not
+/// applied here, because blanking a base64 blob or a build hash out of somebody's
+/// terminal is how a redaction marker becomes something users learn to ignore.
+/// Terminal text that is later forwarded to a model or persisted passes through
+/// an egress-posture boundary, which does apply the heuristic.
 fn redact_terminal_projection(output: &str, limit: u64) -> String {
-    let mut projected = redact_secrets(output);
+    let mut projected =
+        redact_secrets_in_text(&redact_secrets(output), ScanPosture::DisplayPrecision).text;
     let limit = limit as usize;
     if projected.len() > limit {
         let mut end = limit;
@@ -2252,5 +2269,38 @@ mod tests {
         // No false positives on ordinary text.
         let clean = redact_terminal_projection("hello world output", 4096);
         assert_eq!(clean, "hello world output");
+    }
+
+    /// Re-exported rather than re-implemented: four crates grew their own
+    /// copy of this generator, each with a different seed, so none was
+    /// authoritative. See `legion_security::synthetic_credentials`.
+    use legion_security::synthetic_credentials::synthetic_access_key_id;
+
+    #[test]
+    fn terminal_projection_redacts_credentials_the_marker_pass_cannot_see() {
+        // An AWS access key id matches none of the hand-rolled pass's prefixes,
+        // header forms, or assignment keywords. Before the shared ruleset was
+        // wired in it reached the terminal pane verbatim.
+        let key_id = synthetic_access_key_id();
+
+        let projected =
+            redact_terminal_projection(&format!("aws sts get-caller-identity {key_id}"), 4096);
+
+        assert!(!projected.contains(key_id.as_str()));
+        assert!(projected.contains("[redacted]"));
+        assert!(projected.starts_with("aws sts get-caller-identity "));
+    }
+
+    #[test]
+    fn terminal_projection_keeps_high_entropy_build_output_readable() {
+        // DisplayPrecision posture: the entropy heuristic must not blank a build
+        // hash out of a pane somebody is reading. Over-redaction here is what
+        // teaches users to ignore `[redacted]`.
+        let digest = "9f2c4a7b1e6d3058af1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071";
+        let line = format!("Finished release [optimized] target(s) sha256:{digest}");
+
+        let projected = redact_terminal_projection(&line, 4096);
+
+        assert_eq!(projected, line);
     }
 }

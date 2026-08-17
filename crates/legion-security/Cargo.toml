@@ -7,9 +7,16 @@ publish.workspace = true
 
 [dependencies]
 legion-protocol = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 toml = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Exposes `synthetic_credentials` to other crates' tests. `#[cfg(test)]`
+# items are not visible across crate boundaries, and four crates need it.
+test-helpers = []

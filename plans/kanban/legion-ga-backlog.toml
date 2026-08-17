@@ -2304,7 +2304,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-security --test secrets", "cargo test -p legion-ai"]
     acceptance = ["Each secret-detection rule has a fixture and a test."]
     stop_condition = "Stop if a rule is added without a fixture."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/2026-08-17-secret-scanning-ruleset.md"
 
     [[epics.features.tasks]]
     id = "P9.F2.T3"
