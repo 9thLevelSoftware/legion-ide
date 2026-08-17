@@ -393,3 +393,132 @@ fn an_operator_over_multibyte_text_cuts_on_character_boundaries() {
         "cutting on byte offsets would split the é and corrupt the buffer"
     );
 }
+
+// ─── Insert entry, x, and / ─────────────────────────────────────────────────
+
+#[test]
+fn i_enters_insert_without_moving() {
+    let (mut app, buffer_id) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::Right, 2);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertBefore)
+        .expect("i dispatches");
+    assert_eq!(
+        cursor(&app, buffer_id),
+        (0, 2),
+        "`i` inserts where the cursor is"
+    );
+}
+
+#[test]
+fn a_moves_one_right_before_inserting() {
+    let (mut app, buffer_id) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertAfter)
+        .expect("a dispatches");
+    assert_eq!(
+        cursor(&app, buffer_id),
+        (0, 1),
+        "`a` is `i` one character to the right"
+    );
+}
+
+#[test]
+fn o_opens_a_line_below_and_bigo_opens_above() {
+    let (mut app, buffer_id) = app_with_text(
+        "one
+two
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertLineBelow)
+        .expect("o dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "one
+
+two
+"
+    );
+
+    let (mut app, buffer_id) = app_with_text(
+        "one
+two
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertLineAbove)
+        .expect("O dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "
+one
+two
+"
+    );
+}
+
+#[test]
+fn x_deletes_the_character_under_the_cursor_into_the_register() {
+    let (mut app, buffer_id) = app_with_text(
+        "abc
+",
+    );
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::Right, 1);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimDeleteChar)
+        .expect("x dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "ac
+"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::VimPut)
+        .expect("put dispatches");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "acb
+",
+        "`x` cuts, so what it took can be put back"
+    );
+}
+
+#[test]
+fn x_on_an_empty_line_is_harmless() {
+    let (mut app, buffer_id) = app_with_text(
+        "
+second
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimDeleteChar)
+        .expect("x on nothing is not an error");
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "
+second
+"
+    );
+}
+
+#[test]
+fn slash_opens_the_editors_own_find_bar() {
+    let (mut app, _) = app_with_text(
+        "word
+",
+    );
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimSearchForward)
+        .expect("/ dispatches");
+    assert!(
+        app.find_bar_visible(),
+        "`/` reuses the find bar rather than growing a second search UI"
+    );
+}

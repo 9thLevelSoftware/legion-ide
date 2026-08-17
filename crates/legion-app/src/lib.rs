@@ -19524,7 +19524,7 @@ impl AppComposition {
         intent: &CommandDispatchIntent,
         event_context: &EventContext,
     ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
-        use crate::vim_session::{byte_to_character_column, character_to_byte_column};
+        use crate::vim_session::byte_to_character_column;
 
         match intent {
             CommandDispatchIntent::SetVimModeEnabled(enabled) => {
@@ -19565,12 +19565,7 @@ impl AppComposition {
                     utf16_offset: None,
                 };
                 let to = legion_ui::resolve_motion(&text, from, *motion, *count);
-                let target = legion_editor::TextPosition::new(
-                    to.line as usize,
-                    character_to_byte_column(&text, to.line as usize, to.character as usize),
-                );
-                self.editor
-                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+                self.set_vim_cursor(buffer_id, &text, to)?;
                 Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
             }
             CommandDispatchIntent::VimOperatorMotion {
@@ -19606,8 +19601,103 @@ impl AppComposition {
                 };
                 self.apply_vim_put(buffer_id, &text, from, &register, event_context)
             }
+            CommandDispatchIntent::VimInsertBefore | CommandDispatchIntent::VimInsertAfter => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                // `a` is `i` one character to the right. Doing it as a motion
+                // keeps the line-end clamping in one place rather than
+                // repeating it here.
+                if matches!(intent, CommandDispatchIntent::VimInsertAfter) {
+                    let to =
+                        legion_ui::resolve_motion(&text, from, legion_ui::VimMotionKind::Right, 1);
+                    self.set_vim_cursor(buffer_id, &text, to)?;
+                }
+                self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimInsertLineBelow
+            | CommandDispatchIntent::VimInsertLineAbove => {
+                let Some((buffer_id, _text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let below = matches!(intent, CommandDispatchIntent::VimInsertLineBelow);
+                let line = from.line as usize;
+                // `o` opens below, `O` above; both leave the cursor on the new
+                // blank line in insert mode.
+                let at = legion_editor::TextPosition::new(if below { line + 1 } else { line }, 0);
+                let edit = TextEdit::new(legion_editor::TextRange::new(at, at), "\n".to_string());
+                let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
+                let target =
+                    legion_editor::TextPosition::new(if below { line + 1 } else { line }, 0);
+                self.editor
+                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+                self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+                Ok(Some(outcome))
+            }
+            CommandDispatchIntent::VimDeleteChar => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                // `x` takes the character under the cursor, which is a
+                // one-character inclusive range rather than any motion.
+                let line = from.line as usize;
+                let character = from.character as usize;
+                if crate::vim_session::character_to_byte_column(&text, line, character)
+                    >= crate::vim_session::character_to_byte_column(&text, line, character + 1)
+                {
+                    // Nothing under the cursor — an empty line, or past the end.
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                let range = legion_ui::VimRange {
+                    start: (line, character),
+                    end: (line, character + 1),
+                    linewise: false,
+                };
+                self.apply_vim_operator(
+                    buffer_id,
+                    &text,
+                    range,
+                    legion_ui::VimOperatorKind::Delete,
+                    event_context,
+                )
+            }
+            CommandDispatchIntent::VimSearchForward => {
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                // `/` opens the find bar the rest of the editor already has,
+                // rather than growing a second search UI that behaves almost
+                // but not quite the same.
+                self.buffer_search_state.find_bar_visible = true;
+                // The find-bar intents report Noop too; visibility is read
+                // from projection rather than carried in the outcome.
+                Ok(Some(AppCommandOutcome::Noop))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Move the cursor to a character-space coordinate.
+    fn set_vim_cursor(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        to: legion_protocol::TextCoordinate,
+    ) -> Result<(), AppCompositionError> {
+        let target = legion_editor::TextPosition::new(
+            to.line as usize,
+            crate::vim_session::character_to_byte_column(
+                text,
+                to.line as usize,
+                to.character as usize,
+            ),
+        );
+        self.editor
+            .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+        Ok(())
     }
 
     /// Buffer, text and character-space cursor for a Vim command.
@@ -19738,6 +19828,11 @@ impl AppComposition {
         self.emit_transaction_event(&descriptor);
         self.notify_lsp_did_change(buffer_id, &descriptor);
         Ok(AppCommandOutcome::Edited(descriptor))
+    }
+
+    /// Whether the buffer find bar is showing.
+    pub fn find_bar_visible(&self) -> bool {
+        self.buffer_search_state.find_bar_visible
     }
 
     /// Route a UI dispatch intent through editor and workspace authorities.
