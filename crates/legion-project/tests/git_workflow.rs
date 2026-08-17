@@ -8,9 +8,9 @@ use std::{
 
 use legion_project::{
     GitConflictChoice, GitDiffStrategy, GitHunkStage, GitInspectionBackend, GitSnapshotOptions,
-    collect_git_snapshot, collect_git_snapshot_with_backend, commit_git_changes, git_forge_kind,
-    git_pull_request_url, resolve_git_conflict, stage_git_hunk, unstage_git_hunk,
-    validate_git_commit_message,
+    ProjectGitWorktreeKind, collect_git_snapshot, collect_git_snapshot_with_backend,
+    commit_git_changes, git_forge_kind, git_pull_request_url, git_worktree_kind_for_path,
+    resolve_git_conflict, stage_git_hunk, unstage_git_hunk, validate_git_commit_message,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1130,4 +1130,88 @@ fn git_pull_request_url_builds_github_and_gitlab_links() {
         ),
         None
     );
+}
+
+/// P2.F5.T3 — the SCM surface must be able to tell agent worktrees from the
+/// user's own, so the classification is asserted directly on both separator
+/// spellings and on the negative case.
+#[test]
+fn worktree_kind_distinguishes_agent_sandboxes_from_manual_worktrees() {
+    // Delegated-task sandboxes are agent-owned.
+    assert_eq!(
+        git_worktree_kind_for_path(Path::new("/repo/target/delegated-tasks/task-abc123")),
+        ProjectGitWorktreeKind::Agent
+    );
+    // Windows-spelled paths classify identically: a caller may hand us a
+    // `PathBuf` it built itself rather than a porcelain-reported path.
+    assert_eq!(
+        git_worktree_kind_for_path(Path::new(r"C:\repo\target\delegated-tasks\task-abc123")),
+        ProjectGitWorktreeKind::Agent
+    );
+
+    // Negative cases: none of these may be reported as agent worktrees, or the
+    // user would see their own worktrees labelled as something they cannot manage.
+    for manual in [
+        "/repo",
+        "/repo/target/debug",
+        "/repo/../feature-worktree",
+        "/repo/target/delegated-tasks",
+        "/home/dev/tasks/task-abc123",
+    ] {
+        assert_eq!(
+            git_worktree_kind_for_path(Path::new(manual)),
+            ProjectGitWorktreeKind::Manual,
+            "`{manual}` must classify as a manual worktree"
+        );
+    }
+}
+
+/// P2.F5.T3 — an agent worktree created inside a real repository is projected,
+/// and projected as `Agent`, so it cannot be hidden from the user.
+#[test]
+fn git_snapshot_projects_agent_worktrees_as_agent_kind() {
+    let repo = TempGitRepo::new();
+    repo.write("src/lib.rs", "pub fn alpha() {}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+
+    // Mirror the delegated-task sandbox layout that legion-agent creates.
+    let agent_worktree = repo.path().join("target/delegated-tasks/task-visible");
+    run_git(
+        repo.path(),
+        [
+            "worktree",
+            "add",
+            agent_worktree.to_str().expect("utf8"),
+            "-b",
+            "agent-task",
+        ],
+    );
+
+    let snapshot = collect_git_snapshot(repo.path(), None, GitSnapshotOptions::default())
+        .expect("git snapshot should collect");
+
+    let agent_rows: Vec<_> = snapshot
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.kind == ProjectGitWorktreeKind::Agent)
+        .collect();
+    assert_eq!(
+        agent_rows.len(),
+        1,
+        "exactly one agent worktree should be projected; got: {:?}",
+        snapshot.worktrees
+    );
+    assert_eq!(agent_rows[0].branch_label.as_deref(), Some("agent-task"));
+
+    // The repository root itself must not be swept up as an agent worktree.
+    assert!(
+        snapshot
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.kind == ProjectGitWorktreeKind::Manual),
+        "the main worktree must still project as manual"
+    );
+
+    let _ = std::fs::remove_dir_all(&agent_worktree);
 }

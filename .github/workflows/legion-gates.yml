@@ -100,6 +100,15 @@ jobs:
       - name: cargo check (legion-app no-default-features)
         run: cargo check -p legion-app --no-default-features
 
+      # legion-desktop was missing from this check, and that is how a `#[cfg]`
+      # mismatch in view.rs went unnoticed: perf-harness builds the renderer
+      # with `--no-default-features --features offline`, classifies the failure
+      # as a build failure, and downgrades the workload to `skipped` — so the
+      # only ADR-0048-budgeted workload silently stopped running inside a green
+      # `--strict` run.
+      - name: cargo check (legion-desktop no-default-features)
+        run: cargo check -p legion-desktop --no-default-features --features offline
+
       - name: cargo test
         run: cargo test --workspace --all-targets --no-fail-fast
 

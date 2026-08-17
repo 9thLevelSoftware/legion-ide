@@ -5,6 +5,21 @@
 Define the reference workspaces against which all WS-MANUAL-02 scale tasks are measured.
 These workspaces are generated or identified, not shipped as binary fixtures.
 
+> **Accuracy note, 2026-08-16.** Two caveats found while verifying `PR-UI-001`
+> promotion evidence; see `plans/evidence/production/PR-UI-001/2026-08-16-promotion-verification.md`.
+>
+> 1. The generation command cited below for RW-2 and RW-4,
+>    `xtask generate-test-workspace`, **does not exist**. There is no such
+>    `xtask` subcommand and no `generate_test_workspace` symbol in the tree, so
+>    RW-2 (100K files) and RW-4 cannot be produced as written. The largest
+>    workspace-open workload that actually runs is 1,000 files
+>    (`crates/legion-project/tests/workspace_scale.rs`), not 100,000.
+> 2. The RW-3 threshold "100MB single keystroke edit < 50ms" below is a
+>    WS-MANUAL-02-local threshold. It is **weaker than** the ADR-0048 editor
+>    budget (keypress p50 < 16 ms), and the test enforcing it is `#[ignore]`d,
+>    so it runs in neither `cargo test --workspace` nor `xtask perf-harness`.
+>    Do not read a pass here as an ADR-0048 pass.
+
 ## Reference workspaces
 
 ### RW-1: Legion Repository (self-hosted)

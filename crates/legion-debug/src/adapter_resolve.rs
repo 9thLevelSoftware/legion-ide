@@ -8,12 +8,27 @@
 //! in-tree fake adapter (B4). Optional system-adapter dogfood is B9
 //! ([`resolve_system_adapter`]).
 //!
+//! ## Authorization (P2.F3.T2)
+//!
+//! Resolution is policy-gated: every entry point requires an
+//! [`AdapterResolutionGrant`], which can only be minted from a **granted**
+//! `debug.adapter.launch` capability decision and carries the allowlist of
+//! adapter binaries policy will accept. A program that is not on that list is
+//! never returned, including one named by `LEGION_DAP_ADAPTER` — env is an
+//! override for *where* the adapter is, never for *what* may be launched.
+//!
+//! This crate does not evaluate workspace trust (that stays app/security-owned,
+//! see `plans/dependency-policy.md`); it refuses to hand out a spawnable path
+//! without evidence that the decision was already made and allowed.
+//!
 //! ## Resolution order (first hit when mode allows live)
 //!
 //! 1. `LEGION_DAP_ADAPTER` — explicit path to adapter executable
 //! 2. `PATH` lookup for type-specific names (`lldb-dap`, `codelldb`, …)
 //!    (preferred type first, then aliases — not alphabetical demotion)
 //! 3. In-tree `fake_dap_adapter` when `LEGION_DAP_USE_FAKE=1` (CI / local dev)
+//!
+//! Every hit is filtered through the grant's allowlist before it is returned.
 //!
 //! ## Mode
 //!
@@ -31,7 +46,16 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use legion_protocol::{CapabilityDecision, CapabilityDecisionId};
+
 use crate::live_session::fake_dap_adapter_path;
+
+/// Capability a debug adapter launch must be granted under.
+///
+/// Mirrors `legion_security::DEBUG_ADAPTER_LAUNCH_CAPABILITY`; the two crates
+/// cannot depend on each other (`plans/dependency-policy.md`), so the id is the
+/// contract between them and is asserted on both sides.
+pub const DEBUG_ADAPTER_LAUNCH_CAPABILITY: &str = "debug.adapter.launch";
 
 /// Product DAP mode from the environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,21 +106,93 @@ pub struct ResolvedAdapter {
     pub is_fake: bool,
 }
 
+/// Authorization to resolve — and therefore to spawn — a debug adapter binary.
+///
+/// Minted only by [`AdapterResolutionGrant::from_decision`] from a granted
+/// `debug.adapter.launch` decision, and carries the adapter binaries the
+/// granting policy allows. Holding one is the caller's evidence that the trust
+/// and policy checks already ran.
+///
+/// The grant is an in-process authorization object, not an unforgeable token:
+/// it stops resolution from happening *without* a decision, it does not defend
+/// this crate against a caller in the same process that fabricates a decision.
+#[derive(Debug, Clone)]
+pub struct AdapterResolutionGrant {
+    decision_id: CapabilityDecisionId,
+    allowed_binaries: Vec<String>,
+}
+
+impl AdapterResolutionGrant {
+    /// Mint a grant from a capability decision plus the policy's allowlist.
+    ///
+    /// Returns [`None`] — refusing resolution — when the decision was denied,
+    /// when it was granted for some *other* capability, or when the allowlist is
+    /// empty or blank. An empty allowlist must never mean "any binary": that is
+    /// the same vacuous-truth trap guarded in `legion-security`'s policy rules.
+    pub fn from_decision(
+        decision: &CapabilityDecision,
+        allowed_binaries: &[String],
+    ) -> Option<Self> {
+        if !decision.granted || decision.capability.0 != DEBUG_ADAPTER_LAUNCH_CAPABILITY {
+            return None;
+        }
+        let allowed_binaries: Vec<String> = allowed_binaries
+            .iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        if allowed_binaries.is_empty() {
+            return None;
+        }
+        Some(Self {
+            decision_id: decision.decision_id,
+            allowed_binaries,
+        })
+    }
+
+    /// Decision id backing this grant, for audit rows.
+    pub fn decision_id(&self) -> CapabilityDecisionId {
+        self.decision_id
+    }
+
+    /// Whether policy allows launching `program`.
+    ///
+    /// Matches the file stem case-insensitively, so `codelldb`, `codelldb.exe`
+    /// and `C:\tools\CodeLLDB.exe` all check against `codelldb`. Callers that
+    /// build a [`ResolvedAdapter`] without going through this module (test seams)
+    /// must run their program through here too, or the gate has a hole.
+    pub fn permits_program(&self, program: &Path) -> bool {
+        let Some(stem) = program.file_stem().and_then(|stem| stem.to_str()) else {
+            return false;
+        };
+        self.allowed_binaries
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(stem))
+    }
+}
+
 /// Resolve a live adapter for `preferred_type` (e.g. `lldb-dap` / `legion-fake`).
 ///
-/// Returns [`None`] when mode is fixture or no binary is found.
-pub fn resolve_live_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
+/// Returns [`None`] when mode is fixture, when no binary is found, or when the
+/// binary that was found is not permitted by `grant`.
+pub fn resolve_live_adapter(
+    grant: &AdapterResolutionGrant,
+    preferred_type: &str,
+) -> Option<ResolvedAdapter> {
     let mode = DapMode::from_env();
     if !mode.allows_live() {
         return None;
     }
 
-    if let Some(system) = resolve_system_adapter(preferred_type) {
+    if let Some(system) = resolve_system_adapter(grant, preferred_type) {
         return Some(system);
     }
 
     if env_truthy("LEGION_DAP_USE_FAKE")
         && let Some(fake) = fake_dap_adapter_path()
+        // The CI fake is a spawnable process like any other: it is only used
+        // when policy names it, never because the env var was set.
+        && grant.permits_program(&fake)
     {
         return Some(ResolvedAdapter {
             program: fake,
@@ -115,11 +211,16 @@ pub fn resolve_live_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
 /// 1. `LEGION_DAP_ADAPTER` when the path exists
 /// 2. `PATH` candidates for `preferred_type` (preferred name first)
 ///
-/// Never returns the in-tree `fake_dap_adapter`.
-pub fn resolve_system_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
+/// Every hit must satisfy `grant`, so `LEGION_DAP_ADAPTER` cannot be used to
+/// point the debugger at an arbitrary executable. Never returns the in-tree
+/// `fake_dap_adapter`.
+pub fn resolve_system_adapter(
+    grant: &AdapterResolutionGrant,
+    preferred_type: &str,
+) -> Option<ResolvedAdapter> {
     if let Ok(path) = env::var("LEGION_DAP_ADAPTER") {
         let path = PathBuf::from(path.trim());
-        if !path.as_os_str().is_empty() && path.exists() {
+        if !path.as_os_str().is_empty() && path.exists() && grant.permits_program(&path) {
             return Some(ResolvedAdapter {
                 program: path,
                 args: Vec::new(),
@@ -130,7 +231,9 @@ pub fn resolve_system_adapter(preferred_type: &str) -> Option<ResolvedAdapter> {
     }
 
     for candidate in path_candidates(preferred_type) {
-        if let Some(found) = find_on_path(&candidate) {
+        if let Some(found) = find_on_path(&candidate)
+            && grant.permits_program(&found)
+        {
             // Prefer the found binary stem so audit rows match the real tool.
             let adapter_type = found
                 .file_stem()
@@ -245,11 +348,93 @@ mod tests {
     #[test]
     fn resolve_system_adapter_never_returns_fake_flag() {
         // Without LEGION_DAP_ADAPTER / PATH tools this is None; if present, must be non-fake.
-        if let Some(resolved) = resolve_system_adapter("lldb-dap") {
+        if let Some(resolved) = resolve_system_adapter(&test_grant(), "lldb-dap") {
             assert!(
                 !resolved.is_fake,
                 "system resolve must not return fake adapter"
             );
         }
+    }
+
+    /// Granted decision for the adapters the default policy allows.
+    fn test_grant() -> AdapterResolutionGrant {
+        AdapterResolutionGrant::from_decision(
+            &granted_decision(DEBUG_ADAPTER_LAUNCH_CAPABILITY),
+            &["lldb-dap".to_string(), "codelldb".to_string()],
+        )
+        .expect("granted decision with a non-empty allowlist mints a grant")
+    }
+
+    fn granted_decision(capability: &str) -> CapabilityDecision {
+        CapabilityDecision {
+            decision_id: CapabilityDecisionId(7),
+            granted: true,
+            capability: legion_protocol::CapabilityId(capability.to_string()),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn grant_requires_a_granted_debug_adapter_launch_decision() {
+        let allowed = ["lldb-dap".to_string()];
+
+        let denied = CapabilityDecision {
+            granted: false,
+            ..granted_decision(DEBUG_ADAPTER_LAUNCH_CAPABILITY)
+        };
+        assert!(
+            AdapterResolutionGrant::from_decision(&denied, &allowed).is_none(),
+            "a denied decision must not authorize resolution"
+        );
+
+        assert!(
+            AdapterResolutionGrant::from_decision(&granted_decision("terminal.launch"), &allowed)
+                .is_none(),
+            "a grant for another capability must not be reusable for debug adapters"
+        );
+
+        assert!(
+            AdapterResolutionGrant::from_decision(
+                &granted_decision(DEBUG_ADAPTER_LAUNCH_CAPABILITY),
+                &[],
+            )
+            .is_none(),
+            "an empty allowlist must deny, not allow everything"
+        );
+        assert!(
+            AdapterResolutionGrant::from_decision(
+                &granted_decision(DEBUG_ADAPTER_LAUNCH_CAPABILITY),
+                &[String::new(), "   ".to_string()],
+            )
+            .is_none(),
+            "blank allowlist entries must not authorize anything"
+        );
+
+        let grant = AdapterResolutionGrant::from_decision(
+            &granted_decision("debug.adapter.launch"),
+            &allowed,
+        )
+        .expect("granted decision mints a grant");
+        assert_eq!(grant.decision_id(), CapabilityDecisionId(7));
+    }
+
+    #[test]
+    fn grant_permits_only_allowlisted_binaries() {
+        let grant = test_grant();
+        assert!(grant.permits_program(Path::new("/usr/bin/lldb-dap")));
+        // Case-insensitive, and the extension is not part of the name. Written
+        // without a separator so it means the same thing everywhere: off
+        // Windows a backslash is an ordinary filename character, so
+        // `C:\tools\CodeLLDB.exe` has no directory part and its stem is the
+        // entire string — which is how this assertion passed on Windows and
+        // failed on Linux.
+        assert!(grant.permits_program(Path::new("CodeLLDB.exe")));
+        #[cfg(windows)]
+        assert!(grant.permits_program(Path::new("C:\\tools\\CodeLLDB.exe")));
+        // The whole point of the allowlist: an arbitrary executable handed to
+        // LEGION_DAP_ADAPTER is not launchable just because it exists.
+        assert!(!grant.permits_program(Path::new("/bin/sh")));
+        assert!(!grant.permits_program(Path::new("fake_dap_adapter.exe")));
+        assert!(!grant.permits_program(Path::new("")));
     }
 }

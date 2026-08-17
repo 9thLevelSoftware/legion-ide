@@ -347,3 +347,30 @@ fn daily_editing_search_degraded_active_file_uses_limited_viewport() {
             .is_none()
     );
 }
+
+#[test]
+fn daily_editing_search_workspace_reports_column_relative_to_its_own_line() {
+    // Regression: workspace hits carry file-absolute byte offsets but only the
+    // matching line's text. Measuring the column against `line_text` with the
+    // absolute offset saturated to the line length, so every match after the
+    // first line was reported as starting and ending at the end of its line.
+    let workspace = TempWorkspace::new();
+    workspace.write("columns.txt", "filler line\nxx needle yy\n");
+    let mut app = open_app(workspace.path(), None);
+
+    let projection = run_search(&mut app, SearchScopeProjection::Workspace, "needle", 10);
+
+    assert_eq!(projection.results.len(), 1);
+    let row = &projection.results[0];
+    assert_eq!(
+        row.range.start.character, 3,
+        "`needle` starts at column 3 of its own line, not of the file"
+    );
+    assert_eq!(row.range.end.character, 9);
+    assert_eq!(
+        row.range.start.byte_offset,
+        Some(15),
+        "byte offsets stay absolute within the file"
+    );
+    assert_eq!(row.range.end.byte_offset, Some(21));
+}

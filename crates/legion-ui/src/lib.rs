@@ -4,6 +4,9 @@
 
 pub mod projection;
 pub mod ui;
+
+/// The command line: parses a typed string into one dispatch intent.
+mod shell_commands;
 pub mod vim;
 /// Turning a keystroke into a Vim intent.
 mod vim_intent;
@@ -34,8 +37,8 @@ pub use ui::{
     ExplorerNodeProjection, ExplorerProjection, ExplorerSelectionProjection, FindBarProjection,
     GitBlameLineProjection, GitCommitProjection, GitConflictChoiceProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
-    Layout, LocalHistoryEntryProjection, LspServerHealthProjection,
+    GitHunkStageProjection, GitProjection, GitRemotePolicyProjection, GitWorktreeKindProjection,
+    GitWorktreeProjection, Layout, LocalHistoryEntryProjection, LspServerHealthProjection,
     MAX_TEST_EXPLORER_TREE_DISPLAY_ROWS, PaletteCommandGroup, PaletteConfirmationProjection,
     PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, PanelCapability, PanelId,
     PanelRegistry, RenderMode, SearchProjection, SearchResultProjection, SearchScopeProjection,

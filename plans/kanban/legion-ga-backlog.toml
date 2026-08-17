@@ -553,8 +553,16 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # p50 by 45% (23.2ms against 16ms). Open and scroll are within budget;
     # typing is not. See
     # plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md.
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    # 2026-08-16: closed. The per-keystroke clone of the whole line-metrics
+    # vector is gone (crates/legion-text/src/line_table.rs shares an immutable
+    # base and defers the offset shift), and m9.large_file_100mb now reports
+    # edit p50 0.3ms / p95 0.5ms against the 16ms / 32ms budgets, status=passed.
+    # Scope of the claim: the harness measures the text model and the viewport
+    # projection, not the renderer. Renderer-backed large-file UX evidence is
+    # still outstanding for PR-UI-002 promotion and is not claimed here. See
+    # plans/evidence/production/WS-MANUAL-02/large-file-typing-fix.md.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-02/large-file-typing-fix.md"
 
     [[epics.features.tasks]]
     id = "P1.F4.T3"
@@ -766,11 +774,21 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Wire CodeLLDB for Rust with policy-gated adapter resolution"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-debug/src/adapters/codelldb.rs", "crates/legion-security/src/policy.rs"]
+    # `adapters/codelldb.rs` was never created: CodeLLDB is one allowlisted name in
+    # the shared resolver, not a per-adapter module. Files list reflects reality.
+    files = ["crates/legion-debug/src/adapter_resolve.rs", "crates/legion-security/src/policy.rs", "crates/legion-app/src/debug_workflow.rs"]
     dependencies = ["P2.F3.T1"]
     verification = ["cargo test -p legion-debug", "cargo test -p legion-security"]
     acceptance = ["Adapter binary resolution is policy-gated; untrusted workspaces cannot launch debug adapters."]
     stop_condition = "Do not add a 'trust all adapters' switch."
+    # 2026-08-16: the acceptance sentence is met and tested — resolution requires a
+    # granted `debug.adapter.launch` decision and an adapter-binary allowlist
+    # (`explicit_adapter_path_is_refused_unless_the_binary_is_allowlisted` carries a
+    # negative case and a positive control), and untrusted/unknown trust is denied by
+    # the broker. Held at in-progress because the card's *title* names CodeLLDB and no
+    # CodeLLDB or lldb-dap binary has ever been run for it: both system-adapter dogfood
+    # tests report ok via their soft-skip branch, and a clean skip is not proof. To
+    # close: install an adapter and run the dogfood tests with LEGION_DAP_DOGFOOD=1.
     status = "in-progress"
     evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B3-resolution-trust-dual-mode.md"
 
@@ -840,7 +858,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-app", "cargo test -p legion-project"]
     acceptance = ["Replace never mutates files outside proposal review."]
     stop_condition = "Stop if any replace path writes without going through a proposal."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-SEARCH-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F4.T3"
@@ -877,50 +896,52 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Wire live gutter diff/blame to desktop painter"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-project/src/git.rs"]
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P1.F3.T2"]
-    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project", "cargo run -p xtask -- golden-path-1"]
     acceptance = ["GP-1: open Legion repo, edit, see diff, stage hunk, commit, and optionally push."]
     stop_condition = "Stop if diff/blame data is read once and never refreshed."
-    status = "in-progress"
-    evidence = "crates/legion-desktop/tests/git_workflow.rs"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T2"
     title = "Add status panel, hunk/range staging, commit editor, push/fetch/pull actions"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-desktop/src/view/scm_panel.rs", "crates/legion-project/src/git.rs"]
+    files = ["crates/legion-desktop/src/view.rs", "crates/legion-desktop/src/bridge.rs", "crates/legion-app/src/lib.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P2.F5.T1"]
-    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-desktop", "cargo test -p legion-project", "cargo test -p legion-app --test git_remote_policy_workflow"]
     acceptance = ["Hunk staging and commit work end-to-end through the UI."]
     stop_condition = "Do not bypass the workspace's path policy for push/fetch/pull."
-    status = "in-progress"
-    evidence = "crates/legion-app/tests/commit_validation_workflow.rs"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T3"
     title = "Add branch/worktree manager and agent worktree visibility"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-project/src/git.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-desktop/src/view/scm_panel.rs"]
+    files = ["crates/legion-project/src/lib.rs", "crates/legion-agent/src/worktree.rs", "crates/legion-desktop/src/view.rs"]
     dependencies = ["P2.F5.T2", "P5.F2.T2"]
     verification = ["cargo test -p legion-project", "cargo test -p legion-agent", "cargo test -p legion-desktop"]
     acceptance = ["Agent worktrees are visible in the SCM panel; manual worktrees are managed by the user."]
     stop_condition = "Stop if agent worktrees are hidden from the user."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
     [[epics.features.tasks]]
     id = "P2.F5.T4"
     title = "Keep network/auth operations policy-visible"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-project/src/git.rs", "crates/legion-security/src/policy.rs"]
+    files = ["crates/legion-security/src/policy.rs", "crates/legion-app/src/git_policy.rs", "crates/legion-app/src/lib.rs", "crates/legion-project/src/lib.rs"]
     dependencies = ["P2.F5.T2"]
-    verification = ["cargo test -p legion-security", "cargo test -p legion-project"]
+    verification = ["cargo test -p legion-security --test git_remote_policy", "cargo test -p legion-app --test git_remote_policy_workflow", "cargo test -p legion-project"]
     acceptance = ["Every network/auth operation shows its policy decision to the user."]
     stop_condition = "Stop if a network operation is allowed without an audit row."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M8/WS-GIT-01-evidence.md"
 
 # ---------------------------------------------------------------------------
 # EPIC P3 — Proposal apply, checkpoints, and trust review

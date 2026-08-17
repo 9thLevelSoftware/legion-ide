@@ -17,6 +17,9 @@ use thiserror::Error;
 pub mod binary;
 pub use binary::{BinaryDetectionResult, detect_binary, detect_binary_with_window};
 
+mod line_table;
+use line_table::{LineMetric, LineTable, index_for_offset_in, shift_usize};
+
 static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
 const DEFAULT_LEAF_TARGET_BYTES: usize = 1024;
@@ -624,29 +627,9 @@ impl Utf16Range {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LineMetric {
-    start_byte: usize,
-    content_end_byte: usize,
-    end_byte: usize,
-    byte_len: usize,
-    utf16_len: usize,
-    line_ending_bytes: usize,
-}
-
-impl LineMetric {
-    fn contains_offset(&self, offset: usize, is_last_line: bool) -> bool {
-        if is_last_line {
-            self.start_byte <= offset && offset <= self.end_byte
-        } else {
-            self.start_byte <= offset && offset < self.end_byte
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct ChunkedLineIndex {
     rope: Arc<Rope>,
-    lines: Vec<LineMetric>,
+    lines: LineTable,
     chunks: Vec<TextChunkDescriptor>,
 }
 
@@ -671,7 +654,7 @@ impl LineIndex {
         Self {
             inner: ChunkedLineIndex {
                 rope,
-                lines,
+                lines: LineTable::from_metrics(lines),
                 chunks,
             },
         }
@@ -688,9 +671,14 @@ impl LineIndex {
             .get(start_chunk_index)
             .unwrap_or_else(|| self.inner.chunks.last().expect("chunk list is non-empty"));
         let rebuild_start_line = self.line_for_offset_context(rebuild_chunk.start_byte);
-        let rebuild_line_start_byte = self.inner.lines[rebuild_start_line].start_byte;
+        let rebuild_line_start_byte = self
+            .inner
+            .lines
+            .metric(rebuild_start_line)
+            .expect("rebuild start line is within the table")
+            .start_byte;
 
-        let mut lines = self.inner.lines[..rebuild_start_line].to_vec();
+        let mut lines = self.inner.lines.prefix(rebuild_start_line);
         lines.extend(scan_line_metrics_from_byte(
             rope.as_ref(),
             rebuild_line_start_byte,
@@ -707,7 +695,7 @@ impl LineIndex {
         Self {
             inner: ChunkedLineIndex {
                 rope,
-                lines,
+                lines: LineTable::from_metrics(lines),
                 chunks,
             },
         }
@@ -732,18 +720,12 @@ impl LineIndex {
         let replacement_utf16_len = replacement_text.chars().map(char::len_utf16).sum::<usize>();
         let utf16_delta = replacement_utf16_len as isize - removed_utf16_len as isize;
 
-        let mut lines = self.inner.lines.clone();
-        let line = lines.get_mut(edit_line_index)?;
-        line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
-        line.end_byte = shift_usize(line.end_byte, byte_delta);
-        line.byte_len = shift_usize(line.byte_len, byte_delta);
-        line.utf16_len = shift_usize(line.utf16_len, utf16_delta);
-
-        for line in lines.iter_mut().skip(edit_line_index + 1) {
-            line.start_byte = shift_usize(line.start_byte, byte_delta);
-            line.content_end_byte = shift_usize(line.content_end_byte, byte_delta);
-            line.end_byte = shift_usize(line.end_byte, byte_delta);
-        }
+        // Recorded, not applied: writing the shift through to every line below the cursor
+        // is what made a keystroke cost the length of the file. See `line_table`.
+        let lines = self
+            .inner
+            .lines
+            .with_simple_edit(edit_line_index, byte_delta, utf16_delta)?;
 
         let mut chunks = self.inner.chunks.clone();
         let chunk = chunks.get_mut(edit_chunk_index)?;
@@ -819,7 +801,7 @@ impl LineIndex {
     /// Return a bounded slice for a logical line using an explicit byte budget.
     pub fn line_slice(&self, line: usize, max_bytes: usize) -> TextResult<TextLineSlice> {
         let metric = self.line(line)?;
-        build_line_slice(self.inner.rope.as_ref(), metric, line, max_bytes)
+        build_line_slice(self.inner.rope.as_ref(), &metric, line, max_bytes)
     }
 
     /// Return the exact logical line range requested by a viewport using an explicit per-line
@@ -964,10 +946,14 @@ impl LineIndex {
                 .sum::<usize>()
     }
 
-    fn line(&self, line: usize) -> TextResult<&LineMetric> {
+    /// Resolve one line's metrics.
+    ///
+    /// Returned by value rather than by reference: a metric is six `usize` fields, and
+    /// the table may have to fold pending shifts over its shared base to produce it.
+    fn line(&self, line: usize) -> TextResult<LineMetric> {
         self.inner
             .lines
-            .get(line)
+            .metric(line)
             .ok_or(TextError::LineOutOfBounds {
                 line,
                 line_count: self.inner.lines.len(),
@@ -986,10 +972,13 @@ impl LineIndex {
 
     fn line_for_offset(&self, offset: usize) -> TextResult<usize> {
         self.ensure_valid_offset(offset)?;
-        line_index_for_offset(&self.inner.lines, offset).ok_or(TextError::LineOutOfBounds {
-            line: 0,
-            line_count: 0,
-        })
+        self.inner
+            .lines
+            .index_for_offset(offset)
+            .ok_or(TextError::LineOutOfBounds {
+                line: 0,
+                line_count: 0,
+            })
     }
 
     fn line_for_offset_context(&self, offset: usize) -> usize {
@@ -998,7 +987,7 @@ impl LineIndex {
             return 0;
         }
         let clamped = offset.min(len.saturating_sub(1));
-        line_index_for_offset(&self.inner.lines, clamped).unwrap_or(0)
+        self.inner.lines.index_for_offset(clamped).unwrap_or(0)
     }
 
     fn rebuild_start_chunk_index(&self, edit_start: usize) -> usize {
@@ -1766,8 +1755,7 @@ fn build_chunk_descriptors(
     let mut ordinal = start_ordinal;
 
     while chunk_start < total_bytes {
-        let start_line =
-            line_index_for_offset(lines, chunk_start).unwrap_or_else(|| lines.len() - 1);
+        let start_line = index_for_offset_in(lines, chunk_start).unwrap_or_else(|| lines.len() - 1);
         let min_preferred = chunk_start.saturating_add(
             DEFAULT_CHUNK_TARGET_BYTES.saturating_sub(DEFAULT_CHUNK_BOUNDARY_WINDOW_BYTES),
         );
@@ -1812,7 +1800,7 @@ fn build_chunk_descriptors(
             let context = forced_end
                 .saturating_sub(1)
                 .min(total_bytes.saturating_sub(1));
-            let end_line = line_index_for_offset(lines, context).unwrap_or(start_line);
+            let end_line = index_for_offset_in(lines, context).unwrap_or(start_line);
             (forced_end, end_line)
         };
 
@@ -1831,33 +1819,6 @@ fn build_chunk_descriptors(
     }
 
     descriptors
-}
-
-fn line_index_for_offset(lines: &[LineMetric], offset: usize) -> Option<usize> {
-    if lines.is_empty() {
-        return None;
-    }
-
-    match lines.binary_search_by(|line| {
-        if offset < line.start_byte {
-            Ordering::Greater
-        } else if offset > line.end_byte {
-            Ordering::Less
-        } else {
-            Ordering::Equal
-        }
-    }) {
-        Ok(mut idx) => {
-            while idx + 1 < lines.len()
-                && !lines[idx].contains_offset(offset, idx + 1 == lines.len())
-            {
-                idx += 1;
-            }
-            Some(idx)
-        }
-        Err(idx) if idx > 0 => Some(idx - 1),
-        Err(_) => Some(0),
-    }
 }
 
 fn chunk_index_for_offset(chunks: &[TextChunkDescriptor], offset: usize) -> Option<usize> {
@@ -1882,14 +1843,6 @@ fn chunk_index_for_offset(chunks: &[TextChunkDescriptor], offset: usize) -> Opti
         }
         Err(idx) if idx > 0 => Some(idx - 1),
         Err(_) => Some(0),
-    }
-}
-
-fn shift_usize(base: usize, delta: isize) -> usize {
-    if delta >= 0 {
-        base.saturating_add(delta as usize)
-    } else {
-        base.saturating_sub((-delta) as usize)
     }
 }
 

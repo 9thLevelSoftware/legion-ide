@@ -12,8 +12,6 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
-
 #[cfg(feature = "ai")]
 use legion_agent::{
     AgentRuntime, DelegatedTaskSandboxOrchestrator, LegionWorkflowCoordinator,
@@ -61,7 +59,36 @@ pub mod proposal;
 
 /// App-side support-bundle surface: list crash reports, build metadata-only or raw exports.
 pub mod diagnostics;
+
+/// Bounded lexical search over the active file and the workspace, plus the
+/// workspace search-and-replace proposal builder.
+pub mod search;
+
+/// Policy gate and audit trail for git push/fetch/pull.
+pub mod git_policy;
+
+/// Git remote dispatch on `AppComposition`, moved out of this file.
+mod git_remote;
 pub mod test_explorer;
+
+/// Re-exported from the `search` submodule so the crate-root path callers
+/// already use (`legion_app::SearchQueryOptions`) keeps working after the
+/// search pipeline moved out of `lib.rs`.
+pub use crate::search::SearchQueryOptions;
+use crate::search::normalize_search_limit;
+
+/// Debug workflow: DAP session lifecycle, breakpoints, and the live adapter path.
+mod debug_workflow;
+use debug_workflow::{DebugBreakpointToggleInput, DebugWorkflow};
+/// Re-exported so the pre-build helpers keep their `legion_app::…` paths after
+/// the debug workflow moved out of `lib.rs`.
+///
+/// Gated to match the definitions: both are test-only, and re-exporting them
+/// unconditionally broke `--no-default-features`, which nothing built until the
+/// perf harness silently downgraded its only budgeted workload to `skipped`
+/// over it.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use debug_workflow::{live_dap_should_prebuild, run_live_dap_prebuild};
 
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
 pub use legion_storage::checkpoint::DurableCheckpointSummary;
@@ -75,8 +102,8 @@ use legion_debug::{
     test_run_summary_evidence,
 };
 use legion_editor::{
-    BufferMode, Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection,
-    TextEdit, TextPosition, TextRange as EditorTextRange,
+    Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection, TextEdit,
+    TextPosition, TextRange as EditorTextRange,
 };
 use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
@@ -103,16 +130,14 @@ use legion_platform::{NativeFileSystem, NativeWatcherService, resolve_existing_p
 use legion_plugin::PluginRuntimeHost;
 use legion_project::{
     CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
-    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, SearchPattern,
-    SearchPatternKind, WorkspaceActor, WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest,
-    WorkspaceError, WorkspaceMutationRollbackCheckpoint,
-    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
-    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceRestoreFileOp,
-    WorkspaceSaveRequest, WorkspaceSearchBatch, WorkspaceSearchFilters, WorkspaceSearchQuery,
-    collect_git_snapshot, commit_git_changes, create_git_branch, delete_git_branch,
-    discover_cargo_debug_configurations, git_repository_root, prune_git_worktrees, push_git_remote,
-    remove_git_worktree, resolve_git_conflict, stage_git_hunk, stash_git_changes,
-    switch_git_branch, unstage_git_hunk,
+    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
+    WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
+    WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
+    WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
+    WorkspaceRestoreFileOp, WorkspaceSaveRequest, collect_git_snapshot, commit_git_changes,
+    create_git_branch, delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
+    prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
+    stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
 };
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
@@ -211,8 +236,9 @@ use legion_remote::{
     default_remote_capabilities, plan_devcontainer_session_from_json, plan_ssh_session,
 };
 use legion_security::{
-    BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, NetworkPolicy,
-    ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState, mcp_tool_permission_request,
+    BatchRuntimeApplyPolicy, CloudLaneSecurityPolicy, DenyByDefaultBroker, GitRemoteOperation,
+    NetworkPolicy, ProposalApplyGate, SecurityDecision, SecurityPolicy, TrustState,
+    mcp_tool_permission_request,
 };
 use legion_storage::{
     InMemoryPaletteUsageRepository, InMemoryStorageRepositoryPort, OsKeyringSecretStore,
@@ -245,10 +271,10 @@ use legion_ui::ui::{
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
     GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
     PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
-    SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
-    SearchStatusProjection, SettingsProjection, StructuralSearchCaptureProjection,
-    StructuralSearchMatchProjection, StructuralSearchProjection, TestExplorerProjection,
-    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
+    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
+    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
+    TestExplorerProjection, ThemePreferenceProjection, ToastVerbosityProjection,
+    WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
@@ -8678,1000 +8704,6 @@ impl TerminalWorkflow {
     }
 }
 
-/// Owned live DAP adapter process (B5); not Clone — process handles.
-struct LiveDebugSession {
-    session: LiveDapSession,
-    thread_id: u64,
-    session_id: DebugSessionId,
-    adapter_type: String,
-    is_fake: bool,
-    /// C4: platform sandbox lifetime (e.g. Windows job) for sandboxed adapter.
-    _sandbox_guard: Option<legion_sandbox::spawn_stdio::PlatformGuard>,
-}
-
-/// Background wait for next stop after non-blocking continue (B7).
-struct LiveAwaitingStop {
-    session_id: DebugSessionId,
-    adapter_type: String,
-    is_fake: bool,
-    thread_id: u64,
-    /// Kept alive while continue worker holds the child (C4 job object).
-    sandbox_guard: Option<legion_sandbox::spawn_stdio::PlatformGuard>,
-    rx: std::sync::mpsc::Receiver<(
-        LiveDapSession,
-        Result<legion_debug::LiveDapStopOutcome, String>,
-    )>,
-}
-
-struct DebugWorkflow {
-    projection: DebugProjection,
-    runtime_enabled: bool,
-    runtime: DapClientRuntime,
-    configurations: Vec<DebugLaunchConfiguration>,
-    breakpoints: Vec<DebugBreakpointRecord>,
-    pending_breakpoint_deletes: Vec<(WorkspaceId, DebugBreakpointId)>,
-    last_audit: Option<DebugAdapterAuditRecord>,
-    next_sequence: u64,
-    next_watch: u64,
-    /// Test seam: force live path via in-tree fake adapter when set.
-    prefer_live_fake_for_tests: bool,
-    /// Test seam: override `LEGION_DAP_MODE` without process-wide env (parallel-safe).
-    dap_mode_for_tests: Option<legion_debug::DapMode>,
-    /// Persistent live adapter session after `launch_live` (B5).
-    live: Option<LiveDebugSession>,
-    /// In-flight continue-until-stop worker (B7).
-    awaiting_stop: Option<LiveAwaitingStop>,
-}
-
-#[derive(Debug)]
-struct DebugBreakpointToggleInput {
-    context: ActiveWorkspaceContext,
-    metadata: ActiveFileMetadata,
-    line: u32,
-    condition: Option<String>,
-    hit_condition: Option<String>,
-    log_message: Option<String>,
-    event_context: EventContext,
-}
-
-impl Default for DebugWorkflow {
-    fn default() -> Self {
-        Self {
-            projection: DebugProjection::empty(),
-            runtime_enabled: false,
-            runtime: DapClientRuntime::new(DapClientConfig::default()),
-            configurations: Vec::new(),
-            breakpoints: Vec::new(),
-            pending_breakpoint_deletes: Vec::new(),
-            last_audit: None,
-            next_sequence: 0,
-            next_watch: 0,
-            prefer_live_fake_for_tests: false,
-            dap_mode_for_tests: None,
-            live: None,
-            awaiting_stop: None,
-        }
-    }
-}
-
-impl DebugWorkflow {
-    fn projection(&self) -> DebugProjection {
-        self.projection.clone()
-    }
-
-    fn effective_dap_mode(&self) -> legion_debug::DapMode {
-        self.dap_mode_for_tests
-            .unwrap_or_else(legion_debug::DapMode::from_env)
-    }
-
-    fn enable_runtime(&mut self) {
-        self.runtime_enabled = true;
-        self.runtime = DapClientRuntime::new(DapClientConfig::enabled());
-        self.projection.live_adapter = false;
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Idle,
-            message:
-                "Debug runtime enabled (auto: live adapter if resolved, else simulated fixture)"
-                    .to_string(),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-    }
-
-    fn enable_live_fake_for_tests(&mut self) {
-        self.enable_runtime();
-        self.prefer_live_fake_for_tests = true;
-    }
-
-    fn set_dap_mode_for_tests(&mut self, mode: legion_debug::DapMode) {
-        self.dap_mode_for_tests = Some(mode);
-    }
-
-    fn clear_workspace_state(&mut self) {
-        self.drop_live_session();
-        self.projection = DebugProjection::empty();
-        self.configurations.clear();
-        self.breakpoints.clear();
-        self.pending_breakpoint_deletes.clear();
-        self.last_audit = None;
-        self.next_sequence = 0;
-        self.next_watch = 0;
-        self.runtime = if self.runtime_enabled {
-            DapClientRuntime::new(DapClientConfig::enabled())
-        } else {
-            DapClientRuntime::new(DapClientConfig::default())
-        };
-    }
-
-    fn drop_live_session(&mut self) {
-        // Drop awaiting receiver first: worker thread still owns the session and
-        // will Drop it (killing the child) when continue_until_stopped returns.
-        self.awaiting_stop = None;
-        if let Some(live) = self.live.take() {
-            let _ = live
-                .session
-                .disconnect_and_wait(std::time::Duration::from_secs(2));
-        }
-    }
-
-    fn take_last_audit(&mut self) -> Option<DebugAdapterAuditRecord> {
-        self.last_audit.take()
-    }
-
-    fn take_pending_breakpoint_deletes(&mut self) -> Vec<(WorkspaceId, DebugBreakpointId)> {
-        std::mem::take(&mut self.pending_breakpoint_deletes)
-    }
-
-    fn restore_breakpoints(&mut self, records: Vec<DebugBreakpointRecord>) {
-        self.breakpoints = records
-            .into_iter()
-            .map(|mut record| {
-                record.session_id = None;
-                record
-            })
-            .collect();
-        self.sync_breakpoint_projection();
-    }
-
-    fn refresh_configurations(
-        &mut self,
-        context: ActiveWorkspaceContext,
-        root_path: &Path,
-    ) -> Result<DebugProjection, AppCompositionError> {
-        let mut configs =
-            discover_cargo_debug_configurations(root_path, CargoDebugLocatorOptions::default())
-                .map_err(debug_locator_error)?;
-        for config in &mut configs {
-            config.workspace_id = context.workspace_id;
-            config.cwd = CanonicalPath(root_path.to_string_lossy().replace('\\', "/"));
-        }
-        self.configurations = configs;
-        self.projection.configurations = self
-            .configurations
-            .iter()
-            .map(debug_configuration_projection)
-            .collect();
-        self.sync_breakpoint_projection();
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Idle,
-            message: format!(
-                "Debug configurations refreshed: {}",
-                self.projection.configurations.len()
-            ),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-        Ok(self.projection())
-    }
-
-    fn toggle_breakpoint(&mut self, input: DebugBreakpointToggleInput) -> DebugProjection {
-        let breakpoint_id = DebugBreakpointId(format!(
-            "bp:{}:{}:{}",
-            input.context.workspace_id.0, input.metadata.identity.file_id.0, input.line
-        ));
-        if let Some(existing) = self
-            .breakpoints
-            .iter()
-            .position(|breakpoint| breakpoint.breakpoint_id == breakpoint_id)
-        {
-            let removed = self.breakpoints.remove(existing);
-            self.pending_breakpoint_deletes
-                .push((removed.workspace_id, removed.breakpoint_id));
-            self.projection.status = DebugStatusProjection {
-                kind: DebugStatusKindProjection::Idle,
-                message: "Debug breakpoint removed".to_string(),
-            };
-        } else {
-            let sequence = self.next_event_sequence();
-            self.breakpoints.push(DebugBreakpointRecord {
-                breakpoint_id,
-                workspace_id: input.context.workspace_id,
-                session_id: None,
-                path: input.metadata.identity.canonical_path,
-                range: ProtocolTextRange {
-                    start: TextCoordinate {
-                        line: input.line,
-                        character: 0,
-                        byte_offset: None,
-                        utf16_offset: None,
-                    },
-                    end: TextCoordinate {
-                        line: input.line,
-                        character: 0,
-                        byte_offset: None,
-                        utf16_offset: None,
-                    },
-                },
-                enabled: true,
-                condition: input.condition,
-                hit_condition: input.hit_condition,
-                log_message: input.log_message,
-                verified: false,
-                message: Some("pending adapter verification".to_string()),
-                correlation_id: input.event_context.correlation_id,
-                causality_id: input.event_context.causality_id,
-                sequence,
-                schema_version: 1,
-            });
-            self.projection.status = DebugStatusProjection {
-                kind: DebugStatusKindProjection::Idle,
-                message: "Debug breakpoint added".to_string(),
-            };
-        }
-        self.sync_breakpoint_projection();
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn launch(
-        &mut self,
-        context: ActiveWorkspaceContext,
-        configuration_id: DebugConfigurationId,
-        event_context: EventContext,
-    ) -> DebugProjection {
-        // Trust gate (B3): untrusted workspaces never spawn adapters.
-        if context.trust != WorkspaceTrustState::Trusted {
-            return self.deny(
-                "debug.adapter.launch denied: requires a trusted workspace (capability debug.adapter.launch)"
-                    .to_string(),
-            );
-        }
-        if !self.runtime_enabled {
-            return self.deny("Debug runtime is disabled".to_string());
-        }
-        let Some(config) = self
-            .configurations
-            .iter()
-            .find(|config| {
-                config.configuration_id == configuration_id
-                    && config.workspace_id == context.workspace_id
-            })
-            .cloned()
-        else {
-            return self.fail(format!(
-                "debug configuration {} was not found",
-                configuration_id.0
-            ));
-        };
-
-        // Live path when an adapter resolves (or tests force fake).
-        // Wire is Microsoft DAP (B4); resolution: LEGION_DAP_ADAPTER, PATH, or USE_FAKE.
-        let mode = self.effective_dap_mode();
-        if mode.allows_live() {
-            match self.resolve_adapter_for_launch(&config.adapter_type) {
-                Some(resolved) => {
-                    match self.launch_live(&context, &config, &resolved, event_context) {
-                        Ok(projection) => return projection,
-                        Err(message) => {
-                            if mode.require_live() {
-                                return self.fail(format!(
-                                    "live DAP required (LEGION_DAP_MODE=live) but launch failed: {message}"
-                                ));
-                            }
-                            self.projection.diagnostics.push(bounded_label(
-                                format!("live DAP unavailable, falling back to fixture: {message}"),
-                                160,
-                            ));
-                        }
-                    }
-                }
-                None if mode.require_live() => {
-                    return self.fail(
-                        "live DAP required (LEGION_DAP_MODE=live) but no adapter resolved \
-                         (set LEGION_DAP_ADAPTER, install lldb-dap/codelldb on PATH, or LEGION_DAP_USE_FAKE=1)"
-                            .to_string(),
-                    );
-                }
-                None => {}
-            }
-        }
-
-        let breakpoints = self
-            .breakpoints
-            .iter()
-            .filter(|breakpoint| breakpoint.workspace_id == context.workspace_id)
-            .cloned()
-            .map(|mut breakpoint| {
-                breakpoint.session_id = None;
-                breakpoint
-            })
-            .collect();
-        let request = DebugAdapterLaunchRequest {
-            workspace_id: context.workspace_id,
-            configuration_id,
-            adapter_type: config.adapter_type.clone(),
-            breakpoints,
-            schema_version: 1,
-        };
-        match self.runtime.launch(request) {
-            Ok(outcome) => {
-                self.apply_runtime_outcome(outcome);
-                self.projection.live_adapter = false;
-                self.projection.status = DebugStatusProjection {
-                    kind: DebugStatusKindProjection::Paused,
-                    message: "Simulated DAP paused (fixture; no real adapter process)".to_string(),
-                };
-                self.projection.session_state = Some(DebugSessionState::Paused);
-                self.projection.generated_at = TimestampMillis::now();
-                self.record_audit(
-                    self.projection
-                        .active_session_id
-                        .clone()
-                        .unwrap_or_else(|| DebugSessionId("debug:missing".to_string())),
-                    DebugSessionState::Paused,
-                    config.adapter_type,
-                    event_context,
-                    "action=launch state=paused simulated=true".to_string(),
-                );
-                self.projection()
-            }
-            Err(error) => self.fail(format!("debug launch denied: {error}")),
-        }
-    }
-
-    fn resolve_adapter_for_launch(
-        &self,
-        preferred_type: &str,
-    ) -> Option<legion_debug::ResolvedAdapter> {
-        if self.prefer_live_fake_for_tests {
-            return legion_debug::fake_dap_adapter_path().map(|program| {
-                legion_debug::ResolvedAdapter {
-                    program,
-                    args: Vec::new(),
-                    adapter_type: "legion-fake".to_string(),
-                    is_fake: true,
-                }
-            });
-        }
-        resolve_live_adapter(preferred_type)
-    }
-
-    fn launch_live(
-        &mut self,
-        context: &ActiveWorkspaceContext,
-        config: &DebugLaunchConfiguration,
-        resolved: &legion_debug::ResolvedAdapter,
-        event_context: EventContext,
-    ) -> Result<DebugProjection, String> {
-        use std::time::Duration;
-
-        // B12: system adapters need a real binary; run cargo prebuild when
-        // configuration carries cargo_args. Fake adapter skips (CI speed).
-        let prebuild_note = if live_dap_should_prebuild_impl(resolved.is_fake, &config.cargo_args) {
-            Some(run_live_dap_prebuild_impl(
-                config.cwd.0.as_str(),
-                &config.cargo_args,
-                Duration::from_secs(180),
-            )?)
-        } else {
-            None
-        };
-
-        let (mut session, sandbox_guard, sandbox_note) =
-            spawn_live_dap_session(resolved, config.cwd.0.as_str())?;
-        let handshake = session
-            .initialize_handshake(Duration::from_secs(5))
-            .map_err(|err| err.to_string())?;
-
-        // DAP setBreakpoints is per-source: group by path, then map responses.
-        let mut by_path: std::collections::BTreeMap<String, Vec<usize>> =
-            std::collections::BTreeMap::new();
-        for (index, bp) in self.breakpoints.iter().enumerate() {
-            if bp.workspace_id == context.workspace_id {
-                by_path.entry(bp.path.0.clone()).or_default().push(index);
-            }
-        }
-        for (path, indices) in by_path {
-            let lines: Vec<u64> = indices
-                .iter()
-                .map(|&i| u64::from(self.breakpoints[i].range.start.line.saturating_add(1)))
-                .collect();
-            let verified = session
-                .set_breakpoints(&path, &lines, Duration::from_secs(3))
-                .map_err(|err| err.to_string())?;
-            for (idx, verified_bp) in indices.into_iter().zip(verified) {
-                if let Some(bp) = self.breakpoints.get_mut(idx) {
-                    bp.verified = verified_bp.verified;
-                    bp.message = verified_bp.message.clone();
-                }
-            }
-        }
-        if !self.breakpoints.is_empty() {
-            self.sync_breakpoint_projection();
-        }
-
-        // Resolve relative program labels against configuration cwd (workspace root).
-        let program = {
-            let label = config.program_label.clone();
-            let candidate = Path::new(&label);
-            if candidate.is_absolute() {
-                label
-            } else {
-                Path::new(config.cwd.0.as_str())
-                    .join(candidate)
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            }
-        };
-        let stop = session
-            .launch_until_stopped_with(
-                &program,
-                Some(config.cwd.0.as_str()),
-                config.stop_on_entry,
-                Duration::from_secs(5),
-            )
-            .map_err(|err| err.to_string())?;
-
-        // B5: keep the adapter process alive for step/continue (do not disconnect).
-        self.drop_live_session();
-        let session_id = DebugSessionId(format!(
-            "dap-live:{}:{}",
-            context.workspace_id.0, config.configuration_id.0
-        ));
-        let thread_id = stop.thread_id;
-        self.live = Some(LiveDebugSession {
-            session,
-            thread_id,
-            session_id: session_id.clone(),
-            adapter_type: resolved.adapter_type.clone(),
-            is_fake: resolved.is_fake,
-            _sandbox_guard: sandbox_guard,
-        });
-
-        self.projection.active_session_id = Some(session_id.clone());
-        self.projection.session_state = Some(DebugSessionState::Paused);
-        self.projection.live_adapter = true;
-        self.apply_live_stop(&session_id, &stop);
-        if let Some(note) = prebuild_note {
-            self.projection.console.push(DebugConsoleProjection {
-                session_id: session_id.clone(),
-                category_label: "adapter".to_string(),
-                message_label: bounded_label(format!("LIVE DAP prebuild: {note}"), 160),
-            });
-        }
-        if let Some(note) = sandbox_note {
-            self.projection.console.push(DebugConsoleProjection {
-                session_id: session_id.clone(),
-                category_label: "adapter".to_string(),
-                message_label: bounded_label(format!("LIVE DAP sandbox: {note}"), 160),
-            });
-        }
-        self.projection.console.push(DebugConsoleProjection {
-            session_id: session_id.clone(),
-            category_label: "adapter".to_string(),
-            message_label: bounded_label(
-                format!(
-                    "LIVE DAP: initialize adapter={} fake={} persistent=true • {}",
-                    resolved.adapter_type, resolved.is_fake, handshake.metadata_summary
-                ),
-                160,
-            ),
-        });
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Paused,
-            message: format!(
-                "Live DAP paused (adapter={} fake={} reason={} persistent=true)",
-                resolved.adapter_type, resolved.is_fake, stop.reason
-            ),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-        self.record_audit(
-            session_id,
-            DebugSessionState::Paused,
-            resolved.adapter_type.clone(),
-            event_context,
-            stop.metadata_summary,
-        );
-        Ok(self.projection())
-    }
-
-    fn apply_live_stop(
-        &mut self,
-        session_id: &DebugSessionId,
-        stop: &legion_debug::LiveDapStopOutcome,
-    ) {
-        self.projection.stack_frames = stop
-            .stack_frames
-            .iter()
-            .map(|frame| DebugStackFrameProjection {
-                session_id: session_id.clone(),
-                frame_id: frame.id,
-                name: frame.name.clone(),
-                path: frame.path.as_ref().map(|p| CanonicalPath(p.clone())),
-                line: Some(frame.line as u32),
-            })
-            .collect();
-        self.projection.variables = stop
-            .variables
-            .iter()
-            .map(|var| DebugVariableProjection {
-                session_id: session_id.clone(),
-                name: var.name.clone(),
-                value_label: var.value.clone(),
-                type_label: var.type_label.clone(),
-                has_children: false,
-            })
-            .collect();
-        if let Some(live) = self.live.as_mut() {
-            live.thread_id = stop.thread_id;
-        }
-    }
-
-    fn step(
-        &mut self,
-        session_id: DebugSessionId,
-        kind: DebugStepKindProjection,
-    ) -> DebugProjection {
-        if !self.session_is_active(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        if self
-            .live
-            .as_ref()
-            .is_some_and(|live| live.session_id == session_id)
-        {
-            return self.step_live(session_id, kind);
-        }
-        let protocol_kind = debug_step_kind(kind);
-        match self.runtime.step(session_id, protocol_kind) {
-            Ok(outcome) => {
-                self.apply_runtime_outcome(outcome);
-                self.projection.status = DebugStatusProjection {
-                    kind: DebugStatusKindProjection::Paused,
-                    message: "Simulated DAP step completed (fixture)".to_string(),
-                };
-                self.projection.session_state = Some(DebugSessionState::Paused);
-                self.projection.generated_at = TimestampMillis::now();
-                self.projection()
-            }
-            Err(error) => self.fail(format!("debug step failed: {error}")),
-        }
-    }
-
-    fn step_live(
-        &mut self,
-        session_id: DebugSessionId,
-        kind: DebugStepKindProjection,
-    ) -> DebugProjection {
-        use legion_ui::DebugStepKindProjection as StepKind;
-        use std::time::Duration;
-
-        let (thread_id, adapter_type, is_fake) = {
-            let Some(live) = self.live.as_ref() else {
-                return self.fail("live DAP session missing".to_string());
-            };
-            (live.thread_id, live.adapter_type.clone(), live.is_fake)
-        };
-        let timeout = Duration::from_secs(5);
-
-        if self.awaiting_stop.is_some() {
-            return self.deny(
-                "live DAP continue is in progress; use :debug-poll or :debug-stop".to_string(),
-            );
-        }
-
-        match kind {
-            StepKind::Continue => {
-                // B7: non-blocking continue — return Running immediately; poll for stop.
-                let Some(live) = self.live.take() else {
-                    return self.fail("live DAP session missing".to_string());
-                };
-                let (tx, rx) = std::sync::mpsc::channel();
-                let wait_thread_id = live.thread_id;
-                let wait_timeout = Duration::from_secs(30);
-                // Keep sandbox guard alive while worker holds the child (C4).
-                let sandbox_guard = live._sandbox_guard;
-                std::thread::spawn(move || {
-                    let mut session = live.session;
-                    let result = session
-                        .continue_until_stopped(wait_thread_id, wait_timeout)
-                        .map_err(|err| err.to_string());
-                    let _ = tx.send((session, result));
-                });
-                self.awaiting_stop = Some(LiveAwaitingStop {
-                    session_id: session_id.clone(),
-                    adapter_type: adapter_type.clone(),
-                    is_fake,
-                    thread_id,
-                    sandbox_guard,
-                    rx,
-                });
-                self.projection.session_state = Some(DebugSessionState::Running);
-                self.projection.live_adapter = true;
-                self.projection.stack_frames.clear();
-                self.projection.variables.clear();
-                self.projection.status = DebugStatusProjection {
-                    kind: DebugStatusKindProjection::Running,
-                    message: format!(
-                        "Live DAP continuing (adapter={adapter_type} fake={is_fake}; poll for stop)"
-                    ),
-                };
-                self.projection.console.push(DebugConsoleProjection {
-                    session_id: session_id.clone(),
-                    category_label: "adapter".to_string(),
-                    message_label: "LIVE DAP: continue started (non-blocking; use :debug-poll)"
-                        .to_string(),
-                });
-                self.projection.generated_at = TimestampMillis::now();
-                self.projection()
-            }
-            StepKind::Back => {
-                self.fail("live DAP reverse-step is not supported on this adapter path".to_string())
-            }
-            StepKind::Over | StepKind::Into | StepKind::Out => {
-                let command = match kind {
-                    StepKind::Over => "next",
-                    StepKind::Into => "stepIn",
-                    StepKind::Out => "stepOut",
-                    _ => unreachable!(),
-                };
-                let stepped = self.live.as_mut().map(|live| {
-                    live.session
-                        .step_command_until_stopped(command, thread_id, timeout)
-                });
-                match stepped {
-                    Some(Ok(stop)) => {
-                        self.apply_live_stop(&session_id, &stop);
-                        self.projection.session_state = Some(DebugSessionState::Paused);
-                        self.projection.live_adapter = true;
-                        self.projection.status = DebugStatusProjection {
-                            kind: DebugStatusKindProjection::Paused,
-                            message: format!(
-                                "Live DAP {command} paused (adapter={adapter_type} fake={is_fake} reason={})",
-                                stop.reason
-                            ),
-                        };
-                        self.projection.console.push(DebugConsoleProjection {
-                            session_id: session_id.clone(),
-                            category_label: "adapter".to_string(),
-                            message_label: bounded_label(
-                                format!("LIVE DAP step: {} • {}", command, stop.metadata_summary),
-                                160,
-                            ),
-                        });
-                        self.projection.generated_at = TimestampMillis::now();
-                        self.projection()
-                    }
-                    Some(Err(err)) => self.fail(format!("live DAP {command} failed: {err}")),
-                    None => self.fail("live DAP session missing".to_string()),
-                }
-            }
-        }
-    }
-
-    /// Poll for a stop after non-blocking continue (B7).
-    fn poll_session(&mut self, session_id: DebugSessionId) -> DebugProjection {
-        if self.projection.active_session_id.as_ref() != Some(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        let Some(awaiting) = self.awaiting_stop.as_ref() else {
-            // Nothing to poll; return current projection (paused or running fixture).
-            return self.projection();
-        };
-        if awaiting.session_id != session_id {
-            return self.deny("debug poll session mismatch".to_string());
-        }
-        match awaiting.rx.try_recv() {
-            Ok((session, Ok(stop))) => {
-                let meta = self
-                    .awaiting_stop
-                    .take()
-                    .expect("awaiting_stop present after try_recv");
-                self.live = Some(LiveDebugSession {
-                    session,
-                    thread_id: stop.thread_id,
-                    session_id: meta.session_id.clone(),
-                    adapter_type: meta.adapter_type.clone(),
-                    is_fake: meta.is_fake,
-                    _sandbox_guard: meta.sandbox_guard,
-                });
-                self.apply_live_stop(&session_id, &stop);
-                self.projection.session_state = Some(DebugSessionState::Paused);
-                self.projection.live_adapter = true;
-                self.projection.status = DebugStatusProjection {
-                    kind: DebugStatusKindProjection::Paused,
-                    message: format!(
-                        "Live DAP continued then stopped (adapter={} fake={} reason={})",
-                        meta.adapter_type, meta.is_fake, stop.reason
-                    ),
-                };
-                self.projection.console.push(DebugConsoleProjection {
-                    session_id: session_id.clone(),
-                    category_label: "adapter".to_string(),
-                    message_label: bounded_label(
-                        format!(
-                            "LIVE DAP continue→stop (poll): reason={} • {}",
-                            stop.reason, stop.metadata_summary
-                        ),
-                        160,
-                    ),
-                });
-                self.projection.generated_at = TimestampMillis::now();
-                self.projection()
-            }
-            Ok((session, Err(err))) => {
-                let meta = self
-                    .awaiting_stop
-                    .take()
-                    .expect("awaiting_stop present after try_recv");
-                self.live = Some(LiveDebugSession {
-                    session,
-                    thread_id: meta.thread_id,
-                    session_id: meta.session_id,
-                    adapter_type: meta.adapter_type,
-                    is_fake: meta.is_fake,
-                    _sandbox_guard: meta.sandbox_guard,
-                });
-                self.fail(format!("live DAP continue failed: {err}"))
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.projection.session_state = Some(DebugSessionState::Running);
-                self.projection.live_adapter = true;
-                self.projection.status = DebugStatusProjection {
-                    kind: DebugStatusKindProjection::Running,
-                    message: "Live DAP still running (poll again)".to_string(),
-                };
-                self.projection.generated_at = TimestampMillis::now();
-                self.projection()
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.awaiting_stop = None;
-                self.fail("live DAP continue worker disconnected".to_string())
-            }
-        }
-    }
-
-    fn stop_session(&mut self, session_id: DebugSessionId) -> DebugProjection {
-        if !self.session_is_active(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        let was_live = self
-            .live
-            .as_ref()
-            .is_some_and(|live| live.session_id == session_id)
-            || self
-                .awaiting_stop
-                .as_ref()
-                .is_some_and(|awaiting| awaiting.session_id == session_id);
-        // Always clear live + awaiting (awaiting drop abandons worker; session Drop kills child).
-        self.drop_live_session();
-        self.projection.active_session_id = None;
-        self.projection.session_state = Some(DebugSessionState::Exited);
-        self.projection.live_adapter = false;
-        self.projection.stack_frames.clear();
-        self.projection.variables.clear();
-        self.projection.inline_values.clear();
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Exited,
-            message: if was_live {
-                "Live DAP session disconnected".to_string()
-            } else {
-                "Debug session stopped (fixture)".to_string()
-            },
-        };
-        self.projection.console.push(DebugConsoleProjection {
-            session_id: session_id.clone(),
-            category_label: "adapter".to_string(),
-            message_label: if was_live {
-                "LIVE DAP: disconnect".to_string()
-            } else {
-                "SIMULATED DAP: session stopped".to_string()
-            },
-        });
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn run_to_cursor(
-        &mut self,
-        session_id: DebugSessionId,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-    ) -> DebugProjection {
-        if !self.session_is_active(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        self.push_console(
-            session_id,
-            format!(
-                "run-to-cursor buffer={} line={} character={}",
-                buffer_id.0, position.line, position.character
-            ),
-            DebugConsoleCategory::Adapter,
-        );
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Paused,
-            message: "Debug run-to-cursor completed".to_string(),
-        };
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn evaluate_selection(
-        &mut self,
-        session_id: DebugSessionId,
-        expression_label: String,
-    ) -> DebugProjection {
-        if !self.session_is_active(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        self.push_console(
-            session_id,
-            format!("evaluate expression_bytes={}", expression_label.len()),
-            DebugConsoleCategory::Evaluation,
-        );
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn add_watch(
-        &mut self,
-        session_id: DebugSessionId,
-        expression_label: String,
-    ) -> DebugProjection {
-        if !self.session_is_active(&session_id) {
-            return self.deny(format!("debug session {} is not active", session_id.0));
-        }
-        self.next_watch = self.next_watch.saturating_add(1).max(1);
-        self.projection.watches.push(DebugWatchProjection {
-            watch_id: DebugWatchId(format!("watch-{}", self.next_watch)),
-            session_id: session_id.clone(),
-            expression_label: bounded_label(expression_label, 80),
-            value_label: "metadata-only".to_string(),
-            type_label: Some("debug".to_string()),
-        });
-        self.push_console(
-            session_id,
-            "watch added value=metadata-only".to_string(),
-            DebugConsoleCategory::Evaluation,
-        );
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn apply_runtime_outcome(&mut self, outcome: DapClientOutcome) {
-        self.last_audit = Some(outcome.audit.clone());
-        self.projection.live_adapter = false;
-        self.projection.active_session_id = Some(outcome.audit.session_id.clone());
-        for verified in outcome.breakpoints {
-            if let Some(existing) = self
-                .breakpoints
-                .iter_mut()
-                .find(|breakpoint| breakpoint.breakpoint_id == verified.breakpoint_id)
-            {
-                existing.verified = verified.verified;
-                existing.message = verified.message;
-                existing.session_id = None;
-            }
-        }
-        self.sync_breakpoint_projection();
-        self.projection.stack_frames = outcome
-            .stack_frames
-            .into_iter()
-            .map(debug_stack_frame_projection)
-            .collect();
-        self.projection.variables = outcome
-            .variables
-            .into_iter()
-            .map(debug_variable_projection)
-            .collect();
-        self.projection.inline_values = outcome
-            .inline_values
-            .into_iter()
-            .map(debug_inline_value_projection)
-            .collect();
-        self.projection
-            .console
-            .extend(outcome.console.into_iter().map(debug_console_projection));
-    }
-
-    fn sync_breakpoint_projection(&mut self) {
-        self.breakpoints.sort_by(|left, right| {
-            (
-                left.path.0.as_str(),
-                left.range.start.line,
-                left.breakpoint_id.0.as_str(),
-            )
-                .cmp(&(
-                    right.path.0.as_str(),
-                    right.range.start.line,
-                    right.breakpoint_id.0.as_str(),
-                ))
-        });
-        self.projection.breakpoints = self
-            .breakpoints
-            .iter()
-            .map(debug_breakpoint_projection)
-            .collect();
-    }
-
-    fn deny(&mut self, reason: String) -> DebugProjection {
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Denied,
-            message: reason.clone(),
-        };
-        self.projection.diagnostics.push(bounded_label(reason, 120));
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn fail(&mut self, reason: String) -> DebugProjection {
-        self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Failed,
-            message: reason.clone(),
-        };
-        self.projection.diagnostics.push(bounded_label(reason, 120));
-        self.projection.generated_at = TimestampMillis::now();
-        self.projection()
-    }
-
-    fn push_console(
-        &mut self,
-        session_id: DebugSessionId,
-        message_label: String,
-        category: DebugConsoleCategory,
-    ) {
-        self.projection.console.push(DebugConsoleProjection {
-            session_id,
-            category_label: debug_console_category_label(category).to_string(),
-            message_label: bounded_label(message_label, 160),
-        });
-        if self.projection.console.len() > 100 {
-            let excess = self.projection.console.len() - 100;
-            self.projection.console.drain(0..excess);
-        }
-    }
-
-    fn session_is_active(&self, session_id: &DebugSessionId) -> bool {
-        self.projection.active_session_id.as_ref() == Some(session_id)
-            && self.projection.session_state.is_some()
-    }
-
-    fn record_audit(
-        &mut self,
-        session_id: DebugSessionId,
-        state: DebugSessionState,
-        adapter_type: String,
-        event_context: EventContext,
-        metadata_summary: String,
-    ) {
-        self.last_audit = Some(DebugAdapterAuditRecord {
-            session_id,
-            state,
-            adapter_type,
-            event_sequence: self.next_event_sequence(),
-            correlation_id: event_context.correlation_id,
-            causality_id: event_context.causality_id,
-            metadata_summary: bounded_label(metadata_summary, 160),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        });
-    }
-
-    fn next_event_sequence(&mut self) -> EventSequence {
-        self.next_sequence = self.next_sequence.saturating_add(1).max(1);
-        EventSequence(self.next_sequence)
-    }
-}
-
 /// Converts a `file://` URI to a canonical path string (platform-aware).
 ///
 /// The output must compare equal to `meta.identity.canonical_path.0` for an
@@ -9794,140 +8826,6 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
         "text"
     };
     LanguageId(language.to_string())
-}
-
-/// C4: spawn live DAP session — sandboxed stdio for non-fake adapters.
-fn spawn_live_dap_session(
-    resolved: &legion_debug::ResolvedAdapter,
-    workspace_cwd: &str,
-) -> Result<
-    (
-        LiveDapSession,
-        Option<legion_sandbox::spawn_stdio::PlatformGuard>,
-        Option<String>,
-    ),
-    String,
-> {
-    if resolved.is_fake {
-        let session = LiveDapSession::spawn(
-            &resolved.program,
-            &resolved.args,
-            resolved.adapter_type.as_str(),
-        )
-        .map_err(|err| err.to_string())?;
-        return Ok((session, None, None));
-    }
-
-    use legion_sandbox::spawn_stdio::{SandboxStdioSpec, spawn_sandboxed_stdio};
-    use std::collections::BTreeSet;
-    use std::path::PathBuf;
-
-    let cwd = PathBuf::from(workspace_cwd);
-    let spec = SandboxStdioSpec {
-        program: resolved.program.clone(),
-        args: resolved.args.clone(),
-        working_dir: cwd.clone(),
-        writable_root: cwd,
-        allowed_egress: BTreeSet::new(),
-        env: Vec::new(),
-    };
-    match spawn_sandboxed_stdio(&spec) {
-        Ok(sandboxed) => {
-            let (child, stdin, stdout, report, guard) = sandboxed.into_parts();
-            let note = format!(
-                "backend={} fs_write={} net={} caveats={}",
-                report.backend_used,
-                report.filesystem_write_enforced,
-                report.network_enforced,
-                if report.caveat_labels.is_empty() {
-                    "none".to_string()
-                } else {
-                    report.caveat_labels.join(",")
-                }
-            );
-            let session =
-                LiveDapSession::from_stdio(child, stdin, stdout, resolved.adapter_type.as_str())
-                    .map_err(|err| err.to_string())?;
-            Ok((session, Some(guard), Some(note)))
-        }
-        Err(err) => Err(format!(
-            "refusing to launch live DAP adapter without sandbox enforcement: {err}"
-        )),
-    }
-}
-
-/// B12: whether live launch should run a cargo prebuild.
-///
-/// Exposed under `test-helpers` for integration tests; production callers use
-/// `launch_live` only.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn live_dap_should_prebuild(is_fake: bool, cargo_args: &[String]) -> bool {
-    live_dap_should_prebuild_impl(is_fake, cargo_args)
-}
-
-fn live_dap_should_prebuild_impl(is_fake: bool, cargo_args: &[String]) -> bool {
-    !is_fake && !cargo_args.is_empty()
-}
-
-/// Execute `cargo <cargo_args>` in `cwd` with a hard timeout (B12).
-///
-/// Returns a short metadata-only summary for the debug console (no full logs).
-/// Stdio is nulled so a chatty cargo cannot fill pipes and deadlock the wait.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn run_live_dap_prebuild(
-    cwd: &str,
-    cargo_args: &[String],
-    timeout: std::time::Duration,
-) -> Result<String, String> {
-    run_live_dap_prebuild_impl(cwd, cargo_args, timeout)
-}
-
-fn run_live_dap_prebuild_impl(
-    cwd: &str,
-    cargo_args: &[String],
-    timeout: std::time::Duration,
-) -> Result<String, String> {
-    use std::process::{Command, Stdio};
-    use std::time::Instant;
-
-    let mut child = Command::new("cargo")
-        .args(cargo_args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| format!("cargo prebuild spawn failed in {cwd}: {err}"))?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return Ok(format!("cargo {} ok (cwd={})", cargo_args.join(" "), cwd));
-                }
-                return Err(format!(
-                    "cargo prebuild failed (status={status}; args={})",
-                    cargo_args.join(" ")
-                ));
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "cargo prebuild timed out after {timeout:?} (args={})",
-                        cargo_args.join(" ")
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(err) => {
-                let _ = child.kill();
-                return Err(format!("cargo prebuild wait failed: {err}"));
-            }
-        }
-    }
 }
 
 fn bounded_label(value: impl Into<String>, limit: usize) -> String {
@@ -11184,6 +10082,26 @@ pub enum AppCommandRequest {
         /// Remote name entered by the user.
         remote: String,
     },
+    /// Fetch refs from the selected remote.
+    FetchGitRemote {
+        /// Remote name entered by the user.
+        remote: String,
+    },
+    /// Pull the current branch from the selected remote.
+    PullGitRemote {
+        /// Remote name entered by the user.
+        remote: String,
+    },
+    /// Record user consent to reach a host for git remote operations.
+    GrantGitRemoteHost {
+        /// Host to consent to.
+        host: String,
+    },
+    /// Withdraw consent for a git remote host.
+    RevokeGitRemoteHost {
+        /// Host to revoke.
+        host: String,
+    },
     /// Prune orphaned worktree metadata.
     PruneGitWorktrees,
     /// Remove a projected worktree by path.
@@ -11811,6 +10729,10 @@ impl CommandExecutionService {
             | AppCommandRequest::DeleteGitBranch { .. }
             | AppCommandRequest::StashGitChanges { .. }
             | AppCommandRequest::PushGitRemote { .. }
+            | AppCommandRequest::FetchGitRemote { .. }
+            | AppCommandRequest::PullGitRemote { .. }
+            | AppCommandRequest::GrantGitRemoteHost { .. }
+            | AppCommandRequest::RevokeGitRemoteHost { .. }
             | AppCommandRequest::PruneGitWorktrees
             | AppCommandRequest::RemoveGitWorktree { .. }
             | AppCommandRequest::CreateGitWorktree { .. }
@@ -14328,57 +13250,6 @@ impl AssistInlinePredictionState {
     }
 }
 
-/// Explicit search option overrides. `None` means "fall through to
-/// text-prefix parsing" for the corresponding option.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SearchQueryOptions {
-    /// Override case-sensitivity. `None` defers to `case` / `icase` prefixes.
-    pub case_sensitive: Option<bool>,
-    /// Override whole-word matching. `None` defers to `word:` prefix.
-    pub whole_word: Option<bool>,
-    /// Override regex mode. `None` defers to `regex:` / `re:` prefixes.
-    pub use_regex: Option<bool>,
-}
-
-/// Parsed and compiled search query, including effective option values.
-struct ParsedSearchQuery {
-    /// Compiled search pattern ready for `search_workspace_stream`.
-    pattern: SearchPattern,
-    /// Include/exclude glob filters (from `include:` / `exclude:` prefixes).
-    filters: WorkspaceSearchFilters,
-    /// The raw pattern text (without mode/option prefixes).
-    search_text: String,
-    /// Whether the pattern was compiled as literal (not regex). Used to
-    /// decide whether the indexed back-end can be used.
-    is_literal: bool,
-    /// Effective case-sensitivity after applying overrides.
-    case_sensitive: bool,
-    /// Effective whole-word mode after applying overrides.
-    whole_word: bool,
-    /// Effective regex mode after applying overrides.
-    use_regex: bool,
-}
-
-#[derive(Debug, Default)]
-struct SearchBuildResult {
-    results: Vec<SearchResultProjection>,
-    omitted_result_count: usize,
-    omitted_file_count: usize,
-    diagnostics: Vec<String>,
-    degraded_limited: bool,
-    validation_error: Option<String>,
-    /// Number of files skipped because they were detected as binary by the
-    /// NUL-byte heuristic.  Propagated from `WorkspaceSearchReport` into
-    /// `SearchProjection` so the desktop panel can display the count.
-    skipped_binary_count: usize,
-    /// Effective search options used for this result set.
-    case_sensitive: bool,
-    /// Effective whole-word option used for this result set.
-    whole_word: bool,
-    /// Effective regex mode used for this result set.
-    use_regex: bool,
-}
-
 #[derive(Debug, Default)]
 struct StructuralBuildResult {
     matches: Vec<StructuralSearchMatchProjection>,
@@ -14392,238 +13263,6 @@ struct StructuralBuildResult {
 struct StructuralDocumentReport {
     document: SourceDocument,
     matches: Vec<legion_index::StructuralSearchMatch>,
-}
-
-struct SearchTextInput<'a> {
-    query_id: &'a str,
-    pattern: &'a SearchPattern,
-    scope: SearchScopeProjection,
-    workspace_id: Option<WorkspaceId>,
-    buffer_id: Option<BufferId>,
-    file_id: Option<FileId>,
-    file_path: Option<CanonicalPath>,
-    text: &'a str,
-    limit: usize,
-    result: &'a mut SearchBuildResult,
-}
-
-struct SearchLineInput<'a> {
-    query_id: &'a str,
-    pattern: &'a SearchPattern,
-    scope: SearchScopeProjection,
-    workspace_id: Option<WorkspaceId>,
-    buffer_id: Option<BufferId>,
-    file_id: Option<FileId>,
-    file_path: Option<CanonicalPath>,
-    line_number: u32,
-    line_text: &'a str,
-    absolute_line_start: u64,
-    limit: usize,
-    result: &'a mut SearchBuildResult,
-}
-
-fn parse_search_query(
-    query: &str,
-    options: SearchQueryOptions,
-) -> Result<ParsedSearchQuery, String> {
-    let mut mode = SearchPatternKind::Literal;
-    // Text-prefix defaults; explicit overrides are applied below.
-    let mut case_sensitive = true;
-    let mut whole_word = false;
-    let mut include_globs = Vec::<String>::new();
-    let mut exclude_globs = Vec::<String>::new();
-    let mut pattern_parts = Vec::<String>::new();
-
-    for token in query.split_whitespace() {
-        if let Some(pattern) = token.strip_prefix("regex:") {
-            mode = SearchPatternKind::Regex;
-            if !pattern.is_empty() {
-                pattern_parts.push(pattern.to_string());
-            }
-            continue;
-        }
-        if let Some(pattern) = token.strip_prefix("re:") {
-            mode = SearchPatternKind::Regex;
-            if !pattern.is_empty() {
-                pattern_parts.push(pattern.to_string());
-            }
-            continue;
-        }
-        if let Some(pattern) = token.strip_prefix("literal:") {
-            mode = SearchPatternKind::Literal;
-            if !pattern.is_empty() {
-                pattern_parts.push(pattern.to_string());
-            }
-            continue;
-        }
-        if let Some(pattern) = token.strip_prefix("word:") {
-            whole_word = true;
-            if !pattern.is_empty() {
-                pattern_parts.push(pattern.to_string());
-            }
-            continue;
-        }
-        if token == "word" {
-            whole_word = true;
-            continue;
-        }
-        if token == "case" {
-            case_sensitive = true;
-            continue;
-        }
-        if token == "icase" || token == "nocase" {
-            case_sensitive = false;
-            continue;
-        }
-        if let Some(pattern) = token.strip_prefix("include:") {
-            if pattern.is_empty() {
-                return Err("include glob is empty".to_string());
-            }
-            include_globs.push(pattern.to_string());
-            continue;
-        }
-        if let Some(pattern) = token.strip_prefix("exclude:") {
-            if pattern.is_empty() {
-                return Err("exclude glob is empty".to_string());
-            }
-            exclude_globs.push(pattern.to_string());
-            continue;
-        }
-        pattern_parts.push(token.to_string());
-    }
-
-    // Explicit override flags take precedence over text-prefix parsing.
-    if let Some(v) = options.case_sensitive {
-        case_sensitive = v;
-    }
-    if let Some(v) = options.whole_word {
-        whole_word = v;
-    }
-    if let Some(true) = options.use_regex {
-        mode = SearchPatternKind::Regex;
-    } else if options.use_regex == Some(false) {
-        mode = SearchPatternKind::Literal;
-    }
-    let effective_use_regex = matches!(mode, SearchPatternKind::Regex);
-
-    let pattern = pattern_parts.join(" ").trim().to_string();
-    if pattern.is_empty() {
-        return Err("Search query is empty".to_string());
-    }
-
-    let compiled_pattern = match mode {
-        SearchPatternKind::Literal => SearchPattern::literal(&pattern, case_sensitive, whole_word)
-            .map_err(|err| format!("invalid literal search: {err}"))?,
-        SearchPatternKind::Regex => SearchPattern::regex(&pattern, case_sensitive, whole_word)
-            .map_err(|err| format!("invalid regex search: {err}"))?,
-    };
-
-    let include = compile_search_globset(&include_globs)?;
-    let exclude = compile_search_globset(&exclude_globs)?;
-
-    Ok(ParsedSearchQuery {
-        pattern: compiled_pattern,
-        filters: WorkspaceSearchFilters { include, exclude },
-        search_text: pattern,
-        is_literal: !effective_use_regex,
-        case_sensitive,
-        whole_word,
-        use_regex: effective_use_regex,
-    })
-}
-
-fn compile_search_globset(patterns: &[String]) -> Result<Option<Arc<GlobSet>>, String> {
-    if patterns.is_empty() {
-        return Ok(None);
-    }
-
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(
-            Glob::new(pattern).map_err(|err| format!("invalid search glob `{pattern}`: {err}"))?,
-        );
-    }
-    builder
-        .build()
-        .map(|set| Some(Arc::new(set)))
-        .map_err(|err| format!("invalid search glob set: {err}"))
-}
-
-fn normalize_search_limit(limit: usize) -> usize {
-    if limit == 0 {
-        SEARCH_DEFAULT_RESULT_LIMIT
-    } else {
-        limit.min(SEARCH_MAX_RESULT_LIMIT)
-    }
-}
-
-fn search_status_for_result(
-    scope: SearchScopeProjection,
-    result: &SearchBuildResult,
-) -> SearchStatusProjection {
-    if let Some(message) = &result.validation_error {
-        return SearchStatusProjection {
-            kind: SearchStatusKindProjection::ValidationError,
-            message: message.clone(),
-        };
-    }
-
-    if result.degraded_limited {
-        return SearchStatusProjection {
-            kind: SearchStatusKindProjection::DegradedLimited,
-            message: if result.results.is_empty() {
-                "Search was limited to degraded viewport content; no visible matches".to_string()
-            } else {
-                format!(
-                    "Search was limited to degraded viewport content; {} visible matches",
-                    result.results.len()
-                )
-            },
-        };
-    }
-
-    if result.results.is_empty() {
-        SearchStatusProjection {
-            kind: SearchStatusKindProjection::NoResults,
-            message: "No search results".to_string(),
-        }
-    } else {
-        let scope_label = match scope {
-            SearchScopeProjection::ActiveFile => "active file",
-            SearchScopeProjection::Workspace => "workspace",
-        };
-        SearchStatusProjection {
-            kind: SearchStatusKindProjection::Completed,
-            message: format!("Found {} results in {scope_label}", result.results.len()),
-        }
-    }
-}
-
-fn build_search_projection(
-    query_id: Option<String>,
-    scope: SearchScopeProjection,
-    query_label: String,
-    result_limit: usize,
-    status: SearchStatusProjection,
-    result: SearchBuildResult,
-) -> SearchProjection {
-    SearchProjection {
-        query_id,
-        scope,
-        query_label,
-        status,
-        results: result.results,
-        result_limit,
-        omitted_result_count: result.omitted_result_count,
-        omitted_file_count: result.omitted_file_count,
-        skipped_binary_count: result.skipped_binary_count,
-        case_sensitive: result.case_sensitive,
-        whole_word: result.whole_word,
-        use_regex: result.use_regex,
-        diagnostics: result.diagnostics,
-        generated_at: TimestampMillis::now(),
-        schema_version: 1,
-    }
 }
 
 fn structural_search_status_for_result(result: &StructuralBuildResult) -> SearchStatusProjection {
@@ -14771,6 +13410,7 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         commit_validation_warnings: Vec::new(),
         commit_validation_errors: Vec::new(),
         local_history_entries: Vec::new(),
+        remote_policy_audit: Vec::new(),
     }
 }
 
@@ -15126,6 +13766,26 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Stash local changes with an optional message",
             shortcut_label: None,
         },
+        // Remote verbs. Each one is policy-gated at dispatch (P2.F5.T4); the
+        // palette entry only makes them reachable.
+        PaletteCommandSpec {
+            id: "git-push",
+            title: "Git: Push",
+            detail: "Push the current branch to origin",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-fetch",
+            title: "Git: Fetch",
+            detail: "Fetch refs from origin",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "git-pull",
+            title: "Git: Pull",
+            detail: "Pull the current branch from origin",
+            shortcut_label: None,
+        },
         PaletteCommandSpec {
             id: "git-prune-worktrees",
             title: "Git: Prune Worktrees",
@@ -15234,6 +13894,12 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "git-push" => Some(CommandDispatchIntent::PushGitRemote {
             remote: "origin".to_string(),
         }),
+        "git-fetch" => Some(CommandDispatchIntent::FetchGitRemote {
+            remote: "origin".to_string(),
+        }),
+        "git-pull" => Some(CommandDispatchIntent::PullGitRemote {
+            remote: "origin".to_string(),
+        }),
         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
         "git-remove-worktree" => None,
         "git-new-worktree" => None, // Requires query args: <branch> <path>
@@ -15278,99 +13944,6 @@ fn sort_palette_results(results: &mut [PaletteScoredResult]) {
             .then_with(|| left.result.title.cmp(&right.result.title))
             .then_with(|| left.result.id.cmp(&right.result.id))
     });
-}
-
-fn collect_search_results_for_text(input: SearchTextInput<'_>) {
-    let mut absolute_line_start = 0_u64;
-    for (line_number, line) in input.text.split_inclusive('\n').enumerate() {
-        let line_text = line.trim_end_matches(&['\r', '\n'][..]);
-        collect_search_results_for_line(SearchLineInput {
-            query_id: input.query_id,
-            pattern: input.pattern,
-            scope: input.scope,
-            workspace_id: input.workspace_id,
-            buffer_id: input.buffer_id,
-            file_id: input.file_id,
-            file_path: input.file_path.clone(),
-            line_number: line_number as u32,
-            line_text,
-            absolute_line_start,
-            limit: input.limit,
-            result: input.result,
-        });
-        absolute_line_start = absolute_line_start.saturating_add(line.len() as u64);
-    }
-}
-
-fn count_chars_up_to(text: &str, byte_idx: usize) -> usize {
-    text.get(..byte_idx)
-        .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
-}
-
-fn collect_search_results_for_line(input: SearchLineInput<'_>) {
-    let matches = input.pattern.find_ranges(input.line_text);
-    if matches.is_empty() {
-        return;
-    }
-
-    for match_range in matches {
-        let byte_start = match_range.start;
-        let byte_end = match_range.end;
-        let character_start = count_chars_up_to(input.line_text, byte_start) as u32;
-        let character_end = count_chars_up_to(input.line_text, byte_end) as u32;
-        let (snippet, snippet_truncated) = bounded_search_snippet(input.line_text);
-        let row = SearchResultProjection {
-            query_id: input.query_id.to_string(),
-            scope: input.scope,
-            workspace_id: input.workspace_id,
-            buffer_id: input.buffer_id,
-            file_id: input.file_id,
-            file_path: input.file_path.clone(),
-            line_number: input.line_number,
-            range: ProtocolTextRange {
-                start: TextCoordinate {
-                    line: input.line_number,
-                    character: character_start,
-                    byte_offset: Some(input.absolute_line_start + byte_start as u64),
-                    utf16_offset: Some(character_start as u64),
-                },
-                end: TextCoordinate {
-                    line: input.line_number,
-                    character: character_end,
-                    byte_offset: Some(input.absolute_line_start + byte_end as u64),
-                    utf16_offset: Some(character_end as u64),
-                },
-            },
-            snippet,
-            snippet_truncated,
-            stale: false,
-        };
-        push_bounded_search_result(input.result, input.limit, row);
-    }
-}
-
-fn push_bounded_search_result(
-    result: &mut SearchBuildResult,
-    limit: usize,
-    row: SearchResultProjection,
-) {
-    if result.results.len() < limit {
-        result.results.push(row);
-    } else {
-        result.omitted_result_count = result.omitted_result_count.saturating_add(1);
-    }
-}
-
-fn bounded_search_snippet(line: &str) -> (String, bool) {
-    if line.len() <= SEARCH_SNIPPET_LIMIT_BYTES {
-        return (line.to_string(), false);
-    }
-
-    let mut end = SEARCH_SNIPPET_LIMIT_BYTES;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    (format!("{}...", &line[..end]), true)
 }
 
 #[derive(Debug, Clone)]
@@ -16113,6 +14686,12 @@ pub struct AppComposition {
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
+    /// Policy decisions for git push/fetch/pull, oldest first (P2.F5.T4).
+    ///
+    /// App-owned rather than snapshot-derived: `refresh_git_projection` rebuilds
+    /// the projection from git, which would otherwise erase the verdict the user
+    /// needs to read after a denied operation.
+    git_remote_policy_audit: Vec<legion_ui::GitRemotePolicyProjection>,
     /// In-memory local history metadata store (content blobs live on disk).
     local_history_store: legion_storage::local_history::LocalHistoryMetadataStore,
     /// Last blob-write error, if any, propagated as a degraded-mode diagnostic.
@@ -16442,6 +15021,7 @@ impl AppComposition {
             git_projection: GitProjection::idle(),
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
+            git_remote_policy_audit: Vec::new(),
             local_history_store: legion_storage::local_history::LocalHistoryMetadataStore::new(),
             local_history_last_write_error: None,
             debug_workflow: DebugWorkflow::default(),
@@ -19969,18 +18549,19 @@ impl AppComposition {
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
             }
             AppCommandRequest::PushGitRemote { remote } => {
-                let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
-                    return Err(AppCompositionError::WorkspaceNotOpen);
-                };
-                let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
-                    git_protocol_error(
-                        "git_branch_missing",
-                        "git branch label unavailable for push",
-                    )
-                })?;
-                push_git_remote(Path::new(root_path), &remote, &branch)
-                    .map_err(git_inspection_protocol_error)?;
-                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+                self.dispatch_git_remote_operation(GitRemoteOperation::Push, &remote)
+            }
+            AppCommandRequest::FetchGitRemote { remote } => {
+                self.dispatch_git_remote_operation(GitRemoteOperation::Fetch, &remote)
+            }
+            AppCommandRequest::PullGitRemote { remote } => {
+                self.dispatch_git_remote_operation(GitRemoteOperation::Pull, &remote)
+            }
+            AppCommandRequest::GrantGitRemoteHost { host } => {
+                self.dispatch_git_remote_consent(&host, true)
+            }
+            AppCommandRequest::RevokeGitRemoteHost { host } => {
+                self.dispatch_git_remote_consent(&host, false)
             }
             AppCommandRequest::PruneGitWorktrees => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -27020,84 +25601,6 @@ impl AppComposition {
         self.active_documents.set_viewport_scroll(buffer_id, scroll)
     }
 
-    /// Run bounded lexical search through app-owned editor/workspace authority.
-    ///
-    /// When a new query supersedes previous results, the existing
-    /// `SearchResultProjection` rows are immediately marked `stale = true` so
-    /// that callers can show de-emphasised results while the new search runs.
-    pub fn run_search(
-        &mut self,
-        query_id: String,
-        scope: SearchScopeProjection,
-        query: String,
-        limit: usize,
-        options: SearchQueryOptions,
-    ) -> Result<SearchProjection, AppCompositionError> {
-        // Mark current results stale before running the new query so that any
-        // caller holding a snapshot sees them de-emphasised.
-        //
-        // STALE-MARKER VISIBILITY LIMITATION (synchronous model): because
-        // `run_search` is synchronous and single-threaded, the stale flag set
-        // here is immediately overwritten by the `search_projection` assignment
-        // at the end of this call in the same stack frame.  In the current
-        // model there is therefore *zero practical visibility window* for the
-        // stale state — no external observer can read the transient stale
-        // snapshot.  The flag is meaningful only if/when an asynchronous
-        // search path is introduced (where the caller could read the stale
-        // projection between dispatching the new query and receiving its
-        // result).  Keep the logic in place as a forwards-compatible hook, but
-        // document that it has no effect today.
-        let incoming_query_id = query_id.as_str();
-        let current_is_different = self
-            .search_projection
-            .query_id
-            .as_deref()
-            .is_none_or(|prev| prev != incoming_query_id);
-        if current_is_different && !self.search_projection.results.is_empty() {
-            for row in &mut self.search_projection.results {
-                row.stale = true;
-            }
-            self.search_projection.generated_at = TimestampMillis::now();
-        }
-
-        let result_limit = normalize_search_limit(limit);
-        let query_label = query.trim().to_string();
-        if query_label.is_empty() {
-            self.search_projection = build_search_projection(
-                Some(query_id),
-                scope,
-                query_label,
-                result_limit,
-                SearchStatusProjection {
-                    kind: SearchStatusKindProjection::ValidationError,
-                    message: "Search query is empty".to_string(),
-                },
-                SearchBuildResult::default(),
-            );
-            return Ok(self.search_projection.clone());
-        }
-
-        let result = match scope {
-            SearchScopeProjection::ActiveFile => {
-                self.run_active_file_search(&query_id, &query_label, result_limit, options)?
-            }
-            SearchScopeProjection::Workspace => {
-                self.run_workspace_search(&query_id, &query_label, result_limit, options)?
-            }
-        };
-
-        let status = search_status_for_result(scope, &result);
-        self.search_projection = build_search_projection(
-            Some(query_id),
-            scope,
-            query_label,
-            result_limit,
-            status,
-            result,
-        );
-        Ok(self.search_projection.clone())
-    }
-
     /// Run deterministic structural search and optionally create a rewrite proposal preview.
     pub fn run_structural_search(
         &mut self,
@@ -27164,20 +25667,6 @@ impl AppComposition {
                 proposal_id,
             });
         Ok(self.structural_search_projection.clone())
-    }
-
-    /// Cancel the projected search by query id.
-    pub fn cancel_search(&mut self, query_id: String) -> SearchProjection {
-        if self.search_projection.query_id.as_deref() == Some(query_id.as_str()) {
-            self.search_projection.status = SearchStatusProjection {
-                kind: SearchStatusKindProjection::Cancelled,
-                message: "Search cancelled".to_string(),
-            };
-            self.search_projection.generated_at = TimestampMillis::now();
-        }
-        let projection = self.search_projection.clone();
-        self.sync_search_palette_results();
-        projection
     }
 
     /// Refresh test explorer discovery (P2.F3.T4 / T4c).
@@ -27474,6 +25963,9 @@ impl AppComposition {
         // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
         // not in the project snapshot, so it must be injected after each build.
         self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        // Same for the remote-policy audit trail: a denied push refreshes the
+        // projection, and the user must still be able to read why it was denied.
+        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
         // Propagate any local-history blob-write degradation as a diagnostic.
         if let Some(ref err) = self.local_history_last_write_error {
             self.git_projection
@@ -29766,204 +28258,6 @@ impl AppComposition {
             },
             format!("{} proposal preview created", title),
         ))
-    }
-
-    fn run_active_file_search(
-        &self,
-        query_id: &str,
-        query: &str,
-        limit: usize,
-        options: SearchQueryOptions,
-    ) -> Result<SearchBuildResult, AppCompositionError> {
-        let buffer_id = self.active_documents.require_active_buffer()?;
-        let metadata = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-            .ok_or(AppCompositionError::ActiveFileMissing)?;
-
-        if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
-            return self.run_degraded_active_file_search(
-                query_id, query, limit, buffer_id, metadata, options,
-            );
-        }
-
-        let text = self.editor.text(buffer_id)?;
-        let parsed = match parse_search_query(query, options) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                return Ok(SearchBuildResult {
-                    validation_error: Some(message),
-                    ..SearchBuildResult::default()
-                });
-            }
-        };
-        let mut result = SearchBuildResult {
-            case_sensitive: parsed.case_sensitive,
-            whole_word: parsed.whole_word,
-            use_regex: parsed.use_regex,
-            ..SearchBuildResult::default()
-        };
-        collect_search_results_for_text(SearchTextInput {
-            query_id,
-            pattern: &parsed.pattern,
-            scope: SearchScopeProjection::ActiveFile,
-            workspace_id: Some(metadata.identity.workspace_id),
-            buffer_id: Some(buffer_id),
-            file_id: Some(metadata.identity.file_id),
-            file_path: Some(metadata.identity.canonical_path),
-            text,
-            limit,
-            result: &mut result,
-        });
-        Ok(result)
-    }
-
-    fn run_degraded_active_file_search(
-        &self,
-        query_id: &str,
-        query: &str,
-        limit: usize,
-        buffer_id: BufferId,
-        metadata: ActiveFileMetadata,
-        options: SearchQueryOptions,
-    ) -> Result<SearchBuildResult, AppCompositionError> {
-        let scroll = self.active_documents.viewport_scroll_for(buffer_id);
-        let viewport = self
-            .editor
-            .viewport_projection(legion_protocol::EditorViewportRequest {
-                buffer_id,
-                scroll,
-                dimensions: legion_protocol::ViewportDimensions {
-                    width_px: 800,
-                    height_px: 384,
-                },
-            })?;
-        let parsed = match parse_search_query(query, options) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                return Ok(SearchBuildResult {
-                    validation_error: Some(message),
-                    ..SearchBuildResult::default()
-                });
-            }
-        };
-        let mut result = SearchBuildResult {
-            degraded_limited: true,
-            diagnostics: vec![
-                "Active-file search is limited to the visible viewport in degraded mode"
-                    .to_string(),
-            ],
-            case_sensitive: parsed.case_sensitive,
-            whole_word: parsed.whole_word,
-            use_regex: parsed.use_regex,
-            ..SearchBuildResult::default()
-        };
-
-        for slice in &viewport.line_slices {
-            collect_search_results_for_line(SearchLineInput {
-                query_id,
-                pattern: &parsed.pattern,
-                scope: SearchScopeProjection::ActiveFile,
-                workspace_id: Some(metadata.identity.workspace_id),
-                buffer_id: Some(buffer_id),
-                file_id: Some(metadata.identity.file_id),
-                file_path: Some(metadata.identity.canonical_path.clone()),
-                line_number: slice.line_number,
-                line_text: &slice.visible_text,
-                absolute_line_start: slice.byte_range.start,
-                limit,
-                result: &mut result,
-            });
-        }
-
-        Ok(result)
-    }
-
-    fn run_workspace_search(
-        &self,
-        query_id: &str,
-        query: &str,
-        limit: usize,
-        options: SearchQueryOptions,
-    ) -> Result<SearchBuildResult, AppCompositionError> {
-        let workspace_id = self.active_documents.require_workspace_id()?;
-        let parsed = match parse_search_query(query, options) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                return Ok(SearchBuildResult {
-                    validation_error: Some(message),
-                    ..SearchBuildResult::default()
-                });
-            }
-        };
-        let mut result = SearchBuildResult {
-            case_sensitive: parsed.case_sensitive,
-            whole_word: parsed.whole_word,
-            use_regex: parsed.use_regex,
-            ..SearchBuildResult::default()
-        };
-        let backend_query = WorkspaceSearchQuery {
-            workspace_id,
-            pattern: parsed.pattern,
-            search_text: parsed.search_text,
-            filters: parsed.filters,
-            result_limit: limit,
-            batch_size: 32,
-            use_indexed_backend: self.settings.indexed_workspace_search_enabled
-                && parsed.is_literal,
-        };
-
-        let report = self.workspace.search_workspace_stream(
-            backend_query,
-            |batch: WorkspaceSearchBatch| {
-                result.omitted_file_count = result
-                    .omitted_file_count
-                    .saturating_add(batch.omitted_file_count);
-                result.omitted_result_count = result
-                    .omitted_result_count
-                    .saturating_add(batch.omitted_hit_count);
-                result.diagnostics.extend(batch.diagnostics);
-                for hit in batch.hits {
-                    let byte_start = hit.byte_range.start as usize;
-                    let byte_end = hit.byte_range.end as usize;
-                    let character_start = count_chars_up_to(&hit.line_text, byte_start) as u32;
-                    let character_end = count_chars_up_to(&hit.line_text, byte_end) as u32;
-                    result.results.push(SearchResultProjection {
-                        query_id: query_id.to_string(),
-                        scope: SearchScopeProjection::Workspace,
-                        workspace_id: Some(workspace_id),
-                        buffer_id: self.editor.buffer_for_file(workspace_id, hit.file_id),
-                        file_id: Some(hit.file_id),
-                        file_path: Some(hit.canonical_path),
-                        line_number: hit.line_number,
-                        range: ProtocolTextRange {
-                            start: TextCoordinate {
-                                line: hit.line_number,
-                                character: character_start,
-                                byte_offset: Some(hit.byte_range.start),
-                                utf16_offset: Some(character_start as u64),
-                            },
-                            end: TextCoordinate {
-                                line: hit.line_number,
-                                character: character_end,
-                                byte_offset: Some(hit.byte_range.end),
-                                utf16_offset: Some(character_end as u64),
-                            },
-                        },
-                        snippet: hit.snippet,
-                        snippet_truncated: hit.snippet_truncated,
-                        stale: false,
-                    });
-                }
-                true
-            },
-        )?;
-        // Propagate binary-skip count from the workspace report so it is
-        // visible to the user via SearchProjection.skipped_binary_count.
-        result.skipped_binary_count = report.skipped_binary_count;
-
-        Ok(result)
     }
 
     fn run_active_file_structural_search(

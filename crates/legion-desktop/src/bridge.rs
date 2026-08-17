@@ -287,6 +287,16 @@ pub enum DesktopAction {
     },
     /// Push the current branch to the default remote.
     PushGitRemote,
+    /// Fetch refs from the default remote.
+    FetchGitRemote,
+    /// Pull the current branch from the default remote.
+    PullGitRemote,
+    /// Grant consent for the host named by the most recent policy denial.
+    ///
+    /// Carries no host of its own: it resolves the host from the projection so
+    /// the user grants exactly what was refused, and cannot mistype it into
+    /// consenting to a different host.
+    GrantDeniedGitRemoteHost,
     /// Open the branch's forge pull-request URL.
     OpenGitPullRequestUrl,
     /// Prune orphaned worktree metadata.
@@ -1148,6 +1158,9 @@ pub enum DesktopBridgeError {
     /// Git pull-request flow requires a projected branch label.
     #[error("git branch label is unavailable in the current projection")]
     MissingGitBranchLabel,
+    /// No denied remote-policy row names a host to grant consent for.
+    #[error("no denied git remote host is available to grant")]
+    MissingDeniedGitRemoteHost,
     /// Git pull-request flow requires a projected remote default branch.
     #[error("git remote default branch is unavailable in the current projection")]
     MissingRemoteDefaultBranch,
@@ -1586,6 +1599,37 @@ impl DesktopCommandBridge {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::PushGitRemote {
                     remote: "origin".to_string(),
                 })
+            }
+            DesktopAction::FetchGitRemote => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::FetchGitRemote {
+                    remote: "origin".to_string(),
+                })
+            }
+            DesktopAction::PullGitRemote => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::PullGitRemote {
+                    remote: "origin".to_string(),
+                })
+            }
+            DesktopAction::GrantDeniedGitRemoteHost => {
+                // Take the host from the newest denial that named one, so the
+                // grant matches what the user just saw refused.
+                let host = snapshot
+                    .git_projection
+                    .remote_policy_audit
+                    .iter()
+                    .rev()
+                    .find(|row| !row.allowed && row.host.is_some())
+                    .and_then(|row| row.host.clone());
+                match host {
+                    Some(host) => {
+                        DesktopBridgeOutput::Intent(CommandDispatchIntent::GrantGitRemoteHost {
+                            host,
+                        })
+                    }
+                    None => {
+                        DesktopBridgeOutput::Error(DesktopBridgeError::MissingDeniedGitRemoteHost)
+                    }
+                }
             }
             DesktopAction::OpenGitPullRequestUrl => {
                 let Some(remote_url) = snapshot.git_projection.remote_url.as_deref() else {

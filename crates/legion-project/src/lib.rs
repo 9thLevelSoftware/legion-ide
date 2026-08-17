@@ -194,7 +194,15 @@ pub struct WorkspaceSearchHit {
     pub canonical_path: CanonicalPath,
     /// One-based line number of the match (matches the blame convention).
     pub line_number: u32,
+    /// Match range as absolute byte offsets from the start of the file.
     pub byte_range: Range<u64>,
+    /// Absolute byte offset of the first byte of `line_text`.
+    ///
+    /// Callers that need a position *within* the line (a column, a UTF-16
+    /// offset) must subtract this from `byte_range`; indexing `line_text` with
+    /// the absolute offset silently yields the wrong column on every line but
+    /// the first.
+    pub line_byte_start: u64,
     pub line_text: String,
     pub snippet: String,
     pub snippet_truncated: bool,
@@ -1027,13 +1035,31 @@ pub fn collect_git_snapshot(
     collect_git_snapshot_with_backend(root, active_file, options, GitInspectionBackend::Gix)
 }
 
-fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
-    let path = path.to_string_lossy();
-    if path.contains("target/delegated-tasks/task-") {
+/// Classify a worktree path as agent-owned or human-managed.
+///
+/// Agent worktrees are the delegated-task sandboxes created under
+/// `target/delegated-tasks/task-<run-id>`; everything else belongs to the user.
+/// The classification is by path convention because git itself records nothing
+/// about who created a worktree.
+///
+/// Separators are normalized before matching. `git worktree list --porcelain`
+/// reports forward slashes even on Windows, but callers may also classify a
+/// `PathBuf` they built themselves, which on Windows carries backslashes.
+///
+/// This is public because agent worktrees must stay visible to the user
+/// (P2.F5.T3); a classification the SCM surface depends on should be directly
+/// testable rather than only reachable through a full repository snapshot.
+pub fn git_worktree_kind_for_path(path: &Path) -> ProjectGitWorktreeKind {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.contains("target/delegated-tasks/task-") {
         ProjectGitWorktreeKind::Agent
     } else {
         ProjectGitWorktreeKind::Manual
     }
+}
+
+fn git_worktree_kind(path: &Path) -> ProjectGitWorktreeKind {
+    git_worktree_kind_for_path(path)
 }
 
 fn git_remote_url(root: &Path, remote: &str) -> Option<String> {
@@ -1041,6 +1067,16 @@ fn git_remote_url(root: &Path, remote: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Read the configured URL for a named remote, or `None` when it has none.
+///
+/// The snapshot's `remote_url` only ever describes `origin`. Callers that must
+/// make a policy decision about a *specific* remote need that remote's own URL —
+/// authorizing an operation against one remote using another remote's target
+/// would be a policy bypass.
+pub fn git_remote_configured_url(root: impl AsRef<Path>, remote: &str) -> Option<String> {
+    git_remote_url(root.as_ref(), remote)
 }
 
 fn git_remote_default_branch(root: &Path, remote: &str) -> Option<String> {
@@ -3023,6 +3059,40 @@ impl WorkspaceActor {
         }
     }
 
+    /// Snapshot the security policy this workspace enforces.
+    ///
+    /// Decisions taken outside the capability-broker path — such as the git
+    /// remote network gate — must evaluate against the *same* policy the
+    /// workspace enforces, not a freshly defaulted one, or the two surfaces can
+    /// disagree about what is permitted. Returns the default policy if the
+    /// broker lock is poisoned, which is the fail-closed choice: the default
+    /// `NetworkPolicy` is air-gapped.
+    pub fn security_policy(&self) -> legion_security::SecurityPolicy {
+        self.security
+            .lock()
+            .map(|broker| broker.policy.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record user consent to reach `host` for git remote operations.
+    ///
+    /// Returns `true` when the host was newly consented. A poisoned broker lock
+    /// returns `false` (fail closed: no grant is recorded).
+    pub fn consent_git_remote_host(&self, host: impl AsRef<str>) -> bool {
+        self.security
+            .lock()
+            .map(|mut broker| broker.consent_git_remote_host(host))
+            .unwrap_or(false)
+    }
+
+    /// Withdraw consent for `host`, returning `true` when consent was present.
+    pub fn revoke_git_remote_host(&self, host: impl AsRef<str>) -> bool {
+        self.security
+            .lock()
+            .map(|mut broker| broker.revoke_git_remote_host(host))
+            .unwrap_or(false)
+    }
+
     fn now_sequence(state: &mut WorkspaceState) -> EventSequence {
         state.watcher_sequence = state.watcher_sequence.saturating_add(1);
         EventSequence(state.watcher_sequence)
@@ -3366,6 +3436,7 @@ impl WorkspaceActor {
                             canonical_path: file_identity.canonical_path.clone(),
                             line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
+                            line_byte_start: line_start,
                             line_text: line.to_string(),
                             snippet,
                             snippet_truncated,
@@ -5033,6 +5104,7 @@ impl WorkspaceActor {
                             canonical_path: file_identity.canonical_path.clone(),
                             line_number: (line_number as u32).saturating_add(1),
                             byte_range: byte_start..byte_end,
+                            line_byte_start: line_start,
                             line_text: line.to_string(),
                             snippet,
                             snippet_truncated,
