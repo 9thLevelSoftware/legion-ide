@@ -83,6 +83,16 @@ pub enum LspReadKind {
     InlayHints,
     /// Code-lens request (`textDocument/codeLens`).
     CodeLens,
+    /// Formatting request (`textDocument/formatting`).
+    Formatting,
+    /// Code-action request (`textDocument/codeAction`).
+    CodeAction {
+        /// Whether the request was narrowed to `source.organizeImports`.
+        ///
+        /// Organize-imports is a code action with a kind rather than a request
+        /// of its own, so the two share a wire call and are told apart here.
+        organize_imports: bool,
+    },
     /// Rename request (`textDocument/rename`).
     ///
     /// Carries the replacement identifier so the drain-side handler can

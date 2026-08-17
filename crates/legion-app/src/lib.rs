@@ -20186,44 +20186,59 @@ impl AppComposition {
                     )?,
                 ))
             }
-            AppCommandRequest::RequestFormattingProposal { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::Formatting,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    "format".to_string(),
-                )?),
-            ),
+            AppCommandRequest::RequestFormattingProposal { buffer_id } => {
+                self.issue_lsp_formatting_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::Formatting,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                        "format".to_string(),
+                    )?,
+                ))
+            }
             AppCommandRequest::RequestRenameProposal {
                 buffer_id,
                 position,
                 new_name,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::Rename,
-                    position,
-                    new_name,
-                )?,
-            )),
-            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::OrganizeImports,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    "organize-imports".to_string(),
-                )?),
-            ),
+            } => {
+                // Ask the language server too. Its answer arrives on a later
+                // drain as its own proposal; the index-backed one below returns
+                // now so the surface is never blank. Neither writes anything —
+                // both stop at Previewed.
+                self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::Rename,
+                        position,
+                        new_name,
+                    )?,
+                ))
+            }
+            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => {
+                if let Some(range) = self.whole_document_utf16_range(buffer_id) {
+                    self.issue_lsp_code_action_request(buffer_id, range, true);
+                }
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::OrganizeImports,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                        "organize-imports".to_string(),
+                    )?,
+                ))
+            }
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
                 action_id,

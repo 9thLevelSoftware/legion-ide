@@ -117,7 +117,80 @@ impl AppComposition {
                 );
             }
             LspReadKind::Rename { new_name } => {
-                self.ingest_lsp_rename_result(tag.buffer_id, new_name, &lsp_outcome.result);
+                let spec = LspWriteSideSpec {
+                    proposal_kind: LanguageProposalKind::Rename,
+                    source_kind: WorkspaceEditSourceKind::LspRename,
+                    title: format!("Rename symbol to {}", bounded_label(&new_name, 64)),
+                    detail_tag: "language_tooling.lsp_rename",
+                    detail_extra: vec![format!("new_name={}", bounded_label(&new_name, 64))],
+                };
+                self.ingest_lsp_write_side_result(tag.buffer_id, spec, &lsp_outcome.result);
+            }
+            LspReadKind::Formatting => {
+                // A formatting response is a bare `TextEdit[]` for one
+                // document. The proposal path speaks WorkspaceEdit, so the
+                // edits are lifted into one — the same shape a rename arrives
+                // in, so the same translation, preconditions and review apply.
+                let Some(uri) = self.document_uri_for_buffer(tag.buffer_id) else {
+                    return;
+                };
+                let edit = serde_json::json!({ "changes": { uri: lsp_outcome.result } });
+                let spec = LspWriteSideSpec {
+                    proposal_kind: LanguageProposalKind::Formatting,
+                    source_kind: WorkspaceEditSourceKind::LspFormatting,
+                    title: "Format document".to_string(),
+                    detail_tag: "language_tooling.lsp_formatting",
+                    detail_extra: Vec::new(),
+                };
+                self.ingest_lsp_write_side_result(tag.buffer_id, spec, &edit);
+            }
+            LspReadKind::CodeAction { organize_imports } => {
+                let (proposal_kind, source_kind, title, detail_tag) = if organize_imports {
+                    (
+                        LanguageProposalKind::OrganizeImports,
+                        // Organize-imports *is* a code action; the source kind
+                        // says where the edit came from, and it came from one.
+                        WorkspaceEditSourceKind::LspCodeAction,
+                        "Organize imports".to_string(),
+                        "language_tooling.lsp_organize_imports",
+                    )
+                } else {
+                    (
+                        LanguageProposalKind::CodeAction,
+                        WorkspaceEditSourceKind::LspCodeAction,
+                        "Apply code action".to_string(),
+                        "language_tooling.lsp_code_action",
+                    )
+                };
+                let input = self.language_request_input_for_failure(tag.buffer_id);
+                match first_code_action_edit(&lsp_outcome.result) {
+                    Some(edit) => {
+                        let spec = LspWriteSideSpec {
+                            proposal_kind,
+                            source_kind,
+                            title,
+                            detail_tag,
+                            detail_extra: Vec::new(),
+                        };
+                        self.ingest_lsp_write_side_result(tag.buffer_id, spec, &edit);
+                    }
+                    None => {
+                        // A code action carrying only a `command` needs
+                        // `workspace/executeCommand` to run, which would let a
+                        // server mutate the workspace outside the proposal
+                        // pipeline. Refused, and said out loud, rather than
+                        // silently producing nothing.
+                        if let Some(input) = input {
+                            let _ = self.language_tooling.record_proposal_failure(
+                                &input,
+                                proposal_kind,
+                                "no code action with a workspace edit; command-only \
+                                 actions are not executed"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -133,13 +206,21 @@ impl AppComposition {
     /// The resulting proposal enters the `Previewed` state. Call
     /// [`approve_and_apply_rename_proposal`] to transition it through
     /// `Approved` → `Applied` (PKT-APPLY Task 2c).
-    fn ingest_lsp_rename_result(
+    fn ingest_lsp_write_side_result(
         &mut self,
         buffer_id: BufferId,
-        new_name: String,
+        spec: LspWriteSideSpec,
         raw: &serde_json::Value,
     ) {
         use crate::language::translate_workspace_edit;
+
+        let LspWriteSideSpec {
+            proposal_kind,
+            source_kind,
+            title,
+            detail_tag,
+            detail_extra,
+        } = spec;
 
         let Some(workspace_id) = self.active_documents.workspace_id() else {
             return;
@@ -187,7 +268,6 @@ impl AppComposition {
             event_context,
         };
 
-        let title = format!("Rename symbol to {}", bounded_label(&new_name, 64));
         let capability = CapabilityId("fs.write".to_string());
 
         // Build the production DocumentResolver from the current open-buffer state.
@@ -197,7 +277,7 @@ impl AppComposition {
             raw,
             &resolver,
             workspace_id,
-            WorkspaceEditSourceKind::LspRename,
+            source_kind,
             title.clone(),
             capability.clone(),
         ) {
@@ -205,8 +285,8 @@ impl AppComposition {
             Err(err) => {
                 let _ = self.language_tooling.record_proposal_failure(
                     &input,
-                    LanguageProposalKind::Rename,
-                    format!("LSP rename translation failed: {err}"),
+                    proposal_kind,
+                    format!("{title}: LSP translation failed: {err}"),
                 );
                 return;
             }
@@ -252,10 +332,11 @@ impl AppComposition {
                 privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
                 preview: PreviewSummary {
                     summary: title.clone(),
-                    details: vec![
-                        "language_tooling.lsp_rename".to_string(),
-                        format!("new_name={}", bounded_label(&new_name, 64)),
-                    ],
+                    details: {
+                        let mut details = vec![detail_tag.to_string()];
+                        details.extend(detail_extra.iter().cloned());
+                        details
+                    },
                 },
                 expires_at: None,
                 created_at: TimestampMillis::now(),
@@ -267,8 +348,8 @@ impl AppComposition {
             Err(err) => {
                 let _ = self.language_tooling.record_proposal_failure(
                     &input,
-                    LanguageProposalKind::Rename,
-                    format!("rename proposal creation failed: {err:?}"),
+                    proposal_kind,
+                    format!("{title}: proposal creation failed: {err:?}"),
                 );
                 return;
             }
@@ -280,8 +361,8 @@ impl AppComposition {
         if !matches!(created, ProposalResponse::Created(_)) {
             let _ = self.language_tooling.record_proposal_failure(
                 &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal coordinator rejected: {created:?}"),
+                proposal_kind,
+                format!("{title}: proposal coordinator rejected: {created:?}"),
             );
             return;
         }
@@ -291,8 +372,8 @@ impl AppComposition {
         if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
             let _ = self.language_tooling.record_proposal_failure(
                 &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal validation failed: {validated:?}"),
+                proposal_kind,
+                format!("{title}: proposal validation failed: {validated:?}"),
             );
             return;
         }
@@ -302,20 +383,17 @@ impl AppComposition {
         if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
             let _ = self.language_tooling.record_proposal_failure(
                 &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal preview failed: {previewed:?}"),
+                proposal_kind,
+                format!("{title}: proposal preview failed: {previewed:?}"),
             );
             return;
         }
         let _ = self.language_tooling.record_proposal(
             &input,
-            LanguageProposalKind::Rename,
+            proposal_kind,
             proposal.proposal_id,
             None,
-            format!(
-                "Rename proposal generated ({})",
-                bounded_label(&new_name, 64)
-            ),
+            format!("{title}: proposal generated"),
         );
     }
 
@@ -593,6 +671,18 @@ impl AppComposition {
         })
     }
 
+    /// Test-only: the document URI a request for this buffer would carry.
+    ///
+    /// Tests that hand the app a `WorkspaceEdit` must key it the way the
+    /// resolver does. Guessing the URI from a temp path is how a test ends up
+    /// asserting against its own URI-building bug instead of the app's.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn document_uri_for_buffer_for_test(&self, buffer_id: BufferId) -> Option<String> {
+        self.active_documents
+            .metadata_for_buffer(buffer_id)
+            .map(|meta| canonical_path_to_uri(&meta.identity.canonical_path.0))
+    }
+
     /// Test-only: the snapshot id a request issued now would carry.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn current_snapshot_id_for_test(
@@ -755,6 +845,90 @@ impl AppComposition {
             .issue_request("textDocument/codeLens", params, tag)
     }
 
+    /// The document URI for a buffer, or `None` if it has no metadata.
+    fn document_uri_for_buffer(&self, buffer_id: BufferId) -> Option<String> {
+        self.active_documents
+            .metadata_for_buffer(buffer_id)
+            .map(|meta| canonical_path_to_uri(&meta.identity.canonical_path.0))
+    }
+
+    /// A request input built only so a failure can be recorded against it.
+    fn language_request_input_for_failure(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<LanguageRequestInput> {
+        let event_context = self.next_event_context();
+        self.language_request_input(buffer_id, event_context).ok()
+    }
+
+    /// Issues a non-blocking LSP formatting request on the worker thread.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `documentFormattingProvider` in the initialize response.
+    ///
+    /// The result becomes a reviewable proposal like every other write-side
+    /// action; nothing here writes.
+    pub fn issue_lsp_formatting_request(&mut self, buffer_id: BufferId) -> bool {
+        if !self.lsp_server_supports_capability("documentFormattingProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::Formatting,
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/formatting", params, tag)
+    }
+
+    /// Issues a non-blocking LSP code-action request on the worker thread.
+    ///
+    /// `organize_imports` narrows the request to `source.organizeImports`,
+    /// which is how LSP spells that action — it is a code action with a kind,
+    /// not a request of its own.
+    ///
+    /// Returns `false` if the session is not Live, or if the server did not
+    /// advertise `codeActionProvider` in the initialize response.
+    pub fn issue_lsp_code_action_request(
+        &mut self,
+        buffer_id: BufferId,
+        range: legion_protocol::Utf16Range,
+        organize_imports: bool,
+    ) -> bool {
+        if !self.lsp_server_supports_capability("codeActionProvider") {
+            return false;
+        }
+        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
+            return false;
+        };
+        let mut context = serde_json::json!({ "diagnostics": [] });
+        if organize_imports {
+            context["only"] = serde_json::json!(["source.organizeImports"]);
+        }
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": range.start.line, "character": range.start.character },
+                "end": { "line": range.end.line, "character": range.end.character }
+            },
+            "context": context
+        });
+        let tag = crate::language::LspRequestTag {
+            buffer_id,
+            kind: crate::language::LspReadKind::CodeAction { organize_imports },
+            snapshot_id,
+        };
+        self.lsp_session
+            .issue_request("textDocument/codeAction", params, tag)
+    }
+
     /// Issues a non-blocking LSP rename request on the worker thread
     /// (PKT-LSP-C I-2).
     ///
@@ -825,4 +999,30 @@ impl AppComposition {
         self.lsp_session
             .issue_request("textDocument/rename", params, tag)
     }
+}
+
+/// What a write-side result should become once it has been translated.
+///
+/// The four write-side actions differ only in what they are called and which
+/// proposal kind they are recorded as; the WorkspaceEdit → translate →
+/// validate → preview path is identical, and duplicating it once per action is
+/// how one of them quietly stops registering its proposal.
+struct LspWriteSideSpec {
+    proposal_kind: LanguageProposalKind,
+    source_kind: WorkspaceEditSourceKind,
+    title: String,
+    detail_tag: &'static str,
+    detail_extra: Vec<String>,
+}
+
+/// The first workspace edit offered by a code-action response.
+///
+/// A `CodeAction[]` may mix actions carrying an `edit` with actions carrying
+/// only a `command`. Only the former can go through the proposal pipeline, so
+/// only the former is taken; the rest are the caller's problem to report.
+fn first_code_action_edit(response: &serde_json::Value) -> Option<serde_json::Value> {
+    response
+        .as_array()?
+        .iter()
+        .find_map(|action| action.get("edit").cloned())
 }
