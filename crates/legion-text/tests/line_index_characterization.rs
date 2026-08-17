@@ -427,7 +427,10 @@ fn fixture_mappings_match_golden() {
         actual.push_str(&mapping_digest(&LineIndex::new(text), text));
     }
 
-    let golden = include_str!("golden/line_index_mappings.txt");
+    // The golden carries no `eol` attribute, so a checkout with `core.autocrlf` on hands
+    // back CRLF while the digest above is built with LF. Compare on normalized endings so
+    // this pins the mapping rather than the checkout settings of whoever ran it.
+    let golden = include_str!("golden/line_index_mappings.txt").replace("\r\n", "\n");
     assert_eq!(
         actual, golden,
         "line index mapping drifted from the recorded golden"
