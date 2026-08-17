@@ -3281,6 +3281,7 @@ mod tests {
                     blocklist: vec!["example.exfiltration.invalid".to_string()],
                     air_gap: false,
                     local_provider_only: false,
+                    consented_git_remote_hosts: Vec::new(),
                 },
                 cloud_lane_policy: CloudLaneSecurityPolicy {
                     task_submission_enabled: true,
