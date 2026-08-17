@@ -19727,10 +19727,10 @@ impl AppComposition {
                 let at = legion_editor::TextPosition::new(if below { line + 1 } else { line }, 0);
                 let edit = TextEdit::new(legion_editor::TextRange::new(at, at), "\n".to_string());
                 let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
-                let target =
-                    legion_editor::TextPosition::new(if below { line + 1 } else { line }, 0);
+                // The new line's start is where the edit went and where the
+                // cursor belongs; they are the same position, not two.
                 self.editor
-                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: at }])?;
                 self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
                 Ok(Some(outcome))
             }
@@ -19742,10 +19742,12 @@ impl AppComposition {
                 // one-character inclusive range rather than any motion.
                 let line = from.line as usize;
                 let character = from.character as usize;
-                if crate::vim_session::character_to_byte_column(&text, line, character)
-                    >= crate::vim_session::character_to_byte_column(&text, line, character + 1)
-                {
-                    // Nothing under the cursor — an empty line, or past the end.
+                // Nothing under the cursor — an empty line, or past the end.
+                // Asked directly rather than by converting two columns and
+                // comparing them, which walked the line twice to learn one
+                // thing.
+                let line_chars = text.split('\n').nth(line).map(|l| l.chars().count());
+                if line_chars.is_none_or(|count| character >= count) {
                     return Ok(Some(AppCommandOutcome::Noop));
                 }
                 let range = legion_ui::VimRange {

@@ -139,37 +139,24 @@ mod tests {
 
     #[test]
     fn insert_keys_map_to_their_intents() {
-        for (key, matches_intent) in [
-            (
-                'i',
-                matches!(
-                    action_to_intent(VimAction::InsertBefore),
-                    Some(CommandDispatchIntent::VimInsertBefore)
-                ),
-            ),
-            (
-                'a',
-                matches!(
-                    action_to_intent(VimAction::InsertAfter),
-                    Some(CommandDispatchIntent::VimInsertAfter)
-                ),
-            ),
-            (
-                'o',
-                matches!(
-                    action_to_intent(VimAction::InsertLineBelow),
-                    Some(CommandDispatchIntent::VimInsertLineBelow)
-                ),
-            ),
-            (
-                'O',
-                matches!(
-                    action_to_intent(VimAction::InsertLineAbove),
-                    Some(CommandDispatchIntent::VimInsertLineAbove)
-                ),
-            ),
-        ] {
-            assert!(matches_intent, "`{key}` did not map to its intent");
+        let cases = [
+            ('i', "VimInsertBefore"),
+            ('a', "VimInsertAfter"),
+            ('o', "VimInsertLineBelow"),
+            ('O', "VimInsertLineAbove"),
+        ];
+        for (key, expected) in cases {
+            let mut state = VimState::new();
+            let intent = key_to_intent(&mut state, key, false)
+                .unwrap_or_else(|| panic!("`{key}` produced no intent"));
+            let actual = match intent {
+                CommandDispatchIntent::VimInsertBefore => "VimInsertBefore",
+                CommandDispatchIntent::VimInsertAfter => "VimInsertAfter",
+                CommandDispatchIntent::VimInsertLineBelow => "VimInsertLineBelow",
+                CommandDispatchIntent::VimInsertLineAbove => "VimInsertLineAbove",
+                other => panic!("`{key}` produced {other:?}"),
+            };
+            assert_eq!(actual, expected, "`{key}` mapped to the wrong intent");
         }
     }
 

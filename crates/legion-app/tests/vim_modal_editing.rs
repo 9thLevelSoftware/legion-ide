@@ -430,7 +430,7 @@ fn a_moves_one_right_before_inserting() {
 }
 
 #[test]
-fn o_opens_a_line_below_and_bigo_opens_above() {
+fn lowercase_o_opens_a_line_below_and_uppercase_o_opens_above() {
     let (mut app, buffer_id) = app_with_text(
         "one
 two

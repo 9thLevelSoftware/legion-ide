@@ -238,11 +238,9 @@ fn coordinate(line: usize, character: usize) -> TextCoordinate {
 /// character index; a text with no trailing newline still has a final line,
 /// and an empty text has one empty line so a cursor at 0,0 is always valid.
 fn line_chars(text: &str) -> Vec<Vec<char>> {
-    let mut lines: Vec<Vec<char>> = text.split('\n').map(|l| l.chars().collect()).collect();
-    if lines.is_empty() {
-        lines.push(Vec::new());
-    }
-    lines
+    // `split` always yields at least one segment, so empty text is one empty
+    // line and a cursor at 0,0 is always in range.
+    text.split('\n').map(|l| l.chars().collect()).collect()
 }
 
 fn line_len(lines: &[Vec<char>], line: usize) -> usize {
