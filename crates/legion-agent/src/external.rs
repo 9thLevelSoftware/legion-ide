@@ -1,3 +1,4 @@
+use legion_ai::redaction::scan_proposal_payload_for_secrets;
 use legion_protocol::{
     AssistedAiContractError, CapabilityId, CausalityId, CorrelationId, PreviewSummary, PrincipalId,
     ProposalId, ProposalPayload, ProposalTargetCoverageKind, ProposalVersionPreconditions,
@@ -162,14 +163,51 @@ pub fn external_workspace_edit_proposal(
         ..
     } = input;
 
+    let mut preview = preview_summary(&payload);
+    let proposal_payload = ProposalPayload::WorkspaceEdit(payload);
+
+    // Externally authored edit text reaches a reviewer's screen and then the
+    // working tree. Scan it here, at the point the payload becomes a proposal,
+    // rather than trusting the producer.
+    //
+    // Only counts are recorded, never the rule that fired.
+    //
+    // `contains_forbidden_phase8_payload` in `legion-protocol` rejects a proposal
+    // whose rendering contains markers including `secret`, `token`, `password`,
+    // and `api_key`. Ten of the eighteen `SecretRuleId::stable_id()` values
+    // contain one of those markers (`github-token`, `stripe-secret-key`,
+    // `high-entropy-token`, ...), so a rule-id-bearing annotation would make a
+    // proposal unrepresentable depending on *which* credential was found — a
+    // proposal that fails to serialize only sometimes is worse than one that
+    // never names the rule.
+    //
+    // The remaining eight escape only because the marker list spells `api_key`
+    // with an underscore while the rule ids use a hyphen. That is punctuation
+    // luck, not a design property: normalising the separators would push all
+    // eighteen into the rejected set, not free them. Do not read the eight as
+    // headroom for naming rules here.
+    //
+    // The count tells the reviewer to look; the rule id lives in the audit log.
+    let credential_sites = scan_proposal_payload_for_secrets(&proposal_payload);
+    if !credential_sites.is_empty() {
+        let finding_count: usize = credential_sites
+            .iter()
+            .map(|site| site.report.findings.len())
+            .sum();
+        preview.details.push(format!(
+            "credential_scan_sites={} credential_scan_findings={finding_count}",
+            credential_sites.len()
+        ));
+    }
+
     Ok(WorkspaceProposal {
         proposal_id,
         principal,
         capability,
         correlation_id,
-        payload: ProposalPayload::WorkspaceEdit(payload.clone()),
+        payload: proposal_payload,
         preconditions,
-        preview: preview_summary(&payload),
+        preview,
         expires_at,
         created_at,
     })
@@ -253,6 +291,131 @@ mod tests {
             proposal.payload,
             ProposalPayload::WorkspaceEdit(_)
         ));
+    }
+
+    /// Builds an AWS access key id shaped credential without committing one.
+    fn synthetic_access_key_id() -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut state: u64 = 0x0f1e_2d3c_4b5a_6978;
+        let body: String = (0..16)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ALPHABET[((state >> 33) as usize) % ALPHABET.len()] as char
+            })
+            .collect();
+        format!("AKIA{body}")
+    }
+
+    #[test]
+    fn external_workspace_edit_proposal_flags_credentials_in_preview_details() {
+        let input = ExternalWorkspaceEditProposalInput {
+            proposal_id: ProposalId(44),
+            principal: PrincipalId("principal:external".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(18),
+            causality_id: CausalityId(Uuid::now_v7()),
+            payload: WorkspaceEditProposalPayload {
+                workspace_id: legion_protocol::WorkspaceId(9),
+                edit_id: Uuid::now_v7(),
+                title: format!("Rotate {} in deploy config", synthetic_access_key_id()),
+                source: WorkspaceEditSourceKind::AiAssisted,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![proposal_target("deploy/config.toml")],
+                    omitted_target_count: 0,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                },
+                file_edits: vec![],
+                file_operations: vec![WorkspaceFileOperation::Create {
+                    path: CanonicalPath("deploy/config.toml".to_string()),
+                    initial_content_hash: None,
+                }],
+                required_capability: CapabilityId("fs.write".to_string()),
+                diagnostics: vec![],
+                schema_version: 1,
+            },
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            expires_at: None,
+            created_at: TimestampMillis(99),
+        };
+
+        let proposal = external_workspace_edit_proposal(input).expect("proposal envelope");
+
+        assert!(
+            proposal
+                .preview
+                .details
+                .iter()
+                .any(|detail| detail.starts_with("credential_scan_sites=")),
+            "a credential in externally authored proposal content must surface to the reviewer"
+        );
+    }
+
+    #[test]
+    fn external_workspace_edit_proposal_leaves_clean_previews_unannotated() {
+        let input = ExternalWorkspaceEditProposalInput {
+            proposal_id: ProposalId(45),
+            principal: PrincipalId("principal:external".to_string()),
+            capability: CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(19),
+            causality_id: CausalityId(Uuid::now_v7()),
+            payload: WorkspaceEditProposalPayload {
+                workspace_id: legion_protocol::WorkspaceId(9),
+                edit_id: Uuid::now_v7(),
+                title: "Apply external workspace change".to_string(),
+                source: WorkspaceEditSourceKind::User,
+                target_coverage: ProposalTargetCoverage {
+                    coverage_kind: ProposalTargetCoverageKind::Complete,
+                    targets: vec![proposal_target("src/external.rs")],
+                    omitted_target_count: 0,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                },
+                file_edits: vec![],
+                file_operations: vec![WorkspaceFileOperation::Create {
+                    path: CanonicalPath("src/external.rs".to_string()),
+                    initial_content_hash: None,
+                }],
+                required_capability: CapabilityId("fs.write".to_string()),
+                diagnostics: vec![],
+                schema_version: 1,
+            },
+            preconditions: ProposalVersionPreconditions {
+                file_version: None,
+                buffer_version: None,
+                snapshot_id: None,
+                generation: None,
+                file_content_version: None,
+                workspace_generation: None,
+                expected_fingerprint: None,
+                expected_file_length: None,
+                expected_modified_at: None,
+            },
+            expires_at: None,
+            created_at: TimestampMillis(99),
+        };
+
+        let proposal = external_workspace_edit_proposal(input).expect("proposal envelope");
+
+        assert!(
+            !proposal
+                .preview
+                .details
+                .iter()
+                .any(|detail| detail.starts_with("credential_scan_sites=")),
+            "clean proposal previews must not carry a scan annotation"
+        );
     }
 
     #[test]

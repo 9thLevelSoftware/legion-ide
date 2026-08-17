@@ -2,8 +2,17 @@
 
 use std::sync::OnceLock;
 
-use legion_security::{RedactionPayloadKind, scan_payload_for_sensitive_markers};
+use legion_security::{
+    RedactionPayloadKind, ScanPosture, redact_secrets_in_text, scan_payload_for_sensitive_markers,
+};
 use regex::Regex;
+
+/// Re-export of the shared proposal secret scanner.
+///
+/// `plans/dependency-policy.md` does not allow every proposal producer to depend
+/// on `legion-security` directly. Re-exporting here keeps those producers on the
+/// one ruleset instead of growing a second, weaker copy of it.
+pub use legion_security::{ProposalSecretSite, scan_proposal_payload_for_secrets};
 
 const REDACTED: &str = "[redacted]";
 
@@ -48,6 +57,17 @@ pub struct ModelBoundOutput {
 }
 
 /// Redacts common secret markers and truncates the result to a byte ceiling.
+///
+/// Two passes run in order. The marker pass above removes raw-payload field names
+/// and the handful of credential shapes this crate has always known about. The
+/// second pass is [`legion_security::redact_secrets_in_text`], which removes
+/// provider-shaped credentials, credential-named assignments, and high-entropy
+/// tokens that the marker pass cannot see.
+///
+/// The output of this function is bound for a model provider, so it uses
+/// [`ScanPosture::EgressRecall`]: the entropy heuristic redacts here even though
+/// it would not on a human-facing surface, because a credential sent to a
+/// provider cannot be recalled.
 #[must_use]
 pub fn redact_model_bound_output(output: &str, max_bytes: usize) -> ModelBoundOutput {
     let scan = scan_payload_for_sensitive_markers(RedactionPayloadKind::Log, output);
@@ -58,6 +78,8 @@ pub fn redact_model_bound_output(output: &str, max_bytes: usize) -> ModelBoundOu
             .replace_all(&redacted_text, *replacement)
             .into_owned();
     }
+
+    redacted_text = redact_secrets_in_text(&redacted_text, ScanPosture::EgressRecall).text;
 
     let truncated = if redacted_text.len() > max_bytes {
         let bound = char_boundary_floor(&redacted_text, max_bytes);

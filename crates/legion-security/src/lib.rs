@@ -31,6 +31,15 @@ pub use policy::{
 };
 pub mod risk;
 
+/// Regex + entropy secret detection for proposal, terminal, and retained text.
+pub mod secrets;
+pub use secrets::{
+    ProposalSecretScan, ProposalSecretSite, RedactedText, ScanPosture, SecretConfidence,
+    SecretFinding, SecretRuleId, SecretScanReport, SecretSeverity, SecretSpan,
+    redact_secrets_in_text, scan_proposal_for_secrets, scan_proposal_payload_for_secrets,
+    scan_text_for_secrets,
+};
+
 /// Trust state accepted by policy for workspace-sensitive decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustState {
@@ -315,6 +324,21 @@ impl RedactionScanReport {
 }
 
 /// Conservatively scans trace, diff, or log text for raw payload and secret markers.
+///
+/// Two independent detectors run here and both contribute findings:
+///
+/// 1. The structural marker list below, which catches DTO field names that must
+///    never appear in a metadata-only record (`proposal_content`, `source_body`,
+///    ...). These are schema violations, not credentials.
+/// 2. [`secrets::scan_text_for_secrets`], which catches actual credentials by
+///    provider shape, credential-named assignment, and entropy.
+///
+/// The marker list alone cannot see an AWS key or a JWT, and the secret ruleset
+/// alone cannot see a raw-payload schema violation, so neither replaces the other.
+///
+/// This entry point is the pre-retention and pre-export boundary, so it evaluates
+/// secret findings under [`ScanPosture::EgressRecall`]: a leak past this point is
+/// unrecoverable, which makes over-redaction the cheaper error.
 pub fn scan_payload_for_sensitive_markers(
     payload_kind: RedactionPayloadKind,
     payload: &str,
@@ -360,6 +384,17 @@ pub fn scan_payload_for_sensitive_markers(
                 byte_offset,
             });
         }
+    }
+
+    // EgressRecall posture: every confidence tier, including the entropy
+    // heuristic, contributes a finding at this boundary.
+    let secret_report = scan_text_for_secrets(payload);
+    for finding in &secret_report.findings {
+        findings.push(RedactionScanFinding {
+            payload_kind,
+            marker_label: finding.rule_id.stable_id().to_string(),
+            byte_offset: finding.span.start,
+        });
     }
 
     RedactionScanReport {
