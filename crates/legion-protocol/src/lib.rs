@@ -466,6 +466,27 @@ pub enum ViewportProjectionMode {
     BoundedSmallBuffer,
     /// Degraded projection mode for large files where overlays may be deferred.
     DegradedLargeFile,
+    /// The buffer was streamed from disk and its full text was never
+    /// materialized.
+    ///
+    /// Distinct from [`DegradedLargeFile`](Self::DegradedLargeFile), which is
+    /// also large but was handed to the editor as a complete `String`. The
+    /// difference is invisible in the text and decisive for the user: a
+    /// streamed buffer cannot answer questions that need the whole file at
+    /// once, so a UI that showed the same badge for both would promise
+    /// something it cannot do.
+    StreamingLargeFile,
+}
+
+impl ViewportProjectionMode {
+    /// Whether overlays and whole-file work must be deferred.
+    ///
+    /// Both large-file modes answer yes. Asking `== DegradedLargeFile`
+    /// silently excludes streamed buffers — the largest files there are — and
+    /// that is exactly the case the deferral exists for.
+    pub fn defers_whole_file_work(self) -> bool {
+        matches!(self, Self::DegradedLargeFile | Self::StreamingLargeFile)
+    }
 }
 
 /// Editor line wrapping policy.

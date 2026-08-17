@@ -302,6 +302,13 @@ impl DesktopLaunchConfig {
 pub enum DesktopWorkflowOutcome {
     /// Command had no effect.
     Noop,
+    /// Vim modal editing state changed.
+    ///
+    /// Carries the mode to display, or `None` when modal editing is off, so
+    /// the status bar can tell "not using Vim" from "using Vim, in insert
+    /// mode" — identical while typing, and very different in what the next
+    /// keystroke will do.
+    VimModeChanged(Option<legion_ui::EditorInputMode>),
     /// Product mode changed through app authority.
     ProductModeChanged {
         /// Active app-owned product mode.
@@ -582,6 +589,8 @@ pub struct DesktopRuntime {
     onboarding_visible: bool,
     quit_requested: bool,
     last_status: Option<StatusMessageProjection>,
+    /// Vim mode to show in the status bar; `None` when modal editing is off.
+    vim_mode: Option<legion_ui::EditorInputMode>,
     last_status_details: Vec<StatusMessageProjection>,
     last_outcome: DesktopWorkflowOutcome,
     /// Whether the LSP completion popup is currently visible (T6).
@@ -700,6 +709,7 @@ impl DesktopRuntime {
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
             last_status: Some(status),
+            vim_mode: None,
             last_status_details: status_details,
             last_outcome: DesktopWorkflowOutcome::Noop,
             completion_popup_open: false,
@@ -1925,6 +1935,14 @@ impl DesktopRuntime {
 
     fn handle_app_request(&mut self, request: DesktopAppRequest) -> Result<DesktopWorkflowOutcome> {
         match request {
+            DesktopAppRequest::VimKey { key, ctrl } => {
+                let outcome = self.app.dispatch_vim_key(key, ctrl)?;
+                // The mode may have changed as a side effect — `i` and `Esc`
+                // both arrive as ordinary keys — so the indicator is refreshed
+                // from the app rather than only on an explicit mode intent.
+                self.vim_mode = self.app.vim_display_mode();
+                Ok(self.map_app_outcome(outcome, None))
+            }
             DesktopAppRequest::ToggleExplorerPath { path } => {
                 if !self.explorer_expansion.remove(&path) {
                     self.explorer_expansion.insert(path.clone());
@@ -2409,6 +2427,17 @@ impl DesktopRuntime {
                     format!("Close dirty prompt {}", buffer_id.0),
                 );
                 DesktopWorkflowOutcome::CloseDirtyPrompt(buffer_id)
+            }
+            AppCommandOutcome::VimModeChanged(mode) => {
+                self.vim_mode = mode;
+                self.set_status(
+                    StatusSeverity::Info,
+                    match mode {
+                        Some(mode) => format!("Vim: {}", mode.label()),
+                        None => "Vim mode off".to_string(),
+                    },
+                );
+                DesktopWorkflowOutcome::VimModeChanged(mode)
             }
             AppCommandOutcome::CursorSet(buffer_id) => {
                 self.set_status(StatusSeverity::Info, format!("Cursor set {}", buffer_id.0));
@@ -2979,6 +3008,11 @@ impl DesktopRuntime {
             .extend(self.last_status_details.iter().cloned());
         self.shell.replace_projection_snapshot(snapshot);
         Ok(())
+    }
+
+    /// Whether Vim currently owns the keyboard.
+    pub fn vim_consumes_text_input(&self) -> bool {
+        self.app.vim_consumes_text_input()
     }
 
     fn set_status(&mut self, severity: StatusSeverity, message: impl Into<String>) {
@@ -3815,6 +3849,7 @@ impl DesktopEframeApp {
                 &input.events,
                 &snapshot,
                 editor_input_enabled,
+                self.runtime.vim_consumes_text_input(),
             ));
             let ime_composition_active = snapshot
                 .active_buffer_projection
@@ -4474,14 +4509,69 @@ fn projected_scroll(snapshot: &ShellProjectionSnapshot) -> ViewportScroll {
         })
 }
 
+/// Escape, as the Vim parser expects it.
+const ESCAPE_KEY: char = '\u{1b}';
+
+/// The character a Ctrl-modified key should reach the Vim parser as.
+///
+/// Only letters, and only because that is the whole of what the parser reads
+/// under Ctrl today. Mapping every key would hand the parser combinations it
+/// answers `Unknown` to, which is the same as dropping them but costs a
+/// dispatch — and would swallow Ctrl shortcuts the surrounding editor owns.
+fn vim_ctrl_key_char(key: egui::Key) -> Option<char> {
+    key.name()
+        .chars()
+        .next()
+        .filter(|c| c.is_ascii_alphabetic() && key.name().len() == 1)
+        .map(|c| c.to_ascii_lowercase())
+}
+
 fn editor_text_input_actions(
     ui: &egui::Ui,
     events: &[egui::Event],
     snapshot: &ShellProjectionSnapshot,
     editor_input_enabled: bool,
+    vim_consumes_input: bool,
 ) -> Vec<DesktopAction> {
     if !editor_input_enabled {
         return Vec::new();
+    }
+
+    // While Vim is in a command mode every typed character is a command, so it
+    // goes to the parser instead of into the buffer. Doing both would move the
+    // cursor *and* type the key, which is the most visible bug this feature
+    // can have.
+    if vim_consumes_input {
+        return events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Text(text) => text
+                    .chars()
+                    .next()
+                    .map(|key| DesktopAction::VimKey { key, ctrl: false }),
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                } => Some(DesktopAction::VimKey {
+                    key: ESCAPE_KEY,
+                    ctrl: false,
+                }),
+                // A Ctrl-modified key produces no `Text` event, so without this
+                // arm it never reaches the parser at all. That silently costs
+                // Ctrl+R — redo — which is the one command a person reaches for
+                // precisely when something has already gone wrong.
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl || modifiers.command => {
+                    vim_ctrl_key_char(*key).map(|key| DesktopAction::VimKey { key, ctrl: true })
+                }
+                _ => None,
+            })
+            .collect();
     }
 
     let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id else {
@@ -4564,7 +4654,17 @@ pub fn test_editor_text_input_actions(
     snapshot: &ShellProjectionSnapshot,
     editor_input_enabled: bool,
 ) -> Vec<DesktopAction> {
-    editor_text_input_actions(ui, events, snapshot, editor_input_enabled)
+    editor_text_input_actions(ui, events, snapshot, editor_input_enabled, false)
+}
+
+/// The same path with Vim owning the keyboard.
+pub fn test_editor_text_input_actions_with_vim(
+    ui: &egui::Ui,
+    events: &[egui::Event],
+    snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
+) -> Vec<DesktopAction> {
+    editor_text_input_actions(ui, events, snapshot, editor_input_enabled, true)
 }
 
 fn editor_keyboard_control_actions(
@@ -5390,8 +5490,14 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             assert!(
-                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), false)
-                    .is_empty()
+                editor_text_input_actions(
+                    ui,
+                    &events,
+                    &snapshot_with_active_buffer(),
+                    false,
+                    false
+                )
+                .is_empty()
             );
         });
     }
@@ -5431,7 +5537,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             assert_eq!(
-                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true),
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, false),
                 vec![
                     DesktopAction::InsertText {
                         text: "x".to_string(),
@@ -5468,7 +5574,7 @@ mod tests {
             });
 
             assert!(
-                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true)
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, false)
                     .is_empty()
             );
         });
@@ -5497,6 +5603,7 @@ mod tests {
                     &events,
                     &snapshot,
                     !close_dirty_prompt_active(&snapshot),
+                    false,
                 )
                 .is_empty()
             );
@@ -5523,6 +5630,133 @@ mod tests {
             modifiers,
         }];
         input
+    }
+
+    /// While Vim owns the keyboard, a typed character must become a command
+    /// and must not also be inserted.
+    #[test]
+    fn vim_keys_are_forwarded_instead_of_typed() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            {
+                let events = vec![egui::Event::Text("j".to_string())];
+                let actions = editor_text_input_actions(
+                    ui,
+                    &events,
+                    &snapshot_with_active_buffer(),
+                    true,
+                    true,
+                );
+                assert_eq!(actions.len(), 1);
+                assert!(
+                    matches!(actions[0], DesktopAction::VimKey { key: 'j', .. }),
+                    "a `j` that both moved the cursor and typed a `j` is the                      loudest possible bug in this feature: {:?}",
+                    actions[0]
+                );
+                assert!(
+                    !actions
+                        .iter()
+                        .any(|action| matches!(action, DesktopAction::InsertText { .. })),
+                    "nothing may reach the buffer as text"
+                );
+            }
+        });
+    }
+
+    /// Ctrl+R has no text event either, and without a route it silently does
+    /// nothing — costing redo, the command a person reaches for precisely when
+    /// something has already gone wrong.
+    #[test]
+    fn ctrl_r_reaches_the_vim_parser_as_a_ctrl_key() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            let events = vec![egui::Event::Key {
+                key: egui::Key::R,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }];
+            let actions =
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, true);
+            assert_eq!(
+                actions.len(),
+                1,
+                "Ctrl+R must produce exactly one action: {actions:?}"
+            );
+            assert!(
+                matches!(
+                    actions[0],
+                    DesktopAction::VimKey {
+                        key: 'r',
+                        ctrl: true
+                    }
+                ),
+                "the parser reads `ctrl` to tell redo from replace-char, so a                  Ctrl+R arriving as a plain `r` replaces a character instead of                  undoing an undo: {:?}",
+                actions[0]
+            );
+        });
+    }
+
+    /// A Ctrl combination the Vim parser does not read must not be swallowed.
+    ///
+    /// Forwarding every Ctrl key would take Ctrl+S and Ctrl+P away from the
+    /// editor around it and hand the parser an `Unknown` in exchange.
+    #[test]
+    fn an_unread_ctrl_combination_is_left_for_the_editor() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let modifiers = egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            };
+            let events = vec![egui::Event::Key {
+                key: egui::Key::F5,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }];
+            let actions =
+                editor_text_input_actions(ui, &events, &snapshot_with_active_buffer(), true, true);
+            assert!(
+                actions.is_empty(),
+                "a non-letter Ctrl key belongs to the surrounding editor: {actions:?}"
+            );
+        });
+    }
+
+    /// Escape has no text event, so it needs its own route to the parser or
+    /// insert mode becomes a trap.
+    #[test]
+    fn escape_reaches_the_vim_parser() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            {
+                let events = vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }];
+                let actions = editor_text_input_actions(
+                    ui,
+                    &events,
+                    &snapshot_with_active_buffer(),
+                    true,
+                    true,
+                );
+                assert!(
+                    matches!(actions.first(), Some(DesktopAction::VimKey { key, .. }) if *key == ESCAPE_KEY),
+                    "got {actions:?}"
+                );
+            }
+        });
     }
 
     #[test]

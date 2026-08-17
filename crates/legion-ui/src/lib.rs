@@ -5,6 +5,10 @@
 pub mod projection;
 pub mod ui;
 pub mod vim;
+/// Turning a keystroke into a Vim intent.
+mod vim_intent;
+/// Resolving a Vim motion against buffer text.
+mod vim_motion;
 
 pub use projection::{
     LegionWorkflowBoardColumnKind, LegionWorkflowBoardColumnProjection,
@@ -14,6 +18,10 @@ pub use projection::{
 };
 
 pub use vim::{EditorInputMode, VimAction, VimMotionKind, VimOperatorKind, VimState};
+pub use vim_intent::{action_to_intent, key_is_text_input, key_to_intent};
+pub use vim_motion::{
+    VimRange, range_text, resolve_linewise_range, resolve_motion, resolve_operator_range,
+};
 
 pub use ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, AssistInlinePredictionProjection,

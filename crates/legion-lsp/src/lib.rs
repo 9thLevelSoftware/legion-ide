@@ -1997,24 +1997,38 @@ fn code_lens_projection_for_item(
         .and_then(Value::as_str)
         .map(|title| bounded_lsp_label(title, 120))
         .unwrap_or_else(|| "lsp code lens".to_string());
-    let command_label = command
-        .and_then(|command| command.get("command"))
-        .and_then(Value::as_str)
-        .map(|command| bounded_lsp_label(command, 120))
-        .unwrap_or_else(|| "lsp.codelens.unresolved".to_string());
+    // A runnable lens is the one case where `command_label` must not be the LSP
+    // command id: `ActivateLanguageCodeLens` hands that label to the terminal,
+    // and "rust-analyzer.runSingle" is not something a shell can run. When the
+    // lens carries runnable arguments, the label becomes the cargo invocation
+    // they describe.
+    let runnable = runnable_command_line(command);
+    let command_label = runnable.clone().unwrap_or_else(|| {
+        command
+            .and_then(|command| command.get("command"))
+            .and_then(Value::as_str)
+            .map(|command| bounded_lsp_label(command, 120))
+            .unwrap_or_else(|| "lsp.codelens.unresolved".to_string())
+    });
     let data_kind = lens
         .get("data")
         .and_then(|data| data.get("kind"))
         .and_then(Value::as_str);
-    let kind_label = data_kind
-        .map(|kind| format!("lsp.codelens.{}", bounded_lsp_label(kind, 80)))
-        .unwrap_or_else(|| {
-            if command.is_some() {
-                "lsp.codelens.command".to_string()
-            } else {
-                "lsp.codelens.unresolved".to_string()
-            }
-        });
+    let kind_label = if runnable.is_some() {
+        // The marker `AppComposition::ActivateLanguageCodeLens` gates on before
+        // it will launch anything.
+        "lsp.codelens.runnable".to_string()
+    } else {
+        data_kind
+            .map(|kind| format!("lsp.codelens.{}", bounded_lsp_label(kind, 80)))
+            .unwrap_or_else(|| {
+                if command.is_some() {
+                    "lsp.codelens.command".to_string()
+                } else {
+                    "lsp.codelens.unresolved".to_string()
+                }
+            })
+    };
     let data_label = code_lens_data_label(lens.get("data"));
     Some(LanguageCodeLensProjection {
         lens_id: format!("lsp-codelens-{index}-{:016x}", stable_hash(&title)),
@@ -2026,6 +2040,95 @@ fn code_lens_projection_for_item(
         source_label: bounded_lsp_label(source_label, 80),
         schema_version: 1,
     })
+}
+
+/// The cargo command a rust-analyzer runnable lens describes, if it is one.
+///
+/// rust-analyzer publishes Run and Debug as code lenses whose command is
+/// `rust-analyzer.runSingle` (or `debugSingle`) with a single argument carrying
+/// `args: { cargoArgs, executableArgs }`. Those arrays are the actual
+/// invocation; the command id is only a handle for a client that speaks
+/// rust-analyzer's private protocol, and putting the handle in a field named
+/// `command_label` makes the lens describe itself wrongly wherever it is shown
+/// or recorded.
+///
+/// **Nothing executes this string today.** `ActivateLanguageCodeLens` and the
+/// test explorer both hand it to `TerminalWorkflow::launch`, which spawns the
+/// configured shell and uses the label only for display and audit. The value of
+/// building it correctly is that the lens says what it is; the value of the
+/// check below is that it stays safe on the day something does run it.
+///
+/// That check is a refusal, not an escape. Escaping shell metacharacters is a
+/// game the defender loses eventually, and a legitimate cargo argument contains
+/// none of them — so an element carrying a shell metacharacter or a control
+/// character means the lens is not a runnable, and it falls through to the
+/// ordinary path where the command id is displayed and nothing is claimed about
+/// it. The right long-term shape is an argv vector executed without a shell at
+/// all, which makes the question moot; until a caller exists to consume one,
+/// refusing is what can be proven.
+///
+/// Returns `None` for any lens that is not a runnable, which is most of them.
+fn runnable_command_line(command: Option<&Value>) -> Option<String> {
+    let command = command?;
+    let name = command.get("command").and_then(Value::as_str)?;
+    if !name.starts_with("rust-analyzer.run") && !name.starts_with("rust-analyzer.debug") {
+        return None;
+    }
+    let args = command
+        .get("arguments")
+        .and_then(Value::as_array)?
+        .first()?
+        .get("args")?;
+
+    let cargo_args = string_list(args.get("cargoArgs"));
+    if cargo_args.is_empty() {
+        return None;
+    }
+    let executable_args = string_list(args.get("executableArgs"));
+
+    let mut parts = vec!["cargo".to_string()];
+    parts.extend(cargo_args);
+    if !executable_args.is_empty() {
+        parts.push("--".to_string());
+        parts.extend(executable_args);
+    }
+    if parts.iter().any(|part| !is_plain_command_argument(part)) {
+        return None;
+    }
+    Some(bounded_lsp_label(&parts.join(" "), 240))
+}
+
+/// Whether an argument is one a shell would pass through untouched.
+///
+/// Deliberately a whitelist of what a cargo argument actually contains rather
+/// than a blacklist of what a shell reacts to: a blacklist is only as good as
+/// its author's memory of every metacharacter, and this one has to hold against
+/// a language server that may be hostile.
+///
+/// Rejects control characters (newline included, which is how one command
+/// becomes two) and every shell metacharacter. Accepts what real cargo
+/// arguments are made of: identifiers, paths, versions, feature lists,
+/// `--flags`, and the `::` of a Rust test path.
+fn is_plain_command_argument(argument: &str) -> bool {
+    !argument.is_empty()
+        && argument
+            .chars()
+            .all(|c| !c.is_control() && (c.is_ascii_alphanumeric() || "-_./:=+@,[]".contains(c)))
+}
+
+/// The string elements of a JSON array, bounded individually.
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|item| bounded_lsp_label(item, 80))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn code_lens_data_label(data: Option<&Value>) -> Option<String> {

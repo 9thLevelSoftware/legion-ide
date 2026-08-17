@@ -1100,7 +1100,7 @@ impl DesktopProjectionViewModel {
             || active
                 .viewport
                 .as_ref()
-                .is_some_and(|viewport| viewport.mode == ViewportProjectionMode::DegradedLargeFile)
+                .is_some_and(|viewport| viewport.mode.defers_whole_file_work())
         {
             flags.push("degraded".to_string());
         }
@@ -4042,7 +4042,17 @@ fn render_code_lines(
                 if let Some(viewport) = viewport {
                     paint_code_selections(ui, line, &response, &viewport.selections, char_width);
                 }
-                paint_code_cursor(ui, line, &response, current_cursor, char_width);
+                // Every cursor, not only the primary. The projection has
+                // carried the full set all along; painting one made a
+                // multi-cursor edit look like it came from nowhere.
+                match viewport {
+                    Some(viewport) if viewport.cursors.len() > 1 => {
+                        for cursor in &viewport.cursors {
+                            paint_code_cursor(ui, line, &response, *cursor, char_width);
+                        }
+                    }
+                    _ => paint_code_cursor(ui, line, &response, current_cursor, char_width),
+                }
                 paint_find_match_highlights(
                     ui,
                     line,
@@ -4494,26 +4504,16 @@ fn paint_diagnostic_underlines(
     char_width: f32,
 ) {
     let line_zero = line.number.saturating_sub(1);
+    let line_chars = line.text.chars().count() as u32;
     for problem in problems {
         let Some(range) = problem.range.as_ref() else {
             continue;
         };
-        if range.start.line > line_zero || range.end.line < line_zero {
+        let Some((start_char, end_char)) =
+            crate::diagnostic_underline::diagnostic_underline_span(line_zero, line_chars, range)
+        else {
             continue;
-        }
-        let start_char = if range.start.line == line_zero {
-            range.start.character
-        } else {
-            0
         };
-        let end_char = if range.end.line == line_zero {
-            range.end.character
-        } else {
-            line.text.chars().count() as u32
-        };
-        if start_char >= end_char {
-            continue;
-        }
         let start_x = response.rect.left() + start_char as f32 * char_width;
         let end_x = response.rect.left() + end_char as f32 * char_width;
         let y = response.rect.bottom() - 1.0;
@@ -8775,12 +8775,30 @@ fn large_file_banner_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     };
 
     let size_mb = status.byte_len as f64 / (1024.0 * 1024.0);
-    // Name the degraded state and capability reduction explicitly so the banner
-    // makes clear which editor features are unavailable for the large file.
-    let mut rows = vec![format!(
-        "\u{26a0} large-file degraded mode ({:.1} MB) \u{2014} capabilities reduced",
-        size_mb
-    )];
+    // Name the state and the capability reduction explicitly, and distinguish
+    // the two large-file modes. They cost the user different things: a degraded
+    // buffer holds the whole file and defers overlays, a streamed one never
+    // held it at all, so anything needing the entire text is not slow — it is
+    // unavailable. One banner for both would promise something.
+    let mut rows = vec![match viewport.mode {
+        ViewportProjectionMode::StreamingLargeFile => format!(
+            "\u{26a0} large-file streaming mode ({:.1} MB) \u{2014} capabilities reduced",
+            size_mb
+        ),
+        _ => format!(
+            "\u{26a0} large-file degraded mode ({:.1} MB) \u{2014} capabilities reduced",
+            size_mb
+        ),
+    }];
+    if viewport.mode == ViewportProjectionMode::StreamingLargeFile {
+        rows.push(
+            "This file is read from disk in chunks and is never held in memory in full."
+                .to_string(),
+        );
+        rows.push(
+            "  \u{2022} capability reduced: operations needing the whole file at once".to_string(),
+        );
+    }
     if !status.message.is_empty() {
         rows.push(status.message.clone());
     }
@@ -9003,7 +9021,13 @@ fn editor_status_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         .map(|path| path.0.as_str())
         .unwrap_or("<untitled>");
     let dirty = if active.dirty { "dirty" } else { "clean" };
-    let mode = if active.degraded {
+    let mode = if active
+        .viewport
+        .as_ref()
+        .is_some_and(|viewport| viewport.mode == ViewportProjectionMode::StreamingLargeFile)
+    {
+        "StreamingLargeFile"
+    } else if active.degraded {
         "DegradedLargeFile"
     } else if active.viewport.is_some() {
         "viewport"

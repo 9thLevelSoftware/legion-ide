@@ -469,10 +469,10 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     title = "Implement/harden row virtualization, gutter lanes, selection, cursor, multi-cursor projection, scroll behavior"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-editor/src/buffer_view.rs", "crates/legion-editor/src/selection.rs"]
+    files = ["crates/legion-desktop/src/view/code_canvas_painter.rs", "crates/legion-editor/src/buffer_view.rs", "crates/legion-editor/src/selection.rs", "crates/legion-editor/src/multi_cursor.rs", "crates/legion-app/tests/multi_cursor_editing.rs"]
     dependencies = ["P1.F2.T2"]
     verification = ["cargo test -p legion-editor", "cargo test -p legion-desktop"]
-    acceptance = ["Editor is usable via rendered desktop UI, not only API tests."]
+    acceptance = ["Editor is usable via rendered desktop UI, not only API tests.", "A second cursor can be created, typed at, and cleared; every cursor is painted."]
     stop_condition = "Stop if scroll jank exceeds the perf budget at GP-1 scale."
     status = "in-progress"
     evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
@@ -502,6 +502,19 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     stop_condition = "Stop on any input path that lacks a regression test."
     status = "done"
     evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
+
+    [[epics.features.tasks]]
+    id = "P1.F3.T5"
+    title = "Wire Vim modal editing: motions, operators, register, insert entry, and the desktop key feed"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-ui/src/vim_motion.rs", "crates/legion-ui/src/vim_intent.rs", "crates/legion-app/src/vim_session.rs", "crates/legion-app/tests/vim_modal_editing.rs"]
+    dependencies = ["P1.F3.T2"]
+    verification = ["cargo test -p legion-app --test vim_modal_editing", "cargo test -p legion-ui vim"]
+    acceptance = ["A key typed in the code canvas reaches the Vim parser and moves the real cursor or edits the real buffer; normal-mode keys are not also inserted as text."]
+    stop_condition = "Stop if a normal-mode keystroke both acts and types, or if modal editing is reachable while disabled."
+    status = "done"
+    evidence = "crates/legion-app/tests/vim_modal_editing.rs"
 
   [[epics.features]]
   id = "P1.F4"
@@ -535,6 +548,11 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # 10MB-100MB scale tests landed (see AGENTS.md streaming note). The
     # renderer-level acceptance (scrolls without blocking typing) is unproven,
     # so this stays short of done.
+    # 2026-08-16: it is no longer unproven, it is disproven. P1.F4.T5 put the
+    # real 100MB workload in the perf harness and it misses ADR-0048's keypress
+    # p50 by 45% (23.2ms against 16ms). Open and scroll are within budget;
+    # typing is not. See
+    # plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md.
     status = "in-progress"
     evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
 
@@ -543,13 +561,13 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     title = "Update ActiveBufferProjection to distinguish full, degraded, and streaming states"
     mode = "Manual"
     readiness_row = "PR-UI-002"
-    files = ["crates/legion-protocol/src/projection.rs", "crates/legion-ui/src/projection.rs", "crates/legion-editor/src/buffer_view.rs"]
+    files = ["crates/legion-protocol/src/lib.rs", "crates/legion-editor/src/lib.rs", "crates/legion-editor/tests/streaming_projection.rs"]
     dependencies = ["P1.F4.T2"]
     verification = ["cargo test -p legion-protocol", "cargo test -p legion-editor"]
     acceptance = ["Projection explicitly enumerates the three states and consumers branch on it."]
     stop_condition = "Do not add a fourth implicit state without updating tests."
-    status = "todo"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    status = "done"
+    evidence = "crates/legion-editor/tests/streaming_projection.rs"
 
     [[epics.features.tasks]]
     id = "P1.F4.T4"
@@ -561,8 +579,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-ui"]
     acceptance = ["Streaming mode is visible in the UI with a plain-language explanation."]
     stop_condition = "Do not hide streaming-mode limitations from the user."
-    status = "todo"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    status = "done"
+    evidence = "crates/legion-desktop/tests/large_file_guardrails.rs"
 
     [[epics.features.tasks]]
     id = "P1.F4.T5"
@@ -574,7 +592,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
     acceptance = ["100MB workload is in the standard perf-harness run, not a side script."]
     stop_condition = "Stop if the workload is hidden behind an opt-in flag in CI."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-02/large-file-100mb-measurement.md"
 
 # ---------------------------------------------------------------------------
 # EPIC P2 — Language, terminal, debug, search, and git daily-driver loop
@@ -626,7 +645,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-desktop --test headless_input", "cargo test -p legion-lsp"]
     acceptance = ["In the Legion repo, a real Rust diagnostic appears and clears after fixing."]
     stop_condition = "Stop if diagnostics are wired only to the app API and not to the desktop harness."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]
@@ -639,7 +658,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-desktop"]
     acceptance = ["Each LSP feature is reachable from the editor and is covered by a test."]
     stop_condition = "Do not implement features that are not requested by the LSP server's capability set."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/M8/WS-LANG-01-product-ui-evidence.md"
 
     [[epics.features.tasks]]
@@ -647,7 +666,7 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Route write-side actions (rename, format, code actions, organize imports) through proposals"
     mode = "Manual"
     readiness_row = "PR-LANG-002"
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/M8/WS-LANG-01-write-side-evidence.md"
     files = ["crates/legion-app/src/language/translate.rs", "crates/legion-protocol/src/lib.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-app/src/language/redaction.rs"]
     dependencies = ["P2.F1.T4", "P3.F1.T2"]

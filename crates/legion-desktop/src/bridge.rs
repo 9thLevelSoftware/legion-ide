@@ -153,6 +153,18 @@ pub enum DesktopAction {
         /// Intent attached to the projected toast action.
         intent: CommandDispatchIntent,
     },
+    /// Forward one keystroke to the Vim parser through app authority.
+    ///
+    /// The raw key rather than a resolved intent, because the parser is
+    /// stateful — `d` then `w` is one command — and its state lives with the
+    /// app session. A shell holding a second copy would drift from it the
+    /// moment anything else changed the mode.
+    VimKey {
+        /// The character typed.
+        key: char,
+        /// Whether Ctrl was held.
+        ctrl: bool,
+    },
     /// Open the projected Settings surface.
     OpenSettings,
     /// Update theme preference through app authority.
@@ -731,6 +743,10 @@ pub enum DesktopAction {
     },
     /// Refresh the active buffer outline.
     RefreshOutline,
+    /// Refresh inlay hints for the active buffer.
+    RefreshInlayHints,
+    /// Refresh code lenses (and therefore runnables) for the active buffer.
+    RefreshCodeLenses,
     /// Request a formatting proposal preview.
     RequestFormattingProposal,
     /// Request a rename proposal preview.
@@ -976,6 +992,13 @@ pub enum DesktopAction {
 /// App-owned request that is not a direct UI command intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAppRequest {
+    /// Feed one keystroke to the Vim parser.
+    VimKey {
+        /// The character typed.
+        key: char,
+        /// Whether Ctrl was held.
+        ctrl: bool,
+    },
     /// Open a workspace root through the app composition layer.
     OpenWorkspace {
         /// Workspace root path.
@@ -1461,6 +1484,9 @@ impl DesktopCommandBridge {
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissOnboarding => DesktopBridgeOutput::Noop,
             DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),
+            DesktopAction::VimKey { key, ctrl } => {
+                DesktopBridgeOutput::AppRequest(DesktopAppRequest::VimKey { key, ctrl })
+            }
             DesktopAction::OpenSettings => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
             }
@@ -2159,6 +2185,12 @@ impl DesktopCommandBridge {
                     }
                 })
             }
+            DesktopAction::RefreshInlayHints => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::RefreshInlayHints { buffer_id }
+            }),
+            DesktopAction::RefreshCodeLenses => self.with_active_buffer(snapshot, |buffer_id| {
+                CommandDispatchIntent::RefreshCodeLenses { buffer_id }
+            }),
             DesktopAction::RefreshOutline => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::RefreshOutline { buffer_id }
             }),

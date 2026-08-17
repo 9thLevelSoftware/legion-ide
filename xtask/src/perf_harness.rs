@@ -57,6 +57,10 @@ const SEARCH_STREAM_50K_FILE_COUNT: usize = 50_000;
 /// speed and CI runner choice.  The gate can be tightened once baseline
 /// numbers are collected from the reference machines.
 const SEARCH_STREAM_50K_BUDGET_MILLIS: u64 = 0;
+/// The 100MB workload gates on ADR-0048's keypress p50, because typing is
+/// what makes a large file usable rather than merely openable, and it is the
+/// budget the measurement actually strains.
+const LARGE_FILE_100MB_BUDGET_MILLIS: u64 = MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
 
@@ -97,6 +101,16 @@ pub enum SkeletonKind {
     /// only the visible viewport rows looked up/shaped per frame.
     #[serde(rename = "line_galley_shaping_cache", alias = "linegalleyshapingcache")]
     LineGalleyShapingCache,
+    /// Real 100MB large-file measurement supplied by the `large_file_perf`
+    /// subprocess.
+    ///
+    /// Every other large-file number this harness reports is a synthetic
+    /// stand-in, because `xtask` cannot depend on `legion-editor`. This one
+    /// opens an actual 100MB file through the streaming path and measures
+    /// typing in it, which is the question that decides whether large files
+    /// are usable rather than merely openable.
+    #[serde(rename = "large_file_100mb", alias = "largefile100mb")]
+    LargeFile100Mb,
     /// Renderer-backed Manual editor input-to-paint measurement supplied by
     /// the `legion-desktop --manual-perf` subprocess.
     #[serde(rename = "renderer_backed_manual_input_to_paint")]
@@ -121,6 +135,7 @@ impl SkeletonKind {
             Self::RendererBackedManualInputToPaint => "renderer_backed_manual_input_to_paint",
             Self::MemoryCeiling1MB => "memory_ceiling_1mb",
             Self::SearchStream50K => "search_stream_50k",
+            Self::LargeFile100Mb => "large_file_100mb",
         }
     }
 }
@@ -197,6 +212,28 @@ impl SkeletonDescriptor {
                 "WS-MANUAL-02 SCALE.09 memory ceiling gate: creates a 1MB TextBuffer ",
                 "and asserts the memory_footprint_bytes() stays below 10MB. The budget ",
                 "field is unused (measurement is byte-based, not time-based).",
+            )
+            .to_string(),
+        }
+    }
+
+    /// The real 100MB large-file workload.
+    ///
+    /// Part of the standard run rather than an opt-in flag: a budget nobody
+    /// runs is not a budget. It costs a minute of wall clock, which is the
+    /// price of measuring the real thing instead of a stand-in.
+    pub fn m9_large_file_100mb() -> Self {
+        Self {
+            name: "m9.large_file_100mb".to_string(),
+            kind: SkeletonKind::LargeFile100Mb,
+            fixture_bytes: 100 * 1024 * 1024,
+            file_count: None,
+            sample_count: 32,
+            budget_millis: LARGE_FILE_100MB_BUDGET_MILLIS,
+            note: concat!(
+                "Opens a real 100MB file through the streaming path and measures ",
+                "open, a viewport projection at a deep scroll offset, and edit ",
+                "latency. Gates on ADR-0048's keypress p50 (<16ms)."
             )
             .to_string(),
         }
@@ -340,6 +377,25 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
             skeleton.fixture_bytes,
             skeleton.sample_count,
         ),
+        SkeletonKind::LargeFile100Mb => {
+            // Supplied by the `large_file_perf` subprocess, for the same
+            // reason the renderer measurement is: this harness cannot depend
+            // on `legion-editor`, and a synthetic stand-in for a 100MB file
+            // would measure the stand-in.
+            return SkeletonMeasurement {
+                name: skeleton.name.clone(),
+                kind: skeleton.kind,
+                fixture_bytes: skeleton.fixture_bytes,
+                sample_count: skeleton.sample_count,
+                total_micros: 0,
+                p50_micros: 0,
+                p95_micros: 0,
+                budget_millis: skeleton.budget_millis,
+                status: SkeletonStatus::Skipped,
+                message: "100MB large-file measurement is supplied by the legion-app subprocess"
+                    .to_string(),
+            };
+        }
         SkeletonKind::RendererBackedManualInputToPaint => {
             return SkeletonMeasurement {
                 name: skeleton.name.clone(),
@@ -1218,6 +1274,82 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Numbers reported by the `large_file_perf` subprocess.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LargeFilePerfReport {
+    /// Fixture size actually measured.
+    pub byte_len: usize,
+    /// Whether the buffer opened through the streaming path.
+    ///
+    /// Recorded because the whole measurement is about the streaming path: if
+    /// this is false the numbers describe something else and must not be read
+    /// as a large-file result.
+    pub streaming: bool,
+    /// Time to open the file.
+    pub open_millis: f64,
+    /// One viewport projection at a deep scroll offset.
+    pub viewport_millis: f64,
+    /// Median edit latency.
+    pub edit_p50_millis: f64,
+    /// 95th-percentile edit latency.
+    pub edit_p95_millis: f64,
+    /// Bytes of text the viewport actually carried.
+    pub viewport_payload_bytes: usize,
+}
+
+/// Turn the subprocess report into a measurement gated on the keypress budget.
+///
+/// The reported percentiles are the *edit* percentiles, because typing is what
+/// the budget is about. Open and viewport times ride along in the message:
+/// they matter, but a single status cannot answer for three different
+/// questions, and typing is the one that decides usability.
+pub fn large_file_perf_measurement(
+    descriptor: &SkeletonDescriptor,
+    report: &LargeFilePerfReport,
+) -> SkeletonMeasurement {
+    let p50_micros = (report.edit_p50_millis * 1000.0).round() as u64;
+    let p95_micros = (report.edit_p95_millis * 1000.0).round() as u64;
+    let budget_micros = descriptor.budget_millis.saturating_mul(1000);
+
+    let status = if !report.streaming {
+        SkeletonStatus::Skipped
+    } else if descriptor.budget_millis == 0 || p50_micros <= budget_micros {
+        SkeletonStatus::Passed
+    } else {
+        SkeletonStatus::Failed
+    };
+
+    let message = if report.streaming {
+        format!(
+            "100MB streaming open={:.1}ms viewport={:.1}ms edit_p50={:.1}ms edit_p95={:.1}ms \
+             viewport_payload={}B (budget: keypress p50 <{}ms)",
+            report.open_millis,
+            report.viewport_millis,
+            report.edit_p50_millis,
+            report.edit_p95_millis,
+            report.viewport_payload_bytes,
+            descriptor.budget_millis,
+        )
+    } else {
+        "100MB measurement did not open through the streaming path; numbers describe \
+         a different code path and are not reported as a large-file result"
+            .to_string()
+    };
+
+    SkeletonMeasurement {
+        name: descriptor.name.clone(),
+        kind: descriptor.kind,
+        fixture_bytes: report.byte_len,
+        sample_count: descriptor.sample_count,
+        total_micros: p50_micros.saturating_mul(descriptor.sample_count as u64),
+        p50_micros,
+        p95_micros,
+        budget_millis: descriptor.budget_millis,
+        status,
+        message,
+    }
 }
 
 #[cfg(test)]

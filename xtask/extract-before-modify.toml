@@ -1,0 +1,26 @@
+# Chokepoint files: everything routes through them, so every branch that adds a
+# feature adds lines to the same file and conflicts with every other branch.
+#
+# The rule (production roadmap, cross-cutting rule 1) is that a feature change
+# does not land inside one of these. The touched region moves to a module in its
+# own commit — a pure move — and the feature change happens there.
+#
+# `allowed_growth_lines` is slack, not a budget. It is large enough that a bug
+# fix, a doc comment or a new match arm lands without ceremony, and small enough
+# that a feature cannot hide in it. Raising it is a decision about the rule, not
+# a way past a red gate.
+
+[[files]]
+path = "crates/legion-app/src/lib.rs"
+allowed_growth_lines = 120
+extract_to = "crates/legion-app/src/ (see intent_routing.rs, language/lsp_reads.rs)"
+
+[[files]]
+path = "crates/legion-ui/src/ui.rs"
+allowed_growth_lines = 120
+extract_to = "crates/legion-ui/src/ (see vim_motion.rs, vim_intent.rs)"
+
+[[files]]
+path = "crates/legion-desktop/src/view.rs"
+allowed_growth_lines = 120
+extract_to = "crates/legion-desktop/src/"

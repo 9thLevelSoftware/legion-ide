@@ -544,6 +544,168 @@ fn t7_capability_gated_partial_support() {
     );
 }
 
+// ─── P2.F1.T4: references, document symbols, inlay hints, code lenses ───────
+
+/// The four read features added by P2.F1.T4 fail closed, exactly as the three
+/// that came before them do.
+///
+/// This is the task's stop condition — "do not implement features that are not
+/// requested by the LSP server's capability set" — expressed as a test. A
+/// server that does not advertise `inlayHintProvider` must never be sent
+/// `textDocument/inlayHint`.
+#[test]
+fn t4_new_reads_skip_when_the_server_does_not_advertise_them() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    app.set_lsp_health_for_test(health_with_caps(&[
+        ("referencesProvider", false),
+        ("documentSymbolProvider", false),
+        ("inlayHintProvider", false),
+        ("codeLensProvider", false),
+    ]));
+
+    let pos = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 0,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    let range = app
+        .whole_document_utf16_range_for_test(buffer_id)
+        .expect("range");
+
+    assert!(
+        !app.issue_lsp_references_request(buffer_id, pos, true),
+        "references must skip when referencesProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_document_symbol_request(buffer_id),
+        "documentSymbol must skip when documentSymbolProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_inlay_hint_request(buffer_id, range),
+        "inlayHint must skip when inlayHintProvider=false"
+    );
+    assert!(
+        !app.issue_lsp_code_lens_request(buffer_id),
+        "codeLens must skip when codeLensProvider=false"
+    );
+}
+
+/// Each of the four fires when, and only when, its own capability is advertised.
+///
+/// Advertising all four but one proves the gate reads the right key rather than
+/// merely reading a non-empty capability list.
+#[test]
+fn t4_new_reads_fire_only_for_their_own_advertised_capability() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    app.set_lsp_health_for_test(health_with_caps(&[
+        ("referencesProvider", true),
+        ("documentSymbolProvider", true),
+        ("inlayHintProvider", true),
+        ("codeLensProvider", false),
+    ]));
+
+    let pos = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 0,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    let range = app
+        .whole_document_utf16_range_for_test(buffer_id)
+        .expect("range");
+
+    assert!(app.issue_lsp_references_request(buffer_id, pos, true));
+    assert!(app.issue_lsp_document_symbol_request(buffer_id));
+    assert!(app.issue_lsp_inlay_hint_request(buffer_id, range));
+    assert!(
+        !app.issue_lsp_code_lens_request(buffer_id),
+        "the one capability withheld must be the one request withheld"
+    );
+}
+
+/// The inlay-hint range covers the document, and covering it means running one
+/// line past the last.
+///
+/// A range ending on the final line at character zero would omit that line's
+/// hints. Ending one line past is how "everything" is spelled in LSP, and
+/// servers clamp it.
+#[test]
+fn t4_inlay_hint_range_runs_one_line_past_the_last() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let src_file = root.path().join("main.rs");
+    std::fs::write(&src_file, "fn main() {\n    let x = 1;\n}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    let range = app
+        .whole_document_utf16_range_for_test(buffer_id)
+        .expect("range");
+    assert_eq!(range.start.line, 0);
+    assert_eq!(range.start.character, 0);
+    assert!(
+        range.end.line >= 3,
+        "a three-line file must be covered to at least line 3, got {}",
+        range.end.line
+    );
+}
+
+/// Hints and lenses are attributed to the server that produced them, and to
+/// nothing at all before one has answered.
+#[test]
+fn t4_read_source_label_does_not_invent_a_server_name() {
+    let mut app = legion_app::AppComposition::new();
+    assert_eq!(
+        app.lsp_read_source_label_for_test(),
+        "lsp",
+        "with no session there is no server to name"
+    );
+
+    app.set_lsp_health_for_test(health_with_caps(&[("codeLensProvider", true)]));
+    assert_eq!(
+        app.lsp_read_source_label_for_test(),
+        "rust",
+        "once a session exists, its language names the source"
+    );
+}
+
 // ─── T8 (I-2): End-to-end rename wire-up ────────────────────────────────────
 
 /// T8: `textDocument/rename` flows from AppComposition → mock server →

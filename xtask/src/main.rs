@@ -30,6 +30,7 @@ const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/ph
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
 const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
+const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
@@ -487,6 +488,22 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH)]
         config: String,
     },
+    /// Fail when a chokepoint file grows instead of being extracted from.
+    ///
+    /// `crates/legion-app/src/lib.rs` and its siblings are where every feature
+    /// branch collides. The rule is to move the region you are about to change
+    /// into a module first, in its own commit, and change it there. This gate
+    /// enforces the consequence: measured against the merge base, a chokepoint
+    /// file must not have grown past its slack.
+    #[command(name = "extract-before-modify")]
+    ExtractBeforeModify {
+        /// Path to extract-before-modify TOML configuration.
+        #[arg(long, default_value = DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH)]
+        config: String,
+        /// Branch to measure against.
+        #[arg(long, default_value = "origin/main")]
+        base: String,
+    },
     /// Generate dry-run release pipeline installer descriptors.
     ReleasePipeline {
         /// Path to release pipeline TOML configuration.
@@ -869,6 +886,9 @@ fn main() {
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
         Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
+        Commands::ExtractBeforeModify { config, base } => {
+            run_extract_before_modify_command(&config, &base)
+        }
         Commands::ReleasePipeline {
             config,
             out,
@@ -1127,6 +1147,70 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
             }
         }
         1
+    }
+}
+
+fn run_extract_before_modify_command(config_path: &str, base_ref: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("extract-before-modify failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::extract_before_modify::ExtractBeforeModifyConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("extract-before-modify failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::extract_before_modify::run_extract_before_modify(
+        &workspace_root,
+        &config,
+        base_ref,
+    ) {
+        // A gate that fails when it cannot measure teaches people to switch it
+        // off. A shallow clone or an orphan branch is not a rule violation.
+        Err(xtask::extract_before_modify::GateSkip::NoMergeBase(why)) => {
+            println!("extract-before-modify skipped: {why}");
+            0
+        }
+        Ok(Ok(())) => {
+            println!("extract-before-modify: no chokepoint file grew past its slack");
+            0
+        }
+        Ok(Err(growths)) => {
+            eprintln!(
+                "extract-before-modify: {} chokepoint file(s) grew instead of being extracted from:",
+                growths.len()
+            );
+            for growth in &growths {
+                eprintln!(
+                    "  {}: {} -> {} lines (+{}, {} over the {}-line slack)",
+                    growth.path,
+                    growth.base_lines,
+                    growth.head_lines,
+                    growth.head_lines - growth.base_lines,
+                    growth.overage(),
+                    growth.allowed,
+                );
+                eprintln!(
+                    "      extract the region you changed into {}",
+                    growth.extract_to
+                );
+            }
+            eprintln!();
+            eprintln!("Move the region you are changing into a module in its own commit — a pure");
+            eprintln!(
+                "move, reviewable as one — then make the change there. This is the roadmap's"
+            );
+            eprintln!("cross-cutting rule 1; the gate only enforces its arithmetic.");
+            1
+        }
     }
 }
 
@@ -1408,6 +1492,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         xtask::perf_harness::SkeletonDescriptor::m1_line_galley_shaping_cache(),
         xtask::perf_harness::SkeletonDescriptor::m2_memory_ceiling_1mb(),
         xtask::perf_harness::SkeletonDescriptor::m8_search_stream_50k(),
+        xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb(),
     ];
     for skeleton in &mut skeletons {
         xtask::perf_harness::apply_fail_on_budget_override(skeleton);
@@ -1416,6 +1501,7 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
     let mut report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
     append_manual_renderer_measurement(&workspace_root, &out_dir, &mut report);
+    append_large_file_measurement(&workspace_root, &out_dir, &mut report);
     let path = match xtask::perf_harness::write_report(&out_dir, &report) {
         Ok(path) => path,
         Err(err) => {
@@ -1449,6 +1535,93 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Run the real 100MB workload and replace its placeholder measurement.
+///
+/// A subprocess for the same reason the renderer measurement is one: `xtask`
+/// cannot depend on `legion-editor`, and a synthetic 100MB stand-in would
+/// measure the stand-in. It is part of the standard run rather than an opt-in
+/// flag — a budget nobody runs is not a budget — and costs about a minute.
+fn append_large_file_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+    report: &mut xtask::perf_harness::PerfReport,
+) {
+    let descriptor = xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb();
+    let report_path = out_dir.join("large-file-perf.toml");
+    let _ = std::fs::create_dir_all(out_dir);
+
+    let output = std::process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "legion-app",
+            "--bin",
+            "large_file_perf",
+            "--",
+            "--report",
+        ])
+        .arg(&report_path)
+        .output();
+
+    let measurement = match output {
+        Err(err) => placeholder_large_file_measurement(
+            &descriptor,
+            format!("100MB measurement blocked: cannot spawn subprocess: {err}"),
+        ),
+        Ok(output) if !output.status.success() => placeholder_large_file_measurement(
+            &descriptor,
+            format!(
+                "100MB measurement subprocess exited with status {}",
+                output.status
+            ),
+        ),
+        Ok(_) => match std::fs::read_to_string(&report_path)
+            .map_err(|err| err.to_string())
+            .and_then(|body| {
+                toml::from_str::<xtask::perf_harness::LargeFilePerfReport>(&body)
+                    .map_err(|err| err.to_string())
+            }) {
+            Ok(parsed) => xtask::perf_harness::large_file_perf_measurement(&descriptor, &parsed),
+            Err(err) => placeholder_large_file_measurement(
+                &descriptor,
+                format!("100MB measurement report unreadable: {err}"),
+            ),
+        },
+    };
+
+    // Replace the planned placeholder rather than appending beside it, so the
+    // report carries one row per workload and not a stale skipped twin.
+    report
+        .skeletons
+        .retain(|existing| existing.name != measurement.name);
+    let mut measurement = measurement;
+    xtask::perf_harness::apply_fail_on_budget_to_manual_measurement(&mut measurement);
+    report.skeletons.push(measurement);
+    report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
+}
+
+/// A skipped measurement carrying why the real one could not be taken.
+fn placeholder_large_file_measurement(
+    descriptor: &xtask::perf_harness::SkeletonDescriptor,
+    message: String,
+) -> xtask::perf_harness::SkeletonMeasurement {
+    xtask::perf_harness::SkeletonMeasurement {
+        name: descriptor.name.clone(),
+        kind: descriptor.kind,
+        fixture_bytes: descriptor.fixture_bytes,
+        sample_count: descriptor.sample_count,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: descriptor.budget_millis,
+        status: xtask::perf_harness::SkeletonStatus::Skipped,
+        message,
     }
 }
 

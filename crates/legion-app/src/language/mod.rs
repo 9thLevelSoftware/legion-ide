@@ -28,6 +28,8 @@ pub use translate::{
     translate_workspace_edit, uri_to_canonical_path,
 };
 
+mod lsp_reads;
+
 mod app_lsp;
 pub use app_lsp::{LspReadKind, LspRequestTag, LspSessionHandle, LspWorkerResult};
 

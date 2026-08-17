@@ -42,6 +42,20 @@ pub mod terminal_policy;
 /// Auto-updater client: manifest source, version compare, staging, journal, rollback (ADR-0042).
 pub mod updater;
 
+/// Vim modal editing session state and character/byte column conversion.
+pub mod vim_session;
+
+/// The position one past the last character of `text`.
+fn end_position(text: &str) -> legion_editor::TextPosition {
+    let line = text.matches('\n').count();
+    let column = text.rsplit('\n').next().unwrap_or("").len();
+    legion_editor::TextPosition::new(line, column)
+}
+
+/// Command-intent routing, extracted from this file (roadmap 1.1).
+mod intent_routing;
+pub use intent_routing::*;
+
 /// Multi-file proposal review surface: diff computation, partial acceptance, and hunk disposition.
 pub mod proposal;
 
@@ -180,17 +194,17 @@ use legion_protocol::{
     TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
     TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
     Utf16Position, Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection,
-    ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
-    ViewportSemanticTokenOverlay, WorkbenchSettingsRecord, WorkbenchTelemetryConsent,
-    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
-    WorkspaceTextEdit, WorkspaceTrustState, delegated_task_tool_permission_request,
-    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
-    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
-    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
-    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
-    validate_terminal_input, validate_terminal_kill_request, validate_terminal_resize,
+    ViewportScroll, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    WorkbenchSettingsRecord, WorkbenchTelemetryConsent, WorkspaceCloseRequest,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
+    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
+    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
+    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
+    validate_mcp_registry_snapshot, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -11272,6 +11286,16 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
     },
+    /// Refresh inlay hints for the active document through app-owned language tooling.
+    RefreshInlayHints {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
+    /// Refresh code lenses for the active document through app-owned language tooling.
+    RefreshCodeLenses {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+    },
     /// Request a formatting proposal preview through app-owned language tooling.
     RequestFormattingProposal {
         /// Target buffer identifier.
@@ -11820,6 +11844,8 @@ impl CommandExecutionService {
             | AppCommandRequest::GoToDefinition { .. }
             | AppCommandRequest::FindReferences { .. }
             | AppCommandRequest::RefreshOutline { .. }
+            | AppCommandRequest::RefreshInlayHints { .. }
+            | AppCommandRequest::RefreshCodeLenses { .. }
             | AppCommandRequest::RequestFormattingProposal { .. }
             | AppCommandRequest::RequestRenameProposal { .. }
             | AppCommandRequest::RequestOrganizeImportsProposal { .. }
@@ -11879,817 +11905,6 @@ impl CommandExecutionService {
     }
 }
 
-/// Service that maps UI intents into application command requests without invoking concrete adapters.
-#[derive(Debug)]
-pub struct CommandDispatcher;
-
-/// App-owned metadata used to turn projection-only proposal UI intents into protocol requests.
-#[derive(Debug, Clone)]
-pub struct AppProposalIntentRouteContext {
-    /// App-owned proposal for preview/apply intents when required.
-    pub proposal: Option<WorkspaceProposal>,
-    /// Principal selected by app/session policy, not by UI state.
-    pub principal: PrincipalId,
-    /// Capability selected by app/proposal policy, not by UI state.
-    pub capability: CapabilityId,
-    /// Non-zero app-routed correlation id.
-    pub correlation_id: CorrelationId,
-    /// App-routed causality id.
-    pub causality_id: CausalityId,
-    /// App-routed request timestamp.
-    pub requested_at: TimestampMillis,
-}
-
-impl CommandDispatcher {
-    /// Convert a UI command intent into a port-shaped application command request.
-    pub fn route_intent(
-        intent: CommandDispatchIntent,
-        active: AppCommandRouteContext,
-        correlation_id: CorrelationId,
-    ) -> Result<AppCommandRequest, AppCompositionError> {
-        match intent {
-            CommandDispatchIntent::Noop => Ok(AppCommandRequest::Noop),
-            CommandDispatchIntent::Quit => Ok(AppCommandRequest::Quit),
-            CommandDispatchIntent::SetProductMode { mode } => {
-                Ok(AppCommandRequest::SetProductMode {
-                    mode: AppProductMode::from_dock_mode(mode),
-                })
-            }
-            CommandDispatchIntent::Undo { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::Undo { buffer_id })
-            }
-            CommandDispatchIntent::Redo { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::Redo { buffer_id })
-            }
-            CommandDispatchIntent::Insert {
-                buffer_id,
-                at,
-                text,
-            } => Self::edit_request(
-                active,
-                buffer_id,
-                TextEdit::insert(Self::editor_position(at), text),
-                correlation_id,
-            ),
-            CommandDispatchIntent::Delete { buffer_id, range } => Self::edit_request(
-                active,
-                buffer_id,
-                TextEdit::delete(Self::editor_range(range)),
-                correlation_id,
-            ),
-            CommandDispatchIntent::Replace {
-                buffer_id,
-                range,
-                replacement,
-            } => Self::edit_request(
-                active,
-                buffer_id,
-                TextEdit::new(Self::editor_range(range), replacement),
-                correlation_id,
-            ),
-            CommandDispatchIntent::ClipboardCopy { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::ClipboardCopy { buffer_id })
-            }
-            CommandDispatchIntent::ClipboardCut { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::ClipboardCut { buffer_id })
-            }
-            CommandDispatchIntent::SelectAll { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::SelectAll { buffer_id })
-            }
-            CommandDispatchIntent::Save { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::Save { buffer_id })
-            }
-            CommandDispatchIntent::SwitchTab { buffer_id } => {
-                Ok(AppCommandRequest::SwitchTab { buffer_id })
-            }
-            CommandDispatchIntent::CloseTab { buffer_id } => {
-                Ok(AppCommandRequest::CloseTab { buffer_id })
-            }
-            CommandDispatchIntent::ReorderTab {
-                buffer_id,
-                new_index,
-            } => Ok(AppCommandRequest::ReorderTab {
-                buffer_id,
-                new_index,
-            }),
-            CommandDispatchIntent::SaveAll => Ok(AppCommandRequest::SaveAll),
-            CommandDispatchIntent::SetCursor { buffer_id, cursor } => {
-                Ok(AppCommandRequest::SetCursor { buffer_id, cursor })
-            }
-            CommandDispatchIntent::SetSelection { buffer_id, range } => {
-                Ok(AppCommandRequest::SetSelection { buffer_id, range })
-            }
-            CommandDispatchIntent::SetViewportScroll { buffer_id, scroll } => {
-                Ok(AppCommandRequest::SetViewportScroll { buffer_id, scroll })
-            }
-            CommandDispatchIntent::OpenPalette { mode, query, scope } => {
-                Ok(AppCommandRequest::OpenPalette { mode, query, scope })
-            }
-            CommandDispatchIntent::ClosePalette => Ok(AppCommandRequest::ClosePalette),
-            CommandDispatchIntent::UpdatePaletteQuery { query } => {
-                Ok(AppCommandRequest::UpdatePaletteQuery { query })
-            }
-            CommandDispatchIntent::MovePaletteSelection { delta } => {
-                Ok(AppCommandRequest::MovePaletteSelection { delta })
-            }
-            CommandDispatchIntent::CompletePaletteSelection => {
-                Ok(AppCommandRequest::CompletePaletteSelection)
-            }
-            CommandDispatchIntent::DispatchPaletteSelection => {
-                Ok(AppCommandRequest::DispatchPaletteSelection)
-            }
-            CommandDispatchIntent::ConfirmPaletteSelection {
-                token,
-                command_id,
-                operands,
-            } => Ok(AppCommandRequest::ConfirmPaletteSelection {
-                token,
-                command_id,
-                operands,
-            }),
-            CommandDispatchIntent::CancelPaletteConfirmation { token } => {
-                Ok(AppCommandRequest::CancelPaletteConfirmation { token })
-            }
-            CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
-            CommandDispatchIntent::SetThemePreference { preference } => {
-                Ok(AppCommandRequest::SetThemePreference { preference })
-            }
-            CommandDispatchIntent::SetZoomPercent { zoom_percent } => {
-                Ok(AppCommandRequest::SetZoomPercent { zoom_percent })
-            }
-            CommandDispatchIntent::SetEditorFontSize { font_size_pt } => {
-                Ok(AppCommandRequest::SetEditorFontSize { font_size_pt })
-            }
-            CommandDispatchIntent::SetEditorFontFamily { family } => {
-                Ok(AppCommandRequest::SetEditorFontFamily { family })
-            }
-            CommandDispatchIntent::SetToastVerbosity { verbosity } => {
-                Ok(AppCommandRequest::SetToastVerbosity { verbosity })
-            }
-            CommandDispatchIntent::SetLineNumbersVisible { visible } => {
-                Ok(AppCommandRequest::SetLineNumbersVisible { visible })
-            }
-            CommandDispatchIntent::SetCurrentLineHighlight { enabled } => {
-                Ok(AppCommandRequest::SetCurrentLineHighlight { enabled })
-            }
-            CommandDispatchIntent::SetStickyHeadersVisible { visible } => {
-                Ok(AppCommandRequest::SetStickyHeadersVisible { visible })
-            }
-            CommandDispatchIntent::SetCodeFoldingVisible { visible } => {
-                Ok(AppCommandRequest::SetCodeFoldingVisible { visible })
-            }
-            CommandDispatchIntent::SetMinimapVisible { visible } => {
-                Ok(AppCommandRequest::SetMinimapVisible { visible })
-            }
-            CommandDispatchIntent::SetWhitespaceGuidesVisible { visible } => {
-                Ok(AppCommandRequest::SetWhitespaceGuidesVisible { visible })
-            }
-            CommandDispatchIntent::SetIndentGuidesVisible { visible } => {
-                Ok(AppCommandRequest::SetIndentGuidesVisible { visible })
-            }
-            CommandDispatchIntent::SetSmoothScrollingEnabled { enabled } => {
-                Ok(AppCommandRequest::SetSmoothScrollingEnabled { enabled })
-            }
-            CommandDispatchIntent::SetLineWrappingPolicy {
-                policy,
-                wrap_column,
-            } => Ok(AppCommandRequest::SetLineWrappingPolicy {
-                policy,
-                wrap_column,
-            }),
-            CommandDispatchIntent::SetIndexedWorkspaceSearchEnabled { enabled } => {
-                Ok(AppCommandRequest::SetIndexedWorkspaceSearchEnabled { enabled })
-            }
-            CommandDispatchIntent::SetNextEditPredictionEnabled { enabled } => {
-                Ok(AppCommandRequest::SetNextEditPredictionEnabled { enabled })
-            }
-            CommandDispatchIntent::SetCrashReportsEnabled { enabled } => {
-                Ok(AppCommandRequest::SetCrashReportsEnabled { enabled })
-            }
-            CommandDispatchIntent::ResetSettings => Ok(AppCommandRequest::ResetSettings),
-            CommandDispatchIntent::RunSearch {
-                scope,
-                query,
-                limit,
-                case_sensitive,
-                whole_word,
-                use_regex,
-            } => Ok(AppCommandRequest::RunSearch {
-                query_id: format!("search:{}", correlation_id.0),
-                scope,
-                query,
-                limit,
-                case_sensitive,
-                whole_word,
-                use_regex,
-            }),
-            CommandDispatchIntent::RunStructuralSearch {
-                scope,
-                pattern,
-                rewrite,
-                limit,
-            } => Ok(AppCommandRequest::RunStructuralSearch {
-                query_id: format!("structural-search:{}", correlation_id.0),
-                scope,
-                pattern,
-                rewrite,
-                limit,
-            }),
-            CommandDispatchIntent::CancelSearch { query_id } => {
-                Ok(AppCommandRequest::CancelSearch { query_id })
-            }
-            CommandDispatchIntent::RefreshGit => Ok(AppCommandRequest::RefreshGit),
-            CommandDispatchIntent::StageGitHunk { hunk_id } => {
-                Ok(AppCommandRequest::StageGitHunk { hunk_id })
-            }
-            CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
-                Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
-            }
-            CommandDispatchIntent::ResolveGitConflict { path, choice } => {
-                Ok(AppCommandRequest::ResolveGitConflict {
-                    path,
-                    choice: match choice {
-                        GitConflictChoiceProjection::AcceptCurrent => {
-                            GitConflictChoice::AcceptCurrent
-                        }
-                        GitConflictChoiceProjection::AcceptIncoming => {
-                            GitConflictChoice::AcceptIncoming
-                        }
-                    },
-                })
-            }
-            CommandDispatchIntent::CommitGitChanges { message } => {
-                Ok(AppCommandRequest::CommitGitChanges { message })
-            }
-            CommandDispatchIntent::SwitchGitBranch { branch } => {
-                Ok(AppCommandRequest::SwitchGitBranch { branch })
-            }
-            CommandDispatchIntent::CreateGitBranch { branch } => {
-                Ok(AppCommandRequest::CreateGitBranch { branch })
-            }
-            CommandDispatchIntent::DeleteGitBranch { branch } => {
-                Ok(AppCommandRequest::DeleteGitBranch { branch })
-            }
-            CommandDispatchIntent::StashGitChanges { message } => {
-                Ok(AppCommandRequest::StashGitChanges { message })
-            }
-            CommandDispatchIntent::PushGitRemote { remote } => {
-                Ok(AppCommandRequest::PushGitRemote { remote })
-            }
-            CommandDispatchIntent::PruneGitWorktrees => Ok(AppCommandRequest::PruneGitWorktrees),
-            CommandDispatchIntent::RemoveGitWorktree { path } => {
-                Ok(AppCommandRequest::RemoveGitWorktree { path })
-            }
-            CommandDispatchIntent::CreateGitWorktree {
-                branch,
-                worktree_path,
-            } => Ok(AppCommandRequest::CreateGitWorktree {
-                branch,
-                worktree_path,
-            }),
-            CommandDispatchIntent::GitNavNextHunk => Ok(AppCommandRequest::GitNavNextHunk),
-            CommandDispatchIntent::GitNavPrevHunk => Ok(AppCommandRequest::GitNavPrevHunk),
-            CommandDispatchIntent::GitNavNextFile => Ok(AppCommandRequest::GitNavNextFile),
-            CommandDispatchIntent::GitNavPrevFile => Ok(AppCommandRequest::GitNavPrevFile),
-            CommandDispatchIntent::RequestLocalHistoryEntries { path } => {
-                Ok(AppCommandRequest::RequestLocalHistoryEntries { path })
-            }
-            CommandDispatchIntent::RestoreFromLocalHistory { path, entry_id } => {
-                Ok(AppCommandRequest::RestoreFromLocalHistory { path, entry_id })
-            }
-            CommandDispatchIntent::ExportWorktreeEvidence => {
-                Ok(AppCommandRequest::ExportWorktreeEvidence)
-            }
-            CommandDispatchIntent::ValidateGitCommitMessage { message } => {
-                Ok(AppCommandRequest::ValidateGitCommitMessage { message })
-            }
-            CommandDispatchIntent::RefreshDebugConfigurations => {
-                Ok(AppCommandRequest::RefreshDebugConfigurations)
-            }
-            CommandDispatchIntent::RefreshTestExplorer => {
-                Ok(AppCommandRequest::RefreshTestExplorer)
-            }
-            CommandDispatchIntent::RunTestExplorerItem { item_id } => {
-                Ok(AppCommandRequest::RunTestExplorerItem { item_id })
-            }
-            CommandDispatchIntent::RunTestExplorerGroup { parent_label } => {
-                Ok(AppCommandRequest::RunTestExplorerGroup { parent_label })
-            }
-            CommandDispatchIntent::AttachTestExplorerEvidence { session_id } => {
-                Ok(AppCommandRequest::AttachTestExplorerEvidence { session_id })
-            }
-            CommandDispatchIntent::ToggleDebugBreakpoint {
-                buffer_id,
-                line,
-                condition,
-                hit_condition,
-                log_message,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::ToggleDebugBreakpoint {
-                    buffer_id,
-                    line,
-                    condition,
-                    hit_condition,
-                    log_message,
-                })
-            }
-            CommandDispatchIntent::LaunchDebugSession { configuration_id } => {
-                Ok(AppCommandRequest::LaunchDebugSession { configuration_id })
-            }
-            CommandDispatchIntent::DebugStep { session_id, kind } => {
-                Ok(AppCommandRequest::DebugStep { session_id, kind })
-            }
-            CommandDispatchIntent::StopDebugSession { session_id } => {
-                Ok(AppCommandRequest::StopDebugSession { session_id })
-            }
-            CommandDispatchIntent::PollDebugSession { session_id } => {
-                Ok(AppCommandRequest::PollDebugSession { session_id })
-            }
-            CommandDispatchIntent::DebugRunToCursor {
-                session_id,
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::DebugRunToCursor {
-                    session_id,
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::DebugEvaluateSelection {
-                session_id,
-                expression_label,
-            } => Ok(AppCommandRequest::DebugEvaluateSelection {
-                session_id,
-                expression_label,
-            }),
-            CommandDispatchIntent::DebugAddWatch {
-                session_id,
-                expression_label,
-            } => Ok(AppCommandRequest::DebugAddWatch {
-                session_id,
-                expression_label,
-            }),
-            CommandDispatchIntent::RequestHover {
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestHover {
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::RequestCompletion {
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestCompletion {
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::RequestAssistInlinePrediction {
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestAssistInlinePrediction {
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::AcceptAssistInlinePrediction {
-                buffer_id,
-                prediction_id,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::AcceptAssistInlinePrediction {
-                    buffer_id,
-                    prediction_id,
-                })
-            }
-            CommandDispatchIntent::DismissAssistInlinePrediction {
-                buffer_id,
-                prediction_id,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::DismissAssistInlinePrediction {
-                    buffer_id,
-                    prediction_id,
-                })
-            }
-            CommandDispatchIntent::CancelAssistInlinePrediction {
-                buffer_id,
-                prediction_id,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::CancelAssistInlinePrediction {
-                    buffer_id,
-                    prediction_id,
-                })
-            }
-            CommandDispatchIntent::GoToDefinition {
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::GoToDefinition {
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::FindReferences {
-                buffer_id,
-                position,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::FindReferences {
-                    buffer_id,
-                    position,
-                })
-            }
-            CommandDispatchIntent::RefreshOutline { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RefreshOutline { buffer_id })
-            }
-            CommandDispatchIntent::RequestFormattingProposal { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestFormattingProposal { buffer_id })
-            }
-            CommandDispatchIntent::RequestRenameProposal {
-                buffer_id,
-                position,
-                new_name,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestRenameProposal {
-                    buffer_id,
-                    position,
-                    new_name,
-                })
-            }
-            CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestOrganizeImportsProposal { buffer_id })
-            }
-            CommandDispatchIntent::RequestCodeActionProposal {
-                buffer_id,
-                action_id,
-            } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::RequestCodeActionProposal {
-                    buffer_id,
-                    action_id,
-                })
-            }
-            CommandDispatchIntent::ActivateLanguageCodeLens { buffer_id, lens_id } => {
-                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-                Ok(AppCommandRequest::ActivateLanguageCodeLens { buffer_id, lens_id })
-            }
-            CommandDispatchIntent::CancelLanguageOperation { operation_id } => {
-                Ok(AppCommandRequest::CancelLanguageOperation { operation_id })
-            }
-            CommandDispatchIntent::TerminalLaunch {
-                command_label,
-                timeout_secs,
-            } => Ok(AppCommandRequest::TerminalLaunch {
-                command_label,
-                timeout_secs,
-            }),
-            CommandDispatchIntent::TerminalInput {
-                session_id,
-                payload,
-            } => Ok(AppCommandRequest::TerminalInput {
-                session_id,
-                payload,
-            }),
-            CommandDispatchIntent::TerminalResize {
-                session_id,
-                cols,
-                rows,
-            } => Ok(AppCommandRequest::TerminalResize {
-                session_id,
-                cols,
-                rows,
-            }),
-            CommandDispatchIntent::TerminalKill { session_id } => {
-                Ok(AppCommandRequest::TerminalKill { session_id })
-            }
-            CommandDispatchIntent::TerminalClose { session_id } => {
-                Ok(AppCommandRequest::TerminalClose { session_id })
-            }
-            CommandDispatchIntent::TerminalOutputPoll { session_id } => {
-                Ok(AppCommandRequest::TerminalOutputPoll { session_id })
-            }
-            CommandDispatchIntent::TerminalSearch { session_id, query } => {
-                Ok(AppCommandRequest::TerminalSearch { session_id, query })
-            }
-            CommandDispatchIntent::OpenPath { path } => Ok(AppCommandRequest::OpenPath { path }),
-            CommandDispatchIntent::OpenPathAtPosition { path, position } => {
-                Ok(AppCommandRequest::OpenPathAtPosition { path, position })
-            }
-            CommandDispatchIntent::RefreshExplorer => Ok(AppCommandRequest::RefreshExplorer),
-            CommandDispatchIntent::RevealInExplorer { file_id } => {
-                Ok(AppCommandRequest::RevealInExplorer { file_id })
-            }
-            CommandDispatchIntent::StartAiRun { instruction_label } => {
-                Ok(AppCommandRequest::StartAiRun { instruction_label })
-            }
-            CommandDispatchIntent::StartAiExplain { instruction_label } => {
-                Ok(AppCommandRequest::StartAiExplain { instruction_label })
-            }
-            CommandDispatchIntent::StartAiProposal {
-                instruction_label, ..
-            } => Ok(AppCommandRequest::StartAiProposal { instruction_label }),
-            CommandDispatchIntent::SendDelegateChat { prompt_label } => {
-                Ok(AppCommandRequest::SendDelegateChat { prompt_label })
-            }
-            CommandDispatchIntent::StartDelegatedTask {
-                task_description,
-                scope,
-            } => Ok(AppCommandRequest::StartDelegatedTask {
-                task_description,
-                scope,
-            }),
-            CommandDispatchIntent::CancelDelegatedTask => {
-                Ok(AppCommandRequest::CancelDelegatedTask)
-            }
-            CommandDispatchIntent::ReviewDelegateProposalHunk {
-                proposal_id,
-                hunk_id,
-                disposition,
-            } => Ok(AppCommandRequest::ReviewDelegateProposalHunk {
-                proposal_id,
-                hunk_id,
-                disposition,
-            }),
-            CommandDispatchIntent::RecordDelegateToolPermission {
-                request_id,
-                decision,
-            } => Ok(AppCommandRequest::RecordDelegateToolPermission {
-                request_id,
-                decision,
-            }),
-            CommandDispatchIntent::RecordLegionWorkflowToolPermission {
-                session_id,
-                server_id,
-                tool_name,
-                decision,
-            } => Ok(AppCommandRequest::RecordLegionWorkflowToolPermission {
-                session_id,
-                server_id,
-                tool_name,
-                decision,
-            }),
-            CommandDispatchIntent::TriggerLegionWorkflowKillSwitch {
-                session_id,
-                reason_label,
-            } => Ok(AppCommandRequest::TriggerLegionWorkflowKillSwitch {
-                session_id,
-                reason_label,
-            }),
-            CommandDispatchIntent::CancelAiRun { run_id } => {
-                Ok(AppCommandRequest::CancelAiRun { run_id })
-            }
-            CommandDispatchIntent::ReplayAiRun { run_id } => {
-                Ok(AppCommandRequest::ReplayAiRun { run_id })
-            }
-            CommandDispatchIntent::InspectAiRun { run_id } => {
-                Ok(AppCommandRequest::InspectAiRun { run_id })
-            }
-            CommandDispatchIntent::InvokePluginCommand {
-                plugin_id,
-                command_id,
-                metadata_label,
-            } => Ok(AppCommandRequest::InvokePluginCommand {
-                plugin_id,
-                command_id,
-                metadata_label,
-            }),
-            CommandDispatchIntent::JoinCollaborationSession { session_id } => {
-                Ok(AppCommandRequest::JoinCollaborationSession { session_id })
-            }
-            CommandDispatchIntent::LeaveCollaborationSession { session_id } => {
-                Ok(AppCommandRequest::LeaveCollaborationSession { session_id })
-            }
-            CommandDispatchIntent::PublishCollaborationPresence {
-                session_id,
-                participant_id,
-            } => Ok(AppCommandRequest::PublishCollaborationPresence {
-                session_id,
-                participant_id,
-            }),
-            CommandDispatchIntent::LspStartSession => Ok(AppCommandRequest::LspStartSession),
-            CommandDispatchIntent::LspRestartSession => Ok(AppCommandRequest::LspRestartSession),
-            CommandDispatchIntent::PreviewProposal { .. }
-            | CommandDispatchIntent::ApproveProposal { .. }
-            | CommandDispatchIntent::RejectProposal { .. }
-            | CommandDispatchIntent::ApplyProposal { .. }
-            | CommandDispatchIntent::RollbackProposal { .. }
-            | CommandDispatchIntent::CancelProposal { .. }
-            | CommandDispatchIntent::OpenProposalDetails { .. }
-            | CommandDispatchIntent::InspectLegionWorkflowSession { .. }
-            | CommandDispatchIntent::OpenLegionWorkflowProposalPreview { .. }
-            | CommandDispatchIntent::OpenLegionWorkflowProposalDetails { .. }
-            | CommandDispatchIntent::RequestLegionWorkflowVerification { .. }
-            | CommandDispatchIntent::RequestLegionWorkflowSignOff { .. }
-            | CommandDispatchIntent::ResolveLegionWorkflowConflict { .. }
-            | CommandDispatchIntent::RequestLegionWorkflowMergeReadiness { .. } => {
-                Ok(AppCommandRequest::Noop)
-            }
-            // Vim modal editing intents: VimState parser exists in legion-ui
-            // but is not yet wired to the desktop keyboard handler. These arms
-            // satisfy exhaustiveness until integration lands.
-            CommandDispatchIntent::SetVimModeEnabled { .. }
-            | CommandDispatchIntent::VimMotion { .. }
-            | CommandDispatchIntent::VimOperatorMotion { .. }
-            | CommandDispatchIntent::VimLinewiseOperator { .. }
-            | CommandDispatchIntent::VimChangeMode { .. }
-            | CommandDispatchIntent::VimInsertBefore
-            | CommandDispatchIntent::VimInsertAfter
-            | CommandDispatchIntent::VimInsertLineBelow
-            | CommandDispatchIntent::VimInsertLineAbove
-            | CommandDispatchIntent::VimPut
-            | CommandDispatchIntent::VimSearchForward
-            | CommandDispatchIntent::VimDeleteChar => Ok(AppCommandRequest::Noop),
-            // Call hierarchy intents are dispatched by the language subsystem;
-            // satisfy exhaustiveness until app-layer wiring lands.
-            CommandDispatchIntent::PrepareCallHierarchy { .. }
-            | CommandDispatchIntent::ShowIncomingCalls { .. }
-            | CommandDispatchIntent::ShowOutgoingCalls { .. } => Ok(AppCommandRequest::Noop),
-            // Find/replace intents are handled by AppComposition::dispatch_ui_intent
-            // before reaching this router; these arms satisfy exhaustiveness.
-            CommandDispatchIntent::ToggleFindBar
-            | CommandDispatchIntent::CloseFindBar
-            | CommandDispatchIntent::SetFindQuery { .. }
-            | CommandDispatchIntent::FindNext
-            | CommandDispatchIntent::FindPrevious
-            | CommandDispatchIntent::ToggleFindReplace
-            | CommandDispatchIntent::SetFindReplaceText { .. }
-            | CommandDispatchIntent::ReplaceOne
-            | CommandDispatchIntent::ReplaceAll
-            | CommandDispatchIntent::SetFindCaseSensitive { .. }
-            | CommandDispatchIntent::SetFindWholeWord { .. }
-            | CommandDispatchIntent::SetFindRegex { .. } => Ok(AppCommandRequest::Noop),
-        }
-    }
-
-    /// Convert a projection-only proposal UI intent into a protocol proposal request.
-    pub fn route_proposal_intent(
-        intent: CommandDispatchIntent,
-        context: AppProposalIntentRouteContext,
-    ) -> Result<Option<ProposalRequest>, AppCompositionError> {
-        match intent {
-            CommandDispatchIntent::PreviewProposal { proposal_id } => {
-                let proposal = Self::owned_proposal_for_intent(proposal_id, context.proposal)?;
-                Ok(Some(ProposalRequest::Preview(proposal)))
-            }
-            CommandDispatchIntent::ApplyProposal { proposal_id } => {
-                let proposal = Self::owned_proposal_for_intent(proposal_id, context.proposal)?;
-                Ok(Some(ProposalRequest::Apply(proposal)))
-            }
-            CommandDispatchIntent::ApproveProposal { proposal_id } => Ok(Some(
-                ProposalRequest::Approve(Self::proposal_lifecycle_command(
-                    proposal_id,
-                    ProposalLifecycleAction::Approve,
-                    None,
-                    context,
-                )),
-            )),
-            CommandDispatchIntent::RejectProposal {
-                proposal_id,
-                reason,
-            } => Ok(Some(ProposalRequest::Reject(
-                Self::proposal_lifecycle_command(
-                    proposal_id,
-                    ProposalLifecycleAction::Reject,
-                    Some(ProposalLifecycleCommandReason::Rejection(reason)),
-                    context,
-                ),
-            ))),
-            CommandDispatchIntent::RollbackProposal {
-                proposal_id,
-                reason,
-            } => Ok(Some(ProposalRequest::Rollback(
-                Self::proposal_lifecycle_command(
-                    proposal_id,
-                    ProposalLifecycleAction::Rollback,
-                    Some(ProposalLifecycleCommandReason::Rollback(reason)),
-                    context,
-                ),
-            ))),
-            CommandDispatchIntent::CancelProposal {
-                proposal_id,
-                reason,
-            } => Ok(Some(ProposalRequest::Cancel(
-                Self::proposal_lifecycle_command(
-                    proposal_id,
-                    ProposalLifecycleAction::Cancel,
-                    Some(ProposalLifecycleCommandReason::Cancellation(reason)),
-                    context,
-                ),
-            ))),
-            CommandDispatchIntent::OpenProposalDetails { .. } => Ok(None),
-            _ => Ok(None),
-        }
-    }
-
-    fn owned_proposal_for_intent(
-        proposal_id: ProposalId,
-        proposal: Option<WorkspaceProposal>,
-    ) -> Result<WorkspaceProposal, AppCompositionError> {
-        let proposal = proposal.ok_or(AppCompositionError::ProposalIntentMissingProposal)?;
-        if proposal.proposal_id == proposal_id {
-            Ok(proposal)
-        } else {
-            Err(AppCompositionError::ProposalIntentMismatch {
-                target: proposal_id,
-                active: Some(proposal.proposal_id),
-            })
-        }
-    }
-
-    fn proposal_lifecycle_command(
-        proposal_id: ProposalId,
-        action: ProposalLifecycleAction,
-        reason: Option<ProposalLifecycleCommandReason>,
-        context: AppProposalIntentRouteContext,
-    ) -> ProposalLifecycleCommand {
-        ProposalLifecycleCommand {
-            proposal_id,
-            action,
-            principal: context.principal,
-            capability: context.capability,
-            correlation_id: context.correlation_id,
-            causality_id: context.causality_id,
-            reason,
-            diagnostics: Vec::new(),
-            requested_at: context.requested_at,
-            schema_version: 1,
-        }
-    }
-
-    fn edit_request(
-        active: AppCommandRouteContext,
-        buffer_id: BufferId,
-        edit: TextEdit,
-        _correlation_id: CorrelationId,
-    ) -> Result<AppCommandRequest, AppCompositionError> {
-        Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
-        let _ = active
-            .workspace_id
-            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
-        let _ = active
-            .file_id
-            .ok_or(AppCompositionError::ActiveFileMissing)?;
-
-        Ok(AppCommandRequest::ApplyEdit { buffer_id, edit })
-    }
-
-    fn editor_position(position: TextCoordinate) -> TextPosition {
-        TextPosition::new(position.line as usize, position.character as usize)
-    }
-
-    fn editor_range(range: legion_protocol::ProtocolTextRange) -> EditorTextRange {
-        EditorTextRange::new(
-            Self::editor_position(range.start),
-            Self::editor_position(range.end),
-        )
-    }
-
-    fn ensure_active_buffer(
-        active: Option<BufferId>,
-        target: BufferId,
-    ) -> Result<(), AppCompositionError> {
-        if active == Some(target) {
-            Ok(())
-        } else {
-            Err(AppCompositionError::BufferMismatch { target, active })
-        }
-    }
-}
-
-/// Minimal active-document context used by command routing tests and dispatcher calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppCommandRouteContext {
-    /// Active workspace identifier when a workspace is open.
-    pub workspace_id: Option<WorkspaceId>,
-    /// Active buffer identifier.
-    pub buffer_id: Option<BufferId>,
-    /// Active file identifier.
-    pub file_id: Option<FileId>,
-}
-
 impl AppCommandRouteContext {
     fn from_active(active: &ActiveDocumentController) -> Self {
         Self {
@@ -12710,7 +11925,7 @@ fn add_semantic_token_overlays(
     full_text: Option<&str>,
     viewport: &mut ViewportProjection,
 ) {
-    if viewport.mode == ViewportProjectionMode::DegradedLargeFile
+    if viewport.mode.defers_whole_file_work()
         || viewport.large_file_status.is_some()
         || viewport.line_slices.is_empty()
     {
@@ -14783,6 +13998,9 @@ pub struct AppClipboardUpdate {
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
+    /// Vim modal editing state changed; carries the mode to display, or
+    /// `None` when modal editing is off.
+    VimModeChanged(Option<legion_ui::EditorInputMode>),
     /// Command had no effect.
     Noop,
     /// Command requested shell termination.
@@ -16933,6 +16151,8 @@ pub struct AppComposition {
     checkpoint_store: CheckpointStore,
     /// In-editor find/replace state, owned by app composition for projection building.
     buffer_search_state: legion_editor::BufferSearchState,
+    /// Vim modal editing state, carried across keystrokes.
+    vim: crate::vim_session::VimSession,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -17239,6 +16459,7 @@ impl AppComposition {
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
             checkpoint_store: CheckpointStore::new(),
             buffer_search_state: legion_editor::BufferSearchState::default(),
+            vim: crate::vim_session::VimSession::default(),
         }
     }
 
@@ -18261,563 +17482,6 @@ impl AppComposition {
         self.batch_apply_policy.enabled = trust == WorkspaceTrustState::Trusted;
 
         Ok(opened)
-    }
-
-    /// Non-blocking LSP session drain. Call once per frame tick (mirrors
-    /// `TerminalWorkflow::poll`). Returns `true` if session state changed,
-    /// indicating the projection snapshot should be refreshed.
-    ///
-    /// PKT-LSP-B T1 / D4.
-    /// Non-blocking LSP session drain — call once per frame tick (PKT-LSP-B T1).
-    ///
-    /// 1. Advances the startup lifecycle (Starting → Live or Failed) via `drain()`.
-    /// 2. Drains completed worker results and dispatches them to the appropriate
-    ///    ingest method (completions, hover, definition, diagnostics).
-    ///
-    /// Returns `true` if the lifecycle state changed (startup transition).
-    pub fn drain_lsp_session(&mut self) -> bool {
-        let changed = self.lsp_session.drain();
-        // Drain any completed worker results (non-blocking).
-        let results = self.lsp_session.try_drain_results();
-        for result in results {
-            use crate::language::LspWorkerResult;
-            match result {
-                LspWorkerResult::ReadResult { outcome, tag } => {
-                    self.ingest_lsp_worker_result(outcome, tag);
-                }
-                LspWorkerResult::DiagnosticBatch { raw_params } => {
-                    self.ingest_lsp_diagnostic_batch(raw_params);
-                }
-                LspWorkerResult::TransportDead { .. } => {
-                    // Intercepted inside `LspSessionHandle::try_drain_results`
-                    // (routed through the restart circuit breaker); it never
-                    // reaches this dispatch.  Arm kept for exhaustiveness.
-                }
-            }
-        }
-        changed
-    }
-
-    /// Ingests a completed LSP read-request result from the worker thread.
-    fn ingest_lsp_worker_result(
-        &mut self,
-        outcome: Result<crate::language::LspReadOutcome, crate::language::LanguageSessionError>,
-        tag: crate::language::LspRequestTag,
-    ) {
-        use crate::language::{LspReadKind, is_stale_response};
-        let Ok(lsp_outcome) = outcome else {
-            return; // session error; ignore
-        };
-        // Stale-response gate: discard if snapshot moved on since the request.
-        if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
-            && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)
-        {
-            return;
-        }
-        match tag.kind {
-            LspReadKind::Completion => {
-                let _ = self.ingest_lsp_completion_response_for_buffer(
-                    tag.buffer_id,
-                    &lsp_outcome.result,
-                    None,
-                );
-            }
-            LspReadKind::Hover => {
-                let _ = self.ingest_lsp_hover_response_for_buffer(
-                    tag.buffer_id,
-                    &lsp_outcome.result,
-                    None,
-                );
-            }
-            LspReadKind::Definition => {
-                let _ = self.ingest_lsp_definition_response_for_buffer(
-                    tag.buffer_id,
-                    &lsp_outcome.result,
-                    None,
-                );
-            }
-            LspReadKind::Rename { new_name } => {
-                self.ingest_lsp_rename_result(tag.buffer_id, new_name, &lsp_outcome.result);
-            }
-        }
-    }
-
-    /// Ingests a completed LSP `textDocument/rename` result from the worker
-    /// thread (PKT-LSP-C I-2).
-    ///
-    /// Translates the raw `WorkspaceEdit` JSON via [`translate_workspace_edit`]
-    /// using an [`AppDocumentResolver`] backed by the current active-document
-    /// state.  On success, creates and registers a proposal through the
-    /// coordinator and records it in the language-tooling projection.
-    ///
-    /// The resulting proposal enters the `Previewed` state. Call
-    /// [`approve_and_apply_rename_proposal`] to transition it through
-    /// `Approved` → `Applied` (PKT-APPLY Task 2c).
-    fn ingest_lsp_rename_result(
-        &mut self,
-        buffer_id: BufferId,
-        new_name: String,
-        raw: &serde_json::Value,
-    ) {
-        use crate::language::translate_workspace_edit;
-
-        let Some(workspace_id) = self.active_documents.workspace_id() else {
-            return;
-        };
-        let Some(meta) = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-        else {
-            return;
-        };
-        let principal = self
-            .active_documents
-            .active_principal_id
-            .clone()
-            .unwrap_or_else(|| PrincipalId("system".to_string()));
-
-        let event_context = self.next_event_context();
-        let text = self
-            .editor
-            .text(buffer_id)
-            .ok()
-            .map(|t| t.to_string())
-            .unwrap_or_default();
-        let snapshot_id = self
-            .editor
-            .current_snapshot(buffer_id)
-            .ok()
-            .map(|s| s.snapshot_id)
-            .unwrap_or(legion_protocol::SnapshotId(0));
-        let buffer_version = self
-            .editor
-            .buffer_version(buffer_id)
-            .ok()
-            .unwrap_or(BufferVersion(0));
-
-        let input = LanguageRequestInput {
-            workspace_id,
-            buffer_id,
-            metadata: meta.clone(),
-            principal,
-            text,
-            snapshot_id,
-            buffer_version,
-            event_context,
-        };
-
-        let title = format!("Rename symbol to {}", bounded_label(&new_name, 64));
-        let capability = CapabilityId("fs.write".to_string());
-
-        // Build the production DocumentResolver from the current open-buffer state.
-        let resolver = AppDocumentResolver::build(&self.active_documents, &self.editor);
-
-        let workspace_edit = match translate_workspace_edit(
-            raw,
-            &resolver,
-            workspace_id,
-            WorkspaceEditSourceKind::LspRename,
-            title.clone(),
-            capability.clone(),
-        ) {
-            Ok(payload) => payload,
-            Err(err) => {
-                let _ = self.language_tooling.record_proposal_failure(
-                    &input,
-                    LanguageProposalKind::Rename,
-                    format!("LSP rename translation failed: {err}"),
-                );
-                return;
-            }
-        };
-
-        let preconditions = ProposalVersionPreconditions {
-            file_version: Some(meta.file_content_version),
-            buffer_version: Some(input.buffer_version),
-            snapshot_id: Some(input.snapshot_id),
-            generation: Some(meta.workspace_generation),
-            file_content_version: Some(meta.file_content_version),
-            workspace_generation: Some(meta.workspace_generation),
-            expected_fingerprint: Some(meta.fingerprint.clone()),
-            expected_file_length: meta.file_length,
-            expected_modified_at: meta.modified_at,
-        };
-
-        let proposal_id = self.proposal_coordinator.next_id();
-        let request = LspRequestCorrelation {
-            request_id: legion_protocol::LspRequestId(uuid::Uuid::now_v7()),
-            server_id: legion_protocol::LanguageServerId(1),
-            workspace_id: input.workspace_id,
-            file_id: Some(meta.identity.file_id),
-            snapshot_id: Some(input.snapshot_id),
-            buffer_version: Some(input.buffer_version),
-            correlation_id: input.event_context.correlation_id,
-            causality_id: input.event_context.causality_id,
-            cancellation_token: Some(CancellationTokenId(uuid::Uuid::now_v7())),
-            privacy_scope: SemanticPrivacyScope::Workspace,
-            issued_at: TimestampMillis::now(),
-            schema_version: 1,
-        };
-
-        let proposal = match legion_protocol::convert_lsp_edit_to_workspace_proposal(
-            LspEditProposalConversionInput {
-                proposal_id,
-                principal: input.principal.clone(),
-                capability,
-                request,
-                workspace_edit,
-                preconditions,
-                lifecycle_state: ProposalLifecycleState::Created,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-                preview: PreviewSummary {
-                    summary: title.clone(),
-                    details: vec![
-                        "language_tooling.lsp_rename".to_string(),
-                        format!("new_name={}", bounded_label(&new_name, 64)),
-                    ],
-                },
-                expires_at: None,
-                created_at: TimestampMillis::now(),
-                diagnostics: Vec::new(),
-                schema_version: 1,
-            },
-        ) {
-            Ok(p) => p,
-            Err(err) => {
-                let _ = self.language_tooling.record_proposal_failure(
-                    &input,
-                    LanguageProposalKind::Rename,
-                    format!("rename proposal creation failed: {err:?}"),
-                );
-                return;
-            }
-        };
-
-        self.proposal_coordinator
-            .register_lifecycle_context(proposal.proposal_id, input.event_context);
-        let created = self.proposal_coordinator.created_response(&proposal);
-        if !matches!(created, ProposalResponse::Created(_)) {
-            let _ = self.language_tooling.record_proposal_failure(
-                &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal coordinator rejected: {created:?}"),
-            );
-            return;
-        }
-        let validated = self
-            .proposal_coordinator
-            .handle(ProposalRequest::Validate(proposal.clone()));
-        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
-            let _ = self.language_tooling.record_proposal_failure(
-                &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal validation failed: {validated:?}"),
-            );
-            return;
-        }
-        let previewed = self
-            .proposal_coordinator
-            .handle(ProposalRequest::Preview(proposal.clone()));
-        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
-            let _ = self.language_tooling.record_proposal_failure(
-                &input,
-                LanguageProposalKind::Rename,
-                format!("rename proposal preview failed: {previewed:?}"),
-            );
-            return;
-        }
-        let _ = self.language_tooling.record_proposal(
-            &input,
-            LanguageProposalKind::Rename,
-            proposal.proposal_id,
-            None,
-            format!(
-                "Rename proposal generated ({})",
-                bounded_label(&new_name, 64)
-            ),
-        );
-    }
-
-    /// Approve and apply a rename proposal that is in the `Previewed` or
-    /// `Approved` state (PKT-APPLY Task 2c).
-    ///
-    /// This is the user-triggered Approve→Apply path for LSP rename proposals.
-    /// It transitions the proposal to `Approved` (recording explicit human
-    /// approval), then dispatches it to `apply_workspace_proposal`.
-    ///
-    /// Returns `Err` if the proposal is not found or is not in a state that
-    /// accepts approval, or if the apply fails at the composition level.
-    pub fn approve_and_apply_rename_proposal(
-        &mut self,
-        proposal_id: ProposalId,
-    ) -> Result<ProposalResponse, AppCompositionError> {
-        let proposal = self
-            .proposal_coordinator
-            .proposal(proposal_id)
-            .ok_or_else(|| {
-                AppCompositionError::Protocol(ProtocolError {
-                    code: "proposal.not_found".to_string(),
-                    message: format!("rename proposal {proposal_id:?} not found in coordinator"),
-                })
-            })?;
-
-        // Only approve if currently in Previewed state; if already Approved, skip.
-        if matches!(
-            self.proposal_coordinator
-                .current_lifecycle_state(proposal_id),
-            Some(ProposalLifecycleState::Previewed)
-        ) {
-            let approve_command = ProposalLifecycleCommand {
-                proposal_id,
-                action: ProposalLifecycleAction::Approve,
-                principal: proposal.principal.clone(),
-                capability: proposal.capability.clone(),
-                correlation_id: proposal.correlation_id,
-                causality_id: CausalityId(uuid::Uuid::now_v7()),
-                reason: None,
-                diagnostics: vec![],
-                requested_at: TimestampMillis(0),
-                schema_version: 1,
-            };
-            let approved =
-                self.handle_lifecycle_command_request(ProposalRequest::Approve(approve_command))?;
-            if !matches!(approved, ProposalResponse::Approved(_)) {
-                return Ok(approved);
-            }
-        }
-
-        // Re-fetch after approval state change.
-        let proposal = self
-            .proposal_coordinator
-            .proposal(proposal_id)
-            .ok_or_else(|| {
-                AppCompositionError::Protocol(ProtocolError {
-                    code: "proposal.not_found_after_approve".to_string(),
-                    message: format!("rename proposal {proposal_id:?} not found after approval"),
-                })
-            })?;
-
-        self.apply_workspace_proposal(proposal)
-    }
-
-    /// Ingests a raw `publishDiagnostics` notification batch from the worker.
-    fn ingest_lsp_diagnostic_batch(&mut self, raw_params: serde_json::Value) {
-        // Extract URI from params to look up the buffer.
-        let Some(uri) = raw_params.get("uri").and_then(|v| v.as_str()) else {
-            return;
-        };
-        // Convert file URI to a canonical path for lookup.
-        let canonical_path = uri_to_canonical_path(uri);
-        // Find the buffer_id for this URI.
-        let Some(buffer_id) = self.active_documents.buffer_id_for_path(&canonical_path) else {
-            return; // Not an open buffer; ignore (uri-filtered).
-        };
-        // Project + ingest through redaction layer.
-        let _ = self.ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &raw_params, true, None);
-    }
-
-    /// Returns true when the live LSP server advertises support for `capability`.
-    ///
-    /// If the server has not yet advertised capabilities (empty list, e.g. during
-    /// startup or when the session is idle/refused), returns `false` so callers
-    /// silently skip the request rather than firing into a dead session.
-    ///
-    /// An empty capability list from a live session is treated as *not supported*
-    /// (fail-closed) rather than "assume all" — callers must wait until capabilities
-    /// are populated by a successful `initialize` handshake.
-    fn lsp_server_supports_capability(&self, capability: &str) -> bool {
-        let Some(record) = self.lsp_session.health_record() else {
-            return false; // No session at all.
-        };
-        if record.capabilities.is_empty() {
-            // No capability list published yet (e.g. startup refused, or initialize
-            // has not been called). Fail-closed: do not fire the request.
-            return false;
-        }
-        record
-            .capabilities
-            .iter()
-            .any(|c| c.capability == capability && c.supported)
-    }
-
-    /// Issues a non-blocking LSP completion request on the worker thread.
-    ///
-    /// Returns `false` if the session is not Live, or if the server did not
-    /// advertise `completionProvider` in the initialize response (silent skip).
-    pub fn issue_lsp_completion_request(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-    ) -> bool {
-        if !self.lsp_server_supports_capability("completionProvider") {
-            return false;
-        }
-        let Some(meta) = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-        else {
-            return false;
-        };
-        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
-            return false;
-        };
-        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": position.line, "character": position.character }
-        });
-        let tag = crate::language::LspRequestTag {
-            buffer_id,
-            kind: crate::language::LspReadKind::Completion,
-            snapshot_id: snapshot.snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/completion", params, tag)
-    }
-
-    /// Issues a non-blocking LSP hover request on the worker thread.
-    ///
-    /// Returns `false` if the session is not Live, or if the server did not
-    /// advertise `hoverProvider` in the initialize response (silent skip).
-    pub fn issue_lsp_hover_request(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-    ) -> bool {
-        if !self.lsp_server_supports_capability("hoverProvider") {
-            return false;
-        }
-        let Some(meta) = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-        else {
-            return false;
-        };
-        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
-            return false;
-        };
-        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": position.line, "character": position.character }
-        });
-        let tag = crate::language::LspRequestTag {
-            buffer_id,
-            kind: crate::language::LspReadKind::Hover,
-            snapshot_id: snapshot.snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/hover", params, tag)
-    }
-
-    /// Issues a non-blocking LSP go-to-definition request on the worker thread.
-    ///
-    /// Returns `false` if the session is not Live, or if the server did not
-    /// advertise `definitionProvider` in the initialize response (silent skip).
-    pub fn issue_lsp_definition_request(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-    ) -> bool {
-        if !self.lsp_server_supports_capability("definitionProvider") {
-            return false;
-        }
-        let Some(meta) = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-        else {
-            return false;
-        };
-        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
-            return false;
-        };
-        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": position.line, "character": position.character }
-        });
-        let tag = crate::language::LspRequestTag {
-            buffer_id,
-            kind: crate::language::LspReadKind::Definition,
-            snapshot_id: snapshot.snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/definition", params, tag)
-    }
-
-    /// Issues a non-blocking LSP rename request on the worker thread
-    /// (PKT-LSP-C I-2).
-    ///
-    /// Sends `textDocument/rename` through the live session worker.  The result
-    /// arrives via [`LspWorkerResult::ReadResult`] with
-    /// [`LspReadKind::Rename { new_name }`] and is ingested by
-    /// [`ingest_lsp_rename_result`].
-    ///
-    /// Returns `false` if the session is not Live, or if the server did not
-    /// advertise `renameProvider` in the initialize response (silent skip).
-    ///
-    /// The resulting proposal enters the `Previewed` state. Call
-    /// [`approve_and_apply_rename_proposal`] to transition it through
-    /// `Approved` → `Applied` (PKT-APPLY Task 2c).
-    pub fn issue_lsp_rename_request(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-        new_name: String,
-    ) -> bool {
-        if !self.lsp_server_supports_capability("renameProvider") {
-            return false;
-        }
-        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
-    }
-
-    /// Test-only: issues a rename request bypassing the `renameProvider`
-    /// capability gate.  Needed for mock servers that do not advertise
-    /// `renameProvider` in their `initialize` response.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn issue_lsp_rename_request_for_test(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-        new_name: String,
-    ) -> bool {
-        self.issue_lsp_rename_request_inner(buffer_id, position, new_name)
-    }
-
-    /// Inner rename request sender — shared by the gated and ungated paths.
-    fn issue_lsp_rename_request_inner(
-        &mut self,
-        buffer_id: BufferId,
-        position: TextCoordinate,
-        new_name: String,
-    ) -> bool {
-        let Some(meta) = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .cloned()
-        else {
-            return false;
-        };
-        let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
-            return false;
-        };
-        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": position.line, "character": position.character },
-            "newName": new_name,
-        });
-        let tag = crate::language::LspRequestTag {
-            buffer_id,
-            kind: crate::language::LspReadKind::Rename { new_name },
-            snapshot_id: snapshot.snapshot_id,
-        };
-        self.lsp_session
-            .issue_request("textDocument/rename", params, tag)
     }
 
     /// Test-only: starts the LSP session using an explicit server binary path,
@@ -20308,6 +18972,459 @@ impl AppComposition {
         .map_or_else(Vec::new, |operands| operands.values())
     }
 
+    /// Insert at every cursor when more than one is active.
+    ///
+    /// Returns `None` for the ordinary single-cursor case, which keeps going
+    /// through the normal routing path — multi-cursor is an addition to
+    /// editing, not a replacement for it, and diverting the common case
+    /// through this would put every keystroke on a rarely-exercised branch.
+    fn dispatch_multi_cursor_insert(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let CommandDispatchIntent::Insert {
+            buffer_id, text, ..
+        } = intent
+        else {
+            return Ok(None);
+        };
+        let cursors: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(*buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        if cursors.len() < 2 {
+            return Ok(None);
+        }
+
+        let before = self.editor.text(*buffer_id)?.to_string();
+        let (after, moved) = legion_editor::multi_cursor::insert_at_all(&before, &cursors, text);
+
+        // One edit replacing the whole buffer, rather than N edits: the
+        // positions in a multi-cursor insert are only valid against the text
+        // they were computed from, and applying them one at a time through the
+        // normal path would invalidate each other's offsets.
+        let edit = TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(0, 0),
+                end_position(&before),
+            ),
+            after,
+        );
+        let outcome = self.apply_vim_edit(*buffer_id, edit, event_context)?;
+        self.editor.set_cursors(
+            *buffer_id,
+            moved
+                .into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(outcome))
+    }
+
+    /// Handle a multi-cursor intent, or return `None` if it is not one.
+    fn dispatch_cursor_intent(
+        &mut self,
+        intent: &CommandDispatchIntent,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let (buffer_id, delta) = match intent {
+            CommandDispatchIntent::AddCursorAbove { buffer_id } => (*buffer_id, -1),
+            CommandDispatchIntent::AddCursorBelow { buffer_id } => (*buffer_id, 1),
+            CommandDispatchIntent::ClearExtraCursors { buffer_id } => {
+                // Keep the primary and drop the rest, so leaving a multi-cursor
+                // set does not also move the caret.
+                let primary = self.editor.primary_cursor(*buffer_id)?;
+                self.editor.set_cursors(
+                    *buffer_id,
+                    vec![legion_editor::Cursor { position: primary }],
+                )?;
+                return Ok(Some(AppCommandOutcome::CursorSet(*buffer_id)));
+            }
+            _ => return Ok(None),
+        };
+
+        let text = self.editor.text(buffer_id)?.to_string();
+        let existing: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        let next = legion_editor::multi_cursor::add_vertical(&text, &existing, delta);
+        self.editor.set_cursors(
+            buffer_id,
+            next.into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
+    }
+
+    /// Handle a Vim modal-editing intent, or return `None` if it is not one.
+    ///
+    /// Separate from the pure router because resolving `w` needs the buffer's
+    /// text and its current cursor, and `CommandDispatcher` is deliberately
+    /// given neither.
+    ///
+    /// Motions become an ordinary `SetCursor`, so undo, projection and every
+    /// other cursor consumer stay unaware that Vim exists. Modal editing that
+    /// bypassed the normal cursor path would have to reimplement all of it.
+    fn dispatch_vim_intent(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::byte_to_character_column;
+
+        match intent {
+            CommandDispatchIntent::SetVimModeEnabled(enabled) => {
+                self.vim.set_enabled(*enabled);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimChangeMode(mode) => {
+                // Ignored when modal editing is off: a mode change with no Vim
+                // session is a request to enter a state the user cannot leave,
+                // because no key would be routed to the parser that exits it.
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::VimModeChanged(None)));
+                }
+                self.vim.state.set_mode(*mode);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimMotion { motion, count } => {
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                let Some(buffer_id) = self.active_documents.active_buffer_id else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let text = self.editor.text(buffer_id)?.to_string();
+                let position = self.editor.primary_cursor(buffer_id)?;
+
+                // Into character space, resolve, and back: the editor counts
+                // columns in bytes and Vim counts them in characters.
+                let from = legion_protocol::TextCoordinate {
+                    line: position.line as u32,
+                    character: byte_to_character_column(&text, position.line, position.column)
+                        as u32,
+                    byte_offset: None,
+                    utf16_offset: None,
+                };
+                let to = legion_ui::resolve_motion(&text, from, *motion, *count);
+                self.set_vim_cursor(buffer_id, &text, to)?;
+                Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
+            }
+            CommandDispatchIntent::VimOperatorMotion {
+                operator,
+                count,
+                motion,
+            } => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let Some(range) = legion_ui::resolve_operator_range(&text, from, *motion, *count)
+                else {
+                    // The motion did not move, so there is nothing to operate
+                    // on. Emitting an empty edit would cost an undo entry and
+                    // change nothing.
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
+            }
+            CommandDispatchIntent::VimLinewiseOperator { operator, count } => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let range = legion_ui::resolve_linewise_range(&text, from, *count);
+                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
+            }
+            CommandDispatchIntent::VimPut => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let Some(register) = self.vim.register.clone() else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                self.apply_vim_put(buffer_id, &text, from, &register, event_context)
+            }
+            CommandDispatchIntent::VimInsertBefore | CommandDispatchIntent::VimInsertAfter => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                // `a` is `i` one character to the right. Doing it as a motion
+                // keeps the line-end clamping in one place rather than
+                // repeating it here.
+                if matches!(intent, CommandDispatchIntent::VimInsertAfter) {
+                    let to =
+                        legion_ui::resolve_motion(&text, from, legion_ui::VimMotionKind::Right, 1);
+                    self.set_vim_cursor(buffer_id, &text, to)?;
+                }
+                self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+                Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )))
+            }
+            CommandDispatchIntent::VimInsertLineBelow
+            | CommandDispatchIntent::VimInsertLineAbove => {
+                let Some((buffer_id, _text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                let below = matches!(intent, CommandDispatchIntent::VimInsertLineBelow);
+                let line = from.line as usize;
+                // `o` opens below, `O` above; both leave the cursor on the new
+                // blank line in insert mode.
+                let at = legion_editor::TextPosition::new(if below { line + 1 } else { line }, 0);
+                let edit = TextEdit::new(legion_editor::TextRange::new(at, at), "\n".to_string());
+                let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
+                // The new line's start is where the edit went and where the
+                // cursor belongs; they are the same position, not two.
+                self.editor
+                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: at }])?;
+                self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+                Ok(Some(outcome))
+            }
+            CommandDispatchIntent::VimDeleteChar => {
+                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                };
+                // `x` takes the character under the cursor, which is a
+                // one-character inclusive range rather than any motion.
+                let line = from.line as usize;
+                let character = from.character as usize;
+                // Nothing under the cursor — an empty line, or past the end.
+                // Asked directly rather than by converting two columns and
+                // comparing them, which walked the line twice to learn one
+                // thing.
+                let line_chars = text.split('\n').nth(line).map(|l| l.chars().count());
+                if line_chars.is_none_or(|count| character >= count) {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                let range = legion_ui::VimRange {
+                    start: (line, character),
+                    end: (line, character + 1),
+                    linewise: false,
+                };
+                self.apply_vim_operator(
+                    buffer_id,
+                    &text,
+                    range,
+                    legion_ui::VimOperatorKind::Delete,
+                    event_context,
+                )
+            }
+            CommandDispatchIntent::VimSearchForward => {
+                if !self.vim.enabled {
+                    return Ok(Some(AppCommandOutcome::Noop));
+                }
+                // `/` opens the find bar the rest of the editor already has,
+                // rather than growing a second search UI that behaves almost
+                // but not quite the same.
+                self.buffer_search_state.find_bar_visible = true;
+                // The find-bar intents report Noop too; visibility is read
+                // from projection rather than carried in the outcome.
+                Ok(Some(AppCommandOutcome::Noop))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Move the cursor to a character-space coordinate.
+    fn set_vim_cursor(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        to: legion_protocol::TextCoordinate,
+    ) -> Result<(), AppCompositionError> {
+        let target = legion_editor::TextPosition::new(
+            to.line as usize,
+            crate::vim_session::character_to_byte_column(
+                text,
+                to.line as usize,
+                to.character as usize,
+            ),
+        );
+        self.editor
+            .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
+        Ok(())
+    }
+
+    /// Buffer, text and character-space cursor for a Vim command.
+    ///
+    /// `None` when modal editing is off or nothing is open — both are ordinary
+    /// states, not errors, so every Vim arm can bail the same way.
+    #[allow(clippy::type_complexity)]
+    fn vim_cursor_context(
+        &self,
+    ) -> Result<Option<(BufferId, String, legion_protocol::TextCoordinate)>, AppCompositionError>
+    {
+        use crate::vim_session::byte_to_character_column;
+        if !self.vim.enabled {
+            return Ok(None);
+        }
+        let Some(buffer_id) = self.active_documents.active_buffer_id else {
+            return Ok(None);
+        };
+        let text = self.editor.text(buffer_id)?.to_string();
+        let position = self.editor.primary_cursor(buffer_id)?;
+        let cursor = legion_protocol::TextCoordinate {
+            line: position.line as u32,
+            character: byte_to_character_column(&text, position.line, position.column) as u32,
+            byte_offset: None,
+            utf16_offset: None,
+        };
+        Ok(Some((buffer_id, text, cursor)))
+    }
+
+    /// Apply a Vim operator to an already-resolved range.
+    ///
+    /// Delete and change both fill the register first: Vim's delete is a cut,
+    /// so `dd` then `p` moves a line. Change additionally leaves the session in
+    /// insert mode, which is the whole difference between `c` and `d`.
+    fn apply_vim_operator(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        range: legion_ui::VimRange,
+        operator: legion_ui::VimOperatorKind,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::{VimRegister, character_to_byte_column};
+        use legion_ui::VimOperatorKind;
+
+        self.vim.register = Some(VimRegister {
+            text: legion_ui::range_text(text, range),
+            linewise: range.linewise,
+        });
+
+        if matches!(operator, VimOperatorKind::Yank) {
+            // A yank copies and leaves the buffer alone, so there is no edit
+            // and no undo entry.
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+
+        let edit = legion_editor::TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(
+                    range.start.0,
+                    character_to_byte_column(text, range.start.0, range.start.1),
+                ),
+                legion_editor::TextPosition::new(
+                    range.end.0,
+                    character_to_byte_column(text, range.end.0, range.end.1),
+                ),
+            ),
+            String::new(),
+        );
+        let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
+
+        if matches!(operator, VimOperatorKind::Change) {
+            self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
+        }
+        Ok(Some(outcome))
+    }
+
+    /// Put the register at the cursor.
+    ///
+    /// A line-wise register lands on its own line below; a char-wise one lands
+    /// after the cursor. Ignoring that distinction splices a whole line into
+    /// the middle of another, which is what makes `dd`/`p` useless.
+    fn apply_vim_put(
+        &mut self,
+        buffer_id: BufferId,
+        text: &str,
+        cursor: legion_protocol::TextCoordinate,
+        register: &crate::vim_session::VimRegister,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        use crate::vim_session::character_to_byte_column;
+
+        let line = cursor.line as usize;
+        let (position, payload) = if register.linewise {
+            let next_line_start = legion_editor::TextPosition::new(line + 1, 0);
+            (next_line_start, register.text.clone())
+        } else {
+            let column = character_to_byte_column(text, line, cursor.character as usize + 1);
+            (
+                legion_editor::TextPosition::new(line, column),
+                register.text.clone(),
+            )
+        };
+        let edit = legion_editor::TextEdit::new(
+            legion_editor::TextRange::new(position, position),
+            payload,
+        );
+        Ok(Some(self.apply_vim_edit(buffer_id, edit, event_context)?))
+    }
+
+    /// Apply a Vim-produced edit through the ordinary transaction path.
+    ///
+    /// Not `editor.apply_edit` directly: that skips the transaction
+    /// descriptor, the event emission and the LSP change notification, so a
+    /// buffer edited by Vim would be invisible to undo grouping and to the
+    /// language server while every other edit was not.
+    fn apply_vim_edit(
+        &mut self,
+        buffer_id: BufferId,
+        edit: TextEdit,
+        event_context: &EventContext,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        let descriptor = self.apply_edit_to_buffer_with_correlation(
+            buffer_id,
+            edit,
+            event_context.correlation_id,
+        )?;
+        self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(buffer_id, &descriptor);
+        Ok(AppCommandOutcome::Edited(descriptor))
+    }
+
+    /// Feed one keystroke to the Vim parser and dispatch what it resolves to.
+    ///
+    /// The desktop layer forwards raw keys rather than intents because the
+    /// parser is stateful — `d` then `w` is one command — and its state lives
+    /// here with the rest of the session. A shell that owned a second copy
+    /// would drift from this one the moment anything else changed the mode.
+    ///
+    /// A key that completes nothing returns `Noop`: a count digit or a pending
+    /// operator is the parser working, not a failure.
+    pub fn dispatch_vim_key(
+        &mut self,
+        key: char,
+        ctrl: bool,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        if !self.vim.enabled {
+            return Ok(AppCommandOutcome::Noop);
+        }
+        let Some(intent) = legion_ui::key_to_intent(&mut self.vim.state, key, ctrl) else {
+            return Ok(AppCommandOutcome::Noop);
+        };
+        self.dispatch_ui_intent(intent)
+    }
+
+    /// Whether keystrokes are Vim commands rather than typed text.
+    ///
+    /// The desktop layer asks before inserting a character: in normal mode a
+    /// `j` moves the cursor and must not also appear in the buffer.
+    pub fn vim_consumes_text_input(&self) -> bool {
+        !legion_ui::key_is_text_input(&self.vim.state, self.vim.enabled)
+    }
+
+    /// The Vim mode to display, or `None` when modal editing is off.
+    pub fn vim_display_mode(&self) -> Option<legion_ui::EditorInputMode> {
+        self.vim.display_mode()
+    }
+
+    /// Whether the buffer find bar is showing.
+    pub fn find_bar_visible(&self) -> bool {
+        self.buffer_search_state.find_bar_visible
+    }
+
     /// Route a UI dispatch intent through editor and workspace authorities.
     pub fn dispatch_ui_intent(
         &mut self,
@@ -20316,6 +19433,22 @@ impl AppComposition {
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
+        }
+
+        // Multi-cursor intents need the buffer's text to clamp a new cursor to
+        // a shorter line, which the pure router does not have.
+        if let Some(outcome) = self.dispatch_cursor_intent(&intent)? {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.dispatch_multi_cursor_insert(&intent, &event_context)? {
+            return Ok(outcome);
+        }
+
+        // Vim intents need the buffer's text and cursor, which the pure
+        // router does not have, so they are handled here for the same reason
+        // find/replace is.
+        if let Some(outcome) = self.dispatch_vim_intent(&intent, &event_context)? {
+            return Ok(outcome);
         }
 
         // Find/replace intents mutate buffer_search_state directly and return early.
@@ -20991,59 +20124,123 @@ impl AppComposition {
             AppCommandRequest::FindReferences {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
-            )),
-            AppCommandRequest::RefreshOutline { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_read(
-                    buffer_id,
-                    LanguageReadKind::Outline,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                )?),
-            ),
-            AppCommandRequest::RequestFormattingProposal { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::Formatting,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    "format".to_string(),
-                )?),
-            ),
+            } => {
+                // Issue async LSP references (non-blocking; result arrives next
+                // frame via drain). The index answer below is returned now so
+                // the panel is never empty while the server thinks.
+                self.issue_lsp_references_request(buffer_id, position, true);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
+                ))
+            }
+            AppCommandRequest::RefreshOutline { buffer_id } => {
+                // Issue async LSP documentSymbol (non-blocking; result arrives
+                // next frame via drain).
+                self.issue_lsp_document_symbol_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::Outline,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
+            AppCommandRequest::RefreshInlayHints { buffer_id } => {
+                // The index leg below runs and returns nothing useful: the
+                // lexical indexer does not infer types, so it has no inlay
+                // hints to offer. It is kept anyway because it is what records
+                // the operation and stamps the projection with this buffer's
+                // identity, so the surface has a row to update when the
+                // server's answer arrives rather than appearing from nowhere.
+                if let Some(range) = self.whole_document_utf16_range(buffer_id) {
+                    self.issue_lsp_inlay_hint_request(buffer_id, range);
+                }
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::InlayHints,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
+            AppCommandRequest::RefreshCodeLenses { buffer_id } => {
+                self.issue_lsp_code_lens_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_read(
+                        buffer_id,
+                        LanguageReadKind::CodeLens,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                    )?,
+                ))
+            }
+            AppCommandRequest::RequestFormattingProposal { buffer_id } => {
+                self.issue_lsp_formatting_request(buffer_id);
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::Formatting,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                        "format".to_string(),
+                    )?,
+                ))
+            }
             AppCommandRequest::RequestRenameProposal {
                 buffer_id,
                 position,
                 new_name,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::Rename,
-                    position,
-                    new_name,
-                )?,
-            )),
-            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => Ok(
-                AppCommandOutcome::LanguageToolingUpdated(self.run_language_proposal(
-                    buffer_id,
-                    LanguageProposalKind::OrganizeImports,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    "organize-imports".to_string(),
-                )?),
-            ),
+            } => {
+                // Ask the language server too. Its answer arrives on a later
+                // drain as its own proposal; the index-backed one below returns
+                // now so the surface is never blank. Neither writes anything —
+                // both stop at Previewed.
+                self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::Rename,
+                        position,
+                        new_name,
+                    )?,
+                ))
+            }
+            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => {
+                if let Some(range) = self.whole_document_utf16_range(buffer_id) {
+                    self.issue_lsp_code_action_request(buffer_id, range, true);
+                }
+                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                    self.run_language_proposal(
+                        buffer_id,
+                        LanguageProposalKind::OrganizeImports,
+                        TextCoordinate {
+                            line: 0,
+                            character: 0,
+                            byte_offset: Some(0),
+                            utf16_offset: Some(0),
+                        },
+                        "organize-imports".to_string(),
+                    )?,
+                ))
+            }
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
                 action_id,

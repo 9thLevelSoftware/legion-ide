@@ -72,6 +72,27 @@ pub enum LspReadKind {
     Hover,
     /// Go-to-definition request (`textDocument/definition`).
     Definition,
+    /// References request (`textDocument/references`).
+    References,
+    /// Document-symbol request (`textDocument/documentSymbol`).
+    ///
+    /// Named `Outline` rather than `DocumentSymbol` to match
+    /// `LanguageReadKind::Outline`, which is what the projection calls it.
+    Outline,
+    /// Inlay-hint request (`textDocument/inlayHint`).
+    InlayHints,
+    /// Code-lens request (`textDocument/codeLens`).
+    CodeLens,
+    /// Formatting request (`textDocument/formatting`).
+    Formatting,
+    /// Code-action request (`textDocument/codeAction`).
+    CodeAction {
+        /// Whether the request was narrowed to `source.organizeImports`.
+        ///
+        /// Organize-imports is a code action with a kind rather than a request
+        /// of its own, so the two share a wire call and are told apart here.
+        organize_imports: bool,
+    },
     /// Rename request (`textDocument/rename`).
     ///
     /// Carries the replacement identifier so the drain-side handler can

@@ -33,6 +33,9 @@ use uuid::Uuid;
 
 pub use legion_text::{TextEdit, TextPosition, TextRange};
 
+/// Multiple cursors: creating them, and editing at all of them at once.
+pub mod multi_cursor;
+
 /// Editor operation errors.
 #[derive(Debug, Error)]
 pub enum EditorError {
@@ -347,6 +350,12 @@ struct EditorBufferState {
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
     current_snapshot: legion_text::TextSnapshot,
+    /// Whether the text was streamed from disk rather than handed over whole.
+    ///
+    /// Not derivable after the fact: a streamed buffer and one built from a
+    /// `String` of the same size look identical once loaded, and only the
+    /// former never had the whole file in memory.
+    streamed: bool,
     save_state: FileConflictLifecycleState,
     save_diagnostics: Vec<ProtocolDiagnostic>,
     conflict_state: Option<FileConflictState>,
@@ -360,6 +369,7 @@ impl EditorBufferState {
         file_path: impl Into<String>,
         mut buffer: TextBuffer,
         mode: BufferMode,
+        streamed: bool,
     ) -> Result<Self, EditorError> {
         buffer.set_version(BufferVersion(0));
         let current_snapshot =
@@ -372,6 +382,7 @@ impl EditorBufferState {
             file_path: file_path.into(),
             buffer,
             mode,
+            streamed,
             dirty: false,
             cursors: vec![Cursor {
                 position: TextPosition::zero(),
@@ -633,8 +644,17 @@ impl EditorEngine {
             BufferVersion(0),
             matches!(mode, BufferMode::Normal),
         )?;
-        let state =
-            EditorBufferState::build(workspace_id, buffer_id, file_id, file_path, buffer, mode)?;
+        let state = EditorBufferState::build(
+            workspace_id,
+            buffer_id,
+            file_id,
+            file_path,
+            buffer,
+            mode,
+            // Handed a complete String: the whole file was in memory
+            // before this call, so it is not streamed however large it is.
+            false,
+        )?;
         self.retain_snapshot_descriptor(buffer_id, state.current_snapshot.descriptor());
         self.file_to_buffer
             .insert((workspace_id, file_id), buffer_id);
@@ -727,6 +747,7 @@ impl EditorEngine {
             file_path_str,
             buffer,
             mode,
+            true,
         )?;
         self.retain_snapshot_descriptor(buffer_id, state.current_snapshot.descriptor());
         self.file_to_buffer
@@ -1116,9 +1137,14 @@ impl EditorEngine {
             .first()
             .map(|cursor| cursor.position)
             .unwrap_or_else(TextPosition::zero);
-        let mode = match state.mode {
-            BufferMode::Normal => ViewportProjectionMode::Normal,
-            BufferMode::Degraded => ViewportProjectionMode::DegradedLargeFile,
+        // A streamed buffer is reported as streaming even though its
+        // `BufferMode` is also Degraded: both defer overlays, but only the
+        // streamed one never had the whole file in memory, and that is the
+        // difference a user needs told.
+        let mode = match (state.mode, state.streamed) {
+            (BufferMode::Normal, _) => ViewportProjectionMode::Normal,
+            (BufferMode::Degraded, true) => ViewportProjectionMode::StreamingLargeFile,
+            (BufferMode::Degraded, false) => ViewportProjectionMode::DegradedLargeFile,
         };
 
         Ok(ViewportProjection {
@@ -1973,6 +1999,47 @@ impl EditorEngine {
             .ok_or(EditorError::BufferNotFound(buffer_id))?
             .redo_stack
             .len())
+    }
+
+    /// The buffer's primary cursor.
+    ///
+    /// The first cursor is the primary one — the same one viewport projection
+    /// reports. A buffer is seeded with one at open and the set is never
+    /// emptied, so this returns a position rather than an option. Callers that
+    /// need every cursor for multi-cursor editing should use
+    /// [`cursors`](Self::cursors).
+    pub fn primary_cursor(&self, buffer_id: BufferId) -> Result<TextPosition, EditorError> {
+        let state = self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?;
+        Ok(state
+            .cursors
+            .first()
+            .map(|cursor| cursor.position)
+            .expect("BufferState is constructed with one cursor and never empties them"))
+    }
+
+    /// Whether a buffer's text was streamed from disk.
+    ///
+    /// Exposed separately from the viewport because a caller deciding what to
+    /// offer — a whole-file search, a formatter — needs the answer without
+    /// building a projection first.
+    pub fn buffer_is_streamed(&self, buffer_id: BufferId) -> Result<bool, EditorError> {
+        Ok(self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .streamed)
+    }
+
+    /// Every cursor for a buffer, in stored order.
+    pub fn cursors(&self, buffer_id: BufferId) -> Result<&[Cursor], EditorError> {
+        Ok(&self
+            .buffers
+            .get(&buffer_id)
+            .ok_or(EditorError::BufferNotFound(buffer_id))?
+            .cursors)
     }
 
     /// Replace cursors for a buffer.

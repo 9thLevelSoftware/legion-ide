@@ -762,7 +762,11 @@ fn workspace_vfs_integration_large_file_projection_omits_full_source_text() {
 
     assert!(projection.degraded);
     assert!(projection.small_buffer_text().is_none());
-    assert_eq!(viewport.mode, ViewportProjectionMode::DegradedLargeFile);
+    // The app opens files through the streaming path, so a large file
+    // reports `StreamingLargeFile`. `DegradedLargeFile` remains reachable
+    // for callers that hand `open_buffer` a complete String.
+    assert_eq!(viewport.mode, ViewportProjectionMode::StreamingLargeFile);
+    assert!(viewport.mode.defers_whole_file_work());
     let status = viewport
         .large_file_status
         .as_ref()
@@ -801,7 +805,7 @@ fn workspace_vfs_integration_large_file_projection_omits_full_source_text() {
     assert!(shell_active.small_buffer_text().is_none());
     assert_eq!(
         shell_viewport.mode,
-        ViewportProjectionMode::DegradedLargeFile
+        ViewportProjectionMode::StreamingLargeFile
     );
     assert!(shell_viewport.large_file_status.is_some());
     assert!(shell_payload_bytes < text_len / 32);

@@ -275,3 +275,192 @@ caught by a repo-wide marker sweep before any push, resolved, amended.
 | xtask perf-harness + verify-perf-harness | PASS |
 | cargo deny check | PASS |
 | xtask rust-analyzer-smoke | PASS (real rust-analyzer 1.95.0) |
+
+---
+
+## P2.F1.T3 closure — 2026-08-16
+
+The task read "wire diagnostics to gutter/problems panel through desktop
+harness," with the stop condition "stop if diagnostics are wired only to the app
+API and not to the desktop harness." Three things had to be true, and only two
+were.
+
+**Acceptance — a real Rust diagnostic appears and clears after fixing.** GP-1
+step s3 does exactly this against a real rust-analyzer, on a throwaway copy of
+`fixtures/gp1-rust`:
+
+```
+cargo run -p xtask -- golden-path-1        # exit 0
+  s3 passed (31716ms): error introduced, detected, fixed, cleared
+```
+
+**Stop condition — reached through the desktop harness, not just the app API.**
+`crates/legion-desktop/tests/diagnostics_harness.rs::
+desktop_runtime_projects_publish_diagnostics_and_clears_them_again` drives a
+`DesktopRuntime`, not an `AppComposition`, so the projection is proven to reach
+the surface that paints.
+
+**The gutter had no test.** `paint_diagnostic_underlines` in
+`crates/legion-desktop/src/view.rs` decided, per line, which characters a
+diagnostic underlines — clamping multi-line ranges to the visible line, skipping
+empty spans — and nothing exercised it. A painter cannot be tested without a
+frame, so the decision was extracted to `diagnostic_underline_span(line_zero,
+line_chars, range) -> Option<(u32, u32)>`, a pure function the painter now calls.
+Five tests in `view.rs` cover it:
+
+```
+cargo test -p legion-desktop --lib
+test view::tests::a_single_line_diagnostic_underlines_its_own_columns ... ok
+test view::tests::a_diagnostic_on_another_line_underlines_nothing ... ok
+test view::tests::a_multi_line_diagnostic_is_clipped_to_each_line_it_crosses ... ok
+test view::tests::an_empty_span_is_not_painted ... ok
+test view::tests::a_range_ending_at_the_start_of_a_later_line_does_not_underline_it ... ok
+test result: ok. 79 passed; 0 failed
+```
+
+The clipping case is the one worth having: a range spanning lines 2–4 must
+underline from column 6 to end-of-line on line 2, the whole of line 3, and
+columns 0–3 on line 4. A range ending at character 0 of a later line underlines
+nothing on that line, which is the off-by-one that would otherwise have painted a
+stray mark under the first character of the line after an error.
+
+**Workspace state at closure:** `cargo test --workspace --all-targets
+--no-fail-fast` — 257 suites, 2963 passed, 0 failed. `cargo clippy --workspace
+--all-targets -- -D warnings` — clean.
+
+**Not claimed:** the underline geometry is measured in characters against a
+fixed `char_width`, which is correct for the monospace fonts the editor ships
+and wrong for proportional ones. That is the existing painter's assumption, not
+a new one, and it is unchanged here.
+
+---
+
+## P2.F1.T4 closure — 2026-08-16
+
+The task named eight features: completion, hover, definition, references,
+symbols, inlay hints, code lenses, runnables. Acceptance: "each LSP feature is
+reachable from the editor and is covered by a test." Stop condition: "do not
+implement features that are not requested by the LSP server's capability set."
+
+### What was and was not already true
+
+Three of the eight — completion, hover, definition — reached the live language
+server, via `issue_lsp_*_request`, gated on the capability the server advertised
+at `initialize`. That is the pattern this task extends.
+
+References and outline were reachable from the editor (`:references`,
+`:outline`, and `DesktopAction::RefreshOutline`) but were answered entirely by
+Legion's own `LexicalIndexer` — the language server was never asked. Inlay hints
+and code lenses had a protocol DTO, a projector in `legion-lsp`, an ingest
+method in `legion-app`, and no way whatsoever to ask for them: nothing in the
+shell, the intent enum, or the desktop bridge could reach them.
+
+### The extraction commit came first
+
+`3146bef` moved 556 lines — `drain_lsp_session` through
+`issue_lsp_rename_request_inner` — from `lib.rs` into
+`crates/legion-app/src/language/lsp_reads.rs`, unchanged except for widening one
+method to `pub(crate)`, which a child module calling into the crate root
+requires. Cross-cutting rule 1. The feature diff below is readable because of it.
+
+### What changed
+
+- Four `LspReadKind` variants (`References`, `Outline`, `InlayHints`,
+  `CodeLens`) and four `issue_lsp_*_request` methods, each gated on its own
+  advertised capability — `referencesProvider`, `documentSymbolProvider`,
+  `inlayHintProvider`, `codeLensProvider`.
+- Drain-side routing for all four to the ingest methods that already existed.
+- `:references` and `:outline` now ask the server as well as the index. The
+  index answer still returns synchronously so the panel is never empty while the
+  server thinks; the server's answer merges in on the next drain. This is
+  exactly how completion, hover and definition already behaved.
+- Two new intents, `RefreshInlayHints` and `RefreshCodeLenses`, reachable as
+  `:inlayhints` and `:codelens` and as `DesktopAction`s.
+- **Runnables were named wrongly.** rust-analyzer publishes Run and Debug as
+  code lenses whose `command` is `rust-analyzer.runSingle` — a handle into
+  rust-analyzer's private protocol, not a command. Putting the handle in a field
+  called `command_label` makes the lens describe itself wrongly everywhere it is
+  shown or written to the audit log. `runnable_command_line` now assembles the
+  real invocation from the lens's `cargoArgs`/`executableArgs`, element by
+  element, and marks the lens `lsp.codelens.runnable`, which is the marker
+  activation gates on. A runnable command with no `cargoArgs` falls through to
+  the ordinary path rather than advertising a Run action with nothing behind it.
+  See "Not claimed" below: this fixes the naming, not the execution.
+
+### Tests
+
+```
+cargo test -p legion-app --test app_lsp_composition        # 22 passed
+  t4_new_reads_skip_when_the_server_does_not_advertise_them
+  t4_new_reads_fire_only_for_their_own_advertised_capability
+  t4_inlay_hint_range_runs_one_line_past_the_last
+  t4_read_source_label_does_not_invent_a_server_name
+
+cargo test -p legion-app --test lsp_read_drain_routing     # 6 passed
+  a_references_result_lands_in_the_projection_as_locations
+  a_document_symbol_result_lands_in_the_projection_as_an_outline
+  an_inlay_hint_result_lands_in_the_projection_attributed_to_the_server
+  a_code_lens_result_lands_in_the_projection_and_carries_its_command
+  a_result_does_not_leak_into_a_feature_it_was_not_tagged_for
+  the_new_refresh_intents_dispatch_and_are_recorded_as_their_own_operations
+
+cargo test -p legion-ui --test lsp_read_commands           # 4 passed
+cargo test -p legion-lsp --test code_lens_runnables        # 5 passed
+```
+
+Two of those are worth naming. `a_result_does_not_leak_into_a_feature_it_was_not_tagged_for`
+feeds an outline-shaped payload under the references tag and asserts the outline
+stays empty — without it, four tests each asserting only their own field would
+still pass if the routing collapsed every kind into one ingest, which is the
+failure mode that silently kills a feature.
+`t4_new_reads_fire_only_for_their_own_advertised_capability` advertises three of
+four capabilities and withholds the fourth, proving the gate reads its own key
+rather than merely checking that some capability list is non-empty. That gate is
+the stop condition.
+
+### Workspace state at closure
+
+`cargo test --workspace --all-targets --no-fail-fast` — 260 suites, 2982 passed,
+0 failed. `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+`docs-hygiene`, `claim-audit`, `verify-kanban-backlog`,
+`verify-readiness-consistency`, `check-deps`, `no-egui-textedit` — all exit 0.
+
+### Not claimed
+
+**Inlay hints are requested for the whole document, not the viewport.** The
+editor does not plumb its visible line range down to this layer, so
+`whole_document_utf16_range` asks for everything. That is correct and, on a
+large file, wasteful — inlay hints are range-scoped by the server precisely so a
+client need not pay for hints nobody can see. `issue_lsp_inlay_hint_request`
+takes a range rather than computing one so that narrowing it later is a caller
+change, not a redesign.
+
+**No real-server run of the four new features.** They are covered by injected
+worker results through the real drain path, which proves the routing; GP-1 does
+not yet exercise inlay hints or runnables against a live rust-analyzer. Adding a
+GP-1 stage for them is separate work.
+
+**Runnables are projected, not executed.** `ActivateLanguageCodeLens` and the
+test explorer both pass the lens's `command_label` to `TerminalWorkflow::launch`,
+which spawns the configured shell from `effective_shell_command()` and uses the
+label only for the projection message and the audit line. Activating a Run lens
+opens a terminal; it does not run the test. Wiring real execution is separate
+work, and its right shape is an argv vector handed to the process API without a
+shell — not this string.
+
+**The label is checked, not escaped.** Because a caller may one day run it,
+`is_plain_command_argument` refuses any argument carrying a control character or
+a shell metacharacter, and such a lens is not treated as runnable at all. A
+refusal rather than an escape on purpose: escaping is a game the defender
+eventually loses, and a real cargo argument contains none of those characters.
+`bounded_lsp_label` truncates by byte length and does nothing else.
+
+### Correction (2026-08-16, same day)
+
+An earlier draft of this section said that without this change
+`ActivateLanguageCodeLens` and the test explorer "would have launched the literal
+string `rust-analyzer.runSingle` in a shell," and that the terminal policy gate
+was "what mediates it." Both are wrong, and the error was mine — caught in
+review. Nothing executes `command_label`; there is no such mediation because
+there is no execution. The change fixes what a runnable lens is *called* and
+recorded as. It does not make runnables run, and the paragraph above now says so.
