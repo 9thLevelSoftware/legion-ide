@@ -29,6 +29,51 @@ use crate::state::DapLifecycleState;
 /// debugging, not for display.
 const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
 
+/// How long an error path waits for the stderr reader to catch up.
+///
+/// Long enough for a thread that has just been spawned to read a line that is
+/// already in the pipe; short enough that no error is noticeably slower to
+/// report.
+const STDERR_SETTLE: Duration = Duration::from_millis(250);
+
+/// Format captured stderr as a trailing clause for an error message.
+///
+/// Waits briefly when the capture is empty. The errors that want stderr are
+/// raised the instant stdout breaks — the Windows dogfood failure reaches
+/// `unexpected EOF in headers` in 20ms — and the reader thread may not have
+/// been scheduled yet, let alone read a line. Formatting immediately loses the
+/// message to a race and reports the same bare frame error the capture was
+/// added to explain. The wait is bounded and only on error paths.
+///
+/// When nothing arrives the clause says so rather than being omitted: "the
+/// adapter said nothing" and "we failed to capture what it said" are different
+/// diagnoses, and an absent clause cannot tell them apart.
+fn stderr_clause(sink: &Arc<Mutex<String>>) -> String {
+    let deadline = Instant::now() + STDERR_SETTLE;
+    loop {
+        match sink.lock() {
+            Ok(captured) if !captured.trim().is_empty() => break,
+            Ok(_) => {}
+            Err(_) => return String::new(),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Ok(captured) = sink.lock() else {
+        return String::new();
+    };
+    let trimmed = captured.trim();
+    if trimmed.is_empty() {
+        return "; adapter stderr: <empty>".to_string();
+    }
+    // Bounded: an adapter that logs heavily must not turn one error into a
+    // page of unrelated output.
+    let shown: String = trimmed.chars().take(400).collect();
+    format!("; adapter stderr: {shown}")
+}
+
 /// Drain a reader into `sink` on a background thread, a line at a time.
 ///
 /// Line at a time rather than `read_to_string`: the latter returns at EOF,
@@ -725,17 +770,7 @@ impl LiveDapSession {
 
     /// Whatever the adapter wrote to stderr, as a trailing clause.
     fn stderr_suffix(&self) -> String {
-        let Ok(captured) = self.stderr.lock() else {
-            return String::new();
-        };
-        let trimmed = captured.trim();
-        if trimmed.is_empty() {
-            return String::new();
-        }
-        // Bounded: an adapter that logs heavily must not turn one error into a
-        // page of unrelated output.
-        let shown: String = trimmed.chars().take(400).collect();
-        format!("; adapter stderr: {shown}")
+        stderr_clause(&self.stderr)
     }
 
     fn alloc_seq(&mut self) -> u64 {
@@ -855,6 +890,51 @@ mod stderr_capture_tests {
         );
         // `_release` is still held: the reader has not seen EOF, and the
         // assertions above already passed.
+    }
+
+    #[test]
+    fn a_clause_waits_for_stderr_that_has_not_arrived_yet() {
+        // The Windows dogfood failure reaches `unexpected EOF in headers` in
+        // 20ms. Formatting the error immediately raced the reader thread and
+        // printed the bare frame error — the exact message the capture was
+        // added to explain.
+        let sink = Arc::new(Mutex::new(String::new()));
+        let writer = Arc::clone(&sink);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            writer.lock().expect("sink").push_str(
+                "error: unable to find executable
+",
+            );
+        });
+
+        let clause = stderr_clause(&sink);
+        assert!(
+            clause.contains("unable to find executable"),
+            "the clause must wait for stderr that is still in flight; got {clause:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_capture_says_so_rather_than_vanishing() {
+        // "The adapter said nothing" and "we failed to capture what it said"
+        // are different diagnoses. An omitted clause cannot tell them apart,
+        // and that ambiguity is what made the first Windows failure unreadable.
+        let sink = Arc::new(Mutex::new(String::new()));
+        let clause = stderr_clause(&sink);
+        assert_eq!(clause, "; adapter stderr: <empty>");
+    }
+
+    #[test]
+    fn the_wait_is_bounded() {
+        let sink = Arc::new(Mutex::new(String::new()));
+        let started = Instant::now();
+        let _ = stderr_clause(&sink);
+        let waited = started.elapsed();
+        assert!(
+            waited < STDERR_SETTLE * 4,
+            "an error path must not stall on a silent adapter; waited {waited:?}"
+        );
     }
 
     #[test]
