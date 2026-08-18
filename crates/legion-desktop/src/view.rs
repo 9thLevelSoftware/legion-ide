@@ -5031,14 +5031,18 @@ fn render_test_controls(
         .code_lenses
         .iter()
         .filter(|lens| lens.kind_label.contains("runnable"))
-        .take(6)
         .collect();
+    // Bounded, but never silently: a file with forty tests would otherwise
+    // paper the panel, and a cap with nothing to show for it is the same
+    // invisible-capability problem one size smaller.
+    const VISIBLE_RUNNABLES: usize = 6;
+    let omitted_runnables = runnables.len().saturating_sub(VISIBLE_RUNNABLES);
     if !runnables.is_empty()
         && let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id
     {
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::label("Runnables"));
-            for lens in runnables {
+            for lens in runnables.iter().take(VISIBLE_RUNNABLES) {
                 if soft_button(ui, &lens.title)
                     .on_hover_text(&lens.command_label)
                     .clicked()
@@ -5048,6 +5052,9 @@ fn render_test_controls(
                         lens_id: lens.lens_id.clone(),
                     });
                 }
+            }
+            if omitted_runnables > 0 {
+                ui.label(theme::muted(format!("+{omitted_runnables} more")));
             }
         });
     }

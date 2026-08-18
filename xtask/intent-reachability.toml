@@ -13,10 +13,13 @@ intent_source = "crates/legion-ui/src/ui.rs"
 intent_enum = "CommandDispatchIntent"
 
 # Every route a gesture can travel to an intent.
+#
+# The renderer is deliberately absent. `view.rs` and its `view/` submodules
+# name `DesktopAction`, never `CommandDispatchIntent` — the bridge is where a
+# gesture becomes an intent — so listing them adds no evidence and misleads a
+# reader about where routes are declared. That asymmetry is also why this gate
+# does not yet cover `DesktopAction`; see the scope note in the evidence file.
 route_sources = [
-  # The renderer: rail, panels, palette controls, code canvas.
-  "crates/legion-desktop/src/view.rs",
-  "crates/legion-desktop/src/view",
   # Gesture translation and the keyboard handler.
   "crates/legion-desktop/src/bridge.rs",
   "crates/legion-desktop/src/workflow.rs",

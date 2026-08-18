@@ -25,9 +25,9 @@ by chance is not a plan.
 
 `CommandDispatchIntent` is the whole vocabulary of things the product can be
 asked to do. The gate enumerates its variants and requires each to be named by
-some file that can turn a gesture into it — the renderer and its `view/`
-submodules, the bridge, the keyboard handler, the `:` command line, Vim
-mappings, and the palette's string-keyed table in `legion-app`.
+some file that can turn a gesture into it — the bridge, the keyboard handler,
+the `:` command line, Vim mappings, and the palette's string-keyed table in
+`legion-app`.
 
 An intent with no route fails the build unless `xtask/intent-reachability.toml`
 allowlists it **with a written reason**. Three further rules keep the allowlist
@@ -105,3 +105,15 @@ The gate checks `CommandDispatchIntent` only. `DesktopAction` has the same
 failure mode in the other direction — an action no control produces — and is
 not covered here. Worth adding once this one has proven itself in CI rather
 than widening an unproven gate on its first day.
+
+Review pointed out that the renderer was listed in `route_sources` and
+contributes nothing: `view.rs` and its submodules name `DesktopAction`, never
+`CommandDispatchIntent`, because the bridge is where a gesture becomes an
+intent. The entries are gone and the config now records why. That asymmetry is
+the same reason a `DesktopAction` gate would be the useful complement rather
+than a duplicate.
+
+Review also caught a silent `.take(6)` on the new runnables row — a cap with
+nothing to show for it, which is the invisible-capability problem one size
+smaller. The cap stays, because a file with forty tests would paper the panel,
+but the remainder is now reported as `+N more`.
