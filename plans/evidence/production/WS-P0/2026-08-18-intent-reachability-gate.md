@@ -75,8 +75,14 @@ useful part:
 - `PrepareCallHierarchy`, `ShowIncomingCalls`, `ShowOutgoingCalls` all route to
   `AppCommandRequest::Noop`. These are not unreachable features; they are
   unbuilt ones. The `legion-lsp` protocol layer is complete and contract-tested
-  with no app plumbing behind it. Tracked by roadmap 1.6, "wire call-hierarchy
-  app stub".
+  with no app plumbing behind it. Tracked by backlog task **P2.F1.T6**.
+
+  That task was created on 2026-08-18, when the citation was checked and found
+  to point at nothing: the reasons named a "roadmap 1.6" that exists in no
+  document, the roadmap itself deferring work items to the kanban backlog. An
+  allowlist entry whose reason cites a phantom tracker is the rot the reason
+  requirement exists to prevent, and it survived a day because the gate checks
+  that a reason is *present*, not that it is *true*.
 
 A seventh candidate, `Noop`, was allowlisted on the first draft and the
 staleness rule immediately rejected it: it *is* produced from the desktop. The

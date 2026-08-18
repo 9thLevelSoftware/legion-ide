@@ -725,6 +725,19 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     stop_condition = "Write-side actions must never bypass the proposal pipeline."
     notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply activation (P3.F1.T2) is deferred to M9; this task stays in-progress until the apply path lands."
 
+    [[epics.features.tasks]]
+    id = "P2.F1.T6"
+    title = "Wire the call-hierarchy app stub so incoming/outgoing calls reach a panel"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    status = "todo"
+    files = ["crates/legion-app/src/language/intent_routing.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-desktop/src/bridge.rs"]
+    dependencies = ["P2.F1.T4"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-app", "cargo run -p xtask -- intent-reachability"]
+    acceptance = ["Incoming and outgoing calls for the symbol under the caret are listed in a reachable panel, and the three call-hierarchy intents are removed from the intent-reachability allowlist."]
+    stop_condition = "Do not add a control before the intents do something: a button wired to Noop is the defect the intent-reachability gate exists to catch."
+    notes = "Split from P2.F1.T4, which shipped the rest of the read-side navigation set. See `xtask/intent-reachability.toml` for why the three intents are allowlisted rather than wired."
+
   [[epics.features]]
   id = "P2.F2"
   title = "Real terminal runtime"
