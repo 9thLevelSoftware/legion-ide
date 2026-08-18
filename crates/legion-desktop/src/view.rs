@@ -2977,6 +2977,8 @@ fn key_label_to_egui(label: &str) -> Option<egui::Key> {
         "F11" => Some(egui::Key::F11),
         "F12" => Some(egui::Key::F12),
         "Escape" => Some(egui::Key::Escape),
+        "ArrowUp" => Some(egui::Key::ArrowUp),
+        "ArrowDown" => Some(egui::Key::ArrowDown),
         _ => None,
     }
 }
@@ -3005,6 +3007,8 @@ fn action_label_to_desktop_action(
         "FindPrevious" => Some(DesktopAction::FindPrevious),
         "Undo" => Some(DesktopAction::Undo),
         "Redo" => Some(DesktopAction::Redo),
+        "AddCursorAbove" => Some(DesktopAction::AddCursorAbove { buffer_id: None }),
+        "AddCursorBelow" => Some(DesktopAction::AddCursorBelow { buffer_id: None }),
         "GoToDefinition" => Some(DesktopAction::GoToDefinition {
             position: projected_cursor(snapshot),
         }),

@@ -17616,6 +17616,66 @@ impl AppComposition {
         Ok(Some(outcome))
     }
 
+    /// Delete backwards at every cursor when more than one is active.
+    ///
+    /// The mirror of [`Self::dispatch_multi_cursor_insert`], and needed for the
+    /// same reason: without it, typing reaches every cursor but Backspace
+    /// reaches only the caret, so a multi-cursor edit could be made and not
+    /// unmade. `None` keeps the ordinary single-cursor case on the normal path.
+    ///
+    /// The incoming range is ignored deliberately. It was computed by the
+    /// renderer from the active cursor alone and describes one deletion;
+    /// `delete_before_all` recomputes every position from the text, which is
+    /// the only view that stays valid once the first character is removed.
+    fn dispatch_multi_cursor_delete(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let CommandDispatchIntent::Delete { buffer_id, .. } = intent else {
+            return Ok(None);
+        };
+        let cursors: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(*buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        if cursors.len() < 2 {
+            return Ok(None);
+        }
+
+        let before = self.editor.text(*buffer_id)?.to_string();
+        let (after, moved) = legion_editor::multi_cursor::delete_before_all(&before, &cursors);
+        if after == before {
+            // No cursor had anything before it to delete. Hard to reach —
+            // `delete_before_all` skips only offset zero, and normalization
+            // leaves at most one cursor there — but an empty edit would push an
+            // undo step that undoes nothing, which is worse than a branch that
+            // rarely runs.
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+
+        // One whole-buffer edit, for the same reason as the insert path: the
+        // positions are valid only against the text they were computed from.
+        let edit = TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(0, 0),
+                end_position(&before),
+            ),
+            after,
+        );
+        let outcome = self.apply_vim_edit(*buffer_id, edit, event_context)?;
+        self.editor.set_cursors(
+            *buffer_id,
+            moved
+                .into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(outcome))
+    }
+
     /// Handle a multi-cursor intent, or return `None` if it is not one.
     fn dispatch_cursor_intent(
         &mut self,
@@ -18033,6 +18093,9 @@ impl AppComposition {
             return Ok(outcome);
         }
         if let Some(outcome) = self.dispatch_multi_cursor_insert(&intent, &event_context)? {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.dispatch_multi_cursor_delete(&intent, &event_context)? {
             return Ok(outcome);
         }
 
