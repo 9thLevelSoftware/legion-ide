@@ -20,11 +20,12 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    path::Path,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
 };
+
+mod common;
+use common::TempWorkspace;
 
 use legion_desktop::{
     bridge::DesktopAction,
@@ -34,7 +35,6 @@ use legion_desktop::{
 const SCREEN_W: f32 = 1_600.0;
 const SCREEN_H: f32 = 1_000.0;
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// These tests share a process-wide egui/font cache and temp-dir namespace.
@@ -42,48 +42,6 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
     match TEST_LOCK.get_or_init(|| Mutex::new(())).lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-struct TempWorkspace {
-    root: PathBuf,
-}
-
-impl TempWorkspace {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "legion_desktop_shell_affordances_{}_{}_{}",
-            std::process::id(),
-            nanos,
-            id
-        ));
-        fs::create_dir(&root).expect("temp workspace should be created");
-        Self { root }
-    }
-
-    fn path(&self) -> &Path {
-        &self.root
-    }
-
-    fn write(&self, name: &str, content: &str) {
-        fs::write(self.root.join(name), content).expect("temp file should be written");
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        let temp_root = std::env::temp_dir();
-        let file_name = self.root.file_name().and_then(|name| name.to_str());
-        if self.root.starts_with(&temp_root)
-            && file_name.is_some_and(|name| name.starts_with("legion_desktop_shell_affordances_"))
-        {
-            let _ = fs::remove_dir_all(&self.root);
-        }
     }
 }
 
@@ -230,7 +188,7 @@ fn open_tab_titles(app: &DesktopEframeApp) -> Vec<(String, bool)> {
 #[test]
 fn clicking_a_rail_button_does_not_stop_the_editor_accepting_keystrokes() {
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("focus.txt", "seed\n");
     let mut app = open_app(workspace.path());
     open_file(&mut app, "focus.txt");
@@ -256,7 +214,7 @@ fn clicking_a_rail_button_does_not_stop_the_editor_accepting_keystrokes() {
 #[test]
 fn closing_the_settings_overlay_leaves_the_editor_usable() {
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("focus.txt", "seed\n");
     let mut app = open_app(workspace.path());
     open_file(&mut app, "focus.txt");
@@ -280,7 +238,7 @@ fn closing_the_settings_overlay_leaves_the_editor_usable() {
 #[test]
 fn clicking_a_tabs_close_button_closes_that_tab() {
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("alpha.txt", "alpha\n");
     workspace.write("beta.txt", "beta\n");
     let mut app = open_app(workspace.path());
@@ -312,7 +270,7 @@ fn a_tabs_close_button_does_not_merely_switch_to_that_tab() {
     // close on an inactive tab activated it instead — which looks like the
     // button "not working" rather than like a hit-testing order bug.
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("alpha.txt", "alpha\n");
     workspace.write("beta.txt", "beta\n");
     let mut app = open_app(workspace.path());
@@ -335,7 +293,7 @@ fn a_tabs_close_button_does_not_merely_switch_to_that_tab() {
 #[test]
 fn the_unsaved_changes_prompt_renders_inside_the_window() {
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("dirty.txt", "seed\n");
     let mut app = open_app(workspace.path());
     open_file(&mut app, "dirty.txt");
@@ -400,7 +358,7 @@ fn escape_dismisses_the_unsaved_changes_prompt_and_restores_typing() {
     // modal reachable only by mouse is one bad layout away from a hang — which
     // is exactly what it was before, rendering below the window's bottom edge.
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("dirty.txt", "seed\n");
     let mut app = open_app(workspace.path());
     open_file(&mut app, "dirty.txt");
@@ -443,7 +401,7 @@ fn escape_dismisses_the_unsaved_changes_prompt_and_restores_typing() {
 #[test]
 fn enter_saves_and_closes_from_the_unsaved_changes_prompt() {
     let _guard = guard();
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
     workspace.write("dirty.txt", "seed\n");
     let mut app = open_app(workspace.path());
     open_file(&mut app, "dirty.txt");

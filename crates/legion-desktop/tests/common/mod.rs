@@ -204,3 +204,76 @@ pub fn assert_source_includes(source: &str, label: &str, symbol: &str) {
         "{label} should reference `{symbol}`"
     );
 }
+
+/// A throwaway workspace directory for a single test.
+///
+/// Two rules this consolidates, both of which had already started to drift
+/// between copies: the directory name must be unique across concurrently
+/// running tests, and `Drop` must refuse to delete anything it did not create.
+///
+/// The uniqueness components are separate path segments, never summed — adding
+/// a counter to a millisecond timestamp lets two roots collide whenever
+/// `millis_a + counter_a == millis_b + counter_b`, which is the bug removed
+/// from fifteen harnesses in `legion-app` and `legion-project`.
+pub struct TempWorkspace {
+    root: std::path::PathBuf,
+    prefix: &'static str,
+}
+
+static TEMP_WORKSPACE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl TempWorkspace {
+    /// Create a workspace directory named after `prefix`.
+    pub fn new(prefix: &'static str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let id = TEMP_WORKSPACE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("{prefix}_{}_{nanos}_{id}", std::process::id()));
+        // `create_dir`, not `create_dir_all`: a name collision must fail here
+        // rather than silently hand two tests the same workspace.
+        std::fs::create_dir(&root).expect("temp workspace should be created");
+        Self { root, prefix }
+    }
+
+    /// The workspace root.
+    pub fn path(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Write a file inside the workspace, creating parent directories.
+    pub fn write(&self, relative: &str, contents: &str) -> std::path::PathBuf {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent directory should be created");
+        }
+        std::fs::write(&path, contents).expect("temp file should be written");
+        path
+    }
+
+    /// Create a directory inside the workspace.
+    pub fn mkdir(&self, relative: &str) -> std::path::PathBuf {
+        let path = self.root.join(relative);
+        std::fs::create_dir_all(&path).expect("temp directory should be created");
+        path
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        // Guarded on both the system temp root and the prefix this instance was
+        // created with, so a bug in path construction cannot turn cleanup into
+        // deleting something that matters.
+        let temp_root = std::env::temp_dir();
+        let named_by_us = self
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(self.prefix));
+        if self.root.starts_with(&temp_root) && named_by_us {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}

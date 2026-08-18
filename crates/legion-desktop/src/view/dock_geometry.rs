@@ -49,6 +49,25 @@ pub fn stored_fraction(layouts: &[DockLayout], mode: DockMode, side: DockSide) -
     Some(side_layout.splitter_fraction)
 }
 
+/// The stored fraction for a side, but only when the layout is the user's own.
+///
+/// The gate and the lookup always travel together — a fraction from
+/// `DockLayout::standard_all_modes` must never reach a panel, because those
+/// defaults disagree with `ShellGeometry`'s constants and would silently resize
+/// every dock. Pairing them here means a call site cannot do one without the
+/// other.
+#[must_use]
+pub fn user_arranged_fraction(
+    layouts: &[DockLayout],
+    user_arranged: bool,
+    mode: DockMode,
+    side: DockSide,
+) -> Option<f32> {
+    user_arranged
+        .then(|| stored_fraction(layouts, mode, side))
+        .flatten()
+}
+
 /// The size a panel should default to, given an optional stored fraction.
 ///
 /// Falls back to `fallback` when nothing was stored, and always clamps into the

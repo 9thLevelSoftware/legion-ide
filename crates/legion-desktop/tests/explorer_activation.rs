@@ -14,69 +14,15 @@
 //! tests drive the real `DesktopRuntime` action path and — for the click
 //! itself — the real accessibility tree.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::Path;
+
+mod common;
+use common::TempWorkspace;
 
 use legion_desktop::{
     bridge::DesktopAction,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TempWorkspace {
-    root: PathBuf,
-}
-
-impl TempWorkspace {
-    fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "legion_desktop_explorer_activation_{}_{}_{}",
-            std::process::id(),
-            nanos,
-            id
-        ));
-        fs::create_dir(&root).expect("temp workspace should be created");
-        Self { root }
-    }
-
-    fn path(&self) -> &Path {
-        &self.root
-    }
-
-    fn write(&self, name: &str, content: &str) -> PathBuf {
-        let path = self.root.join(name);
-        fs::write(&path, content).expect("temp file should be written");
-        path
-    }
-
-    fn mkdir(&self, name: &str) -> PathBuf {
-        let path = self.root.join(name);
-        fs::create_dir_all(&path).expect("temp directory should be created");
-        path
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        let temp_root = std::env::temp_dir();
-        let file_name = self.root.file_name().and_then(|name| name.to_str());
-        if self.root.starts_with(&temp_root)
-            && file_name.is_some_and(|name| name.starts_with("legion_desktop_explorer_activation_"))
-        {
-            let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-}
 
 fn open_runtime(root: &Path) -> DesktopRuntime {
     DesktopRuntime::open(DesktopLaunchConfig::new(root.to_path_buf(), None))
@@ -107,7 +53,7 @@ fn open_tab_paths(runtime: &DesktopRuntime) -> Vec<String> {
 
 #[test]
 fn activating_an_explorer_file_opens_it_in_a_buffer() {
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.write("hello.txt", "first line\nsecond line\n");
     let mut runtime = open_runtime(workspace.path());
 
@@ -145,7 +91,7 @@ fn activating_an_explorer_file_opens_it_in_a_buffer() {
 
 #[test]
 fn activating_an_explorer_file_also_selects_it() {
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.write("selected.txt", "body\n");
     let mut runtime = open_runtime(workspace.path());
 
@@ -173,7 +119,7 @@ fn activating_an_explorer_file_also_selects_it() {
 
 #[test]
 fn activating_the_same_explorer_file_twice_does_not_open_a_second_tab() {
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.write("once.txt", "body\n");
     let mut runtime = open_runtime(workspace.path());
 
@@ -201,7 +147,7 @@ fn activating_a_nested_explorer_file_opens_it() {
     // trip. A nested file exercises the real shape — a canonical absolute path
     // with the platform's separators — which is what every file a person
     // actually opens in this repo looks like.
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.mkdir("crates/inner/src");
     workspace.write("crates/inner/src/lib.rs", "pub fn f() {}\n");
     let mut runtime = open_runtime(workspace.path());
@@ -229,7 +175,7 @@ fn activating_a_nested_explorer_file_opens_it() {
 
 #[test]
 fn activating_a_directory_row_expands_it_instead_of_opening_a_buffer() {
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.mkdir("src");
     workspace.write("src/main.rs", "fn main() {}\n");
     let mut runtime = open_runtime(workspace.path());
@@ -264,7 +210,7 @@ fn activating_a_directory_row_expands_it_instead_of_opening_a_buffer() {
 
 #[test]
 fn clicking_a_rendered_explorer_row_opens_the_file() {
-    let workspace = TempWorkspace::new();
+    let workspace = TempWorkspace::new("legion_desktop_explorer_activation");
     workspace.write("clickable.txt", "body\n");
     let runtime = open_runtime(workspace.path());
     let mut app = DesktopEframeApp::new(runtime);

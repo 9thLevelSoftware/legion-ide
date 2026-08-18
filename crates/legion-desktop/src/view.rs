@@ -1612,16 +1612,12 @@ impl ProjectionView {
                 // this is what decides the width — which is exactly where a
                 // restored fraction belongs.
                 let left_default = dock_geometry::size_from_fraction(
-                    state
-                        .dock_layouts_user_arranged
-                        .then(|| {
-                            dock_geometry::stored_fraction(
-                                &state.dock_layouts,
-                                snapshot.product_mode,
-                                legion_ui::DockSide::Left,
-                            )
-                        })
-                        .flatten(),
+                    dock_geometry::user_arranged_fraction(
+                        &state.dock_layouts,
+                        state.dock_layouts_user_arranged,
+                        snapshot.product_mode,
+                        legion_ui::DockSide::Left,
+                    ),
                     dock_basis.width(),
                     geometry.left_width,
                     geometry.left_min_width,
@@ -1649,16 +1645,12 @@ impl ProjectionView {
                     .frame(theme::pane_frame(theme::tokens().bg.panel))
                     .resizable(true)
                     .default_size(dock_geometry::size_from_fraction(
-                        state
-                            .dock_layouts_user_arranged
-                            .then(|| {
-                                dock_geometry::stored_fraction(
-                                    &state.dock_layouts,
-                                    snapshot.product_mode,
-                                    legion_ui::DockSide::Right,
-                                )
-                            })
-                            .flatten(),
+                        dock_geometry::user_arranged_fraction(
+                            &state.dock_layouts,
+                            state.dock_layouts_user_arranged,
+                            snapshot.product_mode,
+                            legion_ui::DockSide::Right,
+                        ),
                         dock_basis.width(),
                         geometry.right_width,
                         geometry.right_min_width,
@@ -1681,16 +1673,12 @@ impl ProjectionView {
             } else {
                 bottom_panel
                     .default_size(dock_geometry::size_from_fraction(
-                        state
-                            .dock_layouts_user_arranged
-                            .then(|| {
-                                dock_geometry::stored_fraction(
-                                    &state.dock_layouts,
-                                    snapshot.product_mode,
-                                    legion_ui::DockSide::Bottom,
-                                )
-                            })
-                            .flatten(),
+                        dock_geometry::user_arranged_fraction(
+                            &state.dock_layouts,
+                            state.dock_layouts_user_arranged,
+                            snapshot.product_mode,
+                            legion_ui::DockSide::Bottom,
+                        ),
                         dock_basis.height(),
                         geometry.bottom_height,
                         geometry.bottom_min_height,
