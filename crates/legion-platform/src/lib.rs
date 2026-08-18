@@ -2569,7 +2569,14 @@ mod tests {
         assert!(session.id.starts_with("native-"));
         let mut output = session.output;
         let mut reads = Vec::new();
-        for _ in 0..20 {
+        // Exit and output are not the same event. The child can be reaped
+        // before everything it wrote has been drained, so a loop that stops at
+        // `exited` can stop one read short of the bytes it is waiting for —
+        // which is why this test flaked on Windows CI under load and passed
+        // everywhere quiet. Draining after the exit is what makes it a
+        // happens-before check rather than a race with the scheduler.
+        let mut drains_after_exit = 4;
+        for _ in 0..40 {
             if output.to_ascii_lowercase().contains("hello") {
                 break;
             }
@@ -2583,7 +2590,10 @@ mod tests {
             ));
             output.push_str(&chunk.output);
             if chunk.exited {
-                break;
+                drains_after_exit -= 1;
+                if drains_after_exit == 0 {
+                    break;
+                }
             }
         }
         assert!(
