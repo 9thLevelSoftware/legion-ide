@@ -278,6 +278,52 @@ jobs:
           name: dap-adapter-dogfood-probe-${{ matrix.os }}
           path: target/dap-adapter/probe_report_dogfood.toml
           if-no-files-found: warn
+      # Report-only interrogation of the resolved binary, run before the
+      # handshake so its output is present whether or not the handshake
+      # passes. Windows reports `unexpected EOF in headers; adapter still
+      # running; adapter stderr: <empty>` — a live process that closes stdout
+      # without a word — and the leading hypothesis is that this build does not
+      # serve DAP over stdio for the way we invoke it. `--version` and `--help`
+      # either support that or kill it, which is cheaper than another round of
+      # guessing from inside the handshake. See
+      # `plans/evidence/production/WS-A-D/phase-2-dap/B10-windows-adapter-diagnosis.md`.
+      #
+      # `continue-on-error` and `|| true`: this step must never decide the
+      # job's colour. A diagnostic that can fail the run it is diagnosing is a
+      # second problem, not a tool.
+      - name: Interrogate the resolved adapter (report-only)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          adapter="$(command -v lldb-dap || command -v lldb-vscode || true)"
+          if [ -z "$adapter" ]; then
+            echo "no adapter on PATH; nothing to interrogate"
+            exit 0
+          fi
+          echo "--- resolved: $adapter ---"
+          echo "--- --version ---"
+          "$adapter" --version 2>&1 | head -20 || true
+          echo "--- --help ---"
+          "$adapter" --help 2>&1 | head -60 || true
+          echo "--- run with no arguments and stdin closed (5s cap) ---"
+          # If the binary wants a connection URI rather than stdio, this is
+          # where it says so, or exits without a word.
+          #
+          # Backgrounded with a killer rather than `timeout(1)`: that is GNU
+          # coreutils, absent on the macOS runner, and on Windows `timeout` is
+          # a different program entirely. A diagnostic that hangs one of three
+          # platforms until the 60-minute job cap is worse than no diagnostic.
+          "$adapter" >/tmp/adapter-stdout 2>/tmp/adapter-stderr </dev/null &
+          adapter_pid=$!
+          ( sleep 5; kill -9 "$adapter_pid" 2>/dev/null ) &
+          killer_pid=$!
+          wait "$adapter_pid"
+          echo "exit=$? (137 means it was still running at the cap)"
+          kill "$killer_pid" 2>/dev/null
+          echo "--- stdout ---"; head -20 /tmp/adapter-stdout || true
+          echo "--- stderr ---"; head -20 /tmp/adapter-stderr || true
+
 
       # B9 scope: resolve, spawn, initialize, disconnect. LEGION_DAP_DOGFOOD=1
       # is what makes this fail instead of skip. This proves the adapter

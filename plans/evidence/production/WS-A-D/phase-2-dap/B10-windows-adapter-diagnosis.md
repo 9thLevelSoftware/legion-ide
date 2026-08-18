@@ -71,12 +71,26 @@ handshake, launch, step and policy gate all now pass — the first fully green
 dogfood run on any platform. macOS advances past the handshake and fails at
 `launch`, which is a different problem and is not addressed here.
 
-## Next step
+## Next step, now taken
 
-Extend the existing pre-install inventory job (`dap-adapter-probe`) to run the
-resolved binary with `--version` and `--help` and attach the output. That is
-report-only, costs one job step, and turns the hypothesis above into a fact or
-kills it. Cheaper than another round of guessing from inside the handshake.
+`legion-dap-dogfood.yml` gains a report-only "Interrogate the resolved adapter"
+step, run before the handshake so its output is present whether the handshake
+passes or not. It records `--version`, `--help`, and what the binary does when
+run with no arguments and stdin closed. If it wants a connection URI rather than
+stdio, that is where it says so — or exits without a word, which is itself the
+answer.
+
+Two details, both there to keep a diagnostic from becoming a second problem:
+
+- `continue-on-error` and `|| true` throughout. A step that can fail the run it
+  is diagnosing is not a tool.
+- The five-second cap is a backgrounded killer rather than `timeout(1)`, which
+  is GNU coreutils and absent on the macOS runner, and on Windows names a
+  different program entirely. Hanging one platform until the 60-minute job cap
+  would be worse than no diagnostic at all.
+
+The result of that step is not in this file. It runs on the next push, and
+whatever it says decides whether the transport reading above survives.
 
 ## Status
 
