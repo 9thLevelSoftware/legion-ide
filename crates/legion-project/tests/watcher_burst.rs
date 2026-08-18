@@ -23,15 +23,15 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn create_temp_workspace(prefix: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "legion-project-{}-{}-{}",
+        "legion-project-{}-{}-{}-{}",
         prefix,
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            .map_or(0, |value| value.as_millis() as u64),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::create_dir_all(&root).expect("create temp workspace");
+    fs::create_dir(&root).expect("create temp workspace");
     fs::canonicalize(root).expect("canonicalize temp workspace")
 }
 
