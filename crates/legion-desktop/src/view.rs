@@ -5042,12 +5042,8 @@ fn render_test_controls(
         && let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id
     {
         ui.label(theme::label("Runnables"));
-        // Every runnable, inside a bounded scroll. The first attempt capped the
-        // list at six and labelled the remainder `+N more`, which counted the
-        // hidden ones without giving anyone a way to run them — the exact
-        // defect the intent-reachability gate exists to retire, reintroduced
-        // one size smaller. The sidebar has no scroll of its own, so the bound
-        // belongs here rather than on the list.
+        // Every runnable, never a capped subset: a list that hides entries is
+        // a capability nobody can reach, however honestly it counts them.
         egui::ScrollArea::vertical()
             .id_salt("legion_desktop_runnables")
             .max_height(RUNNABLES_MAX_HEIGHT)
