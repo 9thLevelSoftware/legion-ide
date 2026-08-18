@@ -36,6 +36,18 @@ const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
 /// report.
 const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
+/// Describe an adapter's liveness for an error message.
+///
+/// A free function so the three outcomes can be tested without standing up a
+/// session around a real child process.
+fn exit_clause(status: Result<Option<std::process::ExitStatus>, std::io::Error>) -> String {
+    match status {
+        Ok(Some(status)) => format!("; adapter exited: {status}"),
+        Ok(None) => "; adapter still running".to_string(),
+        Err(err) => format!("; adapter status unknown: {err}"),
+    }
+}
+
 /// Format captured stderr as a trailing clause for an error message.
 ///
 /// Waits briefly when the capture is empty. The errors that want stderr are
@@ -754,18 +766,42 @@ impl LiveDapSession {
             // the bare frame error is what left "unexpected EOF in headers"
             // unexplained for a day.
             Ok(Err(source)) => Err(LiveDapSessionError::Protocol {
-                message: format!("{source}{}", self.stderr_suffix()),
+                message: format!("{source}{}{}", self.exit_suffix(), self.stderr_suffix()),
             }),
             // `waited`, not the remaining time: by the time this arm runs the
             // remainder is zero by definition, which is how the first version
             // of this message reported every timeout as "within 0ns".
             Err(RecvTimeoutError::Timeout) => Err(LiveDapSessionError::Timeout {
-                message: format!("no DAP frame within {waited:?}{}", self.stderr_suffix()),
+                message: format!(
+                    "no DAP frame within {waited:?}{}{}",
+                    self.exit_suffix(),
+                    self.stderr_suffix()
+                ),
             }),
             Err(RecvTimeoutError::Disconnected) => Err(LiveDapSessionError::Protocol {
-                message: format!("adapter stopped producing frames{}", self.stderr_suffix()),
+                message: format!(
+                    "adapter stopped producing frames{}{}",
+                    self.exit_suffix(),
+                    self.stderr_suffix()
+                ),
             }),
         }
+    }
+
+    /// Whether the adapter process is still alive, as a trailing clause.
+    ///
+    /// The Windows dogfood failure reads `unexpected EOF in headers; adapter
+    /// stderr: <empty>`: the adapter closes stdout at once and says nothing at
+    /// all. Stderr cannot explain a process that never wrote to it, and the
+    /// next question — did it die, and how — is answered by its exit status.
+    ///
+    /// Worth the line on Windows in particular, where a missing DLL kills a
+    /// process silently and shows up only as an NTSTATUS in the exit code
+    /// (`0xc0000135` is STATUS_DLL_NOT_FOUND). A silent death and a live
+    /// adapter that simply is not speaking are different faults, and the bare
+    /// frame error looks identical for both.
+    fn exit_suffix(&mut self) -> String {
+        exit_clause(self.child.try_wait())
     }
 
     /// Whatever the adapter wrote to stderr, as a trailing clause.
@@ -814,6 +850,7 @@ pub fn fake_dap_adapter_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod stderr_capture_tests {
     use super::*;
+    use std::process::Command;
     use std::sync::mpsc::{Sender, channel};
 
     /// A reader that yields some bytes and then blocks instead of ending.
@@ -935,6 +972,44 @@ mod stderr_capture_tests {
             waited < STDERR_SETTLE * 4,
             "an error path must not stall on a silent adapter; waited {waited:?}"
         );
+    }
+
+    /// Run a trivial command that exits with `code`, and return its status.
+    fn exited_with(code: i32) -> std::process::ExitStatus {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", &format!("exit {code}")]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", &format!("exit {code}")]);
+            command
+        };
+        command.spawn().expect("spawn").wait().expect("wait")
+    }
+
+    #[test]
+    fn a_dead_adapter_reports_how_it_died() {
+        // The Windows failure says `adapter stderr: <empty>`: the process wrote
+        // nothing at all, so the exit status is the only thing left that can
+        // explain it. On Windows a missing DLL is a silent death visible only
+        // as an NTSTATUS in this code.
+        let clause = exit_clause(Ok(Some(exited_with(3))));
+        assert!(
+            clause.contains("adapter exited"),
+            "a dead adapter must be reported as dead: {clause:?}"
+        );
+        assert!(
+            clause.contains('3'),
+            "the exit code is the diagnostic; it must survive into the message: {clause:?}"
+        );
+    }
+
+    #[test]
+    fn a_live_adapter_is_distinguished_from_a_dead_one() {
+        // Same bare frame error, two different faults: a process that died and
+        // one that is alive and simply not speaking DAP.
+        assert_eq!(exit_clause(Ok(None)), "; adapter still running");
     }
 
     #[test]
