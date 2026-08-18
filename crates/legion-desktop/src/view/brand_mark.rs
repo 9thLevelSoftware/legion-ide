@@ -24,16 +24,18 @@ pub const SIZE: f32 = 10.0;
 ///
 /// Split from painting so the geometry is testable without a render pass —
 /// same split as `rail_icons::shapes`.
-pub fn shapes(slot: Rect, color: Color32) -> Vec<Shape> {
+pub fn shape(slot: Rect, color: Color32) -> Shape {
     let centre = slot.center();
     let reach = SIZE / 2.0;
+    // `convex_polygon` owns its points, so this allocation is the API's, not a
+    // choice. One shape, one `Vec`, once per frame.
     let points: Vec<Pos2> = vec![
         pos2(centre.x, centre.y - reach),
         pos2(centre.x + reach, centre.y),
         pos2(centre.x, centre.y + reach),
         pos2(centre.x - reach, centre.y),
     ];
-    vec![Shape::convex_polygon(points, color, egui::Stroke::NONE)]
+    Shape::convex_polygon(points, color, egui::Stroke::NONE)
 }
 
 /// Allocate space for the mark and paint it.
@@ -44,7 +46,7 @@ pub fn show(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     // suite and the intent-reachability gate both exist to catch.
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(SIZE), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
-        ui.painter().extend(shapes(rect, color));
+        ui.painter().add(shape(rect, color));
     }
     response
 }
@@ -59,14 +61,9 @@ mod tests {
 
     #[test]
     fn the_mark_is_a_diamond_centred_in_its_slot() {
-        let shapes = shapes(slot(), Color32::from_rgb(208, 130, 75));
-        assert_eq!(
-            shapes.len(),
-            1,
-            "one filled polygon, not a stack of strokes"
-        );
-        let Shape::Path(path) = &shapes[0] else {
-            panic!("expected a path shape, got {:?}", shapes[0]);
+        let drawn = shape(slot(), Color32::from_rgb(208, 130, 75));
+        let Shape::Path(path) = &drawn else {
+            panic!("expected a path shape, got {drawn:?}");
         };
         assert_eq!(path.points.len(), 4, "a diamond has four corners");
 
@@ -85,8 +82,8 @@ mod tests {
         // A mark that overdraws its allocation would collide with the wordmark
         // beside it, and the layout would not report the overlap.
         let slot = slot();
-        let shapes = shapes(slot, Color32::WHITE);
-        let Shape::Path(path) = &shapes[0] else {
+        let drawn = shape(slot, Color32::WHITE);
+        let Shape::Path(path) = &drawn else {
             panic!("expected a path shape");
         };
         for point in &path.points {

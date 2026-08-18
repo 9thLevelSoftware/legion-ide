@@ -26,12 +26,7 @@ const TAB_LABEL_CLOSE_GAP: f32 = 2.0;
 /// drawn inside it is much smaller; a close button that looks like a 14px `×`
 /// but answers to a 28px square is easier to hit and no louder to look at.
 const TAB_CLOSE_SIZE: f32 = 28.0;
-/// Side of the rounded chip that lights up on hover.
-///
-/// Named for what it is: this sizes the hover highlight, not the glyph. The
-/// glyph is text and takes `TAB_CLOSE_GLYPH_FONT_SIZE`. The previous name said
-/// "glyph size", which cost a snapshot-regression probe a cycle: changing it
-/// moves nothing a screenshot can see unless the pointer is over the button.
+/// Side of the rounded chip that lights up on hover, not the glyph inside it.
 const TAB_CLOSE_HOVER_SIZE: f32 = 16.0;
 /// Point size of the painted `×` / dirty glyph.
 const TAB_CLOSE_GLYPH_FONT_SIZE: f32 = 12.0;

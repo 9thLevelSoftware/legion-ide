@@ -1982,8 +1982,6 @@ fn render_top_command_bar(
             .max_rect(left_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    // Drawn, not typed: `◆` is the missing-glyph box on Linux. See
-    // `brand_mark`.
     brand_mark::show(&mut left_ui, theme::tokens().accent.amber);
     if !geometry.ultra_compact {
         left_ui.label(theme::title(LEGION_WORDMARK));

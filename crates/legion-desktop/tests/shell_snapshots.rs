@@ -53,28 +53,57 @@ fn per_os(name: &str) -> String {
     format!("{name}-{}", std::env::consts::OS)
 }
 
-/// Replace machine-specific paths with a stable one.
+/// Replace every machine-specific path in the projection with a stable one.
 ///
-/// The breadcrumb and status bar render the active buffer's canonical path, and
-/// a real workspace lives under a temp directory whose name carries a
+/// A real workspace lives under a temp directory whose name carries a
 /// timestamp, a pid, and — on Windows — the account name. Snapshotting that
 /// bakes the machine into the baseline: it differs on every run locally, and a
 /// baseline generated here could never match one generated on a runner.
 ///
-/// Normalising one field is enough because everything else path-shaped is
-/// derived from it: the breadcrumb takes its trailing segments, the status bar
-/// shows it, and explorer rows and tab titles render file *names* rather than
-/// paths.
+/// This rewrites **every** path the projection carries, not only the ones that
+/// currently reach pixels. An earlier version rewrote just the active buffer's
+/// path and claimed everything else was derived from it. That was wrong —
+/// explorer nodes, editor tabs and the dirty-close prompt each carry their own
+/// `CanonicalPath` — and it happened to produce stable images only because the
+/// renderer draws names rather than paths for those. The invariant is now the
+/// total one, which `stabilizing_removes_every_trace_of_the_machine` checks
+/// against the whole `Debug` dump, so a renderer that starts showing a full
+/// path in a tooltip cannot quietly reintroduce the problem.
+fn stable_path(path: &legion_protocol::CanonicalPath) -> legion_protocol::CanonicalPath {
+    // `Path::file_name` rather than splitting on separators: it is the
+    // idiomatic answer and avoids a backslash literal that has to be escaped
+    // differently in every tool that edits this file.
+    let name = Path::new(&path.0)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    legion_protocol::CanonicalPath(format!("/workspace/{name}"))
+}
+
 fn stabilize_paths(snapshot: &mut ShellProjectionSnapshot) {
     if let Some(path) = snapshot.active_buffer_projection.file_path.as_mut() {
-        // `Path::file_name` rather than splitting on separators: it is the
-        // idiomatic answer and avoids a backslash literal that has to be
-        // escaped differently in every tool that edits this file.
-        let name = Path::new(&path.0)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".to_string());
-        *path = legion_protocol::CanonicalPath(format!("/workspace/{name}"));
+        *path = stable_path(path);
+    }
+    for node in &mut snapshot.explorer_projection.nodes {
+        node.canonical_path = stable_path(&node.canonical_path);
+    }
+    for tab in &mut snapshot.daily_editing_projection.tabs.tabs {
+        if let Some(path) = tab.file_path.as_mut() {
+            *path = stable_path(path);
+        }
+    }
+    if let Some(prompt) = snapshot
+        .daily_editing_projection
+        .close_dirty_prompt
+        .as_mut()
+        && let Some(path) = prompt.file_path.as_mut()
+    {
+        *path = stable_path(path);
+    }
+    for section in &mut snapshot.excerpt_surface_projection.sections {
+        if let Some(path) = section.file_path.as_mut() {
+            *path = stable_path(path);
+        }
     }
 }
 
@@ -117,7 +146,9 @@ fn workspace_with_files() -> TempWorkspace {
 }
 
 fn open_file(runtime: &mut DesktopRuntime, name: &str) {
-    let _ = runtime.handle_action(DesktopAction::RefreshExplorer);
+    runtime
+        .handle_action(DesktopAction::RefreshExplorer)
+        .expect("the explorer should refresh");
     let node = runtime
         .projection_snapshot()
         .explorer_projection
@@ -130,6 +161,42 @@ fn open_file(runtime: &mut DesktopRuntime, name: &str) {
             file_id: node.file_id,
         })
         .expect("opening a file should succeed");
+}
+
+#[test]
+fn stabilizing_removes_every_trace_of_the_machine() {
+    // `stabilize_paths` rewrites one field and its documentation claims that is
+    // enough because everything else path-shaped derives from it. That is a
+    // load-bearing assumption about a struct this test does not own: if
+    // `ShellProjectionSnapshot` grows a second path field, the claim silently
+    // becomes false and every baseline becomes unreproducible on the next
+    // machine.
+    //
+    // Checking the whole `Debug` dump rather than the field verifies the claim
+    // instead of restating it, and a new path field fails here rather than in a
+    // confusing image diff on somebody else's platform.
+    let workspace = workspace_with_files();
+    let mut runtime = runtime_over(workspace.path());
+    open_file(&mut runtime, "README.md");
+
+    let mut snapshot = runtime.projection_snapshot();
+    let root = workspace
+        .path()
+        .file_name()
+        .expect("the temp workspace has a directory name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        format!("{snapshot:?}").contains(&root),
+        "precondition: the raw projection must carry the machine-specific path,          or this test proves nothing"
+    );
+
+    stabilize_paths(&mut snapshot);
+    let dumped = format!("{snapshot:?}");
+    assert!(
+        !dumped.contains(&root),
+        "the temp workspace name `{root}` survived stabilization; a field that          renders a path was added and `stabilize_paths` does not know about it"
+    );
 }
 
 #[test]
@@ -148,7 +215,9 @@ fn the_explorer_looks_like_its_baseline() {
     // markers rendered as a literal `-` per file until 2026-08-17.
     let workspace = workspace_with_files();
     let mut runtime = runtime_over(workspace.path());
-    let _ = runtime.handle_action(DesktopAction::RefreshExplorer);
+    runtime
+        .handle_action(DesktopAction::RefreshExplorer)
+        .expect("the explorer should refresh");
     snapshot_shell("explorer", &runtime.projection_snapshot());
 }
 
