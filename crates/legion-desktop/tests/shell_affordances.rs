@@ -444,3 +444,149 @@ fn enter_saves_and_closes_from_the_unsaved_changes_prompt() {
         "Enter must actually save before closing, disk holds {on_disk:?}"
     );
 }
+
+// --- Multi-cursor is reachable from the keyboard ---------------------------
+//
+// `AddCursorAbove`, `AddCursorBelow` and `ClearExtraCursors` existed as intents
+// with app handling and eight passing tests, and no `DesktopAction`, no bridge
+// translation and no keybinding — so the feature could not be used. Same shape
+// as the explorer, the session path, and the panel sizes.
+
+fn ctrl_alt_key(key: egui::Key) -> egui::RawInput {
+    let modifiers = egui::Modifiers {
+        command: true,
+        alt: true,
+        ..egui::Modifiers::default()
+    };
+    egui::RawInput {
+        focused: true,
+        modifiers,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(SCREEN_W, SCREEN_H),
+        )),
+        events: vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }],
+        ..egui::RawInput::default()
+    }
+}
+
+/// Cursors the active buffer is projecting.
+///
+/// `expect`s the viewport rather than defaulting, so a fixture without one
+/// fails loudly instead of reporting a cursor count that production would
+/// disagree with — `projected_cursor_count` in `workflow.rs` treats a missing
+/// viewport as one caret, and two meanings for "how many cursors" is how a
+/// test ends up passing against behaviour nobody implemented.
+fn cursor_count(app: &DesktopEframeApp) -> usize {
+    app.runtime_snapshot()
+        .active_buffer_projection
+        .viewport
+        .as_ref()
+        .expect("an open buffer projects a viewport")
+        .cursors
+        .len()
+}
+
+#[test]
+fn ctrl_alt_down_adds_a_cursor_and_escape_clears_it() {
+    let _guard = guard();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
+    workspace.write("cursors.txt", "one\ntwo\nthree\n");
+    let mut app = open_app(workspace.path());
+    open_file(&mut app, "cursors.txt");
+    let _ = app.run_headless_full_frame(frame(Vec::new()));
+
+    assert_eq!(cursor_count(&app), 1, "a fresh buffer has one caret");
+
+    let _ = app.run_headless_full_frame(ctrl_alt_key(egui::Key::ArrowDown));
+    assert_eq!(
+        cursor_count(&app),
+        2,
+        "Ctrl+Alt+Down must add a cursor — without a binding the feature is \
+         unreachable however well the app layer works"
+    );
+
+    let _ = app.run_headless_full_frame(frame(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: Some(egui::Key::Escape),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+    assert_eq!(
+        cursor_count(&app),
+        1,
+        "Escape must collapse the set back to the caret"
+    );
+}
+
+#[test]
+fn ctrl_alt_up_adds_a_cursor_above() {
+    let _guard = guard();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
+    workspace.write(
+        "cursors.txt",
+        "one
+two
+three
+",
+    );
+    let mut app = open_app(workspace.path());
+    open_file(&mut app, "cursors.txt");
+    let _ = app.run_headless_full_frame(frame(Vec::new()));
+
+    // Put the caret on the last line first. A caret on line 0 has nowhere to
+    // go up and correctly adds nothing — asserting `>= before` around that
+    // case would hold whether or not the binding existed, which is no test at
+    // all.
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: None,
+        cursor: legion_protocol::TextCoordinate {
+            line: 2,
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    })
+    .expect("moving the caret should succeed");
+    let _ = app.run_headless_full_frame(frame(Vec::new()));
+    assert_eq!(cursor_count(&app), 1, "still one caret before the binding");
+
+    let _ = app.run_headless_full_frame(ctrl_alt_key(egui::Key::ArrowUp));
+    assert_eq!(
+        cursor_count(&app),
+        2,
+        "Ctrl+Alt+Up must add a cursor on the line above"
+    );
+}
+
+#[test]
+fn escape_with_one_cursor_is_left_for_other_handlers() {
+    // Escape is Vim's mode exit and the completion popup's dismiss. Clearing
+    // cursors must not swallow it when there is nothing to clear.
+    let _guard = guard();
+    let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
+    workspace.write("cursors.txt", "one\ntwo\n");
+    let mut app = open_app(workspace.path());
+    open_file(&mut app, "cursors.txt");
+    let _ = app.run_headless_full_frame(frame(Vec::new()));
+    assert_eq!(cursor_count(&app), 1);
+
+    let before = buffer_text(&app);
+    let _ = app.run_headless_full_frame(frame(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: Some(egui::Key::Escape),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+
+    assert_eq!(cursor_count(&app), 1, "still one caret");
+    assert_eq!(before, buffer_text(&app), "Escape must not edit the buffer");
+}

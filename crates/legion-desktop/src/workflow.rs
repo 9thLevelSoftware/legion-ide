@@ -4031,6 +4031,24 @@ impl DesktopEframeApp {
                 }
             }
 
+            // Escape collapses a multi-cursor set back to the caret. Gated on
+            // there being more than one cursor so Escape stays available to
+            // whatever else wants it — Vim's mode exit above all — rather than
+            // being swallowed here on every press. The completion popup owns
+            // Escape while it is open and is checked first for the same reason.
+            {
+                let view_state = self.runtime.projection_view_state();
+                if input.key_pressed(egui::Key::Escape)
+                    && !view_state.completion_popup_open
+                    && projected_cursor_count(&snapshot) > 1
+                {
+                    actions.push(DesktopAction::ClearExtraCursors { buffer_id: None });
+                    ui.input_mut(|state| {
+                        state.consume_key(input.modifiers, egui::Key::Escape);
+                    });
+                }
+            }
+
             actions.extend(editor_text_input_actions(
                 ui,
                 &input.events,
@@ -4631,6 +4649,20 @@ fn active_buffer_for_input(snapshot: &ShellProjectionSnapshot) -> Option<BufferI
         .tabs
         .active_buffer_id
         .or(snapshot.active_buffer_projection.buffer_id)
+}
+
+/// How many cursors the active buffer is projecting.
+///
+/// One when the projection carries no explicit cursor list: a buffer always has
+/// a caret, and reporting zero would make "more than one cursor" logic read as
+/// false in the one case where it should be trivially false anyway.
+fn projected_cursor_count(snapshot: &ShellProjectionSnapshot) -> usize {
+    snapshot
+        .active_buffer_projection
+        .viewport
+        .as_ref()
+        .map(|viewport| viewport.cursors.len().max(1))
+        .unwrap_or(1)
 }
 
 fn projected_cursor(snapshot: &ShellProjectionSnapshot) -> TextCoordinate {

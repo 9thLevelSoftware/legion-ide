@@ -1484,6 +1484,17 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             combo: KeyCombo::new("Tab", true, true, false),
             action_label: "PrevTab".into(),
         },
+        // Ctrl+Alt+Up/Down, matching the convention most editors use for
+        // stacking cursors down a column. Plain Ctrl+Up/Down is scroll in many
+        // of them, and Alt alone is the menu key on Windows.
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowUp", true, false, true),
+            action_label: "AddCursorAbove".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowDown", true, false, true),
+            action_label: "AddCursorBelow".into(),
+        },
         KeybindingEntry {
             combo: KeyCombo::new("F12", false, false, false),
             action_label: "GoToDefinition".into(),

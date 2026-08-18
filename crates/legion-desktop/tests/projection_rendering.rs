@@ -6142,3 +6142,87 @@ fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
         "an untouched layout must report nothing to persist, or every frame          overwrites the user's arrangement with the current geometry default"
     );
 }
+
+/// Every cursor in a multi-cursor set must be painted, not just the primary.
+///
+/// P1.F3.T2's remaining acceptance clause. The projection has carried the full
+/// cursor set all along and the painter loops it, but nothing asserted the
+/// loop — and a multi-cursor edit whose other carets are invisible looks like
+/// text changing on its own.
+///
+/// Counted as a delta rather than an absolute: the shell paints many vertical
+/// hairlines (separators, icon strokes), and the only thing that differs
+/// between the two renders here is how many cursors the viewport carries.
+#[test]
+fn projection_rendering_paints_every_cursor_in_a_multi_cursor_set() {
+    fn vertical_hairlines(output: &egui::FullOutput) -> usize {
+        fn count(shape: &egui::epaint::Shape) -> usize {
+            match shape {
+                egui::epaint::Shape::LineSegment { points, stroke } => usize::from(
+                    (points[0].x - points[1].x).abs() < 0.01
+                        && (points[0].y - points[1].y).abs() > 1.0
+                        && (stroke.width - 1.0).abs() < 0.01,
+                ),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
+                _ => 0,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .map(|clipped| count(&clipped.shape))
+            .sum()
+    }
+
+    // `time` is pinned because the caret blinks: `paint_code_cursor` returns
+    // early on the off phase, so an unpinned clock makes this pass or fail by
+    // when it happened to run.
+    let render = |cursors: Vec<legion_protocol::TextCoordinate>| -> usize {
+        let ctx = egui::Context::default();
+        let mut view = ProjectionView::new();
+        // `degraded_snapshot` rather than `populated_snapshot`: only the
+        // former carries a `ViewportProjection`, and the cursor set lives on
+        // the viewport. Asserted rather than assumed — an `if let Some(...)`
+        // here would silently test nothing.
+        let mut snapshot = degraded_snapshot();
+        let viewport = snapshot
+            .active_buffer_projection
+            .viewport
+            .as_mut()
+            .expect("the fixture must carry a viewport for cursors to live on");
+        viewport.cursors = cursors;
+        // Two frames, keeping the second: egui settles panel layout and font
+        // metrics on the first pass, so frame one can report caret geometry
+        // that the next frame immediately revises.
+        let mut painted = 0;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                focused: true,
+                time: Some(0.0),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_440.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = view.render(ui, &snapshot);
+            });
+            painted = vertical_hairlines(&output);
+        }
+        painted
+    };
+
+    // Both on the single line this fixture renders. A caret only paints on the
+    // row matching its line, so putting the second one on line 1 would test the
+    // fixture's line count rather than the painter's loop.
+    let one = render(vec![coord(0, 0, 0)]);
+    let two = render(vec![coord(0, 0, 0), coord(0, 5, 5)]);
+
+    assert_eq!(
+        two,
+        one + 1,
+        "a second cursor must paint a second caret; got {one} hairline(s) with one \
+         cursor and {two} with two, so the extra cursor was not drawn"
+    );
+}

@@ -675,6 +675,24 @@ pub enum DesktopAction {
         /// Cursor coordinate in projection space.
         cursor: TextCoordinate,
     },
+    /// Add a cursor one line above every existing one.
+    ///
+    /// The buffer falls back to the active tab, like the other editing
+    /// actions: the keyboard has no buffer to name.
+    AddCursorAbove {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Add a cursor one line below every existing one.
+    AddCursorBelow {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Collapse a multi-cursor set back to the primary caret.
+    ClearExtraCursors {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
     /// Set the primary selection for a buffer or the active buffer.
     SetSelection {
         /// Optional target buffer; falls back to the active tab.
@@ -2160,6 +2178,21 @@ impl DesktopCommandBridge {
             DesktopAction::SetCursor { buffer_id, cursor } => {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SetCursor { buffer_id, cursor }
+                })
+            }
+            DesktopAction::AddCursorAbove { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorAbove { buffer_id }
+                })
+            }
+            DesktopAction::AddCursorBelow { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorBelow { buffer_id }
+                })
+            }
+            DesktopAction::ClearExtraCursors { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::ClearExtraCursors { buffer_id }
                 })
             }
             DesktopAction::SetSelection { buffer_id, range } => {

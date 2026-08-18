@@ -505,8 +505,19 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-editor", "cargo test -p legion-desktop"]
     acceptance = ["Editor is usable via rendered desktop UI, not only API tests.", "A second cursor can be created, typed at, and cleared; every cursor is painted."]
     stop_condition = "Stop if scroll jank exceeds the perf budget at GP-1 scale."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
+    # 2026-08-17: both acceptance clauses now hold. Clause 1 was settled by the
+    # first non-headless dogfood session. Clause 2 needed a keyboard path, not
+    # an algorithm: `multi_cursor`'s pure functions, the three intents and the
+    # app handling all existed with eight passing tests, and there was no
+    # `DesktopAction`, no bridge translation and no keybinding — so the feature
+    # could not be reached. Ctrl+Alt+Up/Down and Esc are now bound, Backspace
+    # reaches every cursor (`delete_before_all` previously had no callers), and
+    # "every cursor is painted" is measured on painted output rather than on
+    # the projection that feeds it. Both new load-bearing tests were
+    # vacuity-checked. Row virtualization, gutter lanes, selection and scroll
+    # were already in place.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/multi-cursor-reachable-evidence.md"
 
     [[epics.features.tasks]]
     id = "P1.F3.T3"
