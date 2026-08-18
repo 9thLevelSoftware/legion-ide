@@ -1006,6 +1006,19 @@ mod stderr_capture_tests {
     }
 
     #[test]
+    fn an_unreadable_status_is_reported_rather_than_swallowed() {
+        // The doc claimed three outcomes were pinned while two were. Failing to
+        // read a child's status is rare and is exactly when a silent fallback
+        // would mislead: it would report a live adapter, which is a claim, not
+        // an absence of one.
+        let clause = exit_clause(Err(std::io::Error::other("no such process")));
+        assert!(
+            clause.contains("status unknown") && clause.contains("no such process"),
+            "an unreadable status must say so and carry the reason: {clause:?}"
+        );
+    }
+
+    #[test]
     fn a_live_adapter_is_distinguished_from_a_dead_one() {
         // Same bare frame error, two different faults: a process that died and
         // one that is alive and simply not speaking DAP.
