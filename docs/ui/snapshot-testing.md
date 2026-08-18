@@ -129,6 +129,12 @@ part of the workflow rather than only an error path.
 
 `.new.png` and `.diff.png` are gitignored. Only baselines are tracked.
 
+All twelve baselines (four states × three platforms) were established this way:
+Windows locally, macOS and Linux from the artifacts of a deliberately failing
+run — and the Linux render was rejected on its first pass, because it showed the
+missing-glyph box described above. The second pass, after the mark was drawn
+rather than typed, is what is committed.
+
 ## Bootstrapping a new snapshot
 
 A new snapshot is red on the two platforms you are not on until their baselines
