@@ -476,13 +476,21 @@ fn ctrl_alt_key(key: egui::Key) -> egui::RawInput {
     }
 }
 
+/// Cursors the active buffer is projecting.
+///
+/// `expect`s the viewport rather than defaulting, so a fixture without one
+/// fails loudly instead of reporting a cursor count that production would
+/// disagree with — `projected_cursor_count` in `workflow.rs` treats a missing
+/// viewport as one caret, and two meanings for "how many cursors" is how a
+/// test ends up passing against behaviour nobody implemented.
 fn cursor_count(app: &DesktopEframeApp) -> usize {
     app.runtime_snapshot()
         .active_buffer_projection
         .viewport
         .as_ref()
-        .map(|viewport| viewport.cursors.len())
-        .unwrap_or(0)
+        .expect("an open buffer projects a viewport")
+        .cursors
+        .len()
 }
 
 #[test]
@@ -522,28 +530,39 @@ fn ctrl_alt_down_adds_a_cursor_and_escape_clears_it() {
 fn ctrl_alt_up_adds_a_cursor_above() {
     let _guard = guard();
     let workspace = TempWorkspace::new("legion_desktop_shell_affordances");
-    workspace.write("cursors.txt", "one\ntwo\nthree\n");
+    workspace.write(
+        "cursors.txt",
+        "one
+two
+three
+",
+    );
     let mut app = open_app(workspace.path());
     open_file(&mut app, "cursors.txt");
     let _ = app.run_headless_full_frame(frame(Vec::new()));
 
-    // Move off the first line first: a caret on line 0 has nowhere to go up,
-    // which is a real case but not the one this test is about.
-    let _ = app.run_headless_full_frame(ctrl_alt_key(egui::Key::ArrowDown));
-    let _ = app.run_headless_full_frame(frame(vec![egui::Event::Key {
-        key: egui::Key::Escape,
-        physical_key: Some(egui::Key::Escape),
-        pressed: true,
-        repeat: false,
-        modifiers: egui::Modifiers::default(),
-    }]));
+    // Put the caret on the last line first. A caret on line 0 has nowhere to
+    // go up and correctly adds nothing — asserting `>= before` around that
+    // case would hold whether or not the binding existed, which is no test at
+    // all.
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: None,
+        cursor: legion_protocol::TextCoordinate {
+            line: 2,
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    })
+    .expect("moving the caret should succeed");
+    let _ = app.run_headless_full_frame(frame(Vec::new()));
+    assert_eq!(cursor_count(&app), 1, "still one caret before the binding");
 
-    let before = cursor_count(&app);
     let _ = app.run_headless_full_frame(ctrl_alt_key(egui::Key::ArrowUp));
-    assert!(
-        cursor_count(&app) >= before,
-        "Ctrl+Alt+Up must be bound; a caret with nowhere to go adds nothing, \
-         but the binding must still resolve"
+    assert_eq!(
+        cursor_count(&app),
+        2,
+        "Ctrl+Alt+Up must add a cursor on the line above"
     );
 }
 

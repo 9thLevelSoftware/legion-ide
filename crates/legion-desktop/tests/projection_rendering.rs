@@ -6191,6 +6191,9 @@ fn projection_rendering_paints_every_cursor_in_a_multi_cursor_set() {
             .as_mut()
             .expect("the fixture must carry a viewport for cursors to live on");
         viewport.cursors = cursors;
+        // Two frames, keeping the second: egui settles panel layout and font
+        // metrics on the first pass, so frame one can report caret geometry
+        // that the next frame immediately revises.
         let mut painted = 0;
         for _ in 0..2 {
             let input = egui::RawInput {

@@ -96,6 +96,20 @@ did nothing.
 The general rule this earns: a conditional mutation in a test is a test that can
 silently assert nothing.
 
+A third instance was caught in review rather than by me, which is worth
+recording alongside the two I found myself. `ctrl_alt_up_adds_a_cursor_above`
+originally asserted `cursor_count(&app) >= before` — true whether or not the
+binding existed. I knew a caret on line 0 has nowhere to go and weakened the
+assertion to accommodate that, instead of moving the caret somewhere the binding
+could act. It now places the caret on the last line and asserts an exact count
+of two, and disabling the `AddCursorAbove` keymap label fails it.
+
+Two smaller review points, both fixed: the test's `cursor_count` helper treated
+a missing viewport as zero cursors while `projected_cursor_count` in production
+treats it as one — two meanings for the same question — so the helper now
+`expect`s a viewport; and the paint test's two-frame loop is now documented as
+the layout/font settling pass it is rather than looking like a stray iteration.
+
 ## Status
 
 Both acceptance clauses now hold, the second measured on painted output rather
