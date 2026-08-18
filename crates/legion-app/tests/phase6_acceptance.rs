@@ -41,14 +41,14 @@ impl Drop for TempWorkspace {
 
 fn create_root() -> TempWorkspace {
     let root = std::env::temp_dir().join(format!(
-        "legion-app-phase6-{}-{}",
+        "legion-app-phase6-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+            .map_or(0, |value| value.as_millis() as u64),
+        TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&root).expect("create temp root");
+    std::fs::create_dir(&root).expect("create temp root");
     TempWorkspace { root }
 }
 

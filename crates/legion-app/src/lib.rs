@@ -11590,6 +11590,18 @@ impl ProjectionBuilder {
                 file_id: node.identity.file_id,
                 canonical_path: node.identity.canonical_path,
                 name: node.name,
+                // A node with children is a directory whether or not metadata
+                // arrived, and metadata is the authority when it did. Nodes
+                // with neither are treated as files, which is the safe default:
+                // opening one either succeeds or surfaces a read error, where
+                // mis-classifying a file as a directory would silently make it
+                // unopenable with no error to point at.
+                is_directory: node
+                    .metadata
+                    .as_ref()
+                    .map_or(!node.children.is_empty(), |metadata| {
+                        matches!(metadata.kind, FileKind::Directory)
+                    }),
                 children: node.children,
             })
             .collect();

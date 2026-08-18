@@ -30,6 +30,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | # | Action | Pass? | Notes |
 |---|--------|-------|-------|
 | 1 | Open this repo; expand nested dirs (crates/…) | | Watcher should not thrash |
+| 1a | **Click a file row; confirm it opens in the editor** | | See note below |
 | 2 | Edit a file; save; confirm dirty → clean; external overwrite conflict | | |
 | 3 | Focus BYOK field; type; confirm key not inserted into buffer | | |
 | 4 | Terminal: type command, see output, kill if needed | | |
@@ -42,6 +43,16 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
 | 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
 | 13 | Sandbox panel: Windows caveats visible if Job Object-only | | |
+
+> **Why 1a is called out separately.** Until 2026-08-17 this checklist went
+> straight from "expand nested dirs" to "edit a file", and never named the step
+> in between. Clicking a file row selected it and opened nothing — quick-open
+> (`Ctrl+P` / `Ctrl+O`) was the only way into a buffer — and because no line of
+> this checklist and no test asserted the mouse path, the tree looked correct
+> while the app was unusable for anyone who reached for the mouse first. Fixed
+> in `crates/legion-desktop/src/workflow.rs` (`ActivateExplorerFile`) and
+> guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
+> row: an affordance that is never checked is an affordance that can rot back.
 
 ## Commands / keys (debug)
 

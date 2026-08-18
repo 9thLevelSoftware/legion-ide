@@ -4,8 +4,15 @@
 mod assistant_rail;
 mod code_canvas_painter;
 mod components;
+/// Applying persisted dock splitter fractions, and observing new ones.
+pub mod dock_geometry;
 #[cfg(feature = "ai")]
 pub mod ghost_text;
+pub mod rail_icons;
+/// The editor tab strip: tabs, close affordance, drag-to-reorder.
+mod tab_strip;
+
+use tab_strip::render_tab_strip;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
@@ -290,6 +297,16 @@ pub struct DesktopProjectionViewState {
     pub canonical_workspace_root: Option<CanonicalPath>,
     /// Adapter-local mode-scoped dock layouts.
     pub dock_layouts: Vec<DockLayout>,
+    /// Whether [`Self::dock_layouts`] is an arrangement the user made, rather
+    /// than the shipped defaults.
+    ///
+    /// Only a user arrangement may override the panel sizes in
+    /// [`ShellGeometry`]. `DockLayout::standard_all_modes` carries splitter
+    /// fractions that disagree with those constants — it was written when
+    /// nothing read them — and the constants are what the prototype-fidelity
+    /// tests hold the shell to. Applying the defaults' fractions would silently
+    /// resize every panel in the product.
+    pub dock_layouts_user_arranged: bool,
     /// Adapter-local toast ids dismissed by the renderer.
     pub dismissed_toast_ids: BTreeSet<u64>,
     /// Whether the first-run onboarding card should be rendered.
@@ -327,6 +344,7 @@ impl Default for DesktopProjectionViewState {
             selected_bottom_panel: BottomPanelTab::Terminal,
             canonical_workspace_root: None,
             dock_layouts: DockLayout::standard_all_modes(),
+            dock_layouts_user_arranged: false,
             dismissed_toast_ids: BTreeSet::new(),
             first_run_onboarding_visible: false,
             completion_popup_open: false,
@@ -436,7 +454,13 @@ impl DesktopStatusBarViewModel {
         Self {
             product_mode: snapshot.product_mode.label().to_string(),
             flags: flags.to_vec(),
-            path: active.file_path.as_ref().map(|path| path.0.clone()),
+            // Display form: the status bar showed `\\?\D:\...` verbatim, which
+            // is the Windows extended-length prefix and belongs to the kernel,
+            // not to the person reading the bar.
+            path: active
+                .file_path
+                .as_ref()
+                .map(|path| crate::path_display::display_path(&path.0).into_owned()),
             workspace_id: active.workspace_id.map(|workspace| workspace.0),
             file_id: active.file_id.map(|file| file.0),
             buffer_id: active.buffer_id.map(|buffer| buffer.0),
@@ -1223,6 +1247,9 @@ pub struct ProjectionView {
     compact_drawer_restore_focus: Option<egui::Id>,
     last_editor_rect: Option<egui::Rect>,
     last_shell_panel_rects: Option<ShellPanelRects>,
+    /// Dock sizes from the previous frame, so a splitter drag can be told apart
+    /// from a restored layout, a remembered egui size, or a window resize.
+    last_dock_measurement: Option<dock_geometry::DockMeasurement>,
     /// Renderer-only presentation state. This is not product-mode authority.
     pending_mode_confirmation: Option<DockMode>,
     pending_mode_confirmation_source: Option<DockMode>,
@@ -1337,6 +1364,7 @@ impl ProjectionView {
             compact_drawer_restore_focus: None,
             last_editor_rect: None,
             last_shell_panel_rects: None,
+            last_dock_measurement: None,
             pending_mode_confirmation: None,
             pending_mode_confirmation_source: None,
             pending_mode_confirmation_origin: None,
@@ -1458,6 +1486,11 @@ impl ProjectionView {
     ) -> ProjectionViewOutput {
         self.normalize_mode_confirmation(snapshot.product_mode);
         let mut selected_bottom_panel = state.selected_bottom_panel;
+        // Filled in by the standard layout branch below. Compact layouts leave
+        // it empty: their panel sizes are fixed, not user-arranged, and
+        // recording them would overwrite the desktop arrangement whenever the
+        // window was briefly made small.
+        let mut observed_dock_fractions = dock_geometry::DockFractions::default();
         self.theme_preference =
             desktop_theme_preference(snapshot.settings_projection.theme_preference);
         let mut active_theme = self.theme_preference.resolve(ui.ctx());
@@ -1544,6 +1577,18 @@ impl ProjectionView {
             )
         } else {
             let inspector_visible = projected_product_mode(snapshot) != DesktopProductMode::Manual;
+            // The denominator for every splitter fraction this frame, captured
+            // before any dock is placed. Measuring against `ui.available_*`
+            // after a panel is added would give the *remaining* space, so a
+            // fraction written on one frame would mean something different when
+            // read on the next and the panels would creep on every restart.
+            let dock_basis = ui.available_rect_before_wrap();
+            // The size each dock was *asked* for this frame. A panel sitting at
+            // the size we requested tells us nothing — only a difference means
+            // the user moved the splitter. Comparing the rendered size against
+            // the stored fraction instead would rewrite the user's preference
+            // every time it got clamped, so merely making the window narrow
+            // would destroy the arrangement permanently.
             // Panel frames consume one pixel on each horizontal edge. Reserve
             // that chrome in addition to the required 560 px editor canvas.
             let standard_editor_reserve = ShellGeometry::MIN_STANDARD_EDITOR_WIDTH + 2.0;
@@ -1561,8 +1606,25 @@ impl ProjectionView {
             let left_panel = if geometry.compact {
                 left_panel.exact_size(geometry.left_width)
             } else {
+                // `default_size` is only consulted the first time egui lays this
+                // panel out; afterwards egui remembers the user's drag in its
+                // own memory. That memory is per-process, so on a fresh launch
+                // this is what decides the width — which is exactly where a
+                // restored fraction belongs.
+                let left_default = dock_geometry::size_from_fraction(
+                    dock_geometry::user_arranged_fraction(
+                        &state.dock_layouts,
+                        state.dock_layouts_user_arranged,
+                        snapshot.product_mode,
+                        legion_ui::DockSide::Left,
+                    ),
+                    dock_basis.width(),
+                    geometry.left_width,
+                    geometry.left_min_width,
+                    left_max_width,
+                );
                 left_panel
-                    .default_size(geometry.left_width)
+                    .default_size(left_default)
                     .min_size(geometry.left_min_width)
                     .max_size(left_max_width)
             };
@@ -1582,7 +1644,18 @@ impl ProjectionView {
                 egui::Panel::right("legion_desktop_trust")
                     .frame(theme::pane_frame(theme::tokens().bg.panel))
                     .resizable(true)
-                    .default_size(geometry.right_width)
+                    .default_size(dock_geometry::size_from_fraction(
+                        dock_geometry::user_arranged_fraction(
+                            &state.dock_layouts,
+                            state.dock_layouts_user_arranged,
+                            snapshot.product_mode,
+                            legion_ui::DockSide::Right,
+                        ),
+                        dock_basis.width(),
+                        geometry.right_width,
+                        geometry.right_min_width,
+                        right_max_width,
+                    ))
                     .min_size(geometry.right_min_width)
                     .max_size(right_max_width)
                     .show_inside(ui, |ui| {
@@ -1599,7 +1672,21 @@ impl ProjectionView {
                 bottom_panel.exact_size(geometry.bottom_height)
             } else {
                 bottom_panel
-                    .default_size(geometry.bottom_height)
+                    .default_size(dock_geometry::size_from_fraction(
+                        dock_geometry::user_arranged_fraction(
+                            &state.dock_layouts,
+                            state.dock_layouts_user_arranged,
+                            snapshot.product_mode,
+                            legion_ui::DockSide::Bottom,
+                        ),
+                        dock_basis.height(),
+                        geometry.bottom_height,
+                        geometry.bottom_min_height,
+                        // The console may not swallow the editor; leave the
+                        // canvas its documented minimum plus the chrome.
+                        (dock_basis.height() - geometry.bottom_min_height)
+                            .max(geometry.bottom_min_height),
+                    ))
                     .min_size(geometry.bottom_min_height)
             };
             let bottom_content = bottom_panel
@@ -1620,6 +1707,20 @@ impl ProjectionView {
                 bottom_content.min,
                 egui::pos2(bottom_content.right(), status.top()),
             );
+            // A splitter drag is a change between consecutive frames, so that
+            // is what gets reported. Compact layouts and the hidden Manual
+            // inspector never reach here, so a panel that was not drawn stays
+            // `None` rather than being recorded as a deliberate zero.
+            let measurement = dock_geometry::DockMeasurement {
+                basis_width: dock_basis.width(),
+                basis_height: dock_basis.height(),
+                left: Some(left.width()),
+                right: inspector_visible.then(|| right.width()),
+                bottom: Some(bottom_content.height()),
+            };
+            observed_dock_fractions =
+                dock_geometry::dragged_fractions(measurement, self.last_dock_measurement);
+            self.last_dock_measurement = Some(measurement);
             (left, right, bottom)
         };
 
@@ -1675,6 +1776,12 @@ impl ProjectionView {
         if let Some(origin) = self.mode_confirmation_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
+        // Shell-level, and last, alongside the other modal. It previously hung
+        // off the end of the code canvas, which put it inside a panel whose
+        // height was already fully allocated — so it rendered below the window
+        // edge — and registered it before the panels drawn after it, so it did
+        // not reliably win its own clicks either.
+        render_close_dirty_prompt_modal(ui.ctx(), snapshot, &mut actions);
         render_mode_confirmation_dialog(ui.ctx(), ui.is_enabled(), self, &mut actions);
         model.bottom_tab_rows = bottom_tab_rows(
             snapshot,
@@ -1687,6 +1794,7 @@ impl ProjectionView {
             displayed_title: model.layout_title,
             bottom_tab_rows: model.bottom_tab_rows,
             selected_bottom_panel,
+            observed_dock_fractions,
             actions,
         }
     }
@@ -2251,6 +2359,41 @@ fn render_left_sidebar(
     });
 }
 
+/// What a rail button shows: a drawn icon, or a character that does render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailGlyph {
+    /// Painted with the `rail_icons` geometry — no font involved.
+    Drawn(rail_icons::RailIcon),
+    /// A character verified to exist in the bundled font set.
+    Text(&'static str),
+}
+
+/// One activity-rail button, sized and styled identically whichever kind of
+/// glyph it carries, so a drawn icon and a character sit on the same grid.
+fn render_rail_button(ui: &mut egui::Ui, glyph: RailGlyph, selected: bool) -> egui::Response {
+    match glyph {
+        RailGlyph::Text(text) => ui.add_sized(
+            RAIL_BUTTON_SIZE,
+            egui::Button::new(theme::label(text)).selected(selected),
+        ),
+        RailGlyph::Drawn(icon) => {
+            let response = ui.add_sized(RAIL_BUTTON_SIZE, egui::Button::new("").selected(selected));
+            // Painted after the button so the icon sits above its background;
+            // the colour follows the same states the button's own text would.
+            let color = if selected || response.hovered() {
+                theme::tokens().text.primary
+            } else {
+                theme::tokens().text.muted
+            };
+            rail_icons::paint(ui.painter(), icon, response.rect, color);
+            response
+        }
+    }
+}
+
+/// Rail buttons are a fixed size so the column reads as a column.
+const RAIL_BUTTON_SIZE: [f32; 2] = [38.0, 28.0];
+
 fn render_activity_rail(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -2260,30 +2403,46 @@ fn render_activity_rail(
 ) {
     let scope = snapshot.search_projection.scope;
     for (surface, label, glyph, palette) in [
-        (ActivitySurface::Explorer, "Explorer", "▤", None),
+        (
+            ActivitySurface::Explorer,
+            "Explorer",
+            RailGlyph::Drawn(rail_icons::RailIcon::Explorer),
+            None,
+        ),
         (
             ActivitySurface::Search,
             "Search",
-            "⌕",
+            RailGlyph::Drawn(rail_icons::RailIcon::Search),
             Some((PaletteMode::Search, "/")),
         ),
         (
             ActivitySurface::Symbols,
             "Symbols",
-            "ƒ",
+            RailGlyph::Text("ƒ"),
             Some((PaletteMode::Symbol, "")),
         ),
-        (ActivitySurface::SourceControl, "Source Control", "⑂", None),
-        (ActivitySurface::Tests, "Tests", "✓", None),
-        (ActivitySurface::Debug, "Run and Debug", "▷", None),
+        (
+            ActivitySurface::SourceControl,
+            "Source Control",
+            RailGlyph::Drawn(rail_icons::RailIcon::SourceControl),
+            None,
+        ),
+        (
+            ActivitySurface::Tests,
+            "Tests",
+            RailGlyph::Drawn(rail_icons::RailIcon::Tests),
+            None,
+        ),
+        (
+            ActivitySurface::Debug,
+            "Run and Debug",
+            RailGlyph::Drawn(rail_icons::RailIcon::Debug),
+            None,
+        ),
     ] {
         let response = ui
             .push_id(("legion_desktop_activity", label), |ui| {
-                ui.add_sized(
-                    [38.0, 28.0],
-                    egui::Button::new(theme::label(glyph))
-                        .selected(view.selected_activity == surface),
-                )
+                render_rail_button(ui, glyph, view.selected_activity == surface)
             })
             .inner
             .on_hover_text(label);
@@ -2307,10 +2466,10 @@ fn render_activity_rail(
     ui.separator();
     let diagnostics = ui
         .push_id(("legion_desktop_utility", "Diagnostics"), |ui| {
-            ui.add_sized(
-                [38.0, 28.0],
-                egui::Button::new(theme::label("≡"))
-                    .selected(view.utility_surface == Some(UtilitySurface::Diagnostics)),
+            render_rail_button(
+                ui,
+                RailGlyph::Drawn(rail_icons::RailIcon::Diagnostics),
+                view.utility_surface == Some(UtilitySurface::Diagnostics),
             )
         })
         .inner
@@ -2331,10 +2490,10 @@ fn render_activity_rail(
     ] {
         let response = ui
             .push_id(("legion_desktop_utility", label), |ui| {
-                ui.add_sized(
-                    [38.0, 28.0],
-                    egui::Button::new(theme::label(glyph))
-                        .selected(view.utility_surface == Some(surface)),
+                render_rail_button(
+                    ui,
+                    RailGlyph::Text(glyph),
+                    view.utility_surface == Some(surface),
                 )
             })
             .inner
@@ -3403,7 +3562,6 @@ fn render_editor_canvas(
         .response
         .rect;
     render_excerpt_surface(ui, snapshot, actions);
-    render_close_dirty_prompt_controls(ui, snapshot, actions);
     editor_rect
 }
 
@@ -3540,270 +3698,27 @@ fn render_minimap(
     }
 }
 
-const TAB_DIRTY_GLYPH: &str = "\u{2022}";
-const TAB_CLOSE_GLYPH: &str = "\u{00d7}";
-
-/// Persistent drag state for tab reorder, stored in `egui::Context::data_mut`.
-#[derive(Clone, Default)]
-struct TabDragState {
-    /// Buffer id of the tab currently being dragged.
-    dragging: Option<BufferId>,
-    /// Original index of the dragged tab (at drag start).
-    source_index: usize,
-    /// Index of the tab currently under the pointer during a drag.
-    drop_target: Option<usize>,
-}
-
-fn adjusted_tab_drop_target(source_index: usize, target_index: usize) -> usize {
-    if source_index < target_index {
-        target_index.saturating_sub(1)
-    } else {
-        target_index
-    }
-}
-
-fn render_tab_strip(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let drag_state_id = egui::Id::new("tab_strip_drag_state");
-
-    theme::pane_frame(theme::tokens().bg.panel).show(ui, |ui| {
-        ui.set_height(34.0);
-        let tabs = &snapshot.daily_editing_projection.tabs.tabs;
-        if tabs.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label(theme::muted("<no open tabs>"));
-            });
-            return;
-        }
-
-        // Wrap tabs in a horizontal scroll area.  Drag-to-scroll is disabled so
-        // that pointer drag is reserved for tab reorder; users scroll with the
-        // mouse wheel.
-        egui::ScrollArea::horizontal()
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-            .scroll_source(egui::scroll_area::ScrollSource {
-                scroll_bar: true,
-                drag: false,
-                mouse_wheel: true,
-            })
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Load current drag state and reset per-frame target.
-                    let mut drag: TabDragState = ui
-                        .ctx()
-                        .data_mut(|d| d.get_temp(drag_state_id).unwrap_or_default());
-                    drag.drop_target = None;
-
-                    for (tab_index, tab) in tabs.iter().enumerate() {
-                        // --- build tab label ---
-                        let color = if tab.active {
-                            theme::tokens().text.primary
-                        } else {
-                            theme::tokens().text.muted
-                        };
-                        let tab_fill = if tab.active {
-                            theme::tokens().bg.code
-                        } else {
-                            theme::tokens().bg.panel
-                        };
-                        let tab_stroke = egui::Stroke::new(
-                            1.0_f32,
-                            if tab.active {
-                                theme::tokens().border.default
-                            } else {
-                                theme::tokens().bg.panel
-                            },
-                        );
-
-                        // Render tab button with click_and_drag sense.
-                        let tab_response = ui.add(
-                            egui::Button::new(theme::accent(tab.title.clone(), color))
-                                .fill(tab_fill)
-                                .stroke(tab_stroke)
-                                .corner_radius(egui::CornerRadius::same(6))
-                                .sense(egui::Sense::click_and_drag()),
-                        );
-                        ui.ctx().accesskit_node_builder(tab_response.id, |node| {
-                            node.set_role(egui::accesskit::Role::Tab);
-                            node.set_label(tab.title.as_str());
-                            node.set_selected(tab.active);
-                            if tab.dirty {
-                                node.set_description("Unsaved changes");
-                            } else {
-                                node.clear_description();
-                            }
-                            if tab.active {
-                                node.set_aria_current(egui::accesskit::AriaCurrent::True);
-                            } else {
-                                node.clear_aria_current();
-                            }
-                        });
-
-                        let tab_hovered = tab_response.hovered();
-
-                        // --- close button / dirty indicator ---
-                        // Show close button when tab is hovered or active.
-                        // For dirty tabs: show bullet when not hovered, x when hovered.
-                        let show_close = true;
-                        let mut close_clicked = false;
-
-                        if show_close || tab.dirty {
-                            let close_glyph = if tab.dirty && !tab_hovered {
-                                TAB_DIRTY_GLYPH
-                            } else {
-                                TAB_CLOSE_GLYPH
-                            };
-                            let close_color = if tab_hovered {
-                                theme::tokens().text.primary
-                            } else {
-                                theme::tokens().text.muted
-                            };
-                            // Place the close/dirty indicator right after the tab label
-                            // as a small clickable label.
-                            let close_response = ui.add(
-                                egui::Button::new(theme::accent(close_glyph, close_color))
-                                    .fill(egui::Color32::TRANSPARENT)
-                                    .stroke(egui::Stroke::NONE)
-                                    .corner_radius(egui::CornerRadius::same(3))
-                                    .min_size(egui::vec2(
-                                        f32::from(theme::tokens().control_height.compact),
-                                        f32::from(theme::tokens().control_height.compact),
-                                    )),
-                            );
-                            ui.ctx().accesskit_node_builder(close_response.id, |node| {
-                                node.set_label(format!("Close {}", tab.title));
-                            });
-                            if close_response.clicked() {
-                                close_clicked = true;
-                                actions.push(DesktopAction::CloseTab {
-                                    buffer_id: tab.buffer_id,
-                                });
-                            }
-                        }
-
-                        // Add a small gap between tabs.
-                        ui.add_space(2.0);
-
-                        // --- drag-to-reorder ---
-                        if !close_clicked {
-                            if tab_response.drag_started() {
-                                drag.dragging = Some(tab.buffer_id);
-                                drag.source_index = tab_index;
-                            }
-
-                            // While dragging, check if the cursor is over this
-                            // tab to determine the drop target.  Uses
-                            // `contains_pointer()` instead of `hovered()` because
-                            // egui suppresses `hovered` on non-source widgets
-                            // during a drag.
-                            if let Some(dragging_id) = drag.dragging
-                                && dragging_id != tab.buffer_id
-                                && tab_response.contains_pointer()
-                            {
-                                // Treat the left and right halves of a tab as
-                                // distinct insertion slots. The slot is
-                                // measured before removing the source tab,
-                                // then adjusted once at release.
-                                let insert_after = tab_response
-                                    .interact_pointer_pos()
-                                    .is_some_and(|pos| pos.x >= tab_response.rect.center().x);
-                                let target_index = if insert_after {
-                                    tab_index.saturating_add(1)
-                                } else {
-                                    tab_index
-                                };
-                                drag.drop_target = Some(target_index);
-                                let rect = tab_response.rect;
-                                let indicator_x = if insert_after {
-                                    rect.right()
-                                } else {
-                                    rect.left()
-                                };
-                                let painter = ui.painter();
-                                painter.line_segment(
-                                    [
-                                        egui::pos2(indicator_x, rect.top()),
-                                        egui::pos2(indicator_x, rect.bottom()),
-                                    ],
-                                    egui::Stroke::new(2.0_f32, theme::tokens().accent.blue),
-                                );
-                            }
-                        }
-
-                        // --- left-click to switch tab ---
-                        if !close_clicked && tab_response.clicked() {
-                            actions.push(DesktopAction::SwitchTab {
-                                buffer_id: tab.buffer_id,
-                            });
-                        }
-
-                        // --- context menu ---
-                        tab_response.context_menu(|ui| {
-                            if ui.button("Close").clicked() {
-                                actions.push(DesktopAction::CloseTab {
-                                    buffer_id: tab.buffer_id,
-                                });
-                                ui.close();
-                            }
-                            if ui.button("Close Others").clicked() {
-                                for other in
-                                    tabs.iter().filter(|other| other.buffer_id != tab.buffer_id)
-                                {
-                                    actions.push(DesktopAction::CloseTab {
-                                        buffer_id: other.buffer_id,
-                                    });
-                                }
-                                ui.close();
-                            }
-                            if ui.button("Close All").clicked() {
-                                for other in tabs {
-                                    actions.push(DesktopAction::CloseTab {
-                                        buffer_id: other.buffer_id,
-                                    });
-                                }
-                                ui.close();
-                            }
-                        });
-                    }
-
-                    // Handle pointer release: fire ReorderTab if dropped on
-                    // a valid target, then clear drag state.
-                    if ui.input(|i| i.pointer.any_released()) {
-                        if let Some(dragging_id) = drag.dragging.take()
-                            && let Some(target) = drag.drop_target.take()
-                        {
-                            // `target` is a pre-removal insertion slot.
-                            // Removing a tab from the left shifts every later
-                            // slot by one before insertion.
-                            let adjusted_target =
-                                adjusted_tab_drop_target(drag.source_index, target);
-                            if adjusted_target != drag.source_index {
-                                actions.push(DesktopAction::ReorderTab {
-                                    buffer_id: dragging_id,
-                                    new_index: adjusted_target,
-                                });
-                            }
-                        }
-                        drag.drop_target = None;
-                    }
-
-                    // Persist drag state.
-                    ui.ctx().data_mut(|d| d.insert_temp(drag_state_id, drag));
-                });
-            });
-    });
-}
-
 fn render_breadcrumb_bar(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
     let language = &snapshot.language_tooling_projection;
     theme::pane_frame(theme::tokens().bg.code).show(ui, |ui| {
         ui.set_height(26.0);
         ui.horizontal(|ui| {
-            ui.label(theme::code(current_path(snapshot)));
+            // Trailing segments, not the absolute path. Every file in the
+            // workspace shares the same leading directories, so printing them
+            // filled the bar with the one part that carries no information —
+            // and on Windows it led with the `\\?\` prefix, which made every
+            // path in the product look corrupted.
+            let trail = crate::path_display::breadcrumb_trail(current_path(snapshot), 3);
+            for (index, segment) in trail.iter().enumerate() {
+                if index > 0 {
+                    ui.label(theme::muted("›"));
+                }
+                if index + 1 == trail.len() {
+                    ui.label(theme::code(segment));
+                } else {
+                    ui.label(theme::code_muted(segment));
+                }
+            }
             for breadcrumb in language.breadcrumbs.iter().take(4) {
                 ui.label(theme::muted("›"));
                 ui.label(theme::code_muted(&breadcrumb.label));
@@ -3898,34 +3813,18 @@ fn render_code_lines(
         });
 
         let viewport = snapshot.active_buffer_projection.viewport.as_ref();
-        let sticky_scopes = &snapshot.language_tooling_projection.sticky_scopes;
-        let fold_ranges = viewport
-            .map(|viewport| viewport.fold_ranges.as_slice())
-            .unwrap_or(&[]);
-        ui.horizontal_wrapped(|ui| {
-            if model.settings.sticky_headers_visible {
-                ui.label(theme::label("sticky headers"));
-                if let Some(scope) = sticky_scopes.iter().find(|scope| scope.active) {
-                    ui.label(theme::code(&scope.label));
-                    ui.label(theme::code_muted(&scope.kind_label));
-                } else {
-                    ui.label(theme::muted("<none>"));
-                }
-            }
-            if model.settings.code_folding_visible {
-                ui.label(theme::label("folding"));
-                ui.label(theme::code(format!("{} ranges", fold_ranges.len())));
-            }
-            if model.settings.whitespace_guides_visible {
-                ui.label(theme::label("whitespace guides"));
-            }
-            if model.settings.indent_guides_visible {
-                ui.label(theme::label("indent guides"));
-            }
-            if model.settings.smooth_scrolling_enabled {
-                ui.label(theme::label("smooth scrolling"));
-            }
-        });
+
+        // The strip that used to live here printed the *state of the editor
+        // settings* above the file — "sticky headers <none> folding 0 ranges
+        // smooth scrolling" — on every buffer. That is a readout of a settings
+        // struct, not a feature: a setting that is on should show up as the
+        // thing it does (a sticky header pinned to the top, a fold arrow in the
+        // gutter), and a setting that is off should show up as nothing at all.
+        // Naming them in a row above the code told the user nothing and cost
+        // the first line of every file.
+        //
+        // The active sticky scope is still projected and is still rendered
+        // where it belongs; see `sticky_scopes` in the language-tooling panel.
 
         for line in &model.active_buffer_code_lines {
             ui.horizontal(|ui| {
@@ -6599,14 +6498,15 @@ fn render_terminal_stream(
     theme::code_frame().show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(theme::code_muted(render_model.status_label.clone()));
-                if let Some(session_label) = &render_model.active_session_label {
-                    ui.label(theme::code_muted(session_label.clone()));
+                // The render model's `key=value` labels stay as they are —
+                // evidence tests assert them exactly — but the panel shows the
+                // readable form. `status=disabled visible=0 omitted=0
+                // matches=0` across the top of an idle terminal was four facts
+                // nobody asked for, three of which were zero.
+                ui.label(theme::body(terminal.status.kind.display_label()));
+                if let Some(summary) = terminal_panel::scrollback_summary(terminal) {
+                    ui.label(theme::muted(summary));
                 }
-                if let Some(runtime_label) = &render_model.runtime_label {
-                    ui.label(theme::code_muted(runtime_label.clone()));
-                }
-                ui.label(theme::code_muted(render_model.scrollback_label.clone()));
                 if render_model.scrollback_truncated {
                     ui.label(theme::code_muted("scrollback truncated"));
                 }
@@ -7683,7 +7583,11 @@ fn is_word_char(ch: char) -> bool {
 }
 
 /// Adapter-local render output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: the observed dock fractions are `f32`, which has
+/// no total equality. Comparing two outputs stays available; using one as a
+/// hash key does not, and never did anything.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectionViewOutput {
     /// True when adapter-local animation or timing needs another paint.
     pub needs_repaint: bool,
@@ -7695,6 +7599,12 @@ pub struct ProjectionViewOutput {
     ///
     /// Diagnostics presentation does not overwrite this persisted selection.
     pub selected_bottom_panel: BottomPanelTab,
+    /// Dock sizes this frame, as fractions of the shell, for persistence.
+    ///
+    /// Round-tripped through the runtime the same way `selected_bottom_panel`
+    /// is: the renderer observes, the runtime decides whether it is worth
+    /// storing. A field with `None` means that panel was not rendered.
+    pub observed_dock_fractions: dock_geometry::DockFractions,
     /// Adapter actions requested by rendered controls.
     pub actions: Vec<DesktopAction>,
 }
@@ -8558,25 +8468,60 @@ fn has_ascii_extension(path: &str, extension: &str) -> bool {
         && path[path.len() - extension.len()..].eq_ignore_ascii_case(extension)
 }
 
-fn render_close_dirty_prompt_controls(
-    ui: &mut egui::Ui,
+/// The unsaved-changes prompt, as a centred modal.
+///
+/// This used to be a plain `ui.horizontal` appended to the central panel after
+/// the code canvas — but the canvas allocates the panel's entire remaining
+/// height, so the prompt was laid out past the bottom edge and rendered
+/// off-screen at every window size. That was not cosmetic: `editor_input_enabled`
+/// returns false while the prompt is active, so raising it disabled typing and
+/// left the only two ways to dismiss it below the window. The app locked up and
+/// looked like it had simply stopped responding.
+///
+/// A modal is also the honest shape for it. This is a blocking decision about
+/// unsaved work; laying it out as ordinary flow content left it competing for
+/// space with the file it was asking about.
+fn render_close_dirty_prompt_modal(
+    ctx: &egui::Context,
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
     let Some(prompt) = &snapshot.daily_editing_projection.close_dirty_prompt else {
         return;
     };
-    ui.horizontal(|ui| {
-        if ui.button("Save").clicked() {
-            actions.push(DesktopAction::SaveDirtyClose {
-                buffer_id: prompt.buffer_id,
-            });
-        }
-        if ui.button("Cancel").clicked() {
-            actions.push(DesktopAction::CancelDirtyClose {
-                buffer_id: prompt.buffer_id,
-            });
-        }
+    egui::Modal::new(egui::Id::new("legion_close_dirty_prompt")).show(ctx, |ui| {
+        ui.set_max_width(360.0);
+        ctx.accesskit_node_builder(ui.unique_id(), |node| {
+            node.set_role(egui::accesskit::Role::Dialog);
+            node.set_label("Unsaved changes");
+            node.set_description(prompt.message.clone());
+            node.set_modal();
+        });
+        ui.label(theme::title("Unsaved changes"));
+        ui.add_space(6.0);
+        // The projection already carries the sentence to show; composing one
+        // here from the tab list would drift from what app authority says.
+        ui.label(theme::body(prompt.message.clone()));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Save and close").clicked() {
+                actions.push(DesktopAction::SaveDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+            }
+            if ui.button("Cancel").clicked() {
+                actions.push(DesktopAction::CancelDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(theme::muted("Enter saves and closes · Escape cancels"));
+        // There is deliberately no "Discard" here yet: no discard path exists
+        // anywhere in app authority, so offering the button would either do
+        // nothing or lie about what it did. Closing without saving is a real
+        // gap, tracked separately — it needs a way to drop buffer edits that
+        // app authority actually owns, not a renderer-side shortcut.
     });
 }
 
@@ -8611,6 +8556,43 @@ fn render_explorer_controls(
     }
 }
 
+/// Width of the disclosure slot every explorer row reserves.
+const DISCLOSURE_SLOT_WIDTH: f32 = 14.0;
+
+/// A collapsed (▸) or expanded (▾) disclosure triangle.
+///
+/// Painted rather than typed for the same reason the rail icons are: the
+/// characters for these arrows are not in every font this app may end up
+/// running with, and a tree whose disclosure markers render as `□` is worse
+/// than one with no markers at all.
+fn paint_disclosure_triangle(
+    painter: &egui::Painter,
+    slot: egui::Rect,
+    expanded: bool,
+    color: egui::Color32,
+) {
+    let center = slot.center();
+    let reach = 3.5_f32;
+    let points = if expanded {
+        vec![
+            egui::pos2(center.x - reach, center.y - reach * 0.6),
+            egui::pos2(center.x + reach, center.y - reach * 0.6),
+            egui::pos2(center.x, center.y + reach * 0.8),
+        ]
+    } else {
+        vec![
+            egui::pos2(center.x - reach * 0.6, center.y - reach),
+            egui::pos2(center.x + reach * 0.8, center.y),
+            egui::pos2(center.x - reach * 0.6, center.y + reach),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
 fn render_explorer_node(
     ui: &mut egui::Ui,
     node: &legion_ui::ExplorerNodeProjection,
@@ -8624,16 +8606,40 @@ fn render_explorer_node(
         .expanded_explorer_paths
         .contains(&node.canonical_path.0);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
         ui.add_space((depth as f32) * 12.0);
-        if !node.children.is_empty() {
-            let marker = if is_expanded { "v" } else { ">" };
-            if ui.button(marker).clicked() {
+        // Every row reserves the same disclosure slot, directory or not, so the
+        // names line up in a column. Files previously rendered a literal "-"
+        // here and directories a "v"/">" inside a full button frame, which made
+        // the tree read as a list of bulleted buttons rather than a tree.
+        //
+        // Keyed on `is_directory`, not on the child list: an empty directory
+        // has no children and still needs its chevron, or it renders as a file
+        // that refuses to open.
+        let (slot, disclosure) = ui.allocate_exact_size(
+            egui::vec2(DISCLOSURE_SLOT_WIDTH, 16.0),
+            if node.is_directory {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        );
+        if node.is_directory {
+            paint_disclosure_triangle(
+                ui.painter(),
+                slot,
+                is_expanded,
+                if disclosure.hovered() {
+                    theme::tokens().text.primary
+                } else {
+                    theme::tokens().text.muted
+                },
+            );
+            if disclosure.clicked() {
                 actions.push(DesktopAction::ToggleExplorerPath {
                     path: node.canonical_path.0.clone(),
                 });
             }
-        } else {
-            ui.label("-");
         }
         if ui
             .selectable_label(Some(node.file_id) == selected, &node.name)
@@ -8740,7 +8746,7 @@ fn push_explorer_row(
         " "
     };
     let is_expanded = expanded.contains(&node.canonical_path.0);
-    let expansion_marker = if node.children.is_empty() {
+    let expansion_marker = if !node.is_directory {
         "-"
     } else if is_expanded {
         "v"
@@ -11114,6 +11120,7 @@ fn remote_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::tab_strip::adjusted_tab_drop_target;
     use super::*;
     use legion_protocol::{
         CapabilityId, DelegatedTaskToolPermissionDecision, DelegatedTaskToolPermissionProfile,

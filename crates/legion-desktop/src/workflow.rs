@@ -25,8 +25,8 @@ use legion_protocol::{
     PluginHostCallResponse, PluginId, PluginManifest, PrincipalId, ProposalId,
     ProposalLifecycleState, ProposalLifecycleTransition, ProposalResponse, ProtocolTextRange,
     RemoteTransportEnvelope, RemoteWorkspaceSessionDescriptor, RemoteWorkspaceSessionId,
-    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, ViewportScroll,
-    WorkspaceSessionRecord, WorkspaceTrustState,
+    SessionDockLayout, SessionDockSideLayout, SessionPanelState, TextCoordinate, TimestampMillis,
+    ViewportScroll, WorkspaceSessionRecord, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
@@ -58,6 +58,7 @@ use crate::{
     session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
     theme,
+    view::dock_geometry::{self, DockFractions},
     view::{
         BottomPanelTab, DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
         ime_composition_state, ime_composition_state_id,
@@ -111,6 +112,18 @@ impl DesktopLaunchConfig {
     pub fn with_session_state(mut self, path: PathBuf) -> Self {
         self.session_state = Some(path);
         self
+    }
+
+    /// Where an interactive launch keeps its layout metadata.
+    ///
+    /// Beside the workspace's other per-workspace state (`palette_usage.json`,
+    /// `proposal-audit/`), which `enable_workspace_state_persistence` already
+    /// creates, and which workspace scans already exclude. Per workspace rather
+    /// than per user on purpose: opening one repository must not restore
+    /// another's tabs.
+    #[must_use]
+    pub fn default_session_state_path(workspace_root: &Path) -> PathBuf {
+        workspace_root.join(".legion").join("session.json")
     }
 
     /// Attach a metadata-only diagnostics export path.
@@ -283,6 +296,23 @@ impl DesktopLaunchConfig {
         } else {
             None
         };
+
+        // An interactive launch persists its layout by default. Without this,
+        // `session_state` stayed `None` unless `--session-state` was passed,
+        // `save_session_state` returned immediately, and every restart lost the
+        // open tabs, the active buffer, the explorer expansion and the dock
+        // layout — while ten tests in `session_restore.rs` passed, because each
+        // one hands the runtime a path the product never supplied.
+        //
+        // Deliberately after `beta` is constructed: that branch reads
+        // `session_state` directly and substitutes its own default, so
+        // defaulting earlier would silently redirect beta-smoke evidence into
+        // the workspace. Smoke and perf runs are short-lived measurement
+        // harnesses and keep whatever they were given.
+        let session_state = session_state.or_else(|| {
+            (!smoke_enabled && !beta_enabled && !manual_perf_enabled)
+                .then(|| Self::default_session_state_path(&workspace_root))
+        });
 
         Ok(Self {
             workspace_root,
@@ -584,7 +614,13 @@ pub struct DesktopRuntime {
     /// panel selection.
     selected_bottom_panel: BottomPanelTab,
     dock_layouts: Vec<DockLayout>,
+    /// Whether `dock_layouts` is a user arrangement rather than the shipped
+    /// defaults, and may therefore override the shell's designed panel sizes.
+    dock_layouts_user_arranged: bool,
     session_state_path: Option<PathBuf>,
+    /// Encoding of the last session record actually written, so an action that
+    /// changed nothing a restart would restore does not pay for a durable write.
+    last_saved_session_fingerprint: Option<String>,
     diagnostics_export_path: Option<PathBuf>,
     onboarding_visible: bool,
     quit_requested: bool,
@@ -648,6 +684,12 @@ impl DesktopRuntime {
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
+        // Whether `dock_layouts` represents a layout the user arranged, rather
+        // than the shipped defaults. Only an arranged layout may override the
+        // shell's designed panel sizes: `DockLayout::standard_all_modes` and
+        // `ShellGeometry`'s constants disagree about the defaults, and the
+        // constants are the ones the prototype-fidelity tests hold to.
+        let mut dock_layouts_user_arranged = false;
         let mut status = status_message(StatusSeverity::Info, "Desktop adapter ready");
         let mut status_details = Vec::new();
 
@@ -661,6 +703,7 @@ impl DesktopRuntime {
                     .collect();
                 panel_state = record.panel_state.clone();
                 dock_layouts = restore_dock_layouts(record);
+                dock_layouts_user_arranged = !record.dock_layouts.is_empty();
                 let (restore_status, restore_details) = restore_status_messages(&restore);
                 status = restore_status;
                 status_details = restore_details;
@@ -704,7 +747,9 @@ impl DesktopRuntime {
             panel_state,
             selected_bottom_panel,
             dock_layouts,
+            dock_layouts_user_arranged,
             session_state_path: config.session_state,
+            last_saved_session_fingerprint: None,
             diagnostics_export_path: config.diagnostics_export,
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
@@ -1511,12 +1556,36 @@ impl DesktopRuntime {
     }
 
     /// Save the current session to the configured session path.
-    pub fn save_session_state(&self) -> Result<()> {
-        let Some(path) = &self.session_state_path else {
+    ///
+    /// Skips the write when nothing a restart would restore has changed.
+    /// `persist_session_if_configured` runs from the catch-all action arm, so
+    /// this is reached by *every* dispatched action including each inserted
+    /// character — and `DesktopSessionStore::save` is deliberately expensive:
+    /// it writes a temp file, `sync_all`s it, reads it back and re-parses it to
+    /// validate, then atomically replaces the target. An fsync per keystroke
+    /// would not survive the ADR-0048 keypress budget.
+    ///
+    /// The comparison is on the serialized record with `saved_at` zeroed, since
+    /// that field changes on every capture and would defeat the check. Encoding
+    /// a small metadata record costs microseconds against milliseconds for the
+    /// durable write, and the guard is what makes saving on every action —
+    /// which is what makes the layout survive a crash — affordable.
+    pub fn save_session_state(&mut self) -> Result<()> {
+        let Some(path) = self.session_state_path.clone() else {
             return Ok(());
         };
         let record = self.capture_session_record()?;
-        DesktopSessionStore::save(path, &record)?;
+        let fingerprint = session_record_fingerprint(&record);
+        // A record that will not encode is one we cannot compare; fall through
+        // and let the store surface the real error rather than silently
+        // skipping the save.
+        if let Some(fingerprint) = &fingerprint
+            && self.last_saved_session_fingerprint.as_ref() == Some(fingerprint)
+        {
+            return Ok(());
+        }
+        DesktopSessionStore::save(&path, &record)?;
+        self.last_saved_session_fingerprint = fingerprint;
         Ok(())
     }
 
@@ -1583,6 +1652,7 @@ impl DesktopRuntime {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
+            dock_layouts_user_arranged: self.dock_layouts_user_arranged,
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
             selected_bottom_panel: self.selected_bottom_panel,
             canonical_workspace_root: Some(CanonicalPath(
@@ -1626,6 +1696,42 @@ impl DesktopRuntime {
                     .last_product_ai_stream()
                     .map(|s| s.in_flight)
                     .unwrap_or(false),
+        }
+    }
+
+    /// Store dock sizes the renderer observed, if the user actually moved one.
+    ///
+    /// Guarded twice. `None` means the panel was not rendered — compact
+    /// layouts and Manual's hidden inspector — and must not be recorded as a
+    /// deliberate zero. And a change smaller than
+    /// [`dock_geometry::MATERIAL_FRACTION_DELTA`] is sub-pixel float wobble in
+    /// the panel rect, not a resize; without that test every frame would look
+    /// like a drag and, since a layout change now writes the session record,
+    /// the app would fsync continuously while sitting idle.
+    pub fn persist_dock_fractions(&mut self, observed: DockFractions) {
+        let mode = self.projection_snapshot().product_mode;
+        let Some(layout) = self.dock_layouts.iter_mut().find(|l| l.mode == mode) else {
+            return;
+        };
+        let mut changed = false;
+        for (observed, side) in [
+            (observed.left, &mut layout.left),
+            (observed.right, &mut layout.right),
+            (observed.bottom, &mut layout.bottom),
+        ] {
+            if let Some(observed) = observed
+                && dock_geometry::differs_materially(observed, side.splitter_fraction)
+            {
+                side.splitter_fraction = observed.clamp(0.15, 0.85);
+                changed = true;
+            }
+        }
+        if changed {
+            // A drag makes this an arrangement the user owns, so from here on
+            // it may override the shell's designed sizes — including after the
+            // next restart, when it arrives back through the session record.
+            self.dock_layouts_user_arranged = true;
+            self.persist_session_if_configured();
         }
     }
 
@@ -1949,6 +2055,37 @@ impl DesktopRuntime {
                 }
                 self.set_status(StatusSeverity::Info, format!("Explorer toggled {path}"));
                 Ok(DesktopWorkflowOutcome::ExplorerPathToggled(path))
+            }
+            DesktopAppRequest::SaveAndCloseTab { buffer_id } => {
+                let saved = self.dispatch_intent(CommandDispatchIntent::Save { buffer_id })?;
+                if let DesktopWorkflowOutcome::Error(message) = saved {
+                    // Leave the tab open and the prompt answerable: a failed
+                    // save followed by a close would discard the very edits the
+                    // user just asked to keep.
+                    return Ok(DesktopWorkflowOutcome::Error(message));
+                }
+                self.dispatch_intent(CommandDispatchIntent::CloseTab { buffer_id })
+            }
+            DesktopAppRequest::ActivateExplorerFile {
+                file_id,
+                path,
+                is_directory,
+            } => {
+                if is_directory {
+                    // A directory row activates the same way its chevron does.
+                    // Requiring the chevron makes the wide, obvious part of the
+                    // row inert, which reads as a broken tree.
+                    return self.handle_app_request(DesktopAppRequest::ToggleExplorerPath { path });
+                }
+                // Open first, then reveal. `open_file` sets the app's
+                // `active_file_id`, but the explorer projection is only rebuilt
+                // by the reveal outcome, so reversing these leaves the tree
+                // highlighting the row the user clicked *before* this one.
+                let opened = self.dispatch_intent(CommandDispatchIntent::OpenPath { path })?;
+                if let DesktopWorkflowOutcome::Error(message) = opened {
+                    return Ok(DesktopWorkflowOutcome::Error(message));
+                }
+                self.dispatch_intent(CommandDispatchIntent::RevealInExplorer { file_id })
             }
             DesktopAppRequest::OpenExternalUrl { url } => {
                 open_url_in_system_browser(&url)?;
@@ -3238,6 +3375,18 @@ fn restore_status_messages(
     (status, details)
 }
 
+/// A comparable encoding of everything a restart would restore.
+///
+/// `saved_at` is zeroed because it changes on every capture; leaving it in
+/// would make every record differ from the last one and defeat the write guard
+/// in [`DesktopRuntime::save_session_state`]. `None` means the record did not
+/// encode, which the caller treats as "cannot compare, so write".
+fn session_record_fingerprint(record: &WorkspaceSessionRecord) -> Option<String> {
+    let mut probe = record.clone();
+    probe.saved_at = TimestampMillis(0);
+    serde_json::to_string(&probe).ok()
+}
+
 fn session_workspace_matches(workspace_root: &Path, record: &WorkspaceSessionRecord) -> bool {
     let Some(session_root) = &record.last_workspace_path else {
         return true;
@@ -3624,6 +3773,8 @@ impl DesktopEframeApp {
             .render_with_state(ui, &snapshot, &view_state);
         self.runtime
             .persist_bottom_panel_selection(output.selected_bottom_panel);
+        self.runtime
+            .persist_dock_fractions(output.observed_dock_fractions);
         for action in output.actions {
             self.runtime.dispatch_ui_action(action);
         }
@@ -3651,9 +3802,19 @@ impl DesktopEframeApp {
         let mut actions = Vec::new();
         let snapshot = self.runtime.projection_snapshot();
         // Interactive TextEdit widgets (BYOK, terminal input) keep focus across
-        // frames. While any widget owns keyboard focus, do not also dispatch
+        // frames. While one of them owns keyboard focus, do not also dispatch
         // typed characters / Backspace into the code canvas (key leakage).
-        let interactive_widget_focused = ui.memory(|mem| mem.focused().is_some());
+        //
+        // The test is specifically "a text field has focus", not "something has
+        // focus". egui hands focus to buttons too — clicking the Settings gear
+        // or Setup button parks it on a plain `Button`, which never surrenders
+        // it — and the broader check (`mem.focused().is_some()`, which is also
+        // what `Context::egui_wants_keyboard_input` returns) turned that into a
+        // trap: every subsequent keystroke was silently discarded, the state
+        // survived closing the overlay, and nothing on screen said why. Typing
+        // stopping forever after clicking a settings icon is most of what "the
+        // app doesn't work" means to someone using it.
+        let interactive_widget_focused = ui.ctx().text_edit_focused();
         let terminal_input_focused = ui.memory(|mem| {
             mem.focused() == Some(crate::view::interactive_fields::terminal_input_widget_id())
         });
@@ -3676,6 +3837,32 @@ impl DesktopEframeApp {
                 });
                 ui.input_mut(|state| {
                     state.consume_key(input.modifiers, egui::Key::Escape);
+                });
+            }
+        } else if let Some(prompt) = snapshot
+            .daily_editing_projection
+            .close_dirty_prompt
+            .as_ref()
+        {
+            // The unsaved-changes prompt disables editor input while it is up,
+            // so it must be dismissable from the keyboard. Without this the
+            // only way out was the two buttons — which, until this was fixed,
+            // rendered below the bottom of the window. A modal that blocks
+            // typing and cannot be answered is indistinguishable from a hang.
+            if input.key_pressed(egui::Key::Escape) {
+                actions.push(DesktopAction::CancelDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Escape);
+                });
+            }
+            if input.key_pressed(egui::Key::Enter) {
+                actions.push(DesktopAction::SaveDirtyClose {
+                    buffer_id: prompt.buffer_id,
+                });
+                ui.input_mut(|state| {
+                    state.consume_key(input.modifiers, egui::Key::Enter);
                 });
             }
         } else if snapshot.palette_projection.open {

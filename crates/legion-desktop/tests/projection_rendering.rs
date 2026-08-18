@@ -202,12 +202,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("Cargo.toml".to_string()),
                 name: "Cargo.toml".to_string(),
                 children: vec![FileId(8)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(8),
                 canonical_path: CanonicalPath("src/lib.rs".to_string()),
                 name: "lib.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
@@ -249,13 +251,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
             ],
             active_buffer_id: Some(BufferId(3)),
         },
-        close_dirty_prompt: Some(CloseDirtyPromptProjection {
-            buffer_id: BufferId(3),
-            file_id: Some(FileId(2)),
-            file_path: Some(CanonicalPath("Cargo.toml".to_string())),
-            title: "Cargo.toml".to_string(),
-            message: "Save changes before closing Cargo.toml?".to_string(),
-        }),
+        // Deliberately `None`. The unsaved-changes prompt is a modal: while it
+        // is raised it blocks interaction with the whole shell, which is what a
+        // modal is for. Leaving it set in the shared fixture meant every test
+        // in this file rendered a shell no one could click, and the tests only
+        // passed because the prompt used to be inert flow content laid out off
+        // the bottom of the window. Tests that want the prompt raise it
+        // themselves; see `close_dirty_prompt_snapshot`.
+        close_dirty_prompt: None,
         viewport_states: vec![EditorViewportStateProjection {
             buffer_id: BufferId(3),
             scroll: ViewportScroll {
@@ -965,8 +968,20 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("scroll=2:4"))
     );
+    // The prompt is not part of the shared fixture (it is a modal and would
+    // block every other surface), so raise it here to check the row it
+    // produces.
+    let mut prompted = populated_snapshot();
+    prompted.daily_editing_projection.close_dirty_prompt = Some(CloseDirtyPromptProjection {
+        buffer_id: BufferId(3),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+        title: "Cargo.toml".to_string(),
+        message: "Save changes before closing Cargo.toml?".to_string(),
+    });
+    let prompted_model = DesktopProjectionViewModel::from_snapshot(&prompted);
     assert!(
-        model
+        prompted_model
             .close_prompt_rows
             .iter()
             .any(|row| row.contains("close_dirty"))
@@ -6047,4 +6062,83 @@ fn projection_rendering_tests_preserve_app_boundary() {
         .expect("renderer source should be readable");
 
     common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
+}
+
+/// A restored splitter fraction must reach the rendered panel.
+///
+/// This is the assertion whose absence kept P1.F2.T4 open: `splitter_fraction`
+/// was persisted and reloaded for a long time while no renderer read it, so a
+/// restart restored the record rather than the layout the user had arranged.
+/// Asserting on the projection or the stored layout would not have caught that
+/// — only the painted panel rect does.
+#[test]
+fn projection_rendering_applies_a_restored_left_splitter_fraction() {
+    use legion_ui::{DockLayout, DockSideLayout, PanelId};
+
+    let snapshot = populated_snapshot();
+    let mode = snapshot.product_mode;
+
+    let render_with_left_fraction = |fraction: f32| -> f32 {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        // A restored arrangement, which is the only kind allowed to override
+        // the shell's designed panel sizes.
+        let state = DesktopProjectionViewState {
+            dock_layouts_user_arranged: true,
+            dock_layouts: vec![DockLayout {
+                mode,
+                left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), fraction, false),
+                right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.22, false),
+                bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.25, false),
+            }],
+            ..DesktopProjectionViewState::default()
+        };
+        // Two frames: egui settles panel sizes from `default_size` on the
+        // first, and a single frame can report a pre-layout rect.
+        for _ in 0..2 {
+            let _ = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+        }
+        view.last_shell_panel_rects()
+            .expect("the shell should have recorded its panel rects")
+            .left
+            .width()
+    };
+
+    let narrow = render_with_left_fraction(0.18);
+    let wide = render_with_left_fraction(0.42);
+
+    assert!(
+        wide > narrow,
+        "a wider restored fraction must produce a wider explorer panel, \
+         got {wide} for 0.42 and {narrow} for 0.18 — if these are equal the \
+         renderer is ignoring the persisted layout again"
+    );
+}
+
+/// A steady layout reports no drag, so rendering never rewrites stored sizes.
+///
+/// This is the regression that `product_mode_changes_preserve_projected_editor_and_panel_state`
+/// caught: an earlier version reported the rendered size every frame, which fed
+/// the geometry default straight back over every restored fraction.
+#[test]
+fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    // Several settled frames with no pointer input at a fixed window size.
+    let mut last = None;
+    for _ in 0..3 {
+        let (output, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+        last = Some(output);
+    }
+    let observed = last.expect("rendered").observed_dock_fractions;
+
+    assert_eq!(
+        observed,
+        legion_desktop::view::dock_geometry::DockFractions::default(),
+        "an untouched layout must report nothing to persist, or every frame          overwrites the user's arrangement with the current geometry default"
+    );
 }

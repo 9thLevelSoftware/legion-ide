@@ -62,6 +62,14 @@ pub struct ExplorerNodeProjection {
     pub name: String,
     /// Child identifiers for directory rows.
     pub children: Vec<FileId>,
+    /// Whether this row is a directory.
+    ///
+    /// The renderer cannot infer this from [`Self::children`]: an empty
+    /// directory has none, and a directory whose children have not been
+    /// projected yet looks identical to a file. Activating a row does
+    /// different things for the two — a file opens, a directory expands — so
+    /// the distinction has to come from the authority that knows it.
+    pub is_directory: bool,
 }
 
 /// Projected explorer selection.
@@ -7643,6 +7651,7 @@ mod tests {
                 canonical_path: CanonicalPath("C:/repo/src/main.rs".to_string()),
                 name: "main.rs".to_string(),
                 children: vec![],
+                is_directory: false,
             }],
             selection: Some(ExplorerSelectionProjection {
                 file_id: FileId(10),
