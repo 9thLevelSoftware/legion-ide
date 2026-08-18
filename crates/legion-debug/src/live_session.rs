@@ -8,7 +8,7 @@
 //! CI uses the in-tree `fake_dap_adapter` binary (same wire shape as real
 //! CodeLLDB / `lldb-dap`).
 
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
@@ -20,6 +20,56 @@ use thiserror::Error;
 
 use crate::framing::{DapFrameError, DapFramer, DapMessage};
 use crate::state::DapLifecycleState;
+
+/// How much adapter stderr to retain.
+///
+/// Bounded so a chatty adapter cannot grow the capture without limit over a
+/// long session. Generous relative to `stderr_suffix`, which shows the first
+/// 400 characters — the extra is headroom for reading the full capture while
+/// debugging, not for display.
+const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
+
+/// Drain a reader into `sink` on a background thread, a line at a time.
+///
+/// Line at a time rather than `read_to_string`: the latter returns at EOF,
+/// which is when the adapter exits — and the errors that most need stderr (a
+/// timeout, a broken frame) are raised while it is still running. Draining to
+/// EOF attached an empty string on exactly the path the capture exists for.
+///
+/// Best effort throughout: a failure to read the adapter's complaints must not
+/// fail the session, only leave the error message thinner. A free function
+/// rather than an inline closure so it can be tested against a reader that
+/// never reaches EOF, which is the case that was wrong.
+fn spawn_stderr_capture<R>(stderr: R, sink: Arc<Mutex<String>>)
+where
+    R: Read + Send + 'static,
+{
+    let _ = std::thread::Builder::new()
+        .name("legion-dap-stderr".to_string())
+        .spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(mut sink) = sink.lock() else {
+                    break;
+                };
+                // Keep the head and stop. An adapter that logs steadily must
+                // not grow this without bound, and the head is what gets
+                // shown: `stderr_suffix` takes from the front, because the
+                // first complaint is usually the one that explains the
+                // failure.
+                if sink.len() >= STDERR_CAPTURE_BYTES {
+                    break;
+                }
+                sink.push_str(&line);
+            }
+        });
+}
 
 /// Errors from a live DAP session.
 #[derive(Debug, Error)]
@@ -216,20 +266,8 @@ impl LiveDapSession {
             })?;
 
         let captured = Arc::new(Mutex::new(String::new()));
-        if let Some(mut stderr) = stderr {
-            let sink = Arc::clone(&captured);
-            // Best effort: a failure to read the adapter's complaints must not
-            // fail the session, only leave the error message thinner.
-            let _ = std::thread::Builder::new()
-                .name("legion-dap-stderr".to_string())
-                .spawn(move || {
-                    let mut buffer = String::new();
-                    if stderr.read_to_string(&mut buffer).is_ok()
-                        && let Ok(mut sink) = sink.lock()
-                    {
-                        sink.push_str(&buffer);
-                    }
-                });
+        if let Some(stderr) = stderr {
+            spawn_stderr_capture(stderr, Arc::clone(&captured));
         }
 
         Ok(Self {
@@ -273,10 +311,9 @@ impl LiveDapSession {
         let mut saw_initialized_event = false;
 
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
+            // No explicit remaining-time check: `read_frame` enforces the
+            // deadline through `recv_timeout` and returns `Timeout`, which `?`
+            // propagates.
             let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("initialized") {
                 saw_initialized_event = true;
@@ -737,4 +774,111 @@ pub fn fake_dap_adapter_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+    use std::sync::mpsc::{Sender, channel};
+
+    /// A reader that yields some bytes and then blocks instead of ending.
+    ///
+    /// This is the adapter that is still running: it has complained, and it has
+    /// not exited. `read_to_string` on this never returns, which is why the
+    /// previous implementation had nothing to attach at the moment a timeout
+    /// or a framing error was raised.
+    struct WroteThenHung {
+        data: Vec<u8>,
+        position: usize,
+        release: Receiver<()>,
+    }
+
+    impl Read for WroteThenHung {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.position < self.data.len() {
+                let take = (self.data.len() - self.position).min(buf.len());
+                buf[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+                self.position += take;
+                return Ok(take);
+            }
+            // Not EOF: the process is alive and simply has nothing more to say
+            // yet. Blocks until the test lets go.
+            let _ = self.release.recv();
+            Ok(0)
+        }
+    }
+
+    fn hung_reader(text: &str) -> (WroteThenHung, Sender<()>) {
+        let (release_tx, release) = channel();
+        (
+            WroteThenHung {
+                data: text.as_bytes().to_vec(),
+                position: 0,
+                release,
+            },
+            release_tx,
+        )
+    }
+
+    /// Wait for `predicate`, so the test does not depend on thread scheduling.
+    fn within(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        predicate()
+    }
+
+    #[test]
+    fn stderr_is_captured_before_the_adapter_exits() {
+        // The defect this replaced: `read_to_string` returns at EOF, so the
+        // capture was empty for as long as the adapter was alive — which is
+        // every moment at which the error message wanted it.
+        let (reader, _release) = hung_reader("dyld: library not loaded\n");
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let captured = within(Duration::from_secs(5), || {
+            !sink.lock().expect("sink").is_empty()
+        });
+        assert!(
+            captured,
+            "stderr must be readable while the adapter is still running; got {:?}",
+            sink.lock().expect("sink")
+        );
+        assert!(
+            sink.lock().expect("sink").contains("library not loaded"),
+            "the captured text must be what was written"
+        );
+        // `_release` is still held: the reader has not seen EOF, and the
+        // assertions above already passed.
+    }
+
+    #[test]
+    fn capture_stops_at_the_byte_cap() {
+        // An adapter that logs steadily must not grow the capture without
+        // bound over a long session.
+        let line = "x".repeat(255);
+        let mut noisy = String::new();
+        while noisy.len() < STDERR_CAPTURE_BYTES * 2 {
+            noisy.push_str(&line);
+            noisy.push('\n');
+        }
+        let (reader, _release) = hung_reader(&noisy);
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let settled = within(Duration::from_secs(5), || {
+            sink.lock().expect("sink").len() >= STDERR_CAPTURE_BYTES
+        });
+        assert!(settled, "the capture should reach the cap and stop");
+        let len = sink.lock().expect("sink").len();
+        assert!(
+            len < STDERR_CAPTURE_BYTES * 2,
+            "the capture must stop near the cap, not drain everything: {len}"
+        );
+    }
 }
