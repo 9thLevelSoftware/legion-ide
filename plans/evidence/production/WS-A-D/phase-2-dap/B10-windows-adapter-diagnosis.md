@@ -89,8 +89,37 @@ Two details, both there to keep a diagnostic from becoming a second problem:
   different program entirely. Hanging one platform until the 60-minute job cap
   would be worse than no diagnostic at all.
 
-The result of that step is not in this file. It runs on the next push, and
-whatever it says decides whether the transport reading above survives.
+### Round 3 — the probe was wrong before the adapter was
+
+Its first run reported, on Windows:
+
+```
+--- resolved: /c/Program Files/LLVM/bin/lldb-dap ---
+--- --version ---
+--- --help ---
+exit=127
+--- stdout ---
+--- stderr ---
+```
+
+Nothing from `--version`, nothing from `--help`, exit 127, empty streams. Read
+quickly, that says the adapter is mute in every mode and the transport theory is
+confirmed.
+
+It says no such thing. Exit 127 is the shell reporting that it could not execute
+the file, and the resolved path has no `.exe` — `command -v lldb-dap` on the
+Windows runner returns an extensionless path. The Rust side spawns
+`lldb-dap.exe` from that same directory and gets a **live process**. A probe that
+contradicts a working spawn is the probe being wrong.
+
+This is the same shape as the soft-skip that held this task open for two days: a
+tool that fails for its own reasons and reports something that looks like a
+finding about its target. The step now tries `.exe` first and prints an explicit
+`PROBE BROKEN` line when it cannot execute what it resolved, so the next reader
+cannot mistake one for the other.
+
+The transport hypothesis is therefore still **untested**. Nothing has yet run
+this binary successfully outside the handshake.
 
 ## Status
 

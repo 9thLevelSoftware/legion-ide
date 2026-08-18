@@ -296,12 +296,31 @@ jobs:
         shell: bash
         run: |
           set +e
-          adapter="$(command -v lldb-dap || command -v lldb-vscode || true)"
+          # `.exe` first. On the Windows runner `command -v lldb-dap` returns an
+          # extensionless path that the shell then cannot execute — the first
+          # version of this step reported `exit=127` with empty stdout and
+          # stderr, which reads exactly like "the adapter is mute" and is
+          # actually "the probe named a file that is not there". The Rust side
+          # spawns `lldb-dap.exe` from the same directory and gets a live
+          # process, so a probe disagreeing with it is the probe being wrong.
+          adapter=""
+          for candidate in lldb-dap.exe lldb-dap lldb-vscode.exe lldb-vscode; do
+            found="$(command -v "$candidate" 2>/dev/null || true)"
+            if [ -n "$found" ] && [ -x "$found" ]; then
+              adapter="$found"
+              break
+            fi
+          done
           if [ -z "$adapter" ]; then
             echo "no adapter on PATH; nothing to interrogate"
             exit 0
           fi
           echo "--- resolved: $adapter ---"
+          # Prove the probe can execute it at all before trusting anything it
+          # reports about the binary's behaviour.
+          if ! "$adapter" --version >/dev/null 2>&1 && [ "$?" = "127" ]; then
+            echo "PROBE BROKEN: cannot execute $adapter (127); findings below are about the probe, not the adapter"
+          fi
           echo "--- --version ---"
           "$adapter" --version 2>&1 | head -20 || true
           echo "--- --help ---"
