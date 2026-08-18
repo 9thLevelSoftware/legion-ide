@@ -108,11 +108,10 @@ fn system_adapter_initialize_handshake_dogfood() {
         }
     };
 
-    assert!(
-        outcome.initialized_event,
-        "system adapter must emit initialized event: {}",
-        outcome.metadata_summary
-    );
+    // Not asserted: `initialized` arrives after `launch`/`attach`, so a real
+    // adapter has correctly sent nothing by this point. Requiring it here is
+    // the assertion that made this job hang for its full 60-minute budget on
+    // macOS and Linux, and fail with `unexpected EOF in headers` on Windows.
     assert!(
         outcome.metadata_summary.contains("live=true"),
         "expected live summary: {}",

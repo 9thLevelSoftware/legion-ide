@@ -20,11 +20,15 @@ fn live_dap_initialize_handshake_against_fake_adapter() {
         .initialize_handshake(Duration::from_secs(5))
         .expect("initialize handshake");
 
-    assert!(outcome.initialized_event);
+    // Deliberately not asserting `initialized_event`. Per the DAP sequence the
+    // adapter sends `initialized` when it is ready for configuration — after
+    // `launch`/`attach`, not after `initialize`. The in-tree fake sends it
+    // early, and requiring it here is what let this suite stay green while
+    // every real adapter hung: the handshake waited for an event that was not
+    // coming until a request it had not made yet.
     assert_eq!(outcome.adapter_type, "legion-fake");
     assert_eq!(outcome.lifecycle_state, DapLifecycleState::Launching);
     assert!(outcome.metadata_summary.contains("live=true"));
-    assert!(outcome.metadata_summary.contains("initialized=true"));
 
     session
         .disconnect_and_wait(Duration::from_secs(2))
@@ -81,4 +85,31 @@ fn live_dap_breakpoints_launch_stack_step_against_fake_adapter() {
     session
         .disconnect_and_wait(Duration::from_secs(2))
         .expect("disconnect");
+}
+
+#[test]
+fn a_silent_adapter_times_out_instead_of_hanging() {
+    // The bug this guards is why a wrong protocol expectation cost sixty
+    // minutes per CI job instead of failing in seconds. Every wait was a
+    // blocking `read_from` inside a `while Instant::now() < deadline` loop, so
+    // the deadline was only consulted *between* frames and could never fire
+    // while waiting for one. A timeout that cannot fire is worse than no
+    // timeout: it hid whether the adapter was slow, silent, or gone.
+    let mut session =
+        LiveDapSession::spawn(adapter_path(), &["--silent".to_string()], "legion-fake")
+            .expect("spawn silent fake adapter");
+
+    let started = std::time::Instant::now();
+    let result = session.initialize_handshake(Duration::from_millis(300));
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.is_err(),
+        "a silent adapter cannot complete a handshake"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the deadline must be enforced while waiting for a frame, not only \
+         between frames; took {elapsed:?}"
+    );
 }

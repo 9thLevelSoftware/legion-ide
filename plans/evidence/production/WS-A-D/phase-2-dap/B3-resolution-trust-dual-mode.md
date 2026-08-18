@@ -532,6 +532,69 @@ logged the bytes Legion writes, which is what would settle it. But the candidate
 list is down from three to two, and the next step is clear: capture what Legion
 sends on the first `initialize` and compare it against the DAP framing spec.
 
+### 2026-08-18, later: diagnosed, and it was ours
+
+Reading the handshake settled it without needing a packet capture. Two defects,
+one of which hid the other.
+
+**The handshake waited for an event that comes later.**
+`initialize_handshake` returned only once it had seen *both* the `initialize`
+response and the `initialized` event:
+
+```rust
+if saw_initialize_response && saw_initialized_event { return Ok(...) }
+```
+
+Per the DAP sequence — the one `ADR-0044` itself records, client sends
+`initialize`, then `launch`/`attach` — the adapter emits `initialized` when it
+is ready for **configuration**, which is after `launch`/`attach`. A real adapter
+answers `initialize` and then correctly says nothing, because the client has not
+asked for anything else yet. Legion waited anyway.
+
+The in-tree `fake_dap_adapter` sends `initialized` immediately after the
+`initialize` response — its module doc says so on line 5. So the fixture taught
+the client a protocol no real adapter speaks, every test against the fixture
+passed, and every real adapter hung. Three platforms, three binaries, one wrong
+expectation. Cause 1 is dead: the runner's adapters were behaving correctly.
+
+**The timeout could not fire.** Every wait was a blocking
+`DapFramer::read_from(&mut self.stdout)` inside a `while Instant::now() <
+deadline` loop, so the deadline was only consulted *between* frames. Waiting for
+a frame that never came, the loop never re-evaluated. Four call sites had this
+shape. That is why a wrong expectation cost the full 60-minute job budget
+instead of failing in seconds — and why the failure looked like a mystery rather
+than a protocol mismatch.
+
+Windows differing is explained by the same fault: its pipe surfaced EOF where
+the POSIX pipes simply blocked.
+
+### Fixes
+
+- The handshake returns on the `initialize` response. `initialized_event` is
+  still reported when an adapter volunteers it early, but is no longer required.
+- Reads moved to a reader thread feeding a bounded channel; `read_frame` uses
+  `recv_timeout`, so all four waits honour their deadline.
+- `stderr` was `Stdio::null()` — the adapter's own account of its unhappiness,
+  discarded. It is now captured and attached to timeout and disconnect errors.
+- `fake_dap_adapter` gained `--silent`, and its doc now warns that its early
+  `initialized` is *not* real-adapter behaviour and must not be matched.
+
+### Proof
+
+`a_silent_adapter_times_out_instead_of_hanging` spawns the fake with
+`--silent`, asks for a 300ms handshake, and requires the call to return inside
+five seconds. Reverting `read_frame` to a deadline-free wait makes it hang and
+fail — 59 seconds before the harness killed it, the CI symptom in miniature.
+
+The two tests that asserted `initialized_event` after `initialize` were
+asserting the bug, and now say why they do not.
+
+**Not claimed:** a working debug session. This fixes the handshake and the
+timeout; launch, breakpoints and stepping against a real adapter remain
+unproven, and the dogfood job has not yet run green on any platform. What it
+does mean is that the next red run will report something true within seconds
+instead of hanging for an hour.
+
 An unrelated caution for whoever picks this up: `gh pr checks` renders a
 *cancelled* job as `fail`, and a timed-out matrix leg looks the same as a failing
 one at that level. Read `gh run view <id> --json jobs` before concluding which

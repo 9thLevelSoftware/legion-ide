@@ -8,9 +8,11 @@
 //! CI uses the in-tree `fake_dap_adapter` binary (same wire shape as real
 //! CodeLLDB / `lldb-dap`).
 
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -120,7 +122,22 @@ pub struct LiveDapStopOutcome {
 pub struct LiveDapSession {
     child: Child,
     stdin: Option<std::process::ChildStdin>,
-    stdout: BufReader<std::process::ChildStdout>,
+    /// Frames decoded off the adapter's stdout by a reader thread.
+    ///
+    /// Every read used to be `DapFramer::read_from(&mut self.stdout)`, a
+    /// blocking call inside a `while Instant::now() < deadline` loop — so the
+    /// deadline was only consulted *between* frames and could not fire while
+    /// waiting for one. An adapter that answered nothing blocked forever, and
+    /// the CI job's 60-minute timeout was the only thing that stopped it. A
+    /// timeout that cannot fire is worse than none: it made a hang look like a
+    /// protocol failure and hid which of the two was happening.
+    frames: Receiver<Result<DapMessage, DapFrameError>>,
+    /// Whatever the adapter wrote to stderr, for error messages.
+    ///
+    /// Previously `Stdio::null()`, which discarded the adapter's own account of
+    /// why it was unhappy — the single most useful thing to have when a
+    /// handshake fails.
+    stderr: Arc<Mutex<String>>,
     next_seq: u64,
     adapter_type: String,
 }
@@ -138,7 +155,7 @@ impl LiveDapSession {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|err| LiveDapSessionError::Spawn {
             message: format!("{}: {err}", program.display()),
         })?;
@@ -154,7 +171,8 @@ impl LiveDapSession {
             .ok_or_else(|| LiveDapSessionError::Spawn {
                 message: "missing stdout pipe".to_string(),
             })?;
-        Self::from_stdio(child, stdin, stdout, adapter_type)
+        let stderr = child.stderr.take();
+        Self::from_parts(child, stdin, stdout, stderr, adapter_type)
     }
 
     /// Build a session from an already-spawned child with stdio pipes (C4 sandbox).
@@ -164,10 +182,61 @@ impl LiveDapSession {
         stdout: std::process::ChildStdout,
         adapter_type: impl Into<String>,
     ) -> Result<Self, LiveDapSessionError> {
+        Self::from_parts(child, stdin, stdout, None, adapter_type)
+    }
+
+    /// Build a session, moving stdout (and stderr, when piped) onto reader
+    /// threads so every wait can honour a deadline.
+    fn from_parts(
+        child: std::process::Child,
+        stdin: std::process::ChildStdin,
+        stdout: std::process::ChildStdout,
+        stderr: Option<std::process::ChildStderr>,
+        adapter_type: impl Into<String>,
+    ) -> Result<Self, LiveDapSessionError> {
+        // Bounded so a chatty adapter cannot grow this without limit; DAP
+        // traffic for one session is small and the consumer keeps up.
+        let (tx, frames) = sync_channel(64);
+        std::thread::Builder::new()
+            .name("legion-dap-reader".to_string())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let frame = DapFramer::read_from(&mut reader);
+                    let failed = frame.is_err();
+                    // A closed receiver means the session is gone; stop rather
+                    // than block forever on a send nobody will take.
+                    if tx.send(frame).is_err() || failed {
+                        break;
+                    }
+                }
+            })
+            .map_err(|err| LiveDapSessionError::Spawn {
+                message: format!("cannot start DAP reader thread: {err}"),
+            })?;
+
+        let captured = Arc::new(Mutex::new(String::new()));
+        if let Some(mut stderr) = stderr {
+            let sink = Arc::clone(&captured);
+            // Best effort: a failure to read the adapter's complaints must not
+            // fail the session, only leave the error message thinner.
+            let _ = std::thread::Builder::new()
+                .name("legion-dap-stderr".to_string())
+                .spawn(move || {
+                    let mut buffer = String::new();
+                    if stderr.read_to_string(&mut buffer).is_ok()
+                        && let Ok(mut sink) = sink.lock()
+                    {
+                        sink.push_str(&buffer);
+                    }
+                });
+        }
+
         Ok(Self {
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            frames,
+            stderr: captured,
             next_seq: 1,
             adapter_type: adapter_type.into(),
         })
@@ -208,7 +277,7 @@ impl LiveDapSession {
             if remaining.is_zero() {
                 break;
             }
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("initialized") {
                 saw_initialized_event = true;
             }
@@ -218,13 +287,21 @@ impl LiveDapSession {
                 })?;
                 saw_initialize_response = true;
             }
-            if saw_initialize_response && saw_initialized_event {
+            // The `initialize` response alone completes this step. Waiting for
+            // the `initialized` event as well is what made every real adapter
+            // fail: per the DAP sequence the adapter sends `initialized` when
+            // it is ready for configuration, which is after `launch`/`attach`,
+            // not after `initialize`. lldb-dap follows that on all three
+            // platforms; the in-tree fake adapter sends it early, so every test
+            // against the fake passed while the product hung against anything
+            // real. The event is still recorded when an adapter volunteers it.
+            if saw_initialize_response {
                 return Ok(LiveDapHandshakeOutcome {
                     lifecycle_state: DapLifecycleState::Launching,
                     adapter_type: self.adapter_type.clone(),
-                    initialized_event: true,
+                    initialized_event: saw_initialized_event,
                     metadata_summary: format!(
-                        "action=initialize state=launching adapter={} initialized=true live=true wire=microsoft-dap",
+                        "action=initialize state=launching adapter={} initialized={saw_initialized_event} live=true wire=microsoft-dap",
                         self.adapter_type
                     ),
                 });
@@ -361,7 +438,7 @@ impl LiveDapSession {
         let _ = self.request("continue", json!({ "threadId": thread_id }), timeout)?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("continued") {
                 return Ok(());
             }
@@ -406,7 +483,7 @@ impl LiveDapSession {
         let mut thread_id = 1u64;
         let mut saw_stopped = false;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("stopped") {
                 saw_stopped = true;
                 if let Some(body) = msg.event_body() {
@@ -523,7 +600,7 @@ impl LiveDapSession {
 
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if let Some(result) = msg.response_for(seq) {
                 return result
                     .map(|body| {
@@ -575,6 +652,48 @@ impl LiveDapSession {
                 }
             }
         }
+    }
+
+    /// Read one frame, or give up at `deadline`.
+    ///
+    /// The deadline is real here, which it was not before: the old loops called
+    /// a blocking `read_from` and only re-checked the clock after a frame
+    /// arrived, so an adapter that said nothing was waited on forever.
+    ///
+    /// A closed channel means the reader thread stopped — the adapter exited or
+    /// its stdout broke — and the adapter's own stderr is the most useful thing
+    /// to say about that, so it is attached when there is any.
+    fn read_frame(&mut self, deadline: Instant) -> Result<DapMessage, LiveDapSessionError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.frames.recv_timeout(remaining) {
+            Ok(Ok(message)) => Ok(message),
+            Ok(Err(source)) => Err(LiveDapSessionError::Io { source }),
+            Err(RecvTimeoutError::Timeout) => Err(LiveDapSessionError::Timeout {
+                message: format!(
+                    "no DAP frame within {:?}{}",
+                    deadline.saturating_duration_since(Instant::now()),
+                    self.stderr_suffix()
+                ),
+            }),
+            Err(RecvTimeoutError::Disconnected) => Err(LiveDapSessionError::Protocol {
+                message: format!("adapter stopped producing frames{}", self.stderr_suffix()),
+            }),
+        }
+    }
+
+    /// Whatever the adapter wrote to stderr, as a trailing clause.
+    fn stderr_suffix(&self) -> String {
+        let Ok(captured) = self.stderr.lock() else {
+            return String::new();
+        };
+        let trimmed = captured.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        // Bounded: an adapter that logs heavily must not turn one error into a
+        // page of unrelated output.
+        let shown: String = trimmed.chars().take(400).collect();
+        format!("; adapter stderr: {shown}")
     }
 
     fn alloc_seq(&mut self) -> u64 {
