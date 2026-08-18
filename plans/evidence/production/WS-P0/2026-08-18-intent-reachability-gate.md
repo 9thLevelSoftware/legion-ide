@@ -106,14 +106,18 @@ failure mode in the other direction — an action no control produces — and is
 not covered here. Worth adding once this one has proven itself in CI rather
 than widening an unproven gate on its first day.
 
-Review pointed out that the renderer was listed in `route_sources` and
-contributes nothing: `view.rs` and its submodules name `DesktopAction`, never
-`CommandDispatchIntent`, because the bridge is where a gesture becomes an
-intent. The entries are gone and the config now records why. That asymmetry is
-the same reason a `DesktopAction` gate would be the useful complement rather
-than a duplicate.
+## The gate caught its author twice
 
-Review also caught a silent `.take(6)` on the new runnables row — a cap with
-nothing to show for it, which is the invisible-capability problem one size
-smaller. The cap stays, because a file with forty tests would paper the panel,
-but the remainder is now reported as `+N more`.
+Worth recording, because both were the very defect the gate exists to retire.
+
+The runnables row shipped first with `.take(6)`, silently dropping every
+runnable past the sixth. Told about it, the second attempt added a `+N more`
+label — which counts the hidden ones without giving anyone a way to run them.
+As review put it: the label can count the hostages but cannot release them. The
+list is now unbounded inside a bounded `ScrollArea`, since the activity sidebar
+has no scroll of its own and that is what made a cap look necessary.
+
+The renderer was also listed in `route_sources` and contributes nothing:
+`view.rs` and its submodules name `DesktopAction`, never
+`CommandDispatchIntent`, because the bridge is where a gesture becomes an
+intent. Removed, with the reason recorded in the config.
