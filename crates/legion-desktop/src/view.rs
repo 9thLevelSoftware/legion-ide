@@ -5017,6 +5017,12 @@ fn delegate_task_column(
     );
 }
 
+/// Height the runnables list may occupy before it scrolls.
+///
+/// The activity sidebar is not itself scrollable, so an unbounded list would
+/// push the test rows below it off the panel.
+const RUNNABLES_MAX_HEIGHT: f32 = 96.0;
+
 fn render_test_controls(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -5032,31 +5038,31 @@ fn render_test_controls(
         .iter()
         .filter(|lens| lens.kind_label.contains("runnable"))
         .collect();
-    // Bounded, but never silently: a file with forty tests would otherwise
-    // paper the panel, and a cap with nothing to show for it is the same
-    // invisible-capability problem one size smaller.
-    const VISIBLE_RUNNABLES: usize = 6;
-    let omitted_runnables = runnables.len().saturating_sub(VISIBLE_RUNNABLES);
     if !runnables.is_empty()
         && let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id
     {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(theme::label("Runnables"));
-            for lens in runnables.iter().take(VISIBLE_RUNNABLES) {
-                if soft_button(ui, &lens.title)
-                    .on_hover_text(&lens.command_label)
-                    .clicked()
-                {
-                    actions.push(DesktopAction::ActivateLanguageCodeLens {
-                        buffer_id,
-                        lens_id: lens.lens_id.clone(),
-                    });
-                }
-            }
-            if omitted_runnables > 0 {
-                ui.label(theme::muted(format!("+{omitted_runnables} more")));
-            }
-        });
+        ui.label(theme::label("Runnables"));
+        // Every runnable, never a capped subset: a list that hides entries is
+        // a capability nobody can reach, however honestly it counts them.
+        egui::ScrollArea::vertical()
+            .id_salt("legion_desktop_runnables")
+            .max_height(RUNNABLES_MAX_HEIGHT)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for lens in &runnables {
+                        if soft_button(ui, &lens.title)
+                            .on_hover_text(&lens.command_label)
+                            .clicked()
+                        {
+                            actions.push(DesktopAction::ActivateLanguageCodeLens {
+                                buffer_id,
+                                lens_id: lens.lens_id.clone(),
+                            });
+                        }
+                    }
+                });
+            });
     }
     ui.horizontal_wrapped(|ui| {
         if soft_button(ui, "Refresh tests").clicked() {

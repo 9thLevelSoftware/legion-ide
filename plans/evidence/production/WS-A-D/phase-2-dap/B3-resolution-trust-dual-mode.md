@@ -496,6 +496,48 @@ here distinguishes them, and the honest reading is "the handshake does not
 complete", not "the runner's adapter is broken" — the second is a guess that
 happens to be the most comfortable of the three.
 
+### 2026-08-18: the other two platforms narrow it
+
+Run 32104471710 makes cause 1 much less likely, and it cost nothing but reading
+the job list properly.
+
+The same test — `Dogfood — initialize handshake against the system adapter` —
+does not fail fast on macOS and Ubuntu. It **hangs**, on both, until the job's
+`timeout-minutes: 60` kills it. Both ran 05:50:55 → 06:51:1x to the second.
+Every earlier step succeeded, including provisioning and the post-provisioning
+adapter probe, so an adapter was present and found on all three platforms.
+
+So the handshake completes on no platform, in two different ways:
+
+| Platform | Behaviour |
+| --- | --- |
+| Windows | Fails immediately: `malformed DAP frame: unexpected EOF in headers` |
+| macOS | Hangs at `initialize`, killed at 60 minutes |
+| Ubuntu | Hangs at `initialize`, killed at 60 minutes |
+
+Cause 1 — "the runner's `lldb-dap.exe` is non-functional as installed" — would
+have to be true of three different binaries provisioned three different ways on
+three different images, which is a great deal less likely than one fault in the
+code common to all three. A hang is also the more informative half: Legion is
+blocked on a read that never returns, which points at cause 2 or 3, the spawn or
+the framing, rather than at a child that died on startup. A dead child gives EOF;
+a live child that never receives a well-formed request gives silence.
+
+Windows differing is then most naturally read as a platform detail of the same
+fault — pipe handling on Windows surfacing EOF where the POSIX pipes block —
+rather than as a separate problem.
+
+**Still not a diagnosis.** No one has yet attached to the spawned adapter or
+logged the bytes Legion writes, which is what would settle it. But the candidate
+list is down from three to two, and the next step is clear: capture what Legion
+sends on the first `initialize` and compare it against the DAP framing spec.
+
+An unrelated caution for whoever picks this up: `gh pr checks` renders a
+*cancelled* job as `fail`, and a timed-out matrix leg looks the same as a failing
+one at that level. Read `gh run view <id> --json jobs` before concluding which
+platforms failed. Both of this session's first two readings of this run were
+wrong for exactly that reason.
+
 ### Not claimed
 
 **Still no working debug session, and now a known failure with an unknown
