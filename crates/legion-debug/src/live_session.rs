@@ -664,16 +664,21 @@ impl LiveDapSession {
     /// its stdout broke — and the adapter's own stderr is the most useful thing
     /// to say about that, so it is attached when there is any.
     fn read_frame(&mut self, deadline: Instant) -> Result<DapMessage, LiveDapSessionError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.frames.recv_timeout(remaining) {
+        let waited = deadline.saturating_duration_since(Instant::now());
+        match self.frames.recv_timeout(waited) {
             Ok(Ok(message)) => Ok(message),
-            Ok(Err(source)) => Err(LiveDapSessionError::Io { source }),
+            // A framing error is usually the adapter having exited, which is
+            // the case where its stderr is most likely to say why. Reporting
+            // the bare frame error is what left "unexpected EOF in headers"
+            // unexplained for a day.
+            Ok(Err(source)) => Err(LiveDapSessionError::Protocol {
+                message: format!("{source}{}", self.stderr_suffix()),
+            }),
+            // `waited`, not the remaining time: by the time this arm runs the
+            // remainder is zero by definition, which is how the first version
+            // of this message reported every timeout as "within 0ns".
             Err(RecvTimeoutError::Timeout) => Err(LiveDapSessionError::Timeout {
-                message: format!(
-                    "no DAP frame within {:?}{}",
-                    deadline.saturating_duration_since(Instant::now()),
-                    self.stderr_suffix()
-                ),
+                message: format!("no DAP frame within {waited:?}{}", self.stderr_suffix()),
             }),
             Err(RecvTimeoutError::Disconnected) => Err(LiveDapSessionError::Protocol {
                 message: format!("adapter stopped producing frames{}", self.stderr_suffix()),

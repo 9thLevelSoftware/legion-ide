@@ -591,9 +591,40 @@ asserting the bug, and now say why they do not.
 
 **Not claimed:** a working debug session. This fixes the handshake and the
 timeout; launch, breakpoints and stepping against a real adapter remain
-unproven, and the dogfood job has not yet run green on any platform. What it
-does mean is that the next red run will report something true within seconds
-instead of hanging for an hour.
+unproven. What it does mean is that a red run reports something true within
+seconds instead of hanging for an hour.
+
+### First run with the fix
+
+Run against `fix/dap-initialize-handshake`. The hangs are gone on every
+platform, and the three now differ in an informative way:
+
+| Platform | Before | After |
+| --- | --- | --- |
+| Ubuntu | Hung 60 min at `initialize` | **Passes** — handshake, launch, step, policy gate |
+| macOS | Hung 60 min at `initialize` | Handshake passes; fails at `launch` in 16s |
+| Windows | `unexpected EOF in headers` at `initialize` | Unchanged, in 3m26s |
+
+**Ubuntu is the first green dogfood run on any platform.** A real `lldb-dap`
+completes the handshake, launches a real Rust debugee, steps it, and the policy
+gate still refuses non-allowlisted binaries. That is the wire contract holding
+against a real adapter rather than the fixture.
+
+macOS advanced a whole stage: `launch until stopped: DAP session timed out`.
+Whether that is a macOS launch-argument difference or a second protocol
+expectation is the next question, and it is now a 16-second question.
+
+Windows is isolated and unchanged: the adapter yields no frame at all, and — on
+this run — nothing on stderr either. It is now the only platform where the
+handshake itself fails, which makes "the Windows adapter or how we spawn it"
+a much narrower target than "DAP is broken".
+
+Two diagnostic gaps in the first version of the fix, both found by reading this
+run and both since corrected: timeout messages reported the *remaining* budget,
+which is zero by definition once the timeout fires, so every one read `within
+0ns`; and stderr was attached to timeout and disconnect errors but not to
+framing errors — which is precisely the Windows case, the one place it was most
+needed.
 
 An unrelated caution for whoever picks this up: `gh pr checks` renders a
 *cancelled* job as `fail`, and a timed-out matrix leg looks the same as a failing
