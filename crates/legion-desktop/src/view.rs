@@ -2,6 +2,7 @@
 
 #[cfg(feature = "ai")]
 mod assistant_rail;
+mod brand_mark;
 mod code_canvas_painter;
 mod components;
 /// Applying persisted dock splitter fractions, and observing new ones.
@@ -1981,7 +1982,7 @@ fn render_top_command_bar(
             .max_rect(left_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    left_ui.label(theme::accent("◆", theme::tokens().accent.amber));
+    brand_mark::show(&mut left_ui, theme::tokens().accent.amber);
     if !geometry.ultra_compact {
         left_ui.label(theme::title(LEGION_WORDMARK));
     }

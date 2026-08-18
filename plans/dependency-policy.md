@@ -101,6 +101,17 @@ Every current workspace crate must have an explicit internal dependency policy e
 
 `legion-desktop` is the active Phase 2 crate authorized to host GUI renderer dependencies and project/workspace projection helpers. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
 
+`legion-desktop` may additionally use `egui_kittest` as a **test-only**
+dependency (`[dev-dependencies]`, features `wgpu` + `snapshot`) for visual
+regression snapshots of the rendered shell. It is the official egui testing
+harness and is built on AccessKit, which this adapter already integrates. Its
+transitive additions are `kittest`, `dify` (image diffing), `open`, `colored`,
+`getopts`, `is-docker`, `is-wsl` and `lazy_static`; `wgpu` and `egui-wgpu` were
+already authorized above for the renderer stack. No production edge is created:
+the crate is unreachable outside `cfg(test)`, and `check-deps` enforces normal
+dependencies only. Rationale and per-platform baseline mechanics are in
+`../docs/ui/snapshot-testing.md`.
+
 `legion-desktop` may additionally use `legion-agent` and `legion-sandbox` as test-only dependencies for renderer-facing TDD projections that validate agent communication and sandbox-panel rows without moving product authority into the desktop adapter.
 
 - `legion-sandbox` may depend on:

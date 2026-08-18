@@ -52,7 +52,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
             libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev \
+            mesa-vulkan-drivers
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -116,6 +117,21 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --all-targets --no-fail-fast
+
+      # Snapshot baselines are per platform, so a failure here is the only way
+      # to obtain the baseline for a platform nobody has locally. `.new.png` is
+      # what this run rendered and `.diff.png` shows what moved; both are needed
+      # to decide whether a diff is a regression or an intended change.
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-snapshots-${{ matrix.os }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            crates/legion-desktop/tests/snapshots/*.new.png
+            crates/legion-desktop/tests/snapshots/*.diff.png
 
       # Measurement-configuration guard: LEGION_AI_GOVERNORS=off is the arm
       # legion-bench's *raw baseline* runs under, and the Phase 2 exit gate is a

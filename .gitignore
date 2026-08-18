@@ -43,3 +43,9 @@ __pycache__/
 .legion/palette_usage.json
 .legion/proposal-audit/
 .legion/session.json
+
+# Snapshot test intermediates: `.new.png` is what a run rendered and
+# `.diff.png` is the comparison. Both are build output, uploaded by CI as
+# artifacts when a snapshot fails; only the baselines are tracked.
+crates/legion-desktop/tests/snapshots/*.new.png
+crates/legion-desktop/tests/snapshots/*.diff.png
