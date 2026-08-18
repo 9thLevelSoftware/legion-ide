@@ -188,14 +188,14 @@ fn stabilizing_removes_every_trace_of_the_machine() {
         .into_owned();
     assert!(
         format!("{snapshot:?}").contains(&root),
-        "precondition: the raw projection must carry the machine-specific path,          or this test proves nothing"
+        "precondition: the raw projection must carry the machine-specific path, or this test proves nothing"
     );
 
     stabilize_paths(&mut snapshot);
     let dumped = format!("{snapshot:?}");
     assert!(
         !dumped.contains(&root),
-        "the temp workspace name `{root}` survived stabilization; a field that          renders a path was added and `stabilize_paths` does not know about it"
+        "the temp workspace name `{root}` survived stabilization; a field that renders a path was added and `stabilize_paths` does not know about it"
     );
 }
 
