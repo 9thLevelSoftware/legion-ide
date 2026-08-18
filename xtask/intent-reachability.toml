@@ -1,0 +1,62 @@
+# Intent-reachability gate.
+#
+# Every `CommandDispatchIntent` variant must be named by some file that can turn
+# a user gesture into it. See `xtask/src/intent_reachability.rs` for why this
+# exists: on 2026-08-17 four capabilities were found complete, tested, and with
+# no route in, one at a time, by a person running the app.
+#
+# Adding to `allowed` is not free. The reason is required, is read by people,
+# and the gate fails if an allowlisted variant later becomes reachable — so a
+# stale entry cannot quietly outlive its justification.
+
+intent_source = "crates/legion-ui/src/ui.rs"
+intent_enum = "CommandDispatchIntent"
+
+# Every route a gesture can travel to an intent.
+route_sources = [
+  # The renderer: rail, panels, palette controls, code canvas.
+  "crates/legion-desktop/src/view.rs",
+  "crates/legion-desktop/src/view",
+  # Gesture translation and the keyboard handler.
+  "crates/legion-desktop/src/bridge.rs",
+  "crates/legion-desktop/src/workflow.rs",
+  # The `:` command line.
+  "crates/legion-ui/src/shell_commands.rs",
+  # Vim mappings.
+  "crates/legion-ui/src/vim_intent.rs",
+  # The command palette's string-keyed table, which resolves ids to intents.
+  "crates/legion-app/src/lib.rs",
+]
+
+[[allowed]]
+intent = "PrepareCallHierarchy"
+reason = """
+Not implemented. Routes to `AppCommandRequest::Noop` in intent_routing.rs, so
+wiring a control would offer the user a button that does nothing. The
+`legion-lsp` protocol layer is complete and contract-tested
+(`prepare_call_hierarchy_request`, `project_prepare_call_hierarchy_response`)
+with no app plumbing behind it. Tracked by roadmap 1.6, "wire call-hierarchy
+app stub".
+"""
+
+[[allowed]]
+intent = "ShowIncomingCalls"
+reason = """
+Not implemented; same stub and same roadmap item as PrepareCallHierarchy.
+"""
+
+[[allowed]]
+intent = "ShowOutgoingCalls"
+reason = """
+Not implemented; same stub and same roadmap item as PrepareCallHierarchy.
+"""
+
+[[allowed]]
+intent = "SetEditorFontFamily"
+reason = """
+Would not do anything. The setting is persisted, projected and displayed in the
+Settings overlay, but every code-canvas call site hard-codes
+`egui::FontId::monospace(...)`, so the family never reaches text layout. Wiring
+a picker would offer a control that appears to work and does not — exactly what
+this gate exists to prevent. Give it an effect first, then a control.
+"""

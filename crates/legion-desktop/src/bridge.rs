@@ -9,9 +9,9 @@ use legion_protocol::{
     DebugConfigurationId, DebugSessionId, DelegatedTaskPlanId,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, EditablePlanSection,
     FileId, InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
-    ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
-    RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, LineWrappingPolicy,
+    ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
+    ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use legion_protocol::{PluginContribution, PluginId};
 use legion_ui::{
@@ -181,6 +181,20 @@ pub enum DesktopAction {
     SetEditorFontSize {
         /// Requested editor font size in points.
         font_size_pt: u16,
+    },
+    /// Run a runnable code lens through app authority.
+    ActivateLanguageCodeLens {
+        /// Buffer the lens belongs to.
+        buffer_id: BufferId,
+        /// Lens identifier selected from projection data.
+        lens_id: String,
+    },
+    /// Set the editor's line wrapping policy through app authority.
+    SetLineWrappingPolicy {
+        /// Requested policy.
+        policy: LineWrappingPolicy,
+        /// Fixed wrap column, carried through unchanged for the fixed policy.
+        wrap_column: Option<u32>,
     },
     /// Update toast verbosity through app authority.
     SetToastVerbosity {
@@ -1566,6 +1580,19 @@ impl DesktopCommandBridge {
                     font_size_pt,
                 })
             }
+            DesktopAction::ActivateLanguageCodeLens { buffer_id, lens_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ActivateLanguageCodeLens {
+                    buffer_id,
+                    lens_id,
+                })
+            }
+            DesktopAction::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            }),
             DesktopAction::SetToastVerbosity { verbosity } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetToastVerbosity { verbosity })
             }
