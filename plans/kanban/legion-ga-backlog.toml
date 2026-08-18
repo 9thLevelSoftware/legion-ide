@@ -280,7 +280,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     acceptance = ["A dispatched 3-OS run is recorded with per-job outcomes; failures are diagnosed toward the four-consecutive-green promotion criteria."]
     stop_condition = "Stop if smoke promotion is claimed without four consecutive green scheduled 3-OS runs."
     status = "in-progress"
-    evidence = "plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md"
+    evidence = "plans/evidence/production/WS-P0/2026-08-18-smoke-promotion-clock.md"
+    notes = "2026-08-18: four consecutive green 3-OS runs on `main` now exist, so criterion 1 is met as written, and criterion 2 (rust-analyzer provisioning) is verified from the GP-1 log rather than inferred from a green tick. Held at in-progress because criteria 3 and 4 are owner decisions and no sign-off is written. The evidence file also records why the count is thinner than four rows suggest: runs 3 and 4 are the same SHA, three of the four were dispatched by hand, and all four fall inside ~37 hours. Recommendation there is to treat the 2026-08-24 scheduled run as the fourth data point."
 
   [[epics.features]]
   id = "P0.F5"
