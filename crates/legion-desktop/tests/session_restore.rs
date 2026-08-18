@@ -722,3 +722,167 @@ fn a_changed_session_is_written_again() {
         "the newly opened tab should be in the record, got {after}"
     );
 }
+
+// --- Panel sizes actually come back ---------------------------------------
+//
+// `splitter_fraction` was persisted and reloaded for a long time while no
+// renderer read it, so a restart restored the record rather than the layout the
+// user had arranged. These tests exercise the reader.
+
+#[test]
+fn a_restored_splitter_fraction_sizes_the_panel() {
+    use legion_desktop::view::dock_geometry;
+    use legion_ui::DockSide;
+
+    let layouts = vec![DockLayout {
+        mode: DockMode::Manual,
+        left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), 0.4, false),
+        right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.25, false),
+        bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.3, false),
+    }];
+
+    let stored = dock_geometry::stored_fraction(&layouts, DockMode::Manual, DockSide::Left)
+        .expect("the layout carries a left fraction");
+    assert!((stored - 0.4).abs() < f32::EPSILON, "got {stored}");
+
+    // 40% of a 1600px shell, within the panel's own bounds.
+    assert_eq!(
+        dock_geometry::size_from_fraction(Some(stored), 1_600.0, 248.0, 120.0, 900.0),
+        640.0,
+        "a restored fraction must size the panel, not fall back to the default"
+    );
+}
+
+#[test]
+fn a_resized_panel_is_persisted_and_survives_a_restart() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    let workspace = TempWorkspace::new("legion_desktop_dock_roundtrip");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let before = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    // Stand in for the user dragging the splitter: the renderer observes a new
+    // fraction and hands it back, exactly as `render_app_frame` does.
+    let dragged = if before > 0.5 { 0.25 } else { 0.55 };
+    runtime.persist_dock_fractions(DockFractions {
+        left: Some(dragged),
+        right: None,
+        bottom: None,
+    });
+
+    let stored = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("layout should still exist");
+    assert!(
+        (stored - dragged).abs() < 0.001,
+        "the observed fraction should be stored, got {stored}"
+    );
+
+    let on_disk = fs::read_to_string(&session_path)
+        .expect("persisting a dock resize should have written the session");
+    assert!(
+        on_disk.contains("splitter_fraction"),
+        "the session record should carry splitter fractions"
+    );
+
+    // Restart from the same arguments and confirm the arrangement returns.
+    let restored = DesktopRuntime::open(config_from_args(&[workspace
+        .path()
+        .to_string_lossy()
+        .as_ref()]))
+    .expect("runtime should reopen");
+    let after = restored
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("restored layout should exist");
+    assert!(
+        (after - dragged).abs() < 0.001,
+        "restarting must restore the panel arrangement, got {after} not {dragged}"
+    );
+}
+
+#[test]
+fn an_unmoved_splitter_does_not_write_the_session() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    // The renderer hands back a fraction every frame. Only a real drag may
+    // reach the disk, or the app fsyncs continuously while sitting idle.
+    let workspace = TempWorkspace::new("legion_desktop_dock_idle");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let current = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    runtime.persist_dock_fractions(DockFractions {
+        // Sub-pixel wobble, not a drag.
+        left: Some(current + 0.0001),
+        right: None,
+        bottom: None,
+    });
+
+    assert!(
+        !session_path.exists(),
+        "an unmoved splitter must not trigger a durable write"
+    );
+}
+
+#[test]
+fn a_panel_that_was_not_rendered_is_not_recorded_as_collapsed() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    // Manual mode hides the inspector, and compact layouts drop the side docks
+    // entirely. `None` has to mean "not drawn", never "the user dragged it to
+    // nothing" — otherwise briefly shrinking the window would overwrite the
+    // desktop arrangement.
+    let workspace = TempWorkspace::new("legion_desktop_dock_hidden");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let before = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.right.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    runtime.persist_dock_fractions(DockFractions::default());
+
+    let after = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.right.splitter_fraction)
+        .expect("layout should still exist");
+    assert!(
+        (before - after).abs() < f32::EPSILON,
+        "an unrendered panel must leave its stored fraction alone"
+    );
+}

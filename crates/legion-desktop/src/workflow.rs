@@ -58,6 +58,7 @@ use crate::{
     session::DesktopSessionStore,
     smoke::{self, RendererSmokeConfig},
     theme,
+    view::dock_geometry::{self, DockFractions},
     view::{
         BottomPanelTab, DesktopProjectionViewState, ImeCompositionProjection, ProjectionView,
         ime_composition_state, ime_composition_state_id,
@@ -613,6 +614,9 @@ pub struct DesktopRuntime {
     /// panel selection.
     selected_bottom_panel: BottomPanelTab,
     dock_layouts: Vec<DockLayout>,
+    /// Whether `dock_layouts` is a user arrangement rather than the shipped
+    /// defaults, and may therefore override the shell's designed panel sizes.
+    dock_layouts_user_arranged: bool,
     session_state_path: Option<PathBuf>,
     /// Encoding of the last session record actually written, so an action that
     /// changed nothing a restart would restore does not pay for a durable write.
@@ -680,6 +684,12 @@ impl DesktopRuntime {
         let mut explorer_expansion = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
+        // Whether `dock_layouts` represents a layout the user arranged, rather
+        // than the shipped defaults. Only an arranged layout may override the
+        // shell's designed panel sizes: `DockLayout::standard_all_modes` and
+        // `ShellGeometry`'s constants disagree about the defaults, and the
+        // constants are the ones the prototype-fidelity tests hold to.
+        let mut dock_layouts_user_arranged = false;
         let mut status = status_message(StatusSeverity::Info, "Desktop adapter ready");
         let mut status_details = Vec::new();
 
@@ -693,6 +703,7 @@ impl DesktopRuntime {
                     .collect();
                 panel_state = record.panel_state.clone();
                 dock_layouts = restore_dock_layouts(record);
+                dock_layouts_user_arranged = !record.dock_layouts.is_empty();
                 let (restore_status, restore_details) = restore_status_messages(&restore);
                 status = restore_status;
                 status_details = restore_details;
@@ -736,6 +747,7 @@ impl DesktopRuntime {
             panel_state,
             selected_bottom_panel,
             dock_layouts,
+            dock_layouts_user_arranged,
             session_state_path: config.session_state,
             last_saved_session_fingerprint: None,
             diagnostics_export_path: config.diagnostics_export,
@@ -1640,6 +1652,7 @@ impl DesktopRuntime {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
             dock_layouts: self.dock_layouts.clone(),
+            dock_layouts_user_arranged: self.dock_layouts_user_arranged,
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
             selected_bottom_panel: self.selected_bottom_panel,
             canonical_workspace_root: Some(CanonicalPath(
@@ -1683,6 +1696,42 @@ impl DesktopRuntime {
                     .last_product_ai_stream()
                     .map(|s| s.in_flight)
                     .unwrap_or(false),
+        }
+    }
+
+    /// Store dock sizes the renderer observed, if the user actually moved one.
+    ///
+    /// Guarded twice. `None` means the panel was not rendered — compact
+    /// layouts and Manual's hidden inspector — and must not be recorded as a
+    /// deliberate zero. And a change smaller than
+    /// [`dock_geometry::MATERIAL_FRACTION_DELTA`] is sub-pixel float wobble in
+    /// the panel rect, not a resize; without that test every frame would look
+    /// like a drag and, since a layout change now writes the session record,
+    /// the app would fsync continuously while sitting idle.
+    pub fn persist_dock_fractions(&mut self, observed: DockFractions) {
+        let mode = self.projection_snapshot().product_mode;
+        let Some(layout) = self.dock_layouts.iter_mut().find(|l| l.mode == mode) else {
+            return;
+        };
+        let mut changed = false;
+        for (observed, side) in [
+            (observed.left, &mut layout.left),
+            (observed.right, &mut layout.right),
+            (observed.bottom, &mut layout.bottom),
+        ] {
+            if let Some(observed) = observed
+                && dock_geometry::differs_materially(observed, side.splitter_fraction)
+            {
+                side.splitter_fraction = observed.clamp(0.15, 0.85);
+                changed = true;
+            }
+        }
+        if changed {
+            // A drag makes this an arrangement the user owns, so from here on
+            // it may override the shell's designed sizes — including after the
+            // next restart, when it arrives back through the session record.
+            self.dock_layouts_user_arranged = true;
+            self.persist_session_if_configured();
         }
     }
 
@@ -3724,6 +3773,8 @@ impl DesktopEframeApp {
             .render_with_state(ui, &snapshot, &view_state);
         self.runtime
             .persist_bottom_panel_selection(output.selected_bottom_panel);
+        self.runtime
+            .persist_dock_fractions(output.observed_dock_fractions);
         for action in output.actions {
             self.runtime.dispatch_ui_action(action);
         }

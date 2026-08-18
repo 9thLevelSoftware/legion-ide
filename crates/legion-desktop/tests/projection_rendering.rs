@@ -6063,3 +6063,82 @@ fn projection_rendering_tests_preserve_app_boundary() {
 
     common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
 }
+
+/// A restored splitter fraction must reach the rendered panel.
+///
+/// This is the assertion whose absence kept P1.F2.T4 open: `splitter_fraction`
+/// was persisted and reloaded for a long time while no renderer read it, so a
+/// restart restored the record rather than the layout the user had arranged.
+/// Asserting on the projection or the stored layout would not have caught that
+/// — only the painted panel rect does.
+#[test]
+fn projection_rendering_applies_a_restored_left_splitter_fraction() {
+    use legion_ui::{DockLayout, DockSideLayout, PanelId};
+
+    let snapshot = populated_snapshot();
+    let mode = snapshot.product_mode;
+
+    let render_with_left_fraction = |fraction: f32| -> f32 {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        // A restored arrangement, which is the only kind allowed to override
+        // the shell's designed panel sizes.
+        let state = DesktopProjectionViewState {
+            dock_layouts_user_arranged: true,
+            dock_layouts: vec![DockLayout {
+                mode,
+                left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), fraction, false),
+                right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.22, false),
+                bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.25, false),
+            }],
+            ..DesktopProjectionViewState::default()
+        };
+        // Two frames: egui settles panel sizes from `default_size` on the
+        // first, and a single frame can report a pre-layout rect.
+        for _ in 0..2 {
+            let _ = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+        }
+        view.last_shell_panel_rects()
+            .expect("the shell should have recorded its panel rects")
+            .left
+            .width()
+    };
+
+    let narrow = render_with_left_fraction(0.18);
+    let wide = render_with_left_fraction(0.42);
+
+    assert!(
+        wide > narrow,
+        "a wider restored fraction must produce a wider explorer panel, \
+         got {wide} for 0.42 and {narrow} for 0.18 — if these are equal the \
+         renderer is ignoring the persisted layout again"
+    );
+}
+
+/// A steady layout reports no drag, so rendering never rewrites stored sizes.
+///
+/// This is the regression that `product_mode_changes_preserve_projected_editor_and_panel_state`
+/// caught: an earlier version reported the rendered size every frame, which fed
+/// the geometry default straight back over every restored fraction.
+#[test]
+fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    // Several settled frames with no pointer input at a fixed window size.
+    let mut last = None;
+    for _ in 0..3 {
+        let (output, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+        last = Some(output);
+    }
+    let observed = last.expect("rendered").observed_dock_fractions;
+
+    assert_eq!(
+        observed,
+        legion_desktop::view::dock_geometry::DockFractions::default(),
+        "an untouched layout must report nothing to persist, or every frame          overwrites the user's arrangement with the current geometry default"
+    );
+}

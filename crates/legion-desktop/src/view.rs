@@ -4,6 +4,8 @@
 mod assistant_rail;
 mod code_canvas_painter;
 mod components;
+/// Applying persisted dock splitter fractions, and observing new ones.
+pub mod dock_geometry;
 #[cfg(feature = "ai")]
 pub mod ghost_text;
 pub mod rail_icons;
@@ -295,6 +297,16 @@ pub struct DesktopProjectionViewState {
     pub canonical_workspace_root: Option<CanonicalPath>,
     /// Adapter-local mode-scoped dock layouts.
     pub dock_layouts: Vec<DockLayout>,
+    /// Whether [`Self::dock_layouts`] is an arrangement the user made, rather
+    /// than the shipped defaults.
+    ///
+    /// Only a user arrangement may override the panel sizes in
+    /// [`ShellGeometry`]. `DockLayout::standard_all_modes` carries splitter
+    /// fractions that disagree with those constants — it was written when
+    /// nothing read them — and the constants are what the prototype-fidelity
+    /// tests hold the shell to. Applying the defaults' fractions would silently
+    /// resize every panel in the product.
+    pub dock_layouts_user_arranged: bool,
     /// Adapter-local toast ids dismissed by the renderer.
     pub dismissed_toast_ids: BTreeSet<u64>,
     /// Whether the first-run onboarding card should be rendered.
@@ -332,6 +344,7 @@ impl Default for DesktopProjectionViewState {
             selected_bottom_panel: BottomPanelTab::Terminal,
             canonical_workspace_root: None,
             dock_layouts: DockLayout::standard_all_modes(),
+            dock_layouts_user_arranged: false,
             dismissed_toast_ids: BTreeSet::new(),
             first_run_onboarding_visible: false,
             completion_popup_open: false,
@@ -1234,6 +1247,9 @@ pub struct ProjectionView {
     compact_drawer_restore_focus: Option<egui::Id>,
     last_editor_rect: Option<egui::Rect>,
     last_shell_panel_rects: Option<ShellPanelRects>,
+    /// Dock sizes from the previous frame, so a splitter drag can be told apart
+    /// from a restored layout, a remembered egui size, or a window resize.
+    last_dock_measurement: Option<dock_geometry::DockMeasurement>,
     /// Renderer-only presentation state. This is not product-mode authority.
     pending_mode_confirmation: Option<DockMode>,
     pending_mode_confirmation_source: Option<DockMode>,
@@ -1348,6 +1364,7 @@ impl ProjectionView {
             compact_drawer_restore_focus: None,
             last_editor_rect: None,
             last_shell_panel_rects: None,
+            last_dock_measurement: None,
             pending_mode_confirmation: None,
             pending_mode_confirmation_source: None,
             pending_mode_confirmation_origin: None,
@@ -1469,6 +1486,11 @@ impl ProjectionView {
     ) -> ProjectionViewOutput {
         self.normalize_mode_confirmation(snapshot.product_mode);
         let mut selected_bottom_panel = state.selected_bottom_panel;
+        // Filled in by the standard layout branch below. Compact layouts leave
+        // it empty: their panel sizes are fixed, not user-arranged, and
+        // recording them would overwrite the desktop arrangement whenever the
+        // window was briefly made small.
+        let mut observed_dock_fractions = dock_geometry::DockFractions::default();
         self.theme_preference =
             desktop_theme_preference(snapshot.settings_projection.theme_preference);
         let mut active_theme = self.theme_preference.resolve(ui.ctx());
@@ -1555,6 +1577,18 @@ impl ProjectionView {
             )
         } else {
             let inspector_visible = projected_product_mode(snapshot) != DesktopProductMode::Manual;
+            // The denominator for every splitter fraction this frame, captured
+            // before any dock is placed. Measuring against `ui.available_*`
+            // after a panel is added would give the *remaining* space, so a
+            // fraction written on one frame would mean something different when
+            // read on the next and the panels would creep on every restart.
+            let dock_basis = ui.available_rect_before_wrap();
+            // The size each dock was *asked* for this frame. A panel sitting at
+            // the size we requested tells us nothing — only a difference means
+            // the user moved the splitter. Comparing the rendered size against
+            // the stored fraction instead would rewrite the user's preference
+            // every time it got clamped, so merely making the window narrow
+            // would destroy the arrangement permanently.
             // Panel frames consume one pixel on each horizontal edge. Reserve
             // that chrome in addition to the required 560 px editor canvas.
             let standard_editor_reserve = ShellGeometry::MIN_STANDARD_EDITOR_WIDTH + 2.0;
@@ -1572,8 +1606,29 @@ impl ProjectionView {
             let left_panel = if geometry.compact {
                 left_panel.exact_size(geometry.left_width)
             } else {
+                // `default_size` is only consulted the first time egui lays this
+                // panel out; afterwards egui remembers the user's drag in its
+                // own memory. That memory is per-process, so on a fresh launch
+                // this is what decides the width — which is exactly where a
+                // restored fraction belongs.
+                let left_default = dock_geometry::size_from_fraction(
+                    state
+                        .dock_layouts_user_arranged
+                        .then(|| {
+                            dock_geometry::stored_fraction(
+                                &state.dock_layouts,
+                                snapshot.product_mode,
+                                legion_ui::DockSide::Left,
+                            )
+                        })
+                        .flatten(),
+                    dock_basis.width(),
+                    geometry.left_width,
+                    geometry.left_min_width,
+                    left_max_width,
+                );
                 left_panel
-                    .default_size(geometry.left_width)
+                    .default_size(left_default)
                     .min_size(geometry.left_min_width)
                     .max_size(left_max_width)
             };
@@ -1593,7 +1648,22 @@ impl ProjectionView {
                 egui::Panel::right("legion_desktop_trust")
                     .frame(theme::pane_frame(theme::tokens().bg.panel))
                     .resizable(true)
-                    .default_size(geometry.right_width)
+                    .default_size(dock_geometry::size_from_fraction(
+                        state
+                            .dock_layouts_user_arranged
+                            .then(|| {
+                                dock_geometry::stored_fraction(
+                                    &state.dock_layouts,
+                                    snapshot.product_mode,
+                                    legion_ui::DockSide::Right,
+                                )
+                            })
+                            .flatten(),
+                        dock_basis.width(),
+                        geometry.right_width,
+                        geometry.right_min_width,
+                        right_max_width,
+                    ))
                     .min_size(geometry.right_min_width)
                     .max_size(right_max_width)
                     .show_inside(ui, |ui| {
@@ -1610,7 +1680,25 @@ impl ProjectionView {
                 bottom_panel.exact_size(geometry.bottom_height)
             } else {
                 bottom_panel
-                    .default_size(geometry.bottom_height)
+                    .default_size(dock_geometry::size_from_fraction(
+                        state
+                            .dock_layouts_user_arranged
+                            .then(|| {
+                                dock_geometry::stored_fraction(
+                                    &state.dock_layouts,
+                                    snapshot.product_mode,
+                                    legion_ui::DockSide::Bottom,
+                                )
+                            })
+                            .flatten(),
+                        dock_basis.height(),
+                        geometry.bottom_height,
+                        geometry.bottom_min_height,
+                        // The console may not swallow the editor; leave the
+                        // canvas its documented minimum plus the chrome.
+                        (dock_basis.height() - geometry.bottom_min_height)
+                            .max(geometry.bottom_min_height),
+                    ))
                     .min_size(geometry.bottom_min_height)
             };
             let bottom_content = bottom_panel
@@ -1631,6 +1719,20 @@ impl ProjectionView {
                 bottom_content.min,
                 egui::pos2(bottom_content.right(), status.top()),
             );
+            // A splitter drag is a change between consecutive frames, so that
+            // is what gets reported. Compact layouts and the hidden Manual
+            // inspector never reach here, so a panel that was not drawn stays
+            // `None` rather than being recorded as a deliberate zero.
+            let measurement = dock_geometry::DockMeasurement {
+                basis_width: dock_basis.width(),
+                basis_height: dock_basis.height(),
+                left: Some(left.width()),
+                right: inspector_visible.then(|| right.width()),
+                bottom: Some(bottom_content.height()),
+            };
+            observed_dock_fractions =
+                dock_geometry::dragged_fractions(measurement, self.last_dock_measurement);
+            self.last_dock_measurement = Some(measurement);
             (left, right, bottom)
         };
 
@@ -1704,6 +1806,7 @@ impl ProjectionView {
             displayed_title: model.layout_title,
             bottom_tab_rows: model.bottom_tab_rows,
             selected_bottom_panel,
+            observed_dock_fractions,
             actions,
         }
     }
@@ -7492,7 +7595,11 @@ fn is_word_char(ch: char) -> bool {
 }
 
 /// Adapter-local render output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: the observed dock fractions are `f32`, which has
+/// no total equality. Comparing two outputs stays available; using one as a
+/// hash key does not, and never did anything.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectionViewOutput {
     /// True when adapter-local animation or timing needs another paint.
     pub needs_repaint: bool,
@@ -7504,6 +7611,12 @@ pub struct ProjectionViewOutput {
     ///
     /// Diagnostics presentation does not overwrite this persisted selection.
     pub selected_bottom_panel: BottomPanelTab,
+    /// Dock sizes this frame, as fractions of the shell, for persistence.
+    ///
+    /// Round-tripped through the runtime the same way `selected_bottom_panel`
+    /// is: the renderer observes, the runtime decides whether it is worth
+    /// storing. A field with `None` means that panel was not rendered.
+    pub observed_dock_fractions: dock_geometry::DockFractions,
     /// Adapter actions requested by rendered controls.
     pub actions: Vec<DesktopAction>,
 }

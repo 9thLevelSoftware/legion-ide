@@ -464,11 +464,18 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # skips unchanged records so the per-action durable write does not land
     # inside the ADR-0048 keypress budget. Evidence below.
     #
-    # Still in-progress for the original reason: the persisted splitter
-    # fractions are written and reloaded but no renderer applies them, so panel
-    # sizes still reset on restart. Tabs, active buffer, explorer expansion and
-    # workbench settings do now survive a real restart.
-    status = "in-progress"
+    # The original reason for the revert is also closed. `view/dock_geometry.rs`
+    # applies a stored splitter fraction to each dock's `default_size` and
+    # reports a drag back for persistence, gated on `dock_layouts_user_arranged`
+    # so the shipped `DockLayout` defaults — whose fractions disagree with
+    # `ShellGeometry`'s constants — cannot override the designed panel sizes.
+    # Proven non-vacuously: reverting the reader makes the rendered explorer the
+    # same width for 0.18 and 0.42.
+    #
+    # `collapsed` is still unread, deliberately: no renderer affordance can set
+    # it, so there is no user state for restore to honour. Wiring it belongs
+    # with whatever adds a collapse control.
+    status = "done"
     evidence = "plans/evidence/production/WS-MANUAL-01/session-persistence-default-evidence.md"
 
   [[epics.features]]
