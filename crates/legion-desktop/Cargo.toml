@@ -40,3 +40,4 @@ uuid = { workspace = true }
 # Enable `test-helpers` seams on AppComposition (e.g. `set_lsp_health_for_test`)
 # so integration tests in tests/ can reach them without a real LSP server.
 legion-app = { workspace = true, features = ["test-helpers"] }
+egui_kittest = { version = "0.34", features = ["wgpu", "snapshot"] }

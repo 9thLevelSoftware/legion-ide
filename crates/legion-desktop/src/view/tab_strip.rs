@@ -26,8 +26,15 @@ const TAB_LABEL_CLOSE_GAP: f32 = 2.0;
 /// drawn inside it is much smaller; a close button that looks like a 14px `×`
 /// but answers to a 28px square is easier to hit and no louder to look at.
 const TAB_CLOSE_SIZE: f32 = 28.0;
-/// Side of the painted glyph inside that target.
-const TAB_CLOSE_GLYPH_SIZE: f32 = 16.0;
+/// Side of the rounded chip that lights up on hover.
+///
+/// Named for what it is: this sizes the hover highlight, not the glyph. The
+/// glyph is text and takes `TAB_CLOSE_GLYPH_FONT_SIZE`. The previous name said
+/// "glyph size", which cost a snapshot-regression probe a cycle: changing it
+/// moves nothing a screenshot can see unless the pointer is over the button.
+const TAB_CLOSE_HOVER_SIZE: f32 = 16.0;
+/// Point size of the painted `×` / dirty glyph.
+const TAB_CLOSE_GLYPH_FONT_SIZE: f32 = 12.0;
 /// Height of a tab.
 const TAB_HEIGHT: f32 = 28.0;
 
@@ -68,10 +75,10 @@ fn render_tab_close_affordance(
         theme::tokens().text.muted
     };
     if hovered {
-        // Only the glyph-sized square lights up. Filling the whole 28px hit
+        // Only a small square lights up. Filling the whole 28px hit
         // area would put a block of highlight across half the tab.
         ui.painter().rect_filled(
-            egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(TAB_CLOSE_GLYPH_SIZE)),
+            egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(TAB_CLOSE_HOVER_SIZE)),
             egui::CornerRadius::same(3),
             theme::tokens().bg.hover,
         );
@@ -80,7 +87,7 @@ fn render_tab_close_affordance(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         glyph,
-        egui::FontId::proportional(12.0),
+        egui::FontId::proportional(TAB_CLOSE_GLYPH_FONT_SIZE),
         color,
     );
     response
