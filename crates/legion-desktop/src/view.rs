@@ -5022,6 +5022,42 @@ fn render_test_controls(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
+    // Runnable code lenses, as buttons. rust-analyzer reports these for every
+    // `#[test]` and every binary target, the app turns one into a terminal
+    // launch, and until now they rendered only inside a diagnostic string —
+    // so the "run this test" affordance existed everywhere except on screen.
+    let runnables: Vec<_> = snapshot
+        .language_tooling_projection
+        .code_lenses
+        .iter()
+        .filter(|lens| lens.kind_label.contains("runnable"))
+        .collect();
+    // Bounded, but never silently: a file with forty tests would otherwise
+    // paper the panel, and a cap with nothing to show for it is the same
+    // invisible-capability problem one size smaller.
+    const VISIBLE_RUNNABLES: usize = 6;
+    let omitted_runnables = runnables.len().saturating_sub(VISIBLE_RUNNABLES);
+    if !runnables.is_empty()
+        && let Some(buffer_id) = snapshot.active_buffer_projection.buffer_id
+    {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::label("Runnables"));
+            for lens in runnables.iter().take(VISIBLE_RUNNABLES) {
+                if soft_button(ui, &lens.title)
+                    .on_hover_text(&lens.command_label)
+                    .clicked()
+                {
+                    actions.push(DesktopAction::ActivateLanguageCodeLens {
+                        buffer_id,
+                        lens_id: lens.lens_id.clone(),
+                    });
+                }
+            }
+            if omitted_runnables > 0 {
+                ui.label(theme::muted(format!("+{omitted_runnables} more")));
+            }
+        });
+    }
     ui.horizontal_wrapped(|ui| {
         if soft_button(ui, "Refresh tests").clicked() {
             actions.push(DesktopAction::RefreshTestExplorer);
@@ -5352,6 +5388,30 @@ fn render_settings_panel(
                     actions.push(DesktopAction::SetEditorFontSize {
                         font_size_pt: model.settings.editor_font_size_pt.saturating_add(1),
                     });
+                }
+            });
+        }
+        if view.settings_section == SettingsSection::Editor {
+            // Line wrapping had a projected setting, an intent, and app
+            // handling that `code_line_wrap_width` genuinely reads — and no
+            // control, so the only value reachable in the product was the
+            // default.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::label("Line wrapping"));
+                for (policy, label) in [
+                    (LineWrappingPolicy::Off, "Off"),
+                    (LineWrappingPolicy::Viewport, "Viewport"),
+                    (LineWrappingPolicy::FixedColumn, "Column"),
+                ] {
+                    let selected = model.settings.line_wrapping_policy == policy;
+                    let response =
+                        selectable_pill_button(ui, label, theme::tokens().accent.cyan, selected);
+                    if response.clicked() {
+                        actions.push(DesktopAction::SetLineWrappingPolicy {
+                            policy,
+                            wrap_column: model.settings.wrap_column,
+                        });
+                    }
                 }
             });
         }

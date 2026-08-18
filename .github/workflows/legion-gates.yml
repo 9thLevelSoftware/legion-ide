@@ -77,6 +77,11 @@ jobs:
       - name: xtask extract-before-modify
         run: cargo run -p xtask -- extract-before-modify
 
+      # A capability nobody can reach is not shipped. Four were found complete,
+      # tested and unreachable on 2026-08-17, one at a time, by running the app.
+      - name: xtask intent-reachability
+        run: cargo run -p xtask -- intent-reachability
+
       - name: xtask verify-kanban-backlog
         run: cargo run -p xtask -- verify-kanban-backlog
 

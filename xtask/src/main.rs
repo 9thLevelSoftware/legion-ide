@@ -32,6 +32,7 @@ const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
 const DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH: &str = "target/dap-adapter/probe_report.toml";
 const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
+const DEFAULT_INTENT_REACHABILITY_CONFIG_PATH: &str = "xtask/intent-reachability.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
@@ -532,6 +533,16 @@ enum Commands {
         #[arg(long, default_value = "origin/main")]
         base: String,
     },
+    /// Fail when a dispatch intent has no route from any user gesture.
+    ///
+    /// A capability nobody can reach is not shipped. Four were found complete,
+    /// tested and unreachable on 2026-08-17, one at a time, by running the app.
+    #[command(name = "intent-reachability")]
+    IntentReachability {
+        /// Path to intent-reachability TOML configuration.
+        #[arg(long, default_value = DEFAULT_INTENT_REACHABILITY_CONFIG_PATH)]
+        config: String,
+    },
     /// Generate dry-run release pipeline installer descriptors.
     ReleasePipeline {
         /// Path to release pipeline TOML configuration.
@@ -923,6 +934,7 @@ fn main() {
         Commands::ExtractBeforeModify { config, base } => {
             run_extract_before_modify_command(&config, &base)
         }
+        Commands::IntentReachability { config } => run_intent_reachability_command(&config),
         Commands::ReleasePipeline {
             config,
             out,
@@ -1181,6 +1193,71 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
             }
         }
         1
+    }
+}
+
+fn run_intent_reachability_command(config_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("intent-reachability failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::intent_reachability::IntentReachabilityConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("intent-reachability failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::intent_reachability::run_intent_reachability(&workspace_root, &config) {
+        Ok(Ok(checked)) => {
+            println!("intent-reachability: {checked} intent(s) reachable or allowlisted");
+            0
+        }
+        Ok(Err(unreachable)) => {
+            eprintln!(
+                "intent-reachability: {} intent(s) have no route from any user gesture:",
+                unreachable.len()
+            );
+            for entry in &unreachable {
+                eprintln!("  CommandDispatchIntent::{}", entry.intent);
+            }
+            eprintln!();
+            eprintln!(
+                "An intent nobody can reach is a capability that is not shipped, however 
+                 complete the app layer is and however many tests cover it. Give it a route 
+                 — a rendered control, a keybinding, a `:` command, a Vim mapping, or a 
+                 palette entry — or add it to xtask/intent-reachability.toml with a reason."
+            );
+            1
+        }
+        Err(xtask::intent_reachability::GateError::IntentSource(why)) => {
+            eprintln!("intent-reachability failed: {why}");
+            1
+        }
+        Err(xtask::intent_reachability::GateError::ReasonMissing(intent)) => {
+            eprintln!(
+                "intent-reachability failed: allowlisted intent `{intent}` carries no reason. 
+                 An allowlist without reasons is a list nobody remembers the case for."
+            );
+            1
+        }
+        Err(xtask::intent_reachability::GateError::StaleAllowlist(entries)) => {
+            eprintln!(
+                "intent-reachability failed: {} allowlist entry(ies) are stale — now reachable, 
+                 or naming no variant. Remove them; a stale exemption hides the next real one:",
+                entries.len()
+            );
+            for entry in &entries {
+                eprintln!("  {entry}");
+            }
+            1
+        }
     }
 }
 
