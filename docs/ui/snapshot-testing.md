@@ -68,6 +68,26 @@ derived from it, and explorer rows and tab titles render names rather than
 paths. Two consecutive fresh runs must pass; that is the check to repeat if a
 snapshot ever fails for reasons nobody changed.
 
+## What it found on its first three-platform run
+
+The bootstrap run paid for the suite before the suite was even committed.
+
+The Legion mark in the top bar was `◆` (U+25C6 BLACK DIAMOND) in a label. The
+three renders showed a small filled dot on Windows, an amber diamond on macOS,
+and `□` — the missing-glyph box — on Linux. The product's own brand mark was a
+broken character on one of its three targets.
+
+This is the same defect as the five activity-rail icons, found the same way and
+fixed the same way: `view/brand_mark.rs` draws it. A line is a line on every
+platform; a codepoint is a negotiation with whatever fonts the host happens to
+have.
+
+Note what this implies for the bootstrap procedure below. A `.new.png` from a
+platform you do not have is **a render, not a baseline**. Committing the Linux
+one unexamined would have made the missing-glyph box the expected appearance of
+the product on Linux, and the suite would then have defended it. "Look at the
+diff" is not advice in step 4; it is the step.
+
 ## Why baselines are per platform
 
 Font rasterisation, hinting and subpixel placement differ enough between
