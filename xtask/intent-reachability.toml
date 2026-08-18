@@ -38,20 +38,20 @@ Not implemented. Routes to `AppCommandRequest::Noop` in intent_routing.rs, so
 wiring a control would offer the user a button that does nothing. The
 `legion-lsp` protocol layer is complete and contract-tested
 (`prepare_call_hierarchy_request`, `project_prepare_call_hierarchy_response`)
-with no app plumbing behind it. Tracked by roadmap 1.6, "wire call-hierarchy
-app stub".
+with no app plumbing behind it. Tracked by backlog task P2.F1.T6, "wire the
+call-hierarchy app stub so incoming/outgoing calls reach a panel".
 """
 
 [[allowed]]
 intent = "ShowIncomingCalls"
 reason = """
-Not implemented; same stub and same roadmap item as PrepareCallHierarchy.
+Not implemented; same stub and same backlog task (P2.F1.T6) as PrepareCallHierarchy.
 """
 
 [[allowed]]
 intent = "ShowOutgoingCalls"
 reason = """
-Not implemented; same stub and same roadmap item as PrepareCallHierarchy.
+Not implemented; same stub and same backlog task (P2.F1.T6) as PrepareCallHierarchy.
 """
 
 [[allowed]]

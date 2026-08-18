@@ -725,6 +725,19 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     stop_condition = "Write-side actions must never bypass the proposal pipeline."
     notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply activation (P3.F1.T2) is deferred to M9; this task stays in-progress until the apply path lands."
 
+  [[epics.features.tasks]]
+    id = "P2.F1.T6"
+    title = "Wire the call-hierarchy app stub so incoming/outgoing calls reach a panel"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    status = "todo"
+    files = ["crates/legion-app/src/language/intent_routing.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-desktop/src/bridge.rs"]
+    dependencies = ["P2.F1.T4"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-app", "cargo run -p xtask -- intent-reachability"]
+    acceptance = ["Incoming and outgoing calls for the symbol under the caret are listed in a reachable panel, and the three call-hierarchy intents are removed from the intent-reachability allowlist."]
+    stop_condition = "Do not add a control before the intents do something: a button wired to Noop is the defect the intent-reachability gate exists to catch."
+    notes = "Created 2026-08-18 because `xtask/intent-reachability.toml` allowlists PrepareCallHierarchy, ShowIncomingCalls and ShowOutgoingCalls against a tracking item that did not exist — the reasons cited a \"roadmap 1.6\" with no such entry anywhere, which is precisely the rot the allowlist's reason requirement is meant to prevent. The `legion-lsp` protocol layer is complete and contract-tested (`prepare_call_hierarchy_request`, `project_prepare_call_hierarchy_response`); all three intents route to `AppCommandRequest::Noop`, so this is unbuilt rather than unreachable. Report B6 (`plans/legion-course-correction-v0.1.md` W4) names call-graph navigation a voiced unmet need."
+
   [[epics.features]]
   id = "P2.F2"
   title = "Real terminal runtime"
