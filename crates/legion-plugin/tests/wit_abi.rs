@@ -189,7 +189,7 @@ fn wit_world_declares_all_three_contribution_interfaces() {
     assert_eq!(
         world.matches("export ").count(),
         1,
-        "plugin-host must expose exactly one export; a second entrypoint needs an ADR.          World block was: {world}"
+        "plugin-host must expose exactly one export; a second entrypoint needs an ADR. World block was: {world}"
     );
     assert!(world.contains("export activate: func();"));
 }
