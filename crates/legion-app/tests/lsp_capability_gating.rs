@@ -213,26 +213,17 @@ fn a_recorded_capability_reports_what_the_server_actually_said() {
             configured_path: Some(mock_path),
             ..Default::default()
         },
-        supervisor: lsp_mock::mock_supervisor_config(),
+        supervisor: lsp_mock::mock_supervisor_config_withholding(UNADVERTISED_CAPABILITY),
         server_id: LanguageServerId(12),
         language_id: LanguageId("rust".to_string()),
     };
 
-    // Safety: this test process sets the variable before launching the mock and
-    // the mock reads it at startup. Single-threaded within this test, and no
-    // other test in this binary launches a server while it is set.
-    unsafe {
-        std::env::set_var("LEGION_MOCK_WITHHOLD_CAPABILITY", UNADVERTISED_CAPABILITY);
-    }
     let mut launcher = legion_lsp::LspStdioLauncher::new();
     let mut session =
         RustAnalyzerSession::launch(config, &mut launcher).expect("launch should succeed");
     session
         .initialize("file:///workspace")
         .expect("initialize should succeed");
-    unsafe {
-        std::env::remove_var("LEGION_MOCK_WITHHOLD_CAPABILITY");
-    }
 
     let health = session.health();
     let supported = |name: &str| {

@@ -470,10 +470,15 @@ fn declining_to_ask_is_not_reported_as_waiting_for_an_answer() {
         byte_offset: None,
         utf16_offset: None,
     };
-    let _ = app.dispatch_ui_intent(legion_ui::CommandDispatchIntent::ShowIncomingCalls {
+    // Not `let _`: if the router ever stops sending `ShowIncomingCalls` to
+    // `call_hierarchy_outcome`, the assertions below would still pass — the flag
+    // would be false because nothing ever set it, not because the fix cleared
+    // it. That is the silent green this test exists to prevent.
+    app.dispatch_ui_intent(legion_ui::CommandDispatchIntent::ShowIncomingCalls {
         buffer_id,
         position,
-    });
+    })
+    .expect("ShowIncomingCalls must route to call_hierarchy_outcome");
 
     let projection = app.language_tooling_projection();
     assert!(
