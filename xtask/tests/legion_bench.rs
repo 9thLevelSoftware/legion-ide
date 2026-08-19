@@ -1,63 +1,109 @@
 use xtask::legion_bench::{
     LegionBenchReport, LegionBenchRunMode, LegionBenchTaskKind, LegionBenchTaskStatus,
-    SCORING_MODE_LIVE_LOCAL, plan_default_legion_bench_suite, plan_legion_bench_report,
-    read_report, verify_legion_bench_report, write_report,
+    SCORING_MODE_LIVE_LOCAL, SCORING_MODE_RECORDED_REPLAY, read_report, verify_legion_bench_report,
+    write_report,
 };
-use xtask::legion_bench_corpus::{LiveRunInput, corpus_suite, parse_corpus_task};
+use xtask::legion_bench_corpus::{CorpusTask, LiveRunInput, corpus_suite, parse_corpus_task};
 use xtask::legion_bench_live::{
     DEFAULT_LIVE_ENDPOINT, resolve_live_config, score_live_task, skipped_holdout_score,
 };
+use xtask::legion_bench_recorded::{
+    RecordedBaseline, cassette_set_hash, compare_to_baseline, expectations_from_report,
+};
 
-#[test]
-fn legion_bench_default_suite_has_twenty_tasks() {
-    let suite = plan_default_legion_bench_suite();
-    assert_eq!(suite.tasks.len(), 20);
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .to_path_buf()
 }
 
-#[test]
-fn legion_bench_default_suite_covers_four_task_kinds() {
-    let suite = plan_default_legion_bench_suite();
-    let bug_fix = suite
-        .tasks
-        .iter()
-        .filter(|task| task.kind == LegionBenchTaskKind::BugFix)
-        .count();
-    let test_add = suite
-        .tasks
-        .iter()
-        .filter(|task| task.kind == LegionBenchTaskKind::TestAdd)
-        .count();
-    let refactor = suite
-        .tasks
-        .iter()
-        .filter(|task| task.kind == LegionBenchTaskKind::Refactor)
-        .count();
-    let multi_file = suite
-        .tasks
-        .iter()
-        .filter(|task| task.kind == LegionBenchTaskKind::MultiFileFeature)
-        .count();
-
-    assert_eq!(bug_fix, 5);
-    assert_eq!(test_add, 5);
-    assert_eq!(refactor, 5);
-    assert_eq!(multi_file, 5);
+fn in_repo_corpus() -> Vec<CorpusTask> {
+    let corpus_dir = repo_root().join(xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH);
+    xtask::legion_bench_corpus::load_corpus(&corpus_dir).expect("load in-repo corpus")
 }
 
+/// P9.F1.T1/T4 corpus floor. The acceptance criteria name concrete minimums
+/// (20-50 tasks, >=3 fixture repos, a held-out subset); without a test they
+/// are prose that a later trim can silently violate.
 #[test]
-fn legion_bench_report_round_trip_preserves_baseline() {
-    let suite = plan_default_legion_bench_suite();
-    let report = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
+fn in_repo_corpus_meets_the_documented_size_floor() {
+    let corpus = in_repo_corpus();
+    let repos: std::collections::BTreeSet<&str> = corpus
+        .iter()
+        .map(|task| task.task.fixture_repo.as_str())
+        .collect();
+    let holdout = corpus.iter().filter(|task| task.live.holdout).count();
+
+    assert!(
+        (20..=50).contains(&corpus.len()),
+        "corpus must hold 20-50 tasks, found {}",
+        corpus.len()
     );
-    assert_eq!(report.summary.total, 20);
-    assert_eq!(report.summary.passed, 20);
-    assert_eq!(report.summary.failed, 0);
-    assert_eq!(report.summary.regressed, 0);
-    assert_eq!(report.mode, LegionBenchRunMode::RecordedOffline);
+    assert!(
+        repos.len() >= 3,
+        "corpus must span at least 3 fixture repos, found {repos:?}"
+    );
+    assert!(holdout > 0, "corpus must reserve a held-out subset");
+    assert!(
+        holdout < corpus.len(),
+        "corpus must leave tasks outside the holdout"
+    );
+}
+
+/// Every fixture must carry a deterministic scoring rule — the explicit stop
+/// condition on P9.F1.T1. "Deterministic" here means: an exit-code comparison
+/// against a named command, run in a fresh checkout, with integer budgets.
+/// Nothing in the scoring path may be a judgement call.
+#[test]
+fn every_corpus_task_has_a_deterministic_scoring_rule() {
+    for task in in_repo_corpus() {
+        let id = &task.task.id;
+        assert!(
+            !task.live.verification.command.trim().is_empty(),
+            "{id}: verification command is the scoring rule and must be present"
+        );
+        assert!(
+            task.live.verification.timeout_secs > 0,
+            "{id}: an unbounded verification cannot produce a deterministic verdict"
+        );
+        assert!(
+            task.task.gate_budget.max_diff_files > 0 && task.task.gate_budget.max_turns > 0,
+            "{id}: budgets must be positive integers, not open-ended"
+        );
+        // `at_rest` records whether the command passes on the untouched
+        // fixture, so a task that is green before the model runs cannot be
+        // read as one the model solved. Only two values are decidable.
+        if let Some(declared) = task.live.verification.at_rest.as_deref() {
+            assert!(
+                declared == "passes" || declared == "fails",
+                "{id}: at_rest must be `passes` or `fails`, got `{declared}`"
+            );
+        }
+    }
+
+    // The structural half of the corpus-health gate, run in-process: it is
+    // what proves each task's rule can distinguish a working agent from one
+    // that did nothing, and running it here means a bad task fails
+    // `cargo test` rather than only the xtask command.
+    let corpus_dir = repo_root().join(xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH);
+    let health = xtask::legion_bench_corpus_health::check_corpus(&corpus_dir, &repo_root(), false)
+        .expect("corpus health check runs");
+    let unhealthy: Vec<_> = health
+        .iter()
+        .filter(|task| !task.problems.is_empty())
+        .collect();
+    assert!(
+        unhealthy.is_empty(),
+        "unhealthy corpus tasks: {unhealthy:?}"
+    );
+}
+
+#[test]
+fn corpus_report_round_trips_and_verifies() {
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let report = replayed_report(&corpus, &suite);
 
     let temp_dir = tempfile_dir("round-trip");
     let path = write_report(&temp_dir, &report).expect("write bench report");
@@ -68,13 +114,9 @@ fn legion_bench_report_round_trip_preserves_baseline() {
 
 #[test]
 fn legion_bench_verify_rejects_suite_fingerprint_mismatch() {
-    let suite = plan_default_legion_bench_suite();
-    let report = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
-    );
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let report = replayed_report(&corpus, &suite);
     let mut mutated = suite.clone();
     mutated.tasks[0].objective.push_str(" (mutated)");
 
@@ -84,13 +126,9 @@ fn legion_bench_verify_rejects_suite_fingerprint_mismatch() {
 
 #[test]
 fn legion_bench_verify_rejects_tampered_summary_counts() {
-    let suite = plan_default_legion_bench_suite();
-    let mut report = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
-    );
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let mut report = replayed_report(&corpus, &suite);
     // Tamper only with the summary aggregate; the per-task results are intact.
     report.summary.average_score = report.summary.average_score.wrapping_add(1);
 
@@ -101,13 +139,9 @@ fn legion_bench_verify_rejects_tampered_summary_counts() {
 
 #[test]
 fn legion_bench_verify_rejects_tampered_task_definition() {
-    let suite = plan_default_legion_bench_suite();
-    let mut report = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
-    );
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let mut report = replayed_report(&corpus, &suite);
     // Tamper with a non-fingerprinted-but-embedded task field; the suite
     // fingerprint still matches so only full equality can catch this.
     report.tasks[0].task.objective.push_str(" (tampered)");
@@ -120,73 +154,156 @@ fn legion_bench_verify_rejects_tampered_task_definition() {
     );
 }
 
+// ─── Recorded-mode report shape and regression gate ──────────────────────────
+
+/// Build a recorded-replay report over the whole corpus with measured-looking
+/// metrics. Nothing here is a *score derived from the budget*: the numbers are
+/// inputs, exactly as the runner's measurements are.
+fn replayed_report(
+    corpus: &[CorpusTask],
+    suite: &xtask::legion_bench::LegionBenchSuite,
+) -> LegionBenchReport {
+    let tasks: Vec<_> = corpus
+        .iter()
+        .map(|task| xtask::legion_bench::LegionBenchTaskResult {
+            task: task.task.clone(),
+            score: score_live_task(
+                task,
+                &sample_raw_result(&task.task.id),
+                SCORING_MODE_RECORDED_REPLAY,
+            ),
+        })
+        .collect();
+    let mut report = LegionBenchReport {
+        schema_version: xtask::legion_bench::BENCH_SCHEMA_VERSION,
+        package_name: "legion-desktop".to_string(),
+        measured_at_utc: "2026-08-19T00:00:00Z".to_string(),
+        git_sha: "feedface".to_string(),
+        mode: LegionBenchRunMode::RecordedOffline,
+        provider_profile: "recorded:qwen2.5-coder:14b@governed".to_string(),
+        scoring_mode: SCORING_MODE_RECORDED_REPLAY.to_string(),
+        suite_name: suite.suite_name.clone(),
+        suite_fingerprint: suite.suite_fingerprint.clone(),
+        summary: Default::default(),
+        tasks,
+    };
+    report.summary.total = report.tasks.len();
+    let mut total_score = 0_u32;
+    for task in &report.tasks {
+        match task.score.status {
+            LegionBenchTaskStatus::Passed => report.summary.passed += 1,
+            LegionBenchTaskStatus::Failed => report.summary.failed += 1,
+            LegionBenchTaskStatus::Skipped => report.summary.skipped += 1,
+        }
+        if task.score.status != LegionBenchTaskStatus::Skipped {
+            total_score += u32::from(task.score.score);
+        }
+    }
+    let graded = report.summary.total - report.summary.skipped;
+    if graded > 0 {
+        report.summary.average_score = total_score / graded as u32;
+    }
+    report
+}
+
 #[test]
-fn legion_bench_report_tracks_run_mode_profile() {
-    let suite = plan_default_legion_bench_suite();
-    let recorded = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
+fn recorded_report_declares_real_execution_not_synthetic_arithmetic() {
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let report = replayed_report(&corpus, &suite);
+    let toml_text = toml::to_string_pretty(&report).expect("serialize recorded report");
+
+    assert!(toml_text.contains("schema_version = 3"));
+    assert!(toml_text.contains("scoring_mode = \"recorded_replay_execution\""));
+    assert!(toml_text.contains("mode = \"recorded_offline\""));
+    // The synthetic vocabulary must be gone from the report entirely: a report
+    // that still says "synthetic" is one whose numbers were not measured.
+    assert!(
+        !toml_text.contains("synthetic"),
+        "recorded reports must not describe themselves as synthetic"
     );
-    let live = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::LiveWeekly,
-        &suite,
+    // Measured execution metrics are what a recorded report is for.
+    assert!(toml_text.contains("[tasks.score.live]"));
+    assert!(toml_text.contains("task_success"));
+}
+
+/// The regression gate itself: a recorded run that differs from the committed
+/// expectations must be reported as a difference, per task.
+#[test]
+fn recorded_baseline_comparison_catches_a_moved_result() {
+    let corpus = in_repo_corpus();
+    let suite = corpus_suite(&corpus);
+    let report = replayed_report(&corpus, &suite);
+    let baseline = RecordedBaseline {
+        schema_version: xtask::legion_bench_recorded::BASELINE_SCHEMA_VERSION,
+        model: "qwen2.5-coder:14b".to_string(),
+        arm: "governed".to_string(),
+        endpoint: "test".to_string(),
+        recorded_at_utc: "2026-08-19T00:00:00Z".to_string(),
+        suite_fingerprint: suite.suite_fingerprint.clone(),
+        cassette_set_hash: "sha256:unused-by-this-comparison".to_string(),
+        tasks: expectations_from_report(&report),
+    };
+    compare_to_baseline(&report, &baseline).expect("an unchanged run matches its own baseline");
+
+    // One task now takes an extra turn — nothing else moves.
+    let mut moved = report.clone();
+    moved.tasks[0].score.turns += 1;
+    let problems =
+        compare_to_baseline(&moved, &baseline).expect_err("a moved result must be reported");
+    assert_eq!(problems.len(), 1, "only one task moved: {problems:?}");
+    assert!(
+        problems[0].contains(&report.tasks[0].task.id),
+        "the difference must name the task: {problems:?}"
     );
 
-    assert_eq!(recorded.provider_profile, suite.recorded_provider_profile);
-    assert_eq!(live.provider_profile, suite.live_provider_profile);
-    assert_eq!(recorded.schema_version, 2);
-    assert_eq!(
-        recorded.scoring_mode,
-        xtask::legion_bench::SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
-    );
+    // A corpus change invalidates the whole baseline, not one row.
+    let mut recorpused = report.clone();
+    recorpused.suite_fingerprint = "bench-suite-v1:0000000000000000".to_string();
+    let problems =
+        compare_to_baseline(&recorpused, &baseline).expect_err("fingerprint drift must be caught");
     assert!(
-        recorded.tasks[0].score.notes.contains("synthetic=true")
-            && recorded.tasks[0]
-                .score
-                .notes
-                .contains("budget-derived placeholders"),
-        "recorded task notes must self-identify synthetic scoring, got: {}",
-        recorded.tasks[0].score.notes
+        problems.iter().any(|p| p.contains("suite fingerprint")),
+        "{problems:?}"
     );
 }
 
-// ─── Recorded-mode report shape stability ────────────────────────────────────
-
+/// An edited cassette must change the set hash. Without this the "recorded"
+/// half of recorded mode is unpinned: anyone could hand-write a tape that
+/// makes the suite look better.
 #[test]
-fn recorded_report_toml_shape_is_stable() {
-    let suite = plan_default_legion_bench_suite();
-    let report = plan_legion_bench_report(
-        "legion-desktop",
-        "feedface",
-        LegionBenchRunMode::RecordedOffline,
-        &suite,
-    );
-    let toml_text = toml::to_string_pretty(&report).expect("serialize recorded report");
+fn cassette_set_hash_changes_when_a_tape_changes() {
+    let dir = tempfile_dir("cassette-hash");
+    let ids = vec!["a".to_string(), "b".to_string()];
+    std::fs::write(dir.join("a.json"), "{\"schema_version\":1}\n").expect("write a");
+    std::fs::write(dir.join("b.json"), "{\"schema_version\":1}\n").expect("write b");
+    let before = cassette_set_hash(&dir, &ids).expect("hash");
 
-    // Recorded reports keep their historical identity and stay honestly
-    // self-labelled as synthetic.
-    assert!(toml_text.contains("schema_version = 2"));
-    assert!(toml_text.contains("scoring_mode = \"synthetic_budget_arithmetic\""));
-    assert!(toml_text.contains("mode = \"recorded_offline\""));
-    // The live-metrics table must NOT appear in recorded reports.
-    assert!(
-        !toml_text.contains("[tasks.score.live]"),
-        "recorded reports must not contain live metrics tables"
-    );
-    assert!(!toml_text.contains("task_success"));
-    // No task may be skipped in recorded mode.
-    assert!(toml_text.contains("skipped = 0"));
-    assert!(!toml_text.contains("status = \"skipped\""));
+    std::fs::write(dir.join("b.json"), "{\"schema_version\":1,\"x\":1}\n").expect("rewrite b");
+    let after = cassette_set_hash(&dir, &ids).expect("hash");
+    assert_ne!(before, after, "an edited tape must change the set hash");
 
-    // A pre-`skipped`-field report (the historical shape) must still parse.
-    let legacy = toml_text.replace("skipped = 0\n", "");
-    let parsed: LegionBenchReport = toml::from_str(&legacy).expect("legacy report parses");
-    assert_eq!(parsed.summary.skipped, 0);
-    verify_legion_bench_report(&parsed, &suite).expect("legacy-shaped report verifies");
+    // Same length, different bytes: a hash that only covered file sizes would
+    // pass everything above and still let a tape be rewritten in place.
+    std::fs::write(dir.join("b.json"), "{\"schema_version\":1,\"x\":2}\n").expect("rewrite b");
+    assert_ne!(
+        after,
+        cassette_set_hash(&dir, &ids).expect("hash"),
+        "the hash must cover cassette contents, not just their size"
+    );
+    std::fs::write(dir.join("b.json"), "{\"schema_version\":1,\"x\":1}\n").expect("restore b");
+
+    // CRLF is a checkout artifact, not a content change.
+    std::fs::write(dir.join("b.json"), "{\"schema_version\":1,\"x\":1}\r\n").expect("crlf b");
+    assert_eq!(
+        after,
+        cassette_set_hash(&dir, &ids).expect("hash"),
+        "line-ending normalization must not move the hash"
+    );
+
+    // A missing tape is an error, not a hash over fewer files.
+    std::fs::remove_file(dir.join("b.json")).expect("remove b");
+    assert!(cassette_set_hash(&dir, &ids).is_err());
 }
 
 // ─── Corpus task parsing ─────────────────────────────────────────────────────
@@ -390,6 +507,10 @@ fn sample_raw_result(id: &str) -> xtask::legion_bench_corpus::LiveRunTaskResult 
         context_tokens: Some(2048),
         generation_tokens: Some(512),
         wall_ms: 61_000,
+        cassette_model: "qwen2.5-coder:14b".to_string(),
+        cassette_arm: "governed".to_string(),
+        cassette_exchanges: 5,
+        cassette_drift: 0,
         error: None,
         notes: String::new(),
     }
@@ -400,7 +521,7 @@ fn live_scoring_passes_within_budget_and_fails_over_budget() {
     let corpus_task = parse_corpus_task(CORPUS_TASK_FULL, "test").expect("parse");
 
     let good = sample_raw_result("bench-live-77");
-    let score = score_live_task(&corpus_task, &good);
+    let score = score_live_task(&corpus_task, &good, SCORING_MODE_LIVE_LOCAL);
     assert_eq!(score.status, LegionBenchTaskStatus::Passed);
     // weights: diff 1*5 + turns 4*2 = 13 → 87.
     assert_eq!(score.score, 87);
@@ -415,7 +536,7 @@ fn live_scoring_passes_within_budget_and_fails_over_budget() {
     // Over the turn budget (max_turns = 6) → failed even though tests passed.
     let mut over_turns = sample_raw_result("bench-live-77");
     over_turns.turns = 7;
-    let score = score_live_task(&corpus_task, &over_turns);
+    let score = score_live_task(&corpus_task, &over_turns, SCORING_MODE_LIVE_LOCAL);
     assert_eq!(score.status, LegionBenchTaskStatus::Failed);
 
     // Verification failed → failed with fail_penalty applied.
@@ -423,7 +544,7 @@ fn live_scoring_passes_within_budget_and_fails_over_budget() {
     tests_failed.tests_passed = false;
     tests_failed.task_success = false;
     tests_failed.verification_exit = Some(101);
-    let score = score_live_task(&corpus_task, &tests_failed);
+    let score = score_live_task(&corpus_task, &tests_failed, SCORING_MODE_LIVE_LOCAL);
     assert_eq!(score.status, LegionBenchTaskStatus::Failed);
     assert_eq!(score.score, 37); // 87 - fail_penalty(50)
 }
@@ -444,15 +565,15 @@ fn live_report_with_failures_and_holdout_skips_verifies() {
     let results = vec![
         xtask::legion_bench::LegionBenchTaskResult {
             task: corpus_task.task.clone(),
-            score: skipped_holdout_score(),
+            score: skipped_holdout_score(SCORING_MODE_LIVE_LOCAL),
         },
         xtask::legion_bench::LegionBenchTaskResult {
             task: second.task.clone(),
-            score: score_live_task(&second, &failing),
+            score: score_live_task(&second, &failing, SCORING_MODE_LIVE_LOCAL),
         },
     ];
     let report = LegionBenchReport {
-        schema_version: 2,
+        schema_version: xtask::legion_bench::BENCH_SCHEMA_VERSION,
         package_name: "legion-desktop".to_string(),
         measured_at_utc: "2026-08-15T00:00:00Z".to_string(),
         git_sha: "feedface".to_string(),
@@ -486,12 +607,19 @@ fn live_report_with_failures_and_holdout_skips_verifies() {
     );
     assert!(round_trip.tasks[1].score.live.is_some());
 
-    // But a recorded-mode report with failures must still be rejected.
-    let mut synthetic = report.clone();
-    synthetic.scoring_mode =
-        xtask::legion_bench::SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC.to_string();
-    let err = verify_legion_bench_report(&synthetic, &suite)
-        .expect_err("synthetic report with failures must be rejected");
+    // A replayed report with failures verifies too: the reference model's
+    // failures are the baseline, and the baseline comparison gates them.
+    let mut replayed = report.clone();
+    replayed.scoring_mode = SCORING_MODE_RECORDED_REPLAY.to_string();
+    verify_legion_bench_report(&replayed, &suite)
+        .expect("replayed report with failures verifies structurally");
+
+    // The scripted hostile suite is the one frozen-green report; a failure in
+    // it means the generator and the gate disagree.
+    let mut hostile = report.clone();
+    hostile.scoring_mode = xtask::legion_bench::SCORING_MODE_SCRIPTED_HOSTILE.to_string();
+    let err = verify_legion_bench_report(&hostile, &suite)
+        .expect_err("hostile report with failures must be rejected");
     assert!(err.contains("regressions"), "unexpected error: {err}");
 
     // And unknown scoring modes remain rejected.
@@ -536,7 +664,7 @@ fn live_scoring_honors_require_tests_pass_opt_out() {
     // The loop and proposals succeeded; only the optional verification did not.
     verification_failed.task_success = true;
 
-    let score = score_live_task(&corpus_task, &verification_failed);
+    let score = score_live_task(&corpus_task, &verification_failed, SCORING_MODE_LIVE_LOCAL);
     assert_eq!(
         score.status,
         LegionBenchTaskStatus::Passed,
@@ -546,7 +674,7 @@ fn live_scoring_honors_require_tests_pass_opt_out() {
     // With the flag on, the same result fails — proving the flag is what moved it.
     let required = parse_corpus_task(CORPUS_TASK_FULL, "test").expect("parse corpus task");
     assert_eq!(
-        score_live_task(&required, &verification_failed).status,
+        score_live_task(&required, &verification_failed, SCORING_MODE_LIVE_LOCAL).status,
         LegionBenchTaskStatus::Failed
     );
 }

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-04",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:b18e7f5bb4405b24",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/lib.rs\",\n    \"start_line\": 0,\n    \"end_line\": 1000,\n    \"max_bytes\": null\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119856,
+        "id": "chatcmpl-874",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 56,
+          "prompt_tokens": 604,
+          "total_tokens": 660
+        }
+      }
+    }
+  ]
+}

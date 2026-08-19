@@ -13,6 +13,7 @@ pub mod legion_bench;
 pub mod legion_bench_corpus;
 pub mod legion_bench_corpus_health;
 pub mod legion_bench_live;
+pub mod legion_bench_recorded;
 pub mod no_egui_textedit;
 pub mod perf_harness;
 pub mod readiness_consistency;

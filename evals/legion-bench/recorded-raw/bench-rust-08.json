@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-08",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:75d8977360c4f9f4",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"tests/error_display.rs\",\n    \"replacement\": \"use miniconf::error::ParseError;\\n\\n#[test]\\nfn test_parse_error_display() {\\n    let error1 = ParseError::UnterminatedSection { line: 5 };\\n    assert_eq!(error1.to_string(), \\\"line 5: unterminated section\\\");\\n\\n    let error2 = ParseError::EmptySectionName { line: 10 };\\n    assert_eq!(error2.to_string(), \\\"line 10: empty section name\\\");\\n\\n    let error3 = ParseError::EmptyKey { line: 15 };\\n    assert_eq!(error3.to_string(), \\\"line 15: empty key\\\");\\n\\n    let error4 = ParseError::MissingEquals { line: 20 };\\n    assert_eq!(error4.to_string(), \\\"line 20: expected key = value assignment\\\");\\n}\",\n    \"proposal_reason\": \"Add integration test for ParseError Display output\",\n    \"proposal_title\": \"New test file: tests/error_display.rs\"\n  }\n}\n\n{\n  \"name\": \"end_turn\",\n  \"arguments\": {}\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119918,
+        "id": "chatcmpl-932",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 274,
+          "prompt_tokens": 617,
+          "total_tokens": 891
+        }
+      }
+    }
+  ]
+}

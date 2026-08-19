@@ -2289,11 +2289,16 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     readiness_row = "PR-AI-002"
     files = ["xtask/src/legion_bench.rs", "evals/legion-bench/"]
     dependencies = ["P6.F2.T1"]
-    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo test -p xtask --test legion_bench"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench", "cargo test -p xtask --test legion_bench"]
     acceptance = ["Agent/product changes have measurable eval regression gates."]
     stop_condition = "Stop if a fixture does not have a deterministic scoring rule."
-    status = "in-progress"
-    evidence = "plans/evidence/production/M10/PKT-EVAL-evidence.md"
+    # 25 tasks over 6 fixture repos, 5 held out. Each task's scoring rule is an
+    # exit-code comparison against a named verification command run in a fresh
+    # checkout, plus integer diff/turn/cost budgets — no heuristic anywhere.
+    # The regression gate is `verify-legion-bench` comparing a replayed run to
+    # evals/legion-bench/recorded/baseline.toml.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
     [[epics.features.tasks]]
     id = "P9.F1.T2"
@@ -2313,13 +2318,18 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     title = "Run offline in CI with recorded providers and optionally live on schedule"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = [".github/workflows/", "evals/recorded/"]
+    files = [".github/workflows/", "evals/legion-bench/recorded/"]
     dependencies = ["P9.F1.T2"]
-    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench", "cargo test -p xtask --test legion_bench_ci_contract"]
     acceptance = ["CI always runs recorded mode; live mode is opt-in and scheduled."]
     stop_condition = "Stop if live mode is required for any CI gate."
-    status = "in-progress"
-    evidence = ".github/workflows/legion-bench.yml"
+    # legion-bench.yml runs recorded mode on every push and PR and needs no
+    # model, endpoint or credential. Live mode lives only in
+    # legion-bench-live.yml: schedule/dispatch triggers, opt-in behind a repo
+    # variable, continue-on-error. The separation is enforced by
+    # xtask/tests/legion_bench_ci_contract.rs, not by convention.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
     [[epics.features.tasks]]
     id = "P9.F1.T4"
@@ -2331,12 +2341,15 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- legion-bench", "cargo run -p xtask -- verify-legion-bench"]
     acceptance = ["Bench scoring executes real fixture tasks (not synthetic budget arithmetic); the corpus spans >=15 tasks across >=3 fixture repos with a held-out subset; the raw (ungoverned) baseline for the reference local model is recorded with a task-set hash under plans/evidence/production/BENCH/baseline-raw-v1.md."]
     stop_condition = "Stop if the baseline is measured after any SmallCode-derived governor is active in the loop."
-    # Harness + corpus done (live-local execution mode, 18 tasks / 4 fixture
-    # repos / 3 languages / 5 holdout). The baseline measurement itself is
-    # blocked on a local model runtime being installed (EXT-CORPUS covers
-    # corpus externals; the runtime is an owner action, see the evidence).
-    status = "in-progress"
-    evidence = "plans/evidence/production/BENCH/baseline-raw-v1.md"
+    # Synthetic budget arithmetic is deleted: `legion-bench --mode recorded`
+    # now executes every corpus task against a real fixture checkout and
+    # replays only the model's responses. 25 tasks / 6 fixture repos / 3
+    # languages / 5 holdout, suite fingerprint bench-suite-v1:e6ae1f88e5dfbca4.
+    # The raw arm (qwen2.5-coder:14b under LEGION_AI_GOVERNORS=off, the tested
+    # seam) is a deterministic zero, frozen as a hashed cassette set under
+    # evals/legion-bench/recorded-raw/ and replayed on every PR.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
   [[epics.features]]
   id = "P9.F2"

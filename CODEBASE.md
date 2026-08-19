@@ -275,13 +275,14 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 
 ## 7. CI/CD Pipeline
 
-5 GitHub Actions workflows:
+6 GitHub Actions workflows:
 
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | `legion-gates.yml` | push/PR | 3-OS matrix: fmt, check, test, clippy + cargo-deny |
 | `legion-smoke.yml` | scheduled | 3-OS smoke tests + golden-path + update-drill |
-| `legion-bench.yml` | scheduled | Performance/benchmark recording |
+| `legion-bench.yml` | push/PR | Recorded eval suite: real fixture execution with replayed model responses, gated against a committed baseline |
+| `legion-bench-live.yml` | scheduled, opt-in | Live eval run; `continue-on-error`, never a gate |
 | `legion-preview.yml` | scheduled | Preview builds |
 | `legion-release.yml` | manual dispatch only (`mode: verify-only\|publish`) | prepare → validation → package (MSI, DMG ×2, DEB, AppImage) → publish (runs only when `mode=publish`) |
 

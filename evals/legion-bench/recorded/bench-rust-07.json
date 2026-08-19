@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-07",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:9cde1fd7df652404",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/merge.rs\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119224,
+        "id": "chatcmpl-246",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 31,
+          "prompt_tokens": 670,
+          "total_tokens": 701
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:9cd05e44abf22114",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"src/merge.rs\",\n    \"old_str\": \"merged.entry(key.clone()).or_insert_with(|| value.clone());\",\n    \"new_str\": \"merged.insert(key.clone(), value.clone());\",\n    \"proposal_title\": \"Fix merge_layers to prioritize later layers\",\n    \"proposal_reason\": \"The current implementation keeps the first value it sees and ignores later layers, which is the opposite of the documented behavior.\"\n  }\n}\n```\n\n{\"name\": \"end_turn\", \"arguments\": {}}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119235,
+        "id": "chatcmpl-536",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 124,
+          "prompt_tokens": 998,
+          "total_tokens": 1122
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:d023c059ec46f6b9",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\"name\": \"read\", \"arguments\": {\"path\":\"src/merge.rs\"}}\n{\"name\": \"edit-as-proposal\", \"arguments\": {\"path\":\"src/merge.rs\", \"replacement\":\"use std::collections::BTreeMap;\\n\\n/// Merge configuration layers into one map.\\n///\\n/// Layers are ordered from lowest precedence to highest, so a key present in\\n/// a later layer replaces the same key from an earlier one. Keys absent from\\n/// the later layers keep their earlier value.\\npub fn merge_layers(layers: &[BTreeMap<String, String>]) -> BTreeMap<String, String> {\\n    let mut merged = BTreeMap::new();\\n    for layer in layers {\\n        for (key, value) in layer {\\n            merged.insert(key.clone(), value.clone());\\n        }\\n    }\\n    merged\\n}\\n\\n/// Keys whose value differs between two layers.\\n///\\n/// A key present in only one of them counts as differing. The result is\\n/// sorted and free of duplicates.\\npub fn differing_keys(\\n    left: &BTreeMap<String, String>,\\n    right: &BTreeMap<String, String>,\\n) -> Vec<String> {\\n    let mut keys: Vec<String> = Vec::new();\\n    for (key, value) in left {\\n        if right.get(key) != Some(value) {\\n            keys.push(key.clone());\\n        }\\n    }\\n    for key in right.keys() {\\n        if !left.contains_key(key) {\\n            keys.push(key.clone());\\n        }\\n    }\\n    keys.sort();\\n    keys.dedup();\\n    keys\\n}\\n\", \"proposal_reason\": \"Fix merge_layers to prioritize later layers\", \"proposal_title\": \"Fix merge_layers to prioritize later layers\", \"start_line\": 1, \"end_line\": 56}}\n{\"name\": \"end_turn\", \"arguments\": {}}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119270,
+        "id": "chatcmpl-878",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 421,
+          "prompt_tokens": 1097,
+          "total_tokens": 1518
+        }
+      }
+    }
+  ]
+}

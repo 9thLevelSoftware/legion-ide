@@ -1,25 +1,41 @@
 name: Legion Bench Recorded
 
-# Recorded mode does NOT open fixture repos or run agents. Task scores are
-# synthetic budget arithmetic (scoring_mode=synthetic_budget_arithmetic in the
-# report). This workflow proves report shape + verifier integrity, not product
-# agent quality. Live provider mode is future M13 scope.
+# The always-on eval gate. Recorded mode executes every corpus task for real —
+# fixture checkout, agent loop, tool dispatch, proposal apply, then the task's
+# own verification command — with the model's side of the conversation replayed
+# from committed cassettes under evals/legion-bench/recorded/. Nothing here
+# opens a socket and nothing here needs a model installed, so this leg runs on
+# every pull request and can never be blocked on provider availability.
+#
+# The gate is `verify-legion-bench`: it compares the measured per-task result
+# against the committed baseline and fails on any difference. A change to the
+# agent loop, the patch applier or the proposal pipeline moves those numbers.
+#
+# Live mode lives in legion-bench-live.yml, is never triggered by a push or a
+# pull request, and is marked continue-on-error so it cannot gate anything.
 
 on:
-  schedule:
-    - cron: "0 6 * * 1"
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: legion-bench-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   recorded:
-    name: Legion bench recorded weekly (synthetic scoring) (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Legion bench recorded (replayed execution)
+    # Single platform on purpose: the committed baseline is an exact per-task
+    # expectation, and expectations are only exact for one toolchain set. The
+    # harness LF-normalizes each checkout so a cassette is portable, but the
+    # baseline numbers themselves have only been measured here.
+    runs-on: windows-latest
+    timeout-minutes: 90
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+      CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,26 +43,60 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # The corpus verifies Python and JavaScript fixtures with `python -m
+      # unittest` and `node`; both must resolve by those exact names.
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
 
-      - name: Legion bench recorded mode (synthetic scores)
+      # Structural + execution health: every corpus task's verification command
+      # must distinguish a working agent from one that did nothing.
+      - name: Legion bench corpus health
+        run: cargo run -p xtask -- verify-legion-bench-corpus
+
+      - name: Legion bench recorded mode (replayed real execution)
         run: cargo run -p xtask -- legion-bench --mode recorded
 
-      - name: Legion bench verify (report integrity, not agent behavior)
+      - name: Legion bench verify (baseline regression gate)
         run: cargo run -p xtask -- verify-legion-bench
 
-      # Structure only. The execution half runs each task's verification
-      # command against its pristine fixture, which needs Python, Node and a
-      # Cargo build per fixture; that belongs with the live-local run, not on
-      # every push.
-      - name: Legion bench corpus health (structural)
-        run: cargo run -p xtask -- verify-legion-bench-corpus --no-execute
+      # The frozen ungoverned baseline (P9.F1.T4). `LEGION_AI_GOVERNORS=off` is
+      # the tested seam that disables every SmallCode-derived governor; the
+      # raw cassettes record their arm and a replay refuses a tape from the
+      # other one, so this leg cannot silently measure the governed loop.
+      # Re-checking it here is what keeps the baseline frozen rather than
+      # merely written down once.
+      - name: Legion bench raw (ungoverned) baseline replay
+        env:
+          LEGION_AI_GOVERNORS: "off"
+        run: >
+          cargo run -p xtask -- legion-bench --mode recorded
+          --cassettes evals/legion-bench/recorded-raw
+          --out target/legion-bench-raw
+
+      - name: Legion bench raw baseline verify
+        env:
+          LEGION_AI_GOVERNORS: "off"
+        run: >
+          cargo run -p xtask -- verify-legion-bench
+          --cassettes evals/legion-bench/recorded-raw
+          --out target/legion-bench-raw
 
       - name: Upload legion bench report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: legion-bench-report-${{ matrix.os }}
-          path: target/legion-bench/legion_bench_report.toml
+          name: legion-bench-report
+          path: |
+            target/legion-bench/legion_bench_report.toml
+            target/legion-bench-raw/legion_bench_report.toml
           if-no-files-found: warn

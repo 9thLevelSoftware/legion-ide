@@ -368,7 +368,17 @@ pub struct LiveRunInput {
     pub endpoint: String,
     /// Model identifier sent on every chat completion request.
     pub model: String,
+    /// `live` | `record` | `replay`.
+    #[serde(default = "default_provider_mode")]
+    pub provider_mode: String,
+    /// Directory holding per-task cassettes; required by `record` and `replay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cassette_dir: Option<String>,
     pub tasks: Vec<LiveRunTaskInput>,
+}
+
+fn default_provider_mode() -> String {
+    "live".to_string()
 }
 
 /// One executable task handed to the live runner binary.
@@ -428,6 +438,21 @@ pub struct LiveRunTaskResult {
     #[serde(default)]
     pub generation_tokens: Option<u64>,
     pub wall_ms: u64,
+    /// Model named by the replayed cassette; empty when not replaying.
+    #[serde(default)]
+    pub cassette_model: String,
+    /// `governed` | `raw` — the arm the replayed cassette was cut under.
+    #[serde(default)]
+    pub cassette_arm: String,
+    /// Recorded model exchanges replayed (or captured) for this task.
+    #[serde(default)]
+    pub cassette_exchanges: u32,
+    /// Replayed exchanges whose request no longer matches the recorded one.
+    /// The recorded-mode baseline pins this at zero, so a change to what the
+    /// agent asks the model fails the gate instead of quietly replaying a tape
+    /// cut for a different conversation.
+    #[serde(default)]
+    pub cassette_drift: u32,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-live-01",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:c7eb687a4538bcfe",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/scratchpad.rs\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119741,
+        "id": "chatcmpl-580",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 32,
+          "prompt_tokens": 580,
+          "total_tokens": 612
+        }
+      }
+    }
+  ]
+}

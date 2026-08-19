@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-05",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:83486907636da539",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\"name\": \"edit-as-proposal\", \"arguments\": {\"path\": \"src/writer.rs\", \"replacement\": \"pub fn to_text(config: &Config) -> String {\\n    let mut output = String::new();\\n\\n    // Sort and add root section's key = value lines\\n    let mut root_entries: Vec<_> = config.entries(\\\"\\\", None).collect();\\n    root_entries.sort_by_key(|&(k, _)| k);\\n    for (key, value) in root_entries {\\n        output.push_str(&format!(\\\"{} = {}\\n\\\", key, value.as_str().unwrap()));\\n    }\\n\\n    // Sort and add named sections\\n    let mut section_names: Vec<_> = config.sections().collect();\\n    section_names.sort_unstable();\\n    for section in section_names {\\n        if section.is_empty() { continue; } // Skip root section\\n        output.push_str(&format!(\\\"[{}]\\n\\\", section));\\n        let mut entries: Vec<_> = config.entries(&section, None).collect();\\n        entries.sort_by_key(|&(k, _)| k);\\n        for (key, value) in entries {\\n            output.push_str(&format!(\\\"{} = {}\\n\\\", key, value.as_str().unwrap()));\\n        }\\n        output.push_str(\\\"\\\\n\\\"); // Blank line after each section\\n    }\\n\\n    output\\n}\"}}}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119886,
+        "id": "chatcmpl-549",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 313,
+          "prompt_tokens": 734,
+          "total_tokens": 1047
+        }
+      }
+    }
+  ]
+}
