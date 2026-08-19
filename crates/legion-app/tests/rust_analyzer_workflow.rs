@@ -144,12 +144,36 @@ fn path_to_file_uri(path: &std::path::Path) -> String {
 // Smoke test
 // ---------------------------------------------------------------------------
 
+/// Whether a missing or uncooperative rust-analyzer must fail rather than skip.
+///
+/// `LEGION_RA_DOGFOOD=1` mirrors `LEGION_DAP_DOGFOOD` exactly, and for the same
+/// reason. These smokes treat "not on PATH", "session refused" and "startup
+/// timed out after 60s" as reasons to return early and report `ok` — so on a
+/// runner that provisions rust-analyzer and then fails to start it, the suite
+/// stays green while proving nothing. A clean skip is not proof, and that
+/// lesson cost this project two days on the debug adapter.
+///
+/// Off by default so a developer without rust-analyzer installed is not blocked.
+/// CI provisions it and sets this, which is where the claim matters.
+fn skips_are_failures() -> bool {
+    std::env::var("LEGION_RA_DOGFOOD").as_deref() == Ok("1")
+}
+
+/// Give up on a smoke, or fail it, depending on that switch.
+fn skip_or_fail(reason: &str) {
+    assert!(
+        !skips_are_failures(),
+        "LEGION_RA_DOGFOOD=1 requires a working rust-analyzer smoke, and this run would have skipped: {reason}"
+    );
+    eprintln!("{reason}; skipping");
+}
+
 #[test]
 #[ignore = "requires rust-analyzer on PATH; run with --ignored"]
 fn rust_analyzer_full_workflow() {
     // --- Discovery ---
     let Some(bin) = discovered() else {
-        eprintln!("rust-analyzer not found on PATH; skipping");
+        skip_or_fail("rust-analyzer not found on PATH");
         return;
     };
 
@@ -456,7 +480,7 @@ fn rust_analyzer_product_composition_smoke() {
 
     // --- Discovery ---
     let Some(bin) = discovered() else {
-        eprintln!("rust-analyzer not found on PATH; skipping product composition smoke");
+        skip_or_fail("rust-analyzer not found on PATH for the product composition smoke");
         return;
     };
     eprintln!("rust-analyzer binary: {}", bin.display());
@@ -488,13 +512,13 @@ fn rust_analyzer_product_composition_smoke() {
                 break;
             }
             if health.init_status == LspResultStatus::Unavailable {
-                eprintln!("LSP session refused/unavailable — skipping rest of smoke");
+                skip_or_fail("LSP session refused or unavailable");
                 let _ = fs::remove_dir_all(&fixture_dir);
                 return;
             }
         }
         if std::time::Instant::now() > deadline {
-            eprintln!("LSP startup timeout after 60s — skipping rest of smoke");
+            skip_or_fail("LSP startup timed out after 60s");
             let _ = fs::remove_dir_all(&fixture_dir);
             return;
         }
