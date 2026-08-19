@@ -12,8 +12,8 @@ lands; several backlog cards are `blocked` on the `EXT-*` ids below.
 | Azure Trusted Signing account + identity validation | `EXT-CERT-WIN` — Authenticode signing for MSI via signtool dlib; SmartScreen reputation accrual starts at first signed release | ~$9.99/mo (Basic) | 1–3 weeks (identity validation) | portal.azure.com → Trusted Signing | ☐ |
 | Linux signing keypair (minisign/Ed25519) | `EXT-CERT-LIN` — detached signatures for DEB/AppImage + signed SHA256SUMS | $0 (generate locally) | Immediate | `minisign -G` (store per escrow policy below) | ☐ |
 | Update-feed domain + Cloudflare R2 bucket | `EXT-FEED` — HTTPS host for per-channel `release-manifest.v1.toml` + `.sig` (ADR-0042; feed topology ADR to follow in Phase 5) | ~$10/yr domain; R2 ≈ $0 at beta scale | Days | Cloudflare dashboard | ☐ |
-| Cloud Mac access (e.g. MacStadium / AWS EC2 Mac / rented Mac mini) | `EXT-VM` — fresh-VM Gatekeeper evidence (P8.F1.T3), macOS notarization drills | ~$50–130/mo (cancel after evidence) | Days | vendor of choice | ☐ |
-| Hosted provider API keys (Anthropic BYOK at minimum) | `EXT-LIVEKEY` — live-model adversarial evals (PR-AI-002 deferred item), Phase 3 hostile-eval runs | usage-billed | Immediate | console.anthropic.com | ☐ |
+| ~~Cloud Mac access~~ — **not needed**; the owner has a local Mac mini | `EXT-VM` — fresh-VM Gatekeeper evidence (P8.F1.T3), macOS notarization drills | **$0** (was ~$50–130/mo) | n/a | owner's hardware | ☑ **satisfied 2026-08-19** (owner-confirmed). Note the evidence still needs a *fresh* macOS user/VM on that machine: Gatekeeper's first-run prompt only appears where the binary carries no prior trust, so a developer account that has already run the app cannot produce it. |
+| Hosted provider API key — **any OpenAI-compatible provider**, or none | `EXT-LIVEKEY` — live-model adversarial evals (PR-AI-002 deferred item), Phase 3 hostile-eval runs | usage-billed, or $0 local | Immediate | provider of choice | ☐ — owner ruled out Anthropic on cost (2026-08-19). See below; this row no longer names a vendor. |
 
 Not purchased deliberately: no GPU CI runners yet (local-model perf evidence
 runs on the owner's hardware until Phase 4 sizes the need), no external pen
@@ -79,10 +79,38 @@ stored per the escrow policy below and wired as Actions secrets. Those are
 Phase 5 steps 5.3 and 5.1. `P8.F1.T3` (fresh-VM Gatekeeper evidence) also still
 needs `EXT-VM` — a Mac to run it on — which is a separate line item.
 
+## `EXT-LIVEKEY` — no vendor lock, and possibly no spend
+
+The owner ruled out Anthropic on cost (2026-08-19). Nothing in Legion requires
+it: `legion-ai-providers` talks to Ollama by default (`http://localhost:11434`,
+overridable) and its client is built around a configurable `base_url`, with the
+OpenAI request/response shape already exercised in
+`crates/legion-agent/tests/openai_tool_loop_cross_check.rs`. Any
+OpenAI-compatible endpoint is therefore a configuration value, not a code
+change.
+
+That leaves three routes, cheapest first:
+
+1. **Local models via Ollama — $0.** The owner's RTX 4070 Laptop (8 GB VRAM)
+   runs quantised 7–14B coding models comfortably. Adequate for hostile-eval
+   *plumbing*: that the harness refuses, redacts, and records correctly.
+2. **A cheap hosted OpenAI-compatible provider** (DeepSeek, OpenRouter, Groq,
+   Together — usage-billed, typically cents per eval run). Worth it when the
+   question is whether a *frontier-class* model can be talked past the
+   proposal-safety gates, which a 7B local model cannot answer honestly.
+3. **No key at all**, leaving PR-AI-002's adversarial evals deferred as they
+   already are.
+
+The honest split: route 1 proves the harness, route 2 proves the claim. Only
+buy the key when a real adversarial claim is about to be published.
+
 ## Backlog linkage
 
 - `P8.F1.T5` (this checklist) — in progress until every row above is checked.
-- `P8.F1.T3` (fresh-VM evidence) — `blocked` / `EXT-VM`.
+- `P8.F1.T3` (fresh-VM evidence) — deferred by owner decision (2026-08-19),
+  not blocked: `EXT-VM` is satisfied by the owner's Mac mini, and the remaining
+  dependency is `EXT-CERT-*`. Status stays `blocked` in the backlog because the
+  certificates are still outstanding.
 - Phase 5 signing pipeline work starts only after `EXT-CERT-WIN` + `EXT-CERT-MAC` land; everything else in Phases 0–4 proceeds without them.
 - `EXT-CERT-MAC` is acquired (2026-08-17); certificate issuance, the App Store Connect API key, and CI wiring remain.
 - `EXT-CERT-WIN` is undecided, not merely unpurchased — see the Windows signing section above. It blocks no current phase.

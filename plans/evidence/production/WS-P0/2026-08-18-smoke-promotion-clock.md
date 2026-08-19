@@ -1,4 +1,4 @@
-# Smoke promotion clock — criterion 1 reached, with a caveat worth reading
+# Smoke promotion clock — all four criteria met, with a caveat worth reading
 
 **Date:** 2026-08-18
 **Task:** P0.F4.T5 — activate hosted 3-OS `legion-smoke.yml` runs and start the promotion clock
@@ -61,20 +61,51 @@ This was checked against the log rather than inferred from the job's green tick,
 because a soft-skip branch reporting `ok` is the failure mode that held
 P2.F3.T2 open for two days. No skip branch was taken here on any platform.
 
-## Criteria 3 and 4: not met, and not mine to meet
+## Criteria 3 and 4: met on 2026-08-19 by owner sign-off
 
 3. Maintainer acceptance of PR-path cost.
 4. Written owner sign-off with run URLs and SHAs.
 
-Both are owner decisions. This file supplies the run URLs and SHAs that
-criterion 4 requires; the sign-off itself is not written here, and P0.F4.T5
-stays `in-progress` until it is.
+Both are owner decisions, and this file supplies the run URLs and SHAs that
+criterion 4 requires. As of the 2026-08-18 revision neither was met; that
+changed the following day.
+
+The owner was shown the state above in full — including the caveat that the
+four green runs are thinner than the count suggests, and the standing
+recommendation to treat the 2026-08-24 scheduled run as the genuine fourth
+data point — and signed off anyway:
+
+> "That's enough for me. Consider it signed off."
+
+Recorded verbatim because that is what criterion 4 asks for: an owner decision,
+not an inference from a green tick. The caveat was not withdrawn and is not
+retracted here; the owner accepted the evidence as it stands rather than
+disputing its weight. A reader who later wants the stronger version of this
+record should look for a scheduled run on a distinct SHA after 2026-08-24.
+
+One further data point exists that the sections above predate: a hand-dispatched
+3-OS smoke run against `main` at the merge of #166 and #167, dispatched while
+recording this sign-off. It is a fifth observation on a distinct SHA, not a
+substitute for a scheduled one.
 
 ## Status
 
 - Criterion 1 — met as written; see the caveat above before relying on it.
 - Criterion 2 — met and verified from logs.
-- Criterion 3 — open, owner.
-- Criterion 4 — open, owner.
+- Criterion 3 — met, owner accepted PR-path cost (2026-08-19).
+- Criterion 4 — met, owner sign-off recorded above (2026-08-19).
 
-Smoke remains non-blocking. Nothing in this file promotes it.
+All four criteria are met, so the smoke promotion clock is complete and
+P0.F4.T5 is done.
+
+Two things this does **not** do, both worth stating because the tempting reading
+is wrong. It does not move `PR-UI-001` to *Product workflow validated*: that
+row carries its own bar in the readiness ledger — current native platform
+accessibility and focus evidence across supported OSes — and that evidence does
+not exist. And it does not add the smoke to branch protection; promoting the
+clock is not the same as making the smoke a required check, and nothing here
+does that.
+
+ADR-0046 Amendment 1 (2026-08-19) lifts the freeze for two named tasks on the
+owner's direct instruction rather than on this sign-off. The distinction is
+recorded there.

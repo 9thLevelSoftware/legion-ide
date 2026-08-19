@@ -279,8 +279,9 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["gh run list --workflow=legion-smoke.yml"]
     acceptance = ["A dispatched 3-OS run is recorded with per-job outcomes; failures are diagnosed toward the four-consecutive-green promotion criteria."]
     stop_condition = "Stop if smoke promotion is claimed without four consecutive green scheduled 3-OS runs."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/production/WS-P0/2026-08-18-smoke-promotion-clock.md"
+    signed_off_by = "owner (2026-08-19, in-session)"
     notes = "2026-08-18: four consecutive green 3-OS runs on `main` now exist, so criterion 1 is met as written, and criterion 2 (rust-analyzer provisioning) is verified from the GP-1 log rather than inferred from a green tick. Held at in-progress because criteria 3 and 4 are owner decisions and no sign-off is written. The evidence file also records why the count is thinner than four rows suggest: runs 3 and 4 are the same SHA, three of the four were dispatched by hand, and all four fall inside ~37 hours. Recommendation there is to treat the 2026-08-24 scheduled run as the fourth data point."
 
   [[epics.features]]
@@ -2071,6 +2072,9 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["ls plans/evidence/release/"]
     acceptance = ["Fresh-VM install evidence is archived and cited from the readiness ledger."]
     stop_condition = "Stop if smoke evidence is older than the current release descriptor."
+    # 2026-08-19 owner decision: deferred ("We'll do that later"). EXT-VM is
+    # no longer a blocker -- the owner has a local Mac mini -- but EXT-CERT-*
+    # remains outstanding, so the status is unchanged rather than promoted.
     status = "blocked"
     evidence = "plans/evidence/production/WS-A-D/phase-4-release/D4-readiness-close.md"
     external_unblock = "EXT-VM"
@@ -2411,6 +2415,9 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["ls plans/evidence/security/"]
     acceptance = ["An external audit/pen test is scheduled and its report is archived before any strong enterprise claim."]
     stop_condition = "Stop if a strong enterprise claim is published before the audit is complete."
+    # 2026-08-19 owner decision: deferred ("WAY later"). No vendor engaged and
+    # none sought; the stop condition (no strong enterprise claim before the
+    # audit) is what keeps this safe to leave open.
     status = "in-progress"
     evidence = "plans/evidence/security/P9-F2-T4-external-audit-gate.md"
 
