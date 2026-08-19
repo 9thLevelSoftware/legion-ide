@@ -136,49 +136,73 @@ Each mutation was applied, the named test run, and the file restored with
 
 | # | Mutation | Test run | Result |
 |---|---|---|---|
-| M1 | `SignedPolicyBundle::verify` — drop the `verify_ed25519_signature` call | `signed_policy_bundle` | **KILLED** — 5 failures |
+| M1 | `SignedPolicyBundle::verify` — drop the `verify_ed25519_signature` call | `signed_policy_bundle` | **KILLED** — 7 failures |
 | M2 | `verify` — drop the `keyring.is_empty()` guard | `signed_policy_bundle` | **KILLED** — 1 failure |
 | M3 | `verify` — drop the algorithm check | `signed_policy_bundle` | **KILLED** — 2 failures |
-| M4 | `ProviderAllowlistPolicy::refusal` — always return `None` | `policy_bundle_surfaces`, `legion-ai --lib` | **KILLED** — 4 + 1 failures |
-| M5 | `McpToolAllowlistPolicy::refusal` — always return `None` | `policy_bundle_surfaces`, `mcp_tool_allowlist_bridge` | **KILLED** — 5 + 2 failures |
-| M6 | `BudgetCapPolicy::refusal` — always return `None` | `policy_bundle_surfaces` | **KILLED** — 5 failures |
-| M7 | `RetentionExportPolicy::retention_refusal` — always `None` | `policy_bundle_surfaces`, `legion-retention --lib` | **KILLED** — 3 + 1 failures |
-| M8 | `RetentionExportPolicy::export_refusal` — always `None` | `policy_bundle_surfaces`, `legion-retention --lib` | **KILLED** — 2 + 2 failures |
-| M9 | `VerifiedPolicyBundle::check_mode` — always `None` | `policy_bundle_surfaces`, `org_policy_mode_ceiling` | **KILLED** — 1 failure (bundle); app tests survive (see note) |
-| M10 | Broker hook — remove `bundle_enforcement.refusal` from `decide_with_context` | `policy_bundle_surfaces` | **KILLED** — 6 failures, all `broker_*` |
-| M11 | `legion-agent` — revert `check_broker_capability` to `CapabilityRequestContext::default()` | `mcp_tool_allowlist_bridge` | **KILLED** — 3 failures |
-| M12 | `legion-ai` — drop `ai_provider_id` from the route context | `legion-ai --lib` | **KILLED** — 1 failure |
-| M13 | `legion-retention` — drop the capture-window check from `capture_bundle` | `legion-retention --lib` | **KILLED** — 1 failure |
-| M14 | `legion-retention` — drop the export check from `export_encrypted_bundle_hosted` | `legion-retention --lib` | **KILLED** — 2 failures |
-| M15 | `legion-app` — drop the ceiling early-return from `set_product_mode` | `org_policy_mode_ceiling` | **KILLED** — 1 failure |
-| M16 | `allowlist_contains` — return `true` for an empty allowlist | `legion-security --lib` | **KILLED** — 4 failures |
+| M4 | `ProviderAllowlistPolicy::refusal` — return `None` unconditionally | `policy_bundle_surfaces`, `legion-ai --lib` | **KILLED** — 4 + 1 failures |
+| M5 | `McpToolAllowlistPolicy::refusal` — return `None` unconditionally | `policy_bundle_surfaces`, `mcp_tool_allowlist_bridge` | **KILLED** — 5 + 2 failures |
+| M6 | `BudgetCapPolicy::refusal` — return `None` unconditionally | `policy_bundle_surfaces` | **KILLED** — 6 failures |
+| M7 | `RetentionExportPolicy::retention_refusal` — return `None` unconditionally | `policy_bundle_surfaces`, `legion-retention --lib` | **KILLED** — 3 + 1 failures |
+| M8 | `RetentionExportPolicy::export_refusal` — return `None` unconditionally | `policy_bundle_surfaces`, `legion-retention --lib` | **KILLED** — 2 + 2 failures |
+| M9 | `SURFACE_CHECKS` — replace the `Mode` evaluator with a no-op | `policy_bundle_surfaces`, `org_policy_mode_ceiling` | **KILLED** by surfaces — 1 failure; app tests **survived** (see note) |
+| M10 | Broker hook — remove `bundle_enforcement.refusal` from `decide_with_context` | `policy_bundle_surfaces` | **KILLED** — exactly 5 failures, all `broker_*`; bundle-level tests survived (see note) |
+| M11 | `legion-agent` — revert `check_broker_capability` to `CapabilityRequestContext::default()` | `mcp_tool_allowlist_bridge` | **KILLED** — 2 failures |
+| M12 | `legion-ai` — set `ai_provider_id: None` in the route context | `legion-ai --lib` | **KILLED** — 1 failure |
+| M13a | `legion-retention` — change the capture check's capability string | `legion-retention --lib` | **KILLED NOTHING** — see finding below |
+| M13b | `legion-retention` — remove the capture-window guard from `capture_bundle` | `legion-retention --lib` | **KILLED** — 1 failure |
+| M14 | `legion-retention` — remove the export guard from `export_encrypted_bundle_hosted` | `legion-retention --lib` | **KILLED** — 2 failures |
+| M15 | `legion-app` — remove the ceiling early-return from `set_product_mode` | `org_policy_mode_ceiling` | **KILLED** — 1 failure |
+| M16 | `allowlist_contains` — return `true` for an empty allowlist | `legion-security --lib` | **KILLED** — 3 failures |
+
+Working tree verified clean (`git status --short` empty) after restoring, and the
+four affected crates re-tested green.
+
+### The mutation that killed nothing (M13a)
+
+M13a changed the capability string passed to `retention_refusal` in
+`capture_bundle` from `"retention.raw_source.capture"` to a string matching no
+prefix. Every test still passed.
+
+Investigated: this is not a coverage gap, it is the operand trigger working as
+designed. `retention_refusal` fires on **either** a matching capability prefix
+**or** a declared retention window, precisely so that renaming a capability
+cannot switch a rule off. `capture_bundle` always declares the window, so the
+rule still fired and the guard still refused. The mutation removed the prefix
+half of a deliberately two-sided trigger and the other half held.
+
+Confirmed by M13b, which removes the guard outright and does kill the test. And
+the property M13a accidentally demonstrated has its own test at the bundle level:
+`a_renamed_capability_cannot_route_around_an_allowlist`. Recorded rather than
+discarded because "the mutation killed nothing" was the honest first observation,
+and the reason it killed nothing is a property worth naming.
 
 ### Notes on masking
 
-**M9 is a partial-mask finding and is recorded as one.** Removing
-`check_mode` from the bundle's surface table kills the bundle-level Mode case,
-but the `legion-app` mode-ceiling tests keep passing, because
+**M9 is a partial-mask finding and is recorded as one.** Replacing the `Mode`
+evaluator in the surface table kills the bundle-level Mode case, but the
+`legion-app` mode-ceiling tests keep passing, because
 `AppComposition::set_product_mode` calls `bundle().allows_mode(..)` directly
 rather than going through `decide`. That is two enforcement points for one rule,
 which is deliberate — the app gate stops the user stranding themselves in a mode
 that cannot act, the per-request gate is the security boundary — but it does mean
-neither test alone covers both. Both are present, and mutating either one is
-visible in its own test.
+neither test alone covers both. Both exist, and M9 and M15 show each is killed by
+its own test.
 
 **M10 is the masking-detection pair for M4–M8.** M4–M8 mutate the shared rule
 functions and kill both the bundle-level and broker-level tests. M10 mutates only
-the broker's *call* to those rules, and kills exactly the six `broker_*` tests
-while the bundle-level tests survive. That asymmetry is the evidence that the two
-enforcement points are separately covered rather than one masking the other.
+the broker's *call* to those rules, and kills exactly the five `broker_*` tests
+while every bundle-level test survives. That asymmetry is the evidence that the
+two enforcement points are separately covered rather than one masking the other.
 
-**One mutation that initially killed nothing, and what it turned up.** An early
-draft used `delegate.tool.mcp_passthrough` as the MCP capability prefix. The
-`legion-agent` refusal tests passed anyway — because the *operand* trigger caught
-the request, not the prefix. The real capability id is
+### A wrong prefix the tests caught during development
+
+An earlier draft used `delegate.tool.mcp_passthrough` as the MCP capability
+prefix. The `legion-agent` refusal tests passed anyway — the *operand* trigger
+was catching the request, not the prefix. The real capability id is
 `delegate.tool.mcp-passthrough` (hyphen: `LegionToolKind::tool_name()` returns
-`"mcp-passthrough"`), so the prefix never matched anything. The isolation test
-`the_broker_receives_the_mcp_server_and_tool_identity` caught it. Left unfixed,
-an MCP passthrough that declared *no* server or tool would have slipped past the
+`"mcp-passthrough"`), so the prefix matched nothing. The isolation test
+`the_broker_receives_the_mcp_server_and_tool_identity` surfaced it. Left unfixed,
+an MCP passthrough declaring *no* server or tool would have slipped past the
 allowlist instead of being refused for failing to declare one. Fixed in the
 source, the example bundle, and every test.
 
