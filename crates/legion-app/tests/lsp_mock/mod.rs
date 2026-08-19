@@ -121,6 +121,28 @@ pub fn mock_supervisor_config() -> LspSupervisorConfig {
     }
 }
 
+/// A mock that omits one capability from its initialize response.
+///
+/// The withheld name travels in the CHILD's environment, not the test
+/// process's. `std::env::set_var` mutates the whole process, and cargo runs
+/// tests in a binary concurrently — so a test that set it while another test
+/// spawned its own mock would hand that mock the same instruction. The other
+/// test would then see a capability missing that it asserts is present and fail
+/// on whatever the scheduler happened to do. `LspServerProcessConfig::env`
+/// reaches exactly one child and cannot leak.
+///
+/// `dead_code` is allowed because this module is included by several test
+/// binaries and each uses only the helpers it needs.
+#[allow(dead_code)]
+pub fn mock_supervisor_config_withholding(capability: &str) -> LspSupervisorConfig {
+    let mut config = mock_supervisor_config();
+    config.process.env.push((
+        "LEGION_MOCK_WITHHOLD_CAPABILITY".to_string(),
+        capability.to_string(),
+    ));
+    config
+}
+
 /// Same as [`mock_supervisor_config`] but with `MOCK_LSP_EMIT_DIAGNOSTICS=1`
 /// in the process environment so the mock emits a `publishDiagnostics` notification.
 #[allow(dead_code)]

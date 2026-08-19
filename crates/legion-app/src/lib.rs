@@ -7255,6 +7255,18 @@ impl LanguageToolingWorkflow {
         self.projection()
     }
 
+    /// Record that no answer is coming after all.
+    ///
+    /// The read leg sets `call_hierarchy_awaiting` from the kind alone, because
+    /// at that point the question has been asked. When the request was never
+    /// issued — no live session, or a server without `callHierarchyProvider` —
+    /// the operation is still worth recording (the user did press the key) but
+    /// the wait is not, and a flag nobody will ever clear renders as a spinner
+    /// that never resolves.
+    fn cancel_call_hierarchy_wait(&mut self) {
+        self.projection.call_hierarchy_awaiting = false;
+    }
+
     fn ingest_lsp_read_projection(
         &mut self,
         input: &LanguageRequestInput,

@@ -31,19 +31,21 @@ use legion_protocol::{LanguageId, LanguageServerId};
 
 mod lsp_mock;
 
+/// The gated capability withheld for the negative control.
+///
+/// The mock advertises everything by default, because the round-trip tests need
+/// a server that can answer every read. `LEGION_MOCK_WITHHOLD_CAPABILITY` drops
+/// exactly one, which is what lets this suite check the other half of the
+/// property: an implementation marking everything supported would pass a test
+/// that only ever sees advertised capabilities.
+const UNADVERTISED_CAPABILITY: &str = "codeLensProvider";
+
 /// Every capability string the read side gates on.
 ///
 /// Kept here rather than imported so the test fails when the two drift, which
 /// is the failure mode it exists to catch. If a new gated capability is added
 /// to `lsp_reads.rs`, add it here too — and the test will tell you whether the
 /// parser learned about it.
-/// The one gated capability the mock deliberately does not advertise.
-///
-/// A mock that advertises everything cannot tell "records the key" from
-/// "records the right answer": an implementation marking everything supported
-/// would pass.
-const UNADVERTISED_CAPABILITY: &str = "codeLensProvider";
-
 const GATED_CAPABILITIES: &[&str] = &[
     "hoverProvider",
     "definitionProvider",
@@ -211,7 +213,7 @@ fn a_recorded_capability_reports_what_the_server_actually_said() {
             configured_path: Some(mock_path),
             ..Default::default()
         },
-        supervisor: lsp_mock::mock_supervisor_config(),
+        supervisor: lsp_mock::mock_supervisor_config_withholding(UNADVERTISED_CAPABILITY),
         server_id: LanguageServerId(12),
         language_id: LanguageId("rust".to_string()),
     };

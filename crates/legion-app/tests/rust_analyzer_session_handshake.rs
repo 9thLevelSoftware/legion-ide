@@ -112,24 +112,17 @@ fn initialize_populates_capability_summaries() {
         "definitionProvider must be supported=true (mock advertises it)"
     );
 
-    // The mock does NOT advertise codeLensProvider, so it must be false.
+    // The "an unadvertised capability is recorded as unsupported" property used
+    // to be asserted here against whichever capability the mock happened not to
+    // send. That made this test hostage to the mock's default capability set:
+    // it was written for `completionProvider`, moved to `codeLensProvider` when
+    // the mock learned to advertise everything the read side gates on, and would
+    // have moved again the next time the mock grew.
     //
-    // This was `completionProvider` until the mock grew the full set of gated
-    // capabilities: the parser recorded three keys while the read side gated on
-    // nine, so references, document symbols, inlay hints and code lenses could
-    // never be sent, and a mock advertising only what the parser handled could
-    // never have shown it. `codeLensProvider` is now the deliberate omission —
-    // see `tests/lsp_capability_gating.rs`.
-    let lens_cap = health
-        .capabilities
-        .iter()
-        .find(|c| c.capability == "codeLensProvider");
-    if let Some(c) = lens_cap {
-        assert!(
-            !c.supported,
-            "codeLensProvider must be supported=false (mock does not advertise it)"
-        );
-    }
+    // It now lives in `tests/lsp_capability_gating.rs`, which withholds one
+    // capability on purpose via `LEGION_MOCK_WITHHOLD_CAPABILITY` rather than
+    // relying on an omission. This test keeps what is actually its own subject:
+    // that a successful initialize parses capabilities at all.
     // Whether completionProvider is absent or present-but-false, what matters is
     // that the capability list is non-empty (capabilities were parsed).
     assert!(
