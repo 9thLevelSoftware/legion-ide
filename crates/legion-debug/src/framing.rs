@@ -154,7 +154,6 @@ impl DapMessage {
         }
     }
 
-    /// Response body when this is a successful response for `request_seq`.
     /// The outcome of this frame if it is a response, whatever it answers.
     ///
     /// `response_for` asks about one sequence number, which is the wrong
@@ -182,6 +181,7 @@ impl DapMessage {
         }
     }
 
+    /// Response body when this is a successful response for `request_seq`.
     pub fn response_for(&self, request_seq: u64) -> Option<Result<&Value, String>> {
         match self {
             Self::Response {
