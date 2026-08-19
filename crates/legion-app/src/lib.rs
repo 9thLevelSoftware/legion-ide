@@ -50,8 +50,9 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
     legion_editor::TextPosition::new(line, column)
 }
 
-/// Command-intent routing, extracted from this file (roadmap 1.1).
+/// Outcome construction, extracted from this file for the chokepoint budget.
 mod command_outcome;
+/// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
 pub use intent_routing::*;
 
