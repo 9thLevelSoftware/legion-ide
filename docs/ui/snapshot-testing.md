@@ -141,6 +141,30 @@ A new snapshot is red on the two platforms you are not on until their baselines
 land, and that is expected. Add the test, generate your own platform's baseline,
 push, and take the other two from the artifact.
 
+## Rendering is serialised, on purpose
+
+Each snapshot builds a `wgpu`-backed harness, and two alive at once segfaults.
+Measured on an idle machine, on the merged suite:
+
+| Invocation | Failures |
+| --- | --- |
+| default test threads | 2 in 30 |
+| `--test-threads=1` | 0 in 30 |
+| default threads, with the lock | 0 in 40 |
+
+The crash is inside the driver, below anything this suite can observe, so the
+fix is to stop asking for the situation: `RENDER_LOCK` serialises the harness
+across test threads within the process.
+
+A lock rather than a note saying "run this with `--test-threads=1`". CI runs
+`cargo test --workspace`, nobody passes that flag, and a test that is only
+correct when invoked a particular way is a trap for whoever invokes it the
+ordinary way.
+
+0 in 40 is not proof of zero — it is one order of magnitude past the observed
+rate, with a mechanism that explains both numbers. If a segfault ever appears
+here again, that table is the place to start.
+
 ## Requirements
 
 `egui_kittest` renders through `wgpu` and prefers a CPU adapter, so no GPU is

@@ -107,6 +107,20 @@ fn stabilize_paths(snapshot: &mut ShellProjectionSnapshot) {
     }
 }
 
+/// Serialises rendering across the test threads in this process.
+///
+/// Each snapshot builds a `wgpu`-backed harness, and two of them alive at once
+/// segfaults: measured at 2 failures in 30 runs with the default test threads
+/// and 0 in 30 with `--test-threads=1`, on an otherwise idle machine. The crash
+/// is in the driver, below anything this suite can see, so the fix is to stop
+/// asking for the situation.
+///
+/// A lock rather than a documented "run this with --test-threads=1": CI runs
+/// `cargo test --workspace`, nobody passes that flag, and a test that is only
+/// correct when invoked a particular way is a trap for whoever invokes it the
+/// ordinary way.
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Render the shell and compare against the baseline for this platform.
 ///
 /// `run()` settles the frame: egui resolves panel layout and font metrics on
@@ -115,6 +129,13 @@ fn snapshot_shell(name: &str, snapshot: &ShellProjectionSnapshot) {
     let mut snapshot = snapshot.clone();
     stabilize_paths(&mut snapshot);
     let snapshot = &snapshot;
+    // Poisoning is not interesting here: it means another snapshot test failed
+    // its assertion while holding the lock, and that test has already reported
+    // itself. Recovering keeps one real failure from cascading into four
+    // confusing ones.
+    let _rendering = RENDER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state = DesktopProjectionViewState::default();
     let mut view = ProjectionView::new();
     let mut harness = Harness::builder()
