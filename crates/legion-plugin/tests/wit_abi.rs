@@ -118,8 +118,10 @@ fn lsp_adapter_abi_carries_every_declared_field_across_the_boundary() {
 
 #[test]
 fn plugin_host_world_grants_no_ambient_authority() {
-    // ADR-0047 admits wasmtime on the condition that the plugin world imports
-    // nothing but Legion's own registration interfaces. A component that asks
+    // ADR-0050 admits wasmtime on the condition that the plugin world imports
+    // nothing but Legion's own registration interfaces. (ADR-0047 is Extension
+    // Distribution Strategy — signed bundles and Open VSX — and says nothing
+    // about ambient authority.) A component that asks
     // for WASI (or anything else) must fail to link against this linker, which
     // is populated *only* by the generated bindings.
     let wasi_component = r#"
@@ -166,10 +168,28 @@ fn wit_world_declares_all_three_contribution_interfaces() {
     .expect("read lsp.wit");
 
     assert!(lsp.contains("world plugin-host"));
+
+    // Counted inside the world block, not across the file. The previous version
+    // counted `export ` substrings in the whole of `lsp.wit`, so a new export in
+    // an unrelated interface would have failed it while a second world
+    // entrypoint added to `grammars.wit` would not. It measured the wrong text.
+    //
+    // That `export activate` exists at all is enforced by the compiler, not
+    // here: removing it fails the build with `no method named 'call_activate'`.
+    // What this asserts is the part the type system cannot — that the world
+    // stays a single entrypoint, because a second one is a new host-callable
+    // surface and needs its own decision.
+    let world = lsp
+        .split_once("world plugin-host")
+        .expect("world header")
+        .1
+        .split_once('}')
+        .expect("world block is brace-delimited")
+        .0;
     assert_eq!(
-        lsp.matches("export ").count(),
+        world.matches("export ").count(),
         1,
-        "plugin-host must expose exactly one export; a second entrypoint needs an ADR"
+        "plugin-host must expose exactly one export; a second entrypoint needs an ADR.          World block was: {world}"
     );
-    assert!(lsp.contains("export activate: func();"));
+    assert!(world.contains("export activate: func();"));
 }
