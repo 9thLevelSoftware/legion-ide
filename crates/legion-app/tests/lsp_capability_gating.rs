@@ -98,6 +98,107 @@ fn initialize_records_every_capability_the_read_side_gates_on() {
     );
 }
 
+/// The gate opening is only worth something if the request completes.
+///
+/// Recording `referencesProvider` and refusing to send the request are two
+/// different failures with the same symptom, and the tests that inject a health
+/// record could never tell them apart because they never involved a server.
+/// This drives the real thing end to end: a live session against the mock, the
+/// request issued through the capability gate, the response drained, and the
+/// server's locations landing in the projection.
+///
+/// Before the parser was fixed this could not have got past the second step —
+/// `issue_lsp_references_request` returned `false` and no request was sent.
+#[test]
+fn a_references_request_now_reaches_the_server_and_comes_back() {
+    let mock_path = lsp_mock::mock_server_path().expect("mock_lsp_server not found");
+    let root = tempfile::tempdir().expect("tempdir");
+    // A real workspace, because the session refuses one without a manifest —
+    // `lifecycle=Refused reason="no Cargo.toml in workspace root"`, which is the
+    // product being careful rather than the test being wrong.
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write manifest");
+    std::fs::create_dir_all(root.path().join("src")).expect("mkdir src");
+    let source = root.path().join("src").join("main.rs");
+    std::fs::write(&source, "fn main() {}\n").expect("write");
+
+    let mut app = legion_app::AppComposition::new();
+    app.open_workspace(
+        root.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("test".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(source.to_string_lossy()).expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    app.force_lsp_start_with_server_path_for_test(mock_path);
+
+    // Startup is asynchronous: drain until the session reports Live rather than
+    // sleeping for a guessed interval.
+    let mut became_live = false;
+    for _ in 0..600 {
+        app.drain_lsp_session();
+        if app.lsp_session_status_projection().lifecycle
+            == legion_protocol::LspSessionLifecycleKind::Live
+        {
+            became_live = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = app.lsp_session_status_projection();
+    assert!(
+        became_live,
+        "the mock session never reached Live; lifecycle={:?} reason={:?}",
+        status.lifecycle, status.failure_reason
+    );
+
+    let position = legion_protocol::TextCoordinate {
+        line: 0,
+        character: 3,
+        byte_offset: None,
+        utf16_offset: None,
+    };
+    assert!(
+        app.issue_lsp_references_request(buffer_id, position, true),
+        "the capability gate refused the request; before the parser fix this is \
+         exactly where references died, silently, for every workspace"
+    );
+
+    let mut locations = Vec::new();
+    for _ in 0..600 {
+        app.drain_lsp_session();
+        locations = app.language_tooling_projection().references;
+        if !locations.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(
+        !locations.is_empty(),
+        "the request was sent and nothing came back into the projection"
+    );
+    // The mock answers with two locations, one of them in a file the caret is
+    // not in. Asserting on that one specifically is what distinguishes the
+    // server's answer from the lexical index's: the index cannot know about
+    // `caller.rs`, which does not exist on disk.
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.label.contains("caller.rs")
+                || location
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.0.contains("caller.rs"))),
+        "the rows must be the server's answer, not the index's; got {locations:?}"
+    );
+}
+
 #[test]
 fn a_recorded_capability_reports_what_the_server_actually_said() {
     // Recording the key is only half of it. A capability recorded as
