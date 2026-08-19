@@ -114,6 +114,28 @@ fn main() {
                         "textDocumentSync": {"openClose": true, "change": 1},
                         "hoverProvider": true,
                         "definitionProvider": true,
+                        // Every capability the read-side gates on. A mock that
+                        // advertises only what the parser already handles can
+                        // never reveal a parser that handles too little, which
+                        // is exactly how `referencesProvider` went unrecorded
+                        // while a fixture-injected health record kept the tests
+                        // green.
+                        // An object rather than a bool, which is what
+                        // rust-analyzer sends and what `as_bool()` used to read
+                        // as "unsupported". Kept object-valued here so the
+                        // `boolean | XOptions` path stays covered.
+                        "completionProvider": {
+                            "triggerCharacters": [".", ":"],
+                        },
+                        "referencesProvider": true,
+                        "documentSymbolProvider": true,
+                        "inlayHintProvider": true,
+                        // `codeLensProvider` is deliberately absent: it is the
+                        // negative control. A mock that advertises everything
+                        // cannot show that an unadvertised capability is
+                        // recorded as unsupported, and "records the key" and
+                        // "records the right answer" are different properties.
+                        "callHierarchyProvider": true,
                         // LSP 3.17 pull diagnostics — lets clients exercise
                         // the textDocument/diagnostic request path against
                         // the mock (rust-analyzer 1.96+ serves native
