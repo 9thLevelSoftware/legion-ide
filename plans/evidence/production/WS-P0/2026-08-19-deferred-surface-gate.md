@@ -52,7 +52,14 @@ one.
 Two things were wrong. The rule says each surface needs **its own** ADR, and
 ADR-0046 is the freeze shared by all three — so the config now names
 ADR-0025 (remote transport), ADR-0045 (collaboration operation layer) and
-ADR-0047 (extension host, which does not exist yet, which is the point).
+ADR-0050 (extension host, which does not exist yet, which is the point).
+
+The number needed care. Review caught the first attempt naming
+`ADR-0047-isolated-extension-host.md`, and ADR-0047 is already taken by
+extension *distribution* — a different topic. Pointing at a path that does not
+exist is deliberate here, since the artifact is exactly what the freeze is
+waiting for; pointing at a number already spoken for would have misdirected
+whoever writes the real one. 0050 is the next free slot.
 
 More importantly, an artifacts-only check was the wrong shape. Every frozen
 surface already has its own ADR — remote has four — so artifacts alone would
