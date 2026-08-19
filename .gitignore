@@ -47,5 +47,12 @@ __pycache__/
 # Snapshot test intermediates: `.new.png` is what a run rendered and
 # `.diff.png` is the comparison. Both are build output, uploaded by CI as
 # artifacts when a snapshot fails; only the baselines are tracked.
-crates/legion-desktop/tests/snapshots/*.new.png
-crates/legion-desktop/tests/snapshots/*.diff.png
+#
+# Unanchored on purpose. These were scoped to the one directory that produces
+# them in normal use, and four of them still reached a commit: running the test
+# binary by hand from the workspace root makes the harness resolve snapshots
+# relative to the working directory, so it wrote `tests/snapshots/` at the repo
+# root, outside the rule. A pattern that only covers the expected location is
+# not covering the case that needs it.
+**/*.new.png
+**/*.diff.png
