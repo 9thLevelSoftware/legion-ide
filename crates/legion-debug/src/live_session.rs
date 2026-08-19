@@ -417,9 +417,7 @@ impl LiveDapSession {
         &mut self,
         timeout: Duration,
     ) -> Result<LiveDapHandshakeOutcome, LiveDapSessionError> {
-        let seq = self.alloc_seq();
-        let req = DapMessage::request(
-            seq,
+        let seq = self.send_request(
             "initialize",
             json!({
                 "clientID": "legion",
@@ -429,14 +427,7 @@ impl LiveDapSession {
                 "linesStartAt1": true,
                 "columnsStartAt1": true,
             }),
-        );
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| LiveDapSessionError::Protocol {
-                message: "stdin already closed".to_string(),
-            })?;
-        DapFramer::write_to(stdin, &req)?;
+        )?;
 
         let deadline = Instant::now() + timeout;
         let mut saw_initialize_response = false;
@@ -918,15 +909,7 @@ impl LiveDapSession {
         arguments: Value,
         timeout: Duration,
     ) -> Result<Value, LiveDapSessionError> {
-        let seq = self.alloc_seq();
-        let req = DapMessage::request(seq, command, arguments);
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| LiveDapSessionError::Protocol {
-                message: "stdin already closed".to_string(),
-            })?;
-        DapFramer::write_to(stdin, &req)?;
+        let seq = self.send_request(command, arguments)?;
 
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -937,7 +920,11 @@ impl LiveDapSession {
             // so it arrives while some unrelated request is waiting; discarding
             // it left `launch_until_stopped_with` waiting for an event that had
             // already been read and thrown away.
-            self.record_pending(&msg);
+            // The response this call is waiting for is consumed here, not
+            // recorded. Recording it first meant every `request` left its own
+            // sequence number in `answered` and never took it back — a map that
+            // grew by one per request for the life of the session, holding
+            // answers nobody would ever ask for again.
             if let Some(result) = msg.response_for(seq) {
                 return result
                     .map(|body| {
@@ -951,8 +938,9 @@ impl LiveDapSession {
                         message: format!("{command} error: {message}"),
                     });
             }
-            // Events while waiting for this response are ignored here; callers
-            // that need stopped/continued use dedicated wait helpers after.
+            // Only frames this call is NOT consuming are kept, for the waiter
+            // that will want them.
+            self.record_pending(&msg);
         }
         Err(LiveDapSessionError::Timeout {
             message: format!("waiting for {command} response seq={seq}"),
@@ -1038,6 +1026,16 @@ impl LiveDapSession {
                 ),
             }),
         }
+    }
+
+    /// How many answers are being held for a waiter that has not asked yet.
+    ///
+    /// Test-only. It exists because the natural bug here is unobservable from
+    /// outside: every `request` used to leave its own sequence number in the
+    /// map, so it grew by one per request for the life of the session and
+    /// nothing ever failed.
+    pub fn held_answer_count_for_test(&self) -> usize {
+        self.answered.len()
     }
 
     /// Whether the adapter process is still alive, as a trailing clause.

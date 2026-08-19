@@ -215,3 +215,43 @@ fn launch_completes_when_the_adapter_answers_before_it_is_ready() {
         .disconnect_and_wait(Duration::from_secs(2))
         .expect("disconnect");
 }
+
+/// A session must not accumulate answers nobody will ask for.
+///
+/// `request` reads frames until it sees its own response, and every frame it
+/// read was being recorded first — including that response. So each call left
+/// one entry behind, and the map grew by one per request for the life of the
+/// session. Nothing failed, which is why it needed a test rather than a bug
+/// report: the only symptom was memory.
+#[test]
+fn a_session_does_not_hoard_answers_it_has_already_returned() {
+    let mut session =
+        LiveDapSession::spawn(adapter_path(), &[], "legion-fake").expect("spawn fake adapter");
+    session
+        .initialize_handshake(Duration::from_secs(5))
+        .expect("initialize handshake");
+
+    let before = session.held_answer_count_for_test();
+    let stop = session
+        .launch_until_stopped("/tmp/legion-fake-program", Duration::from_secs(3))
+        .expect("launch");
+    assert_eq!(stop.reason, "entry");
+
+    // Several round trips, each of which used to leave a permanent entry.
+    for _ in 0..4 {
+        session
+            .step_over_until_stopped(stop.thread_id, Duration::from_secs(3))
+            .expect("step over");
+    }
+
+    let after = session.held_answer_count_for_test();
+    assert!(
+        after <= before + 1,
+        "answers held grew from {before} to {after} across five round trips; each request \
+         is leaving its own response behind"
+    );
+
+    session
+        .disconnect_and_wait(Duration::from_secs(2))
+        .expect("disconnect");
+}
