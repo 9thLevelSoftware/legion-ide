@@ -7,8 +7,7 @@
 use xtask::perf_harness::{SkeletonKind, SkeletonStatus};
 use xtask::perf_workloads::{
     ProductBudget, ProductWorkloadRow, classify_product_row, parse_product_perf_report,
-    product_budgets_are_host_enforced, product_measurements, product_workload_policies,
-    regate_with_ceiling,
+    product_measurements, product_workload_policies, regate_with_ceiling,
 };
 
 fn policy(name: &str) -> xtask::perf_workloads::ProductWorkloadPolicy {
@@ -142,12 +141,38 @@ fn zero_percentile_ceiling_is_untracked_not_impossible() {
     );
 }
 
-/// Product budgets must stay armed on hosted CI. The skeleton-era
+/// Product budgets must stay armed on hosted CI, and this now checks it.
+///
+/// The previous version asserted a function that returned a literal `true` —
+/// a claim restating itself. The claim is real and testable: the skeleton-era
 /// `LEGION_PERF_FAIL_ON_BUDGET_MS=0` override made every budget on every OS
-/// unfailable, which is P8.F4.T2's stop condition.
+/// unfailable, which is P8.F4.T2's stop condition, and product classification
+/// must ignore that variable entirely.
+///
+/// So the variable is set to the value that disarms skeleton budgets, and an
+/// over-budget product row must still fail.
 #[test]
-fn product_budgets_are_not_report_only() {
-    assert!(product_budgets_are_host_enforced());
+fn product_budgets_ignore_the_skeleton_report_only_override() {
+    // Safety: set and removed around a synchronous classification call that
+    // spawns nothing. `classify_product_row` reads no environment at all, which
+    // is the property under test.
+    unsafe {
+        std::env::set_var("LEGION_PERF_FAIL_ON_BUDGET_MS", "0");
+    }
+    let policy = policy("p8.startup");
+    let mut over = row("p8.startup");
+    over.p50_micros = 90_000_000;
+    over.p95_micros = 90_000_000;
+    let measurement = classify_product_row(&policy, &over, "linux");
+    unsafe {
+        std::env::remove_var("LEGION_PERF_FAIL_ON_BUDGET_MS");
+    }
+
+    assert_eq!(
+        measurement.status,
+        SkeletonStatus::Failed,
+        "a 90s startup must fail even with the skeleton override set; product ceilings are          sized to survive a slow runner precisely so they can stay armed everywhere"
+    );
 }
 
 // ── Memory classification ────────────────────────────────────────────────────

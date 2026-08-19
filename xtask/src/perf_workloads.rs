@@ -28,7 +28,7 @@ pub const PRODUCT_PERF_REPORT_FILE: &str = "product-perf.toml";
 /// # How these numbers were chosen
 ///
 /// Unlike the skeleton budgets, these are **not** relaxed by
-/// `LEGION_PERF_FAIL_ON_BUDGET_MS` — see [`product_budgets_are_host_enforced`].
+/// `LEGION_PERF_FAIL_ON_BUDGET_MS` — see `product_budgets_ignore_the_skeleton_report_only_override`.
 /// They therefore have to hold on the slowest supported CI runner, not only on
 /// a quiet developer machine, and they are sized accordingly: each is a
 /// catastrophe guard with room for a slow shared VM above it.
@@ -89,21 +89,6 @@ const LEGION_REPO_BUDGET_MILLIS: u64 = 120_000;
 /// throughput question this workload really asks is answered by the archived
 /// trend numbers, not by this ceiling.
 const FIXTURE_100K_BUDGET_MILLIS: u64 = 1_800_000;
-
-/// Product-workload budgets are enforced on every host, including hosted CI.
-///
-/// The skeleton budgets are relaxed there by `LEGION_PERF_FAIL_ON_BUDGET_MS=0`,
-/// because a 2 ms wall-clock microbenchmark on a shared VM is noise. That
-/// override made every budget on every OS unfailable, which is precisely
-/// P8.F4.T2's stop condition — "no OS job may silently skip". The product
-/// ceilings above are sized to survive a slow runner instead, so they can stay
-/// armed everywhere.
-///
-/// This function exists to hold the reason next to the decision; the caller
-/// reads it rather than an unexplained absence of an override call.
-pub fn product_budgets_are_host_enforced() -> bool {
-    true
-}
 
 /// What a workload is allowed to cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +239,18 @@ pub fn product_measurements(report: &ProductPerfReport) -> Vec<SkeletonMeasureme
 }
 
 /// Classify one reported row against its policy.
+// Product-workload budgets are enforced on every host, including hosted CI.
+//
+// This function reads no environment at all, and that is the point.
+// `LEGION_PERF_FAIL_ON_BUDGET_MS=0` relaxes the skeleton budgets on shared
+// runners, because a 2 ms wall-clock microbenchmark on a hosted VM is noise.
+// Applying that override here would make every budget on every OS unfailable,
+// which is exactly P8.F4.T2's stop condition — "no OS job may silently skip".
+// The product ceilings are sized to survive a slow runner instead, so they can
+// stay armed everywhere.
+//
+// `product_budgets_ignore_the_skeleton_report_only_override` sets the variable
+// and asserts an over-budget row still fails.
 pub fn classify_product_row(
     policy: &ProductWorkloadPolicy,
     row: &ProductWorkloadRow,
@@ -465,7 +462,7 @@ fn truncate(text: &str) -> String {
 /// Re-gate a product measurement against an explicit millisecond ceiling.
 ///
 /// Not wired to `LEGION_PERF_FAIL_ON_BUDGET_MS` — see
-/// [`product_budgets_are_host_enforced`] for why product ceilings stay armed on
+/// `product_budgets_ignore_the_skeleton_report_only_override` for why product ceilings stay armed on
 /// every host. This exists for the failing-gate drill: a caller that wants to
 /// prove the gate can fail hands it a ceiling below the measured value.
 ///

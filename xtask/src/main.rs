@@ -1824,13 +1824,12 @@ fn evaluate_perf_trend(
 /// and applying it to the product workloads is what made every budget on every
 /// OS unfailable — P8.F4.T2's stop condition. The product ceilings are sized to
 /// survive a slow runner instead
-/// (`xtask::perf_workloads::product_budgets_are_host_enforced`).
+/// (see `product_budgets_ignore_the_skeleton_report_only_override`).
 fn append_product_workload_measurements(
     workspace_root: &Path,
     out_dir: &Path,
     report: &mut xtask::perf_harness::PerfReport,
 ) {
-    debug_assert!(xtask::perf_workloads::product_budgets_are_host_enforced());
     let measurements = xtask::perf_workloads::run_product_workloads(workspace_root, out_dir);
     report.skeletons.extend(measurements);
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
