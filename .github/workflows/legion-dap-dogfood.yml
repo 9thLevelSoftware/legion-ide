@@ -226,6 +226,24 @@ jobs:
           ls -1 "$prefix/bin" 2>/dev/null | grep -i lldb
           exit 1
 
+      # LLDB embeds CPython, and the image's `liblldb.dll` links against
+      # `python310.dll` specifically. That library is the one dependent of the
+      # whole chain that does not resolve — every other one, including
+      # `liblldb.dll` itself, is present. Without it `lldb-dap.exe` dies during
+      # loader initialisation before reaching `main`, which is why the process
+      # showed as alive with an empty stderr and stdout closed: the framing
+      # error `unexpected EOF in headers` was the only symptom of a program
+      # that never started.
+      #
+      # `setup-python` puts the interpreter's directory on PATH, and
+      # `python310.dll` lives beside `python.exe`, so this is a PATH fix rather
+      # than an LLVM reinstall.
+      - name: Provide the Python runtime LLDB links against (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Provision an adapter (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -291,6 +309,100 @@ jobs:
       # `continue-on-error` and `|| true`: this step must never decide the
       # job's colour. A diagnostic that can fail the run it is diagnosing is a
       # second problem, not a tool.
+      # Windows only, for a specific reason. `lldb-dap.exe` on the runner image
+      # reports `error while loading shared libraries` and exits 127, so it
+      # never reaches `main`. The loader prints `?` for the name because MSYS2
+      # is relaying a Windows DLL failure through a POSIX-shaped message, which
+      # means the shell cannot say which library is missing.
+      #
+      # `dumpbin /dependents` can. LLDB embeds Python, and a distribution that
+      # ships lldb-dap without its matching Python runtime is the most common
+      # way this fails — but that is a hypothesis, and this step exists to
+      # replace it with a name.
+      - name: Name the missing Windows DLL (report-only)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $adapter = Join-Path $env:ProgramFiles 'LLVM\bin\lldb-dap.exe'
+          if (-not (Test-Path $adapter)) { Write-Host "no adapter at $adapter"; exit 0 }
+          Write-Host "adapter: $adapter"
+
+          $dumpbin = Get-ChildItem -Path (Join-Path $env:ProgramFiles 'Microsoft Visual Studio') `
+            -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) {
+            $dumpbin = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio') `
+              -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $dumpbin) { Write-Host 'dumpbin not found on this image'; exit 0 }
+
+          Write-Host '--- dependents ---'
+          $lines = & $dumpbin.FullName /dependents $adapter 2>&1
+          $lines | Select-Object -First 40 | ForEach-Object { Write-Host $_ }
+
+          # A dependent that resolves is not the problem; the one that does not
+          # is the answer. Windows searches the exe's own directory first, then
+          # the system directories, then PATH.
+          #
+          # The dependent names are parsed from the lines between "Image has the
+          # following dependencies:" and the blank line that ends that block.
+          # The previous version matched every line against a regex and produced
+          # nothing at all, which read like "no dependents" rather than "the
+          # parse failed" — a silent diagnostic, which is the failure mode this
+          # whole step exists to retire.
+          # `liblldb.dll` turned out to sit right beside the adapter, so the
+          # absent library is a TRANSITIVE dependency — something liblldb.dll
+          # itself needs. LLDB embeds Python, and a distribution shipping
+          # liblldb.dll without its matching pythonNNN.dll is the classic way
+          # this fails. So both binaries are walked, not just the adapter.
+          $adapterDir = Split-Path $adapter
+          $searchPath = @($adapterDir, "$env:SystemRoot\System32", $env:SystemRoot) + ($env:PATH -split ';')
+
+          function Get-Dependents($binary) {
+            # Every trimmed line that is bare `something.dll` is a dependent
+            # name. The block-tracking version reported PARSE FAILED twice, and
+            # a diagnostic that cannot parse is worth less than no diagnostic,
+            # because it looks like an answer.
+            $raw = & $dumpbin.FullName /dependents $binary 2>&1
+            ($raw | Out-String) -split "`n" |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' } |
+              Select-Object -Unique
+          }
+
+          function Report-Resolvability($binary) {
+            Write-Host "--- resolvability of $(Split-Path $binary -Leaf) ---"
+            $deps = Get-Dependents $binary
+            if (-not $deps -or $deps.Count -eq 0) {
+              Write-Host '  PARSE FAILED: no dependent names recovered'
+              return
+            }
+            foreach ($dep in $deps) {
+              $hit = $null
+              foreach ($dir in $searchPath) {
+                if ($dir -and (Test-Path (Join-Path $dir $dep) -ErrorAction SilentlyContinue)) {
+                  $hit = Join-Path $dir $dep
+                  break
+                }
+              }
+              if ($hit) { Write-Host "  OK      $dep" } else { Write-Host "  MISSING $dep" }
+            }
+          }
+
+          Report-Resolvability $adapter
+          $liblldb = Join-Path $adapterDir 'liblldb.dll'
+          if (Test-Path $liblldb) {
+            Report-Resolvability $liblldb
+          } else {
+            Write-Host "--- liblldb.dll is not beside the adapter ---"
+          }
+
+          Write-Host '--- python runtimes visible ---'
+          Get-ChildItem -Path $adapterDir -Filter 'python*.dll' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  beside adapter: $($_.Name)" }
+          Get-Command python -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  python on PATH: $($_.Source)" }
+
       - name: Interrogate the resolved adapter (report-only)
         continue-on-error: true
         shell: bash
@@ -364,9 +476,18 @@ jobs:
       # stopOnEntry, one step over, disconnect. This is a debug SESSION against
       # a real adapter. It is still not zero-config Rust debugging in the
       # product UI (roadmap 1.9) — no Legion UI is involved anywhere here.
+      # `LEGION_DAP_TRACE_FRAMES=1` echoes every DAP frame in both directions.
+      #
+      # macOS fails here with "no DAP frame within 15s; adapter still running;
+      # adapter stderr: <empty>", and two rounds of diagnosis produced
+      # hypotheses that fit that symptom and were wrong. The symptom is the same
+      # for a deadlock, a silent refusal, and an adapter that never received the
+      # message; what tells them apart is the conversation, and nothing was
+      # recording it. This records it.
       - name: Dogfood — launch and step a real Rust debugee
         env:
           LEGION_DAP_DOGFOOD: "1"
+          LEGION_DAP_TRACE_FRAMES: "1"
         run: cargo test -p legion-debug --test system_adapter_launch_step_dogfood -- --nocapture
 
       # Control: the policy gate must still refuse a non-allowlisted binary on a

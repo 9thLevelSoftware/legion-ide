@@ -33,7 +33,20 @@ fn main() {
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();
     let mut out_seq = 1u64;
+    // Modes arrive as arguments, not environment variables.
+    //
+    // `std::env::set_var` mutates the whole process and cargo runs tests in a
+    // binary concurrently, so a test setting a mode would hand it to every fake
+    // adapter another test spawned in the same window. That is not theory: it
+    // happened here, and it is the same defect review had just caught in the
+    // LSP capability tests. Arguments reach exactly one child.
+    let modes: Vec<String> = std::env::args().skip(1).collect();
+    let defer_launch_response = modes.iter().any(|mode| mode == "--defer-launch-response");
+    let initialized_after_launch = modes
+        .iter()
+        .any(|mode| mode == "--initialized-after-launch");
     let mut stopped = false;
+    let mut deferred_launch: Option<(u64, String)> = None;
 
     while let Ok(msg) = read_message(&mut reader) {
         let msg_type = msg
@@ -70,7 +83,13 @@ fn main() {
                         "supportsSetVariable": false
                     }),
                 );
-                write_event(&mut stdout, &mut out_seq, "initialized", json!({}));
+                // Real lldb-dap does NOT send `initialized` here; it sends it
+                // after answering `launch`. `--initialized-after-launch`
+                // reproduces that ordering, which is what the Ubuntu runner
+                // actually does and what no in-tree test covered.
+                if !initialized_after_launch {
+                    write_event(&mut stdout, &mut out_seq, "initialized", json!({}));
+                }
             }
             "setBreakpoints" => {
                 let source = arguments.get("source").cloned().unwrap_or(json!({}));
@@ -103,16 +122,56 @@ fn main() {
                 );
             }
             "launch" | "attach" => {
-                write_response(
-                    &mut stdout,
-                    &mut out_seq,
-                    request_seq,
-                    &command,
-                    true,
-                    json!({}),
-                );
+                // Real adapters answer `launch` only after configuration is
+                // finished. lldb-dap does; this fake historically did not, and
+                // that convenience taught the client a sequence that deadlocked
+                // against every real adapter — the client blocked on the launch
+                // response before sending `configurationDone`, and the adapter
+                // was waiting for exactly that.
+                //
+                // `--defer-launch-response` makes this fake
+                // behave like the real thing, so the deadlock is reproducible
+                // in-tree instead of only on a CI runner fifteen seconds at a
+                // time.
+                if defer_launch_response {
+                    deferred_launch = Some((request_seq, command.clone()));
+                } else {
+                    write_response(
+                        &mut stdout,
+                        &mut out_seq,
+                        request_seq,
+                        &command,
+                        true,
+                        json!({}),
+                    );
+                    // lldb-dap's real order: the launch response, then a
+                    // `process` event, then `initialized`. A client waiting for
+                    // `initialized` therefore reads the launch response on the
+                    // way and must not lose it.
+                    if initialized_after_launch {
+                        write_event(
+                            &mut stdout,
+                            &mut out_seq,
+                            "process",
+                            json!({ "name": "fake", "startMethod": "launch" }),
+                        );
+                        write_event(&mut stdout, &mut out_seq, "initialized", json!({}));
+                    }
+                }
             }
             "configurationDone" => {
+                // The deferred launch response is released here, which is the
+                // ordering the DAP sequence actually specifies.
+                if let Some((launch_seq, launch_command)) = deferred_launch.take() {
+                    write_response(
+                        &mut stdout,
+                        &mut out_seq,
+                        launch_seq,
+                        &launch_command,
+                        true,
+                        json!({}),
+                    );
+                }
                 write_response(
                     &mut stdout,
                     &mut out_seq,

@@ -113,3 +113,145 @@ fn a_silent_adapter_times_out_instead_of_hanging() {
          between frames; took {elapsed:?}"
     );
 }
+
+/// The same session against an adapter that answers `launch` the way real ones do.
+///
+/// Real adapters defer the `launch` response until configuration is finished:
+/// they emit `initialized`, wait for the client's breakpoints and
+/// `configurationDone`, and only then answer `launch`. lldb-dap does exactly
+/// this, and the client used to block on the launch response before sending
+/// `configurationDone` — a deadlock in which both sides were waiting for the
+/// other and neither was misbehaving.
+///
+/// It cost a fifteen-second timeout per CI run on macOS to observe, reported as
+/// `no DAP frame within 15s; adapter still running; adapter stderr: <empty>` —
+/// alive, silent and blameless. The in-tree fake answered `launch` immediately,
+/// so the whole suite stayed green against a sequence no real adapter follows.
+/// That is the second time this fake's convenience has hidden a real defect;
+/// the first was `initialized` at handshake time.
+///
+/// `--defer-launch-response` makes the fake behave correctly,
+/// so the deadlock is reproducible in-tree rather than only on a runner.
+#[test]
+fn launch_completes_against_an_adapter_that_defers_its_launch_response() {
+    let mut session = LiveDapSession::spawn(
+        adapter_path(),
+        &["--defer-launch-response".to_string()],
+        "legion-fake",
+    )
+    .expect("spawn fake adapter");
+
+    session
+        .initialize_handshake(Duration::from_secs(5))
+        .expect("initialize handshake");
+
+    // Three seconds is deliberately tight. The bug this pins does not produce a
+    // wrong answer, it produces no answer at all, so a generous timeout would
+    // turn a deadlock into a slow test rather than a failing one.
+    let outcome = session
+        .launch_until_stopped("/tmp/legion-fake-program", Duration::from_secs(3))
+        .expect("launch must complete against an adapter that defers its launch response");
+    assert_eq!(
+        outcome.reason, "entry",
+        "the stop that follows configurationDone is the launch's answer"
+    );
+
+    session
+        .disconnect_and_wait(Duration::from_secs(2))
+        .expect("disconnect");
+}
+
+/// The ordering lldb-dap actually uses, captured from a runner transcript.
+///
+/// `LEGION_DAP_TRACE_FRAMES=1` on the Ubuntu dogfood produced this sequence:
+///
+/// ```text
+/// --> launch
+/// <-- response(launch)          the answer comes straight back
+/// <-- event(process)
+/// <-- event(initialized)        and only then is it ready for configuration
+/// --> configurationDone
+/// <-- response(configurationDone)
+/// <-- event(stopped)
+/// ```
+///
+/// Every frame the adapter owed arrived, and the client still timed out — because
+/// waiting for `initialized` necessarily reads the launch response on the way,
+/// and that response was being discarded. The later wait then looked for a frame
+/// that had already come and gone.
+///
+/// This is the ordering that broke the one platform that worked, and no in-tree
+/// test covered it: the fake sent `initialized` during the handshake instead,
+/// which is a third ordering that resembles neither real adapter.
+#[test]
+fn launch_completes_when_the_adapter_answers_before_it_is_ready() {
+    // Modes travel as arguments so this test cannot disturb any other running
+    // beside it — process-wide `set_var` broke exactly that way one revision
+    // ago, taking a sibling test with it.
+    let mut session = LiveDapSession::spawn(
+        adapter_path(),
+        &["--initialized-after-launch".to_string()],
+        "legion-fake",
+    )
+    .expect("spawn fake adapter");
+
+    let outcome = session
+        .initialize_handshake(Duration::from_secs(5))
+        .expect("initialize handshake");
+    assert!(
+        !outcome.initialized_event,
+        "this adapter withholds `initialized` until after launch, which is the \
+         whole point of the ordering under test"
+    );
+
+    // Tight on purpose: the failure this pins is a wait that never ends, so a
+    // generous timeout would turn a hang into a slow pass.
+    let stop = session
+        .launch_until_stopped("/tmp/legion-fake-program", Duration::from_secs(3))
+        .expect("launch must complete when the launch response precedes `initialized`");
+    assert_eq!(stop.reason, "entry");
+
+    session
+        .disconnect_and_wait(Duration::from_secs(2))
+        .expect("disconnect");
+}
+
+/// A session must not accumulate answers nobody will ask for.
+///
+/// `request` reads frames until it sees its own response, and every frame it
+/// read was being recorded first — including that response. So each call left
+/// one entry behind, and the map grew by one per request for the life of the
+/// session. Nothing failed, which is why it needed a test rather than a bug
+/// report: the only symptom was memory.
+#[test]
+fn a_session_does_not_hoard_answers_it_has_already_returned() {
+    let mut session =
+        LiveDapSession::spawn(adapter_path(), &[], "legion-fake").expect("spawn fake adapter");
+    session
+        .initialize_handshake(Duration::from_secs(5))
+        .expect("initialize handshake");
+
+    let before = session.held_answer_count_for_test();
+    let stop = session
+        .launch_until_stopped("/tmp/legion-fake-program", Duration::from_secs(3))
+        .expect("launch");
+    assert_eq!(stop.reason, "entry");
+
+    // Several round trips, each of which used to leave a permanent entry.
+    for _ in 0..4 {
+        session
+            .step_over_until_stopped(stop.thread_id, Duration::from_secs(3))
+            .expect("step over");
+    }
+
+    let after = session.held_answer_count_for_test();
+    assert!(
+        after <= before + 1,
+        "answers held grew from {before} to {after} across five round trips; each request \
+         is leaving its own response behind"
+    );
+
+    session
+        .disconnect_and_wait(Duration::from_secs(2))
+        .expect("disconnect");
+}
