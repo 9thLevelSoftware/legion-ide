@@ -332,45 +332,51 @@ jobs:
           # nothing at all, which read like "no dependents" rather than "the
           # parse failed" — a silent diagnostic, which is the failure mode this
           # whole step exists to retire.
-          Write-Host '--- resolvability ---'
+          # `liblldb.dll` turned out to sit right beside the adapter, so the
+          # absent library is a TRANSITIVE dependency — something liblldb.dll
+          # itself needs. LLDB embeds Python, and a distribution shipping
+          # liblldb.dll without its matching pythonNNN.dll is the classic way
+          # this fails. So both binaries are walked, not just the adapter.
           $adapterDir = Split-Path $adapter
           $searchPath = @($adapterDir, "$env:SystemRoot\System32", $env:SystemRoot) + ($env:PATH -split ';')
-          $text = ($lines | Out-String) -split "`r?`n"
-          $deps = @()
-          $inBlock = $false
-          foreach ($line in $text) {
-            if ($line -match 'following (delay load )?dependencies:') { $inBlock = $true; continue }
-            if ($inBlock) {
-              if ($line.Trim() -eq '') { $inBlock = $false; continue }
-              $name = $line.Trim()
-              if ($name -match '^[\w.+-]+\.dll$') { $deps += $name }
-            }
-          }
-          if ($deps.Count -eq 0) {
-            Write-Host '  PARSE FAILED: no dependent names recovered from dumpbin output'
-          }
-          foreach ($dep in $deps) {
-            $hit = $null
-            foreach ($dir in $searchPath) {
-              if ($dir -and (Test-Path (Join-Path $dir $dep) -ErrorAction SilentlyContinue)) {
-                $hit = Join-Path $dir $dep
-                break
-              }
-            }
-            if ($hit) { Write-Host "  OK      $dep" } else { Write-Host "  MISSING $dep" }
+
+          function Get-Dependents($binary) {
+            # Every trimmed line that is bare `something.dll` is a dependent
+            # name. The block-tracking version reported PARSE FAILED twice, and
+            # a diagnostic that cannot parse is worth less than no diagnostic,
+            # because it looks like an answer.
+            $raw = & $dumpbin.FullName /dependents $binary 2>&1
+            ($raw | Out-String) -split "`n" |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\.dll$' } |
+              Select-Object -Unique
           }
 
-          # `liblldb.dll` is the one dependent that is LLVM's rather than the
-          # system's, so it is the only plausible absentee. If the image has it
-          # somewhere else, saying where turns "install something" into "put a
-          # directory on PATH".
-          Write-Host '--- liblldb.dll on the image ---'
-          $found = Get-ChildItem -Path 'C:\' -Filter 'liblldb.dll' -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -First 5
-          if ($found) {
-            $found | ForEach-Object { Write-Host "  found: $($_.FullName)" }
+          function Report-Resolvability($binary) {
+            Write-Host "--- resolvability of $(Split-Path $binary -Leaf) ---"
+            $deps = Get-Dependents $binary
+            if (-not $deps -or $deps.Count -eq 0) {
+              Write-Host '  PARSE FAILED: no dependent names recovered'
+              return
+            }
+            foreach ($dep in $deps) {
+              $hit = $null
+              foreach ($dir in $searchPath) {
+                if ($dir -and (Test-Path (Join-Path $dir $dep) -ErrorAction SilentlyContinue)) {
+                  $hit = Join-Path $dir $dep
+                  break
+                }
+              }
+              if ($hit) { Write-Host "  OK      $dep" } else { Write-Host "  MISSING $dep" }
+            }
+          }
+
+          Report-Resolvability $adapter
+          $liblldb = Join-Path $adapterDir 'liblldb.dll'
+          if (Test-Path $liblldb) {
+            Report-Resolvability $liblldb
           } else {
-            Write-Host '  not present anywhere on C:\ — the LLVM distribution on this image ships lldb-dap.exe without the library it links against'
+            Write-Host "--- liblldb.dll is not beside the adapter ---"
           }
 
           Write-Host '--- python runtimes visible ---'
