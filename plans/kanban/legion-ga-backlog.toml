@@ -2451,7 +2451,9 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Each surface has its own ADR, policy, tests, and product evidence before readiness status changes."]
     stop_condition = "Stop if any of these surfaces flips readiness without all four artifacts."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/2026-08-19-deferred-surface-gate.md"
+    notes = "Done 2026-08-19. The rule now has a gate: `cargo run -p xtask -- deferred-surfaces` fails when a frozen surface claims readiness its artifacts do not support, and checks the ADR-0046 freeze precondition first because every frozen surface already has its own ADR — an artifacts-only check waved through a promotion the ADR forbids outright, which the mutation caught. Wired into legion-gates.yml and documented in the operator runbook."
 
   [[epics.features]]
   id = "P9.F4"

@@ -33,6 +33,7 @@ const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml"
 const DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH: &str = "target/dap-adapter/probe_report.toml";
 const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
 const DEFAULT_INTENT_REACHABILITY_CONFIG_PATH: &str = "xtask/intent-reachability.toml";
+const DEFAULT_DEFERRED_SURFACES_CONFIG_PATH: &str = "xtask/deferred-surfaces.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
@@ -543,6 +544,18 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_INTENT_REACHABILITY_CONFIG_PATH)]
         config: String,
     },
+    /// Fail when a frozen surface claims readiness its artifacts do not support.
+    ///
+    /// ADR-0046 keeps three gates deferred, and the roadmap's rule is that each
+    /// needs its own ADR, policy, tests and product evidence before its
+    /// readiness status changes. The ledger is a markdown table, so without
+    /// this the rule was enforceable only by whoever reviewed the diff.
+    #[command(name = "deferred-surfaces")]
+    DeferredSurfaces {
+        /// Path to deferred-surfaces TOML configuration.
+        #[arg(long, default_value = DEFAULT_DEFERRED_SURFACES_CONFIG_PATH)]
+        config: String,
+    },
     /// Generate dry-run release pipeline installer descriptors.
     ReleasePipeline {
         /// Path to release pipeline TOML configuration.
@@ -935,6 +948,7 @@ fn main() {
             run_extract_before_modify_command(&config, &base)
         }
         Commands::IntentReachability { config } => run_intent_reachability_command(&config),
+        Commands::DeferredSurfaces { config } => run_deferred_surfaces_command(&config),
         Commands::ReleasePipeline {
             config,
             out,
@@ -1193,6 +1207,67 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
             }
         }
         1
+    }
+}
+
+fn run_deferred_surfaces_command(config_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("deferred-surfaces failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::deferred_surfaces::DeferredSurfacesConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("deferred-surfaces failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::deferred_surfaces::run_deferred_surfaces(&workspace_root, &config) {
+        Ok(Ok(checked)) => {
+            println!("deferred-surfaces: {checked} frozen surface(s) deferred or fully evidenced");
+            0
+        }
+        Ok(Err(unsupported)) => {
+            eprintln!(
+                "deferred-surfaces: {} surface(s) claim readiness their artifacts do not support:",
+                unsupported.len()
+            );
+            for entry in &unsupported {
+                eprintln!("  {} is \"{}\" but is missing:", entry.gate, entry.status);
+                for missing in &entry.missing {
+                    eprintln!("      {missing}");
+                }
+            }
+            eprintln!();
+            eprintln!(
+                "A frozen surface needs its own ADR, policy, tests and product evidence before its readiness status changes (roadmap P9.F3.T4). Produce the missing artifacts, or leave the row deferred until they exist."
+            );
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::Ledger(why)) => {
+            eprintln!("deferred-surfaces failed: {why}");
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::ReasonMissing(gate)) => {
+            eprintln!("deferred-surfaces failed: surface {gate} has no reason recorded");
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::RowMissing(gates)) => {
+            eprintln!(
+                "deferred-surfaces failed: these surfaces have no ledger row: {}",
+                gates.join(", ")
+            );
+            eprintln!(
+                "Deleting the row is not a way out of the gate; it is a louder version of the edit the gate exists to prevent."
+            );
+            1
+        }
     }
 }
 

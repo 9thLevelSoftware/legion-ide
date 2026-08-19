@@ -32,6 +32,40 @@ If any command fails, save exact output under `plans/evidence/legion-e2e/` befor
 
 Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly smoke remain the primary GP evidence sources. See `plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`.
 
+## Deferred surfaces and what unfreezing costs
+
+Three readiness gates are frozen: **PR-VSC-002** (isolated extension host),
+**PR-ENT-001** (remote development UX), and **PR-ENT-002** (collaboration and
+admin controls). ADR-0046 keeps them deferred until PR-UI-001 reaches "product
+workflow validated".
+
+The rule (roadmap P9.F3.T4) is that each surface needs **its own ADR, policy,
+tests, and product evidence** before its readiness status changes — and that the
+freeze must be lifted first.
+
+```text
+cargo run -p xtask -- deferred-surfaces
+```
+
+The gate exists because the rule was otherwise enforceable only by whoever
+reviewed the diff. The readiness ledger is a markdown table: a surface could be
+promoted from "Deferred" to "Product workflow validated" by editing one cell,
+and the four artifacts would still be missing while the row read as though they
+were not.
+
+Two properties are worth knowing:
+
+- **The freeze is checked first, and it is what bites today.** All three
+  surfaces already have their own ADRs — remote has four — so an artifacts-only
+  check would wave through a promotion ADR-0046 forbids outright. The artifacts
+  are necessary; the freeze being lifted is what makes them sufficient.
+- **Deleting a row is not a way out.** A configured surface with no ledger row
+  fails the gate, because removing the row is a louder version of the edit the
+  gate exists to prevent.
+
+To promote one of these surfaces: amend ADR-0046 (or promote PR-UI-001), produce
+the four artifacts, then change the status. In that order.
+
 ## GUI packaging and support artifacts
 
 The current package-and-support path is intentionally explicit so release notes and issue triage can point at concrete files instead of assumptions.

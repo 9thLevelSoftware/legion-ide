@@ -1,0 +1,72 @@
+# Deferred-surface gate (roadmap P9.F3.T4).
+#
+# ADR-0046 freezes surface expansion until PR-UI-001 reaches "product workflow
+# validated", and keeps three gates deferred by name. The roadmap's rule is that
+# each of those surfaces needs its own ADR, policy, tests, and product evidence
+# before its readiness status changes.
+#
+# Without this gate that rule was enforceable only by whoever happened to review
+# the diff: the readiness ledger is a markdown table, and a surface could be
+# promoted by editing one cell while all four artifacts stayed missing.
+#
+# A surface may sit deferred with no artifacts at all — that is the honest
+# resting state. The obligation attaches the moment the row claims anything
+# else.
+
+ledger = "plans/product-readiness-ledger.md"
+
+# The freeze precondition, and the condition that actually bites today.
+#
+# ADR-0046 clause 2 gates product activation on PR-UI-001 reaching "product
+# workflow validated". Every frozen surface already has its own ADR — remote has
+# four — so checking artifacts alone would wave through a promotion the ADR
+# forbids outright. The artifacts are necessary; the freeze being lifted is what
+# makes them sufficient.
+freeze_gate = "PR-UI-001"
+freeze_lifted_status = "Product workflow validated"
+
+# Statuses that count as "still frozen". Matched as a prefix, because the
+# ledger's deferred rows carry qualifiers ("Deferred with explicit cut lines").
+deferred_statuses = [
+  "Deferred",
+  "Not started",
+  "Blocked",
+]
+
+[[surfaces]]
+gate = "PR-VSC-002"
+reason = """
+Isolated extension host. ADR-0046 clause 3 keeps this deferred and says
+undeferring requires an amendment to that ADR. `legion-vscode-compat` classifies
+manifests and contribution points; it does not execute extensions, and no
+shipped composition path depends on it.
+"""
+adr = "plans/adrs/ADR-0047-isolated-extension-host.md"
+policy = "crates/legion-security/src/policy.rs"
+tests = "crates/legion-vscode-compat/tests"
+evidence = "plans/evidence/production/PR-VSC-002"
+
+[[surfaces]]
+gate = "PR-ENT-001"
+reason = """
+Remote development UX. ADR-0046 clause 2 gates product activation of
+`legion-remote-transport` on PR-UI-001 promotion, and that crate is the
+substrate this surface would activate. Roadmap P9.F3.T2 is the task that would
+do it, and it stays blocked while the freeze holds.
+"""
+adr = "plans/adrs/ADR-0025-production-remote-network-transport.md"
+policy = "crates/legion-security/src/policy.rs"
+tests = "crates/legion-remote/tests"
+evidence = "plans/evidence/remote"
+
+[[surfaces]]
+gate = "PR-ENT-002"
+reason = """
+Collaboration and admin controls. ADR-0046 clause 3 keeps this deferred. The
+CRDT/operation-layer ADR exists (P9.F3.T1) but the product surface does not, and
+an ADR alone is one of the four artifacts, not all of them.
+"""
+adr = "plans/adrs/ADR-0045-collaboration-operation-layer.md"
+policy = "crates/legion-security/src/policy.rs"
+tests = "crates/legion-remote/tests"
+evidence = "plans/evidence/production/PR-ENT-002"
