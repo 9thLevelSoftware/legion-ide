@@ -325,11 +325,30 @@ jobs:
           # A dependent that resolves is not the problem; the one that does not
           # is the answer. Windows searches the exe's own directory first, then
           # the system directories, then PATH.
+          #
+          # The dependent names are parsed from the lines between "Image has the
+          # following dependencies:" and the blank line that ends that block.
+          # The previous version matched every line against a regex and produced
+          # nothing at all, which read like "no dependents" rather than "the
+          # parse failed" — a silent diagnostic, which is the failure mode this
+          # whole step exists to retire.
           Write-Host '--- resolvability ---'
           $adapterDir = Split-Path $adapter
           $searchPath = @($adapterDir, "$env:SystemRoot\System32", $env:SystemRoot) + ($env:PATH -split ';')
-          $deps = $lines | Select-String -Pattern '^\s+(\S+\.[Dd][Ll][Ll])\s*$' |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $text = ($lines | Out-String) -split "`r?`n"
+          $deps = @()
+          $inBlock = $false
+          foreach ($line in $text) {
+            if ($line -match 'following (delay load )?dependencies:') { $inBlock = $true; continue }
+            if ($inBlock) {
+              if ($line.Trim() -eq '') { $inBlock = $false; continue }
+              $name = $line.Trim()
+              if ($name -match '^[\w.+-]+\.dll$') { $deps += $name }
+            }
+          }
+          if ($deps.Count -eq 0) {
+            Write-Host '  PARSE FAILED: no dependent names recovered from dumpbin output'
+          }
           foreach ($dep in $deps) {
             $hit = $null
             foreach ($dir in $searchPath) {
@@ -339,6 +358,19 @@ jobs:
               }
             }
             if ($hit) { Write-Host "  OK      $dep" } else { Write-Host "  MISSING $dep" }
+          }
+
+          # `liblldb.dll` is the one dependent that is LLVM's rather than the
+          # system's, so it is the only plausible absentee. If the image has it
+          # somewhere else, saying where turns "install something" into "put a
+          # directory on PATH".
+          Write-Host '--- liblldb.dll on the image ---'
+          $found = Get-ChildItem -Path 'C:\' -Filter 'liblldb.dll' -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 5
+          if ($found) {
+            $found | ForEach-Object { Write-Host "  found: $($_.FullName)" }
+          } else {
+            Write-Host '  not present anywhere on C:\ — the LLVM distribution on this image ships lldb-dap.exe without the library it links against'
           }
 
           Write-Host '--- python runtimes visible ---'
