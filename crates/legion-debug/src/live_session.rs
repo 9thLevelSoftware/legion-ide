@@ -267,6 +267,19 @@ pub struct LiveDapSession {
     /// why it was unhappy — the single most useful thing to have when a
     /// handshake fails.
     stderr: Arc<Mutex<String>>,
+    /// Whether the adapter has reported `initialized` at any point.
+    ///
+    /// Sticky, because the event is emitted once per session and can arrive
+    /// while a different wait is in progress. Re-waiting for an event that has
+    /// already gone past is indistinguishable from an adapter that never sent
+    /// it.
+    saw_initialized_event: bool,
+    /// A `stopped` event read while waiting for something else.
+    ///
+    /// Adapters may report the stop before answering `launch`. Dropping it
+    /// would leave the following wait looking for an event that has already
+    /// happened.
+    pending_stopped: Option<DapMessage>,
     next_seq: u64,
     adapter_type: String,
 }
@@ -354,6 +367,8 @@ impl LiveDapSession {
             stdin: Some(stdin),
             frames,
             stderr: captured,
+            saw_initialized_event: false,
+            pending_stopped: None,
             next_seq: 1,
             adapter_type: adapter_type.into(),
         })
@@ -396,6 +411,12 @@ impl LiveDapSession {
             let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("initialized") {
                 saw_initialized_event = true;
+                // Also recorded on the session, because the event is emitted
+                // once and `launch_until_stopped_with` waits for it later. An
+                // adapter that volunteers it here — the in-tree fake does —
+                // would otherwise leave that wait looking for an event that has
+                // already gone past.
+                self.saw_initialized_event = true;
             }
             if let Some(result) = msg.response_for(seq) {
                 result.map_err(|message| LiveDapSessionError::Protocol {
@@ -502,8 +523,31 @@ impl LiveDapSession {
         {
             obj.insert("cwd".to_string(), json!(cwd));
         }
-        let _ = self.request("launch", arguments, timeout)?;
-        let _ = self.request("configurationDone", json!({}), timeout)?;
+        // `launch` is sent WITHOUT waiting for its response, and that ordering is
+        // the whole point.
+        //
+        // Per the DAP sequence, an adapter answers `launch` only once
+        // configuration is finished — it emits `initialized`, waits for the
+        // client's breakpoint requests and `configurationDone`, and responds to
+        // `launch` after that. lldb-dap does exactly this. Blocking on the
+        // launch response before sending `configurationDone` is therefore a
+        // deadlock: the adapter is waiting for us, we are waiting for it, and
+        // nothing is wrong with either party.
+        //
+        // It presented on macOS as `no DAP frame within 15s; adapter still
+        // running; adapter stderr: <empty>` — alive, silent, and blameless.
+        // The in-tree fake adapter answers `launch` immediately, so every test
+        // against the fake passed while the product hung against the real
+        // thing. That is the second time a fixture's convenience has taught
+        // this client a sequence no real adapter follows; see the `initialize`
+        // handshake in B9.
+        let launch_seq = self.send_request("launch", arguments)?;
+        // `initialized` is what says the adapter is ready for configuration.
+        // Waiting for it rather than sending `configurationDone` immediately
+        // keeps us correct against adapters that are slower to arrive there.
+        self.wait_for_initialized_event(timeout)?;
+        let configuration_seq = self.send_request("configurationDone", json!({}))?;
+        self.await_responses(&[launch_seq, configuration_seq], "launch", timeout)?;
         self.wait_stopped_and_inspect("entry", timeout)
     }
 
@@ -598,8 +642,15 @@ impl LiveDapSession {
         let mut reason = expected_reason_hint.to_string();
         let mut thread_id = 1u64;
         let mut saw_stopped = false;
+        // A stop that arrived while an earlier wait was running is still this
+        // wait's answer. Reading past it would block for an event the adapter
+        // has already sent and will not send again.
+        let mut carried = self.pending_stopped.take();
         while Instant::now() < deadline {
-            let msg = self.read_frame(deadline)?;
+            let msg = match carried.take() {
+                Some(msg) => msg,
+                None => self.read_frame(deadline)?,
+            };
             if msg.event_name() == Some("stopped") {
                 saw_stopped = true;
                 if let Some(body) = msg.event_body() {
@@ -698,6 +749,112 @@ impl LiveDapSession {
         })
     }
 
+    /// Write a request and return its sequence number without waiting.
+    ///
+    /// The waiting half is deliberately separate: a client that must send two
+    /// requests before either can be answered cannot use a call that blocks on
+    /// the first one.
+    fn send_request(
+        &mut self,
+        command: &str,
+        arguments: Value,
+    ) -> Result<u64, LiveDapSessionError> {
+        let seq = self.alloc_seq();
+        let req = DapMessage::request(seq, command, arguments);
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| LiveDapSessionError::Protocol {
+                message: "stdin already closed".to_string(),
+            })?;
+        DapFramer::write_to(stdin, &req)?;
+        Ok(seq)
+    }
+
+    /// Read frames until the adapter says it is ready for configuration.
+    ///
+    /// Returns immediately if the event has already been seen — adapters are
+    /// free to emit it before the launch request is even written, and treating
+    /// that as "not yet" would wait for an event that has already gone past.
+    fn wait_for_initialized_event(&mut self, timeout: Duration) -> Result<(), LiveDapSessionError> {
+        if self.saw_initialized_event {
+            return Ok(());
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let msg = self.read_frame(deadline)?;
+            if msg.event_name() == Some("initialized") {
+                self.saw_initialized_event = true;
+                return Ok(());
+            }
+            self.record_pending(&msg);
+        }
+        Err(LiveDapSessionError::Timeout {
+            message: format!(
+                "adapter did not report `initialized` within {timeout:?}{}{}",
+                self.exit_suffix(),
+                self.stderr_suffix()
+            ),
+        })
+    }
+
+    /// Read frames until every listed request has been answered.
+    ///
+    /// Responses may arrive in any order, and events (including `stopped`) may
+    /// be interleaved, so anything that is not one of the awaited responses is
+    /// kept rather than discarded.
+    fn await_responses(
+        &mut self,
+        seqs: &[u64],
+        label: &str,
+        timeout: Duration,
+    ) -> Result<(), LiveDapSessionError> {
+        let mut outstanding: Vec<u64> = seqs.to_vec();
+        let deadline = Instant::now() + timeout;
+        while !outstanding.is_empty() && Instant::now() < deadline {
+            let msg = self.read_frame(deadline)?;
+            let mut matched = None;
+            for (index, seq) in outstanding.iter().enumerate() {
+                if let Some(result) = msg.response_for(*seq) {
+                    result.map_err(|message| LiveDapSessionError::Protocol {
+                        message: format!("{label} error: {message}"),
+                    })?;
+                    matched = Some(index);
+                    break;
+                }
+            }
+            match matched {
+                Some(index) => {
+                    outstanding.remove(index);
+                }
+                None => self.record_pending(&msg),
+            }
+        }
+        if outstanding.is_empty() {
+            return Ok(());
+        }
+        Err(LiveDapSessionError::Timeout {
+            message: format!(
+                "{label} unanswered within {timeout:?}{}{}",
+                self.exit_suffix(),
+                self.stderr_suffix()
+            ),
+        })
+    }
+
+    /// Keep a frame that arrived while waiting for something else.
+    ///
+    /// A `stopped` event can land before the `launch` response, and dropping it
+    /// would make the subsequent wait hang for an event that already happened.
+    fn record_pending(&mut self, msg: &DapMessage) {
+        if msg.event_name() == Some("initialized") {
+            self.saw_initialized_event = true;
+        }
+        if msg.event_name() == Some("stopped") {
+            self.pending_stopped = Some(msg.clone());
+        }
+    }
+
     fn request(
         &mut self,
         command: &str,
@@ -717,6 +874,13 @@ impl LiveDapSession {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let msg = self.read_frame(deadline)?;
+            // Recorded before the match, because a frame this call does not
+            // want may be one a later call cannot do without. The fake adapter
+            // writes `initialized` immediately after the initialize response,
+            // so it arrives while some unrelated request is waiting; discarding
+            // it left `launch_until_stopped_with` waiting for an event that had
+            // already been read and thrown away.
+            self.record_pending(&msg);
             if let Some(result) = msg.response_for(seq) {
                 return result
                     .map(|body| {

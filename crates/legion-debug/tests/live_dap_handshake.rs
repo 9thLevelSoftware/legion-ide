@@ -113,3 +113,55 @@ fn a_silent_adapter_times_out_instead_of_hanging() {
          between frames; took {elapsed:?}"
     );
 }
+
+/// The same session against an adapter that answers `launch` the way real ones do.
+///
+/// Real adapters defer the `launch` response until configuration is finished:
+/// they emit `initialized`, wait for the client's breakpoints and
+/// `configurationDone`, and only then answer `launch`. lldb-dap does exactly
+/// this, and the client used to block on the launch response before sending
+/// `configurationDone` — a deadlock in which both sides were waiting for the
+/// other and neither was misbehaving.
+///
+/// It cost a fifteen-second timeout per CI run on macOS to observe, reported as
+/// `no DAP frame within 15s; adapter still running; adapter stderr: <empty>` —
+/// alive, silent and blameless. The in-tree fake answered `launch` immediately,
+/// so the whole suite stayed green against a sequence no real adapter follows.
+/// That is the second time this fake's convenience has hidden a real defect;
+/// the first was `initialized` at handshake time.
+///
+/// `LEGION_FAKE_DAP_DEFER_LAUNCH_RESPONSE=1` makes the fake behave correctly,
+/// so the deadlock is reproducible in-tree rather than only on a runner.
+#[test]
+fn launch_completes_against_an_adapter_that_defers_its_launch_response() {
+    // Safety: set before the adapter is spawned and read by the child at
+    // startup. Restored immediately after the spawn so no other test in this
+    // binary sees it.
+    unsafe {
+        std::env::set_var("LEGION_FAKE_DAP_DEFER_LAUNCH_RESPONSE", "1");
+    }
+    let session = LiveDapSession::spawn(adapter_path(), &[], "legion-fake");
+    unsafe {
+        std::env::remove_var("LEGION_FAKE_DAP_DEFER_LAUNCH_RESPONSE");
+    }
+    let mut session = session.expect("spawn fake adapter");
+
+    session
+        .initialize_handshake(Duration::from_secs(5))
+        .expect("initialize handshake");
+
+    // Three seconds is deliberately tight. The bug this pins does not produce a
+    // wrong answer, it produces no answer at all, so a generous timeout would
+    // turn a deadlock into a slow test rather than a failing one.
+    let outcome = session
+        .launch_until_stopped("/tmp/legion-fake-program", Duration::from_secs(3))
+        .expect("launch must complete against an adapter that defers its launch response");
+    assert_eq!(
+        outcome.reason, "entry",
+        "the stop that follows configurationDone is the launch's answer"
+    );
+
+    session
+        .disconnect_and_wait(Duration::from_secs(2))
+        .expect("disconnect");
+}

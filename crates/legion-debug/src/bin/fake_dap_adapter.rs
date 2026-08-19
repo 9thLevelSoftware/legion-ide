@@ -34,6 +34,7 @@ fn main() {
     let mut stdout = io::stdout().lock();
     let mut out_seq = 1u64;
     let mut stopped = false;
+    let mut deferred_launch: Option<(u64, String)> = None;
 
     while let Ok(msg) = read_message(&mut reader) {
         let msg_type = msg
@@ -103,16 +104,43 @@ fn main() {
                 );
             }
             "launch" | "attach" => {
-                write_response(
-                    &mut stdout,
-                    &mut out_seq,
-                    request_seq,
-                    &command,
-                    true,
-                    json!({}),
-                );
+                // Real adapters answer `launch` only after configuration is
+                // finished. lldb-dap does; this fake historically did not, and
+                // that convenience taught the client a sequence that deadlocked
+                // against every real adapter — the client blocked on the launch
+                // response before sending `configurationDone`, and the adapter
+                // was waiting for exactly that.
+                //
+                // `LEGION_FAKE_DAP_DEFER_LAUNCH_RESPONSE=1` makes this fake
+                // behave like the real thing, so the deadlock is reproducible
+                // in-tree instead of only on a CI runner fifteen seconds at a
+                // time.
+                if std::env::var("LEGION_FAKE_DAP_DEFER_LAUNCH_RESPONSE").as_deref() == Ok("1") {
+                    deferred_launch = Some((request_seq, command.clone()));
+                } else {
+                    write_response(
+                        &mut stdout,
+                        &mut out_seq,
+                        request_seq,
+                        &command,
+                        true,
+                        json!({}),
+                    );
+                }
             }
             "configurationDone" => {
+                // The deferred launch response is released here, which is the
+                // ordering the DAP sequence actually specifies.
+                if let Some((launch_seq, launch_command)) = deferred_launch.take() {
+                    write_response(
+                        &mut stdout,
+                        &mut out_seq,
+                        launch_seq,
+                        &launch_command,
+                        true,
+                        json!({}),
+                    );
+                }
                 write_response(
                     &mut stdout,
                     &mut out_seq,
