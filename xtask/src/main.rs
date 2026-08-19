@@ -457,6 +457,22 @@ const PARSER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
 const PARSER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["legion-index"];
 const FORBIDDEN_PARSER_DEPS: &[&str] = &["tree-sitter", "tree-sitter-rust"];
 
+/// External runtime engines that may only be in the workspace with a ratifying
+/// ADR and a matching `plans/dependency-policy.md` entry. `P7.F1.T1` carries the
+/// stop condition "Stop if the runtime is added to the workspace before the ADR
+/// is merged"; this list is that condition turned into a standing check, so the
+/// engine cannot outlive its authorization.
+const PLUGIN_RUNTIME_GATED_DEPS: &[&str] = &["wasmtime"];
+/// The only workspace packages permitted to declare a gated runtime engine.
+const PLUGIN_RUNTIME_ALLOWED_PACKAGES: &[&str] = &["legion-plugin"];
+/// The ADR that ratifies the gated runtime engine.
+const PLUGIN_RUNTIME_ADR_PATH: &str = "plans/adrs/ADR-0050-wasmtime-runtime-ratification.md";
+/// Clauses `plans/dependency-policy.md` must carry to admit the engine.
+const PLUGIN_RUNTIME_POLICY_MARKERS: &[&str] = &[
+    "WASM plugin runtime engine (`legion-plugin`): `wasmtime`",
+    "ADR-0050-wasmtime-runtime-ratification.md",
+];
+
 #[derive(Parser)]
 #[command(author, version, about = "Repository maintenance and validation tasks")]
 struct Args {
@@ -2865,6 +2881,12 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
         validate_renderer_dependency_gate(&policy_text, &package_dependency_names);
     let parser_violations =
         validate_parser_dependency_gate(&policy_text, &package_dependency_names);
+    let plugin_runtime_adr = fs::read_to_string(workspace_root.join(PLUGIN_RUNTIME_ADR_PATH)).ok();
+    let plugin_runtime_violations = validate_plugin_runtime_dependency_gate(
+        &policy_text,
+        &package_dependency_names,
+        plugin_runtime_adr.as_deref(),
+    );
 
     let protocol_violations = validate_protocol_contracts(
         &workspace_root.join(DEFAULT_PROTOCOL_PATH),
@@ -3036,6 +3058,7 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let mut all = violations;
     all.extend(renderer_violations);
     all.extend(parser_violations);
+    all.extend(plugin_runtime_violations);
     all.extend(protocol_violations);
     all.extend(phase3_violations);
     all.extend(phase4_violations);
@@ -3279,6 +3302,71 @@ fn validate_parser_dependency_gate(
     }
 
     issues.sort();
+    issues
+}
+
+/// Enforce that a gated runtime engine is admitted before it is depended on.
+///
+/// The check is silent while no workspace crate declares the engine — a policy
+/// entry for a dependency nobody has is not a violation. The moment some crate
+/// does declare it, three things must hold: the crate is on the allow-list, the
+/// policy text admits the engine, and the ratifying ADR exists and names it.
+/// Deleting the ADR or the policy clause while the dependency remains is
+/// therefore a `check-deps` failure, which is the ordering `P7.F1.T1` protects.
+fn validate_plugin_runtime_dependency_gate(
+    policy_text: &str,
+    package_dependencies: &HashMap<String, HashSet<String>>,
+    adr_text: Option<&str>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    let allowed_packages = PLUGIN_RUNTIME_ALLOWED_PACKAGES
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    for engine in PLUGIN_RUNTIME_GATED_DEPS {
+        let mut declaring_packages = package_dependencies
+            .iter()
+            .filter(|(_, dependencies)| dependencies.contains(*engine))
+            .map(|(package, _)| package.as_str())
+            .collect::<Vec<_>>();
+        declaring_packages.sort();
+
+        if declaring_packages.is_empty() {
+            continue;
+        }
+
+        for package in &declaring_packages {
+            if !allowed_packages.contains(package) {
+                issues.push(format!(
+                    "workspace package `{package}` must not declare runtime engine `{engine}`; only {} may",
+                    PLUGIN_RUNTIME_ALLOWED_PACKAGES.join(", ")
+                ));
+            }
+        }
+
+        for marker in PLUGIN_RUNTIME_POLICY_MARKERS {
+            if !policy_text.contains(marker) {
+                issues.push(format!(
+                    "`plans/dependency-policy.md` must admit runtime engine `{engine}` with clause `{marker}`"
+                ));
+            }
+        }
+
+        match adr_text {
+            None => issues.push(format!(
+                "runtime engine `{engine}` is in the workspace but `{PLUGIN_RUNTIME_ADR_PATH}` is missing; the ADR must be merged before the runtime"
+            )),
+            Some(text) if !text.contains(engine) => issues.push(format!(
+                "`{PLUGIN_RUNTIME_ADR_PATH}` must explain the choice of runtime engine `{engine}`"
+            )),
+            Some(_) => {}
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
     issues
 }
 
@@ -4736,6 +4824,87 @@ fn parser_dependency_gate_keeps_tree_sitter_in_index_crate() {
             .iter()
             .any(|issue| issue.contains("legion-desktop") && issue.contains("tree-sitter")),
         "desktop parser dependency violation should be reported, got: {issues:?}"
+    );
+}
+
+#[test]
+fn plugin_runtime_gate_requires_policy_and_adr_before_the_engine() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest should live under workspace root");
+    let policy = fs::read_to_string(workspace_root.join(DEFAULT_POLICY_PATH))
+        .expect("policy should be readable");
+    let adr = fs::read_to_string(workspace_root.join(PLUGIN_RUNTIME_ADR_PATH))
+        .expect("plugin runtime ADR should be readable");
+
+    let clean = HashMap::from([
+        (
+            "legion-plugin".to_string(),
+            HashSet::from(["legion-protocol".to_string(), "wasmtime".to_string()]),
+        ),
+        (
+            "legion-desktop".to_string(),
+            HashSet::from(["legion-app".to_string()]),
+        ),
+    ]);
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &clean, Some(&adr));
+    assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+
+    // A workspace with no wasmtime at all needs no ADR and no policy clause.
+    let no_engine = HashMap::from([(
+        "legion-desktop".to_string(),
+        HashSet::from(["legion-app".to_string()]),
+    )]);
+    let issues = validate_plugin_runtime_dependency_gate("", &no_engine, None);
+    assert!(
+        issues.is_empty(),
+        "gate must stay silent when the engine is absent, got: {issues:?}"
+    );
+
+    // The engine present without the ADR is the ordering `P7.F1.T1` forbids.
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &clean, None);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains(PLUGIN_RUNTIME_ADR_PATH)
+                && issue.contains("must be merged before the runtime")),
+        "missing ADR should be reported, got: {issues:?}"
+    );
+
+    // The engine present with an ADR that never mentions it is equally unratified.
+    let issues = validate_plugin_runtime_dependency_gate(
+        &policy,
+        &clean,
+        Some("# ADR about something else"),
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("must explain the choice of runtime engine `wasmtime`")),
+        "silent ADR should be reported, got: {issues:?}"
+    );
+
+    // The engine present while the policy stays silent about it.
+    let issues = validate_plugin_runtime_dependency_gate("", &clean, Some(&adr));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("must admit runtime engine `wasmtime`")),
+        "silent policy should be reported, got: {issues:?}"
+    );
+
+    // The engine spreading beyond `legion-plugin`.
+    let mut spread = clean;
+    spread
+        .get_mut("legion-desktop")
+        .expect("legion-desktop fixture must exist")
+        .insert("wasmtime".to_string());
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &spread, Some(&adr));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("legion-desktop") && issue.contains("wasmtime")),
+        "engine outside legion-plugin should be reported, got: {issues:?}"
     );
 }
 

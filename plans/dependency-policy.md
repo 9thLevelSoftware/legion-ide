@@ -214,6 +214,8 @@ Phase 4 activates `legion-agent`, `legion-tracker`, and `legion-memory` only for
 
 Phase 5 activates `legion-plugin` only as an isolated WASM plugin runtime boundary using protocol DTOs, manifest/capability validation, quota metadata, plugin-scoped storage, and metadata-only observability. It must not depend on app/UI/editor/project internals and must not gain direct filesystem, process, network, terminal, AI, tracker, memory, collaboration, remote, settings, or buffer mutation authority. Plugin mutation outputs must remain proposal-mediated.
 
+WASM plugin runtime engine (`legion-plugin`): `wasmtime`, ratified by `plans/adrs/ADR-0050-wasmtime-runtime-ratification.md`. No other workspace crate may declare `wasmtime`, and the dependency may not exist in the workspace without that ADR — `cargo run -p xtask -- check-deps` enforces both directions. `wasmtime-wasi` is not admitted by this policy: the plugin host grants no WASI imports, and adding a WASI host implementation requires a new ADR. The engine is admitted as a dependency only; reaching `WasmPluginHost` or the component-model host from a product composition root remains gated by section 4.
+
 - `legion-vscode-compat` may depend on:
   - `legion-protocol`
 
