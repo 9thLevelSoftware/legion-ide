@@ -100,12 +100,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install Linux GUI build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+        run: .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -172,19 +167,12 @@ jobs:
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
         shell: bash
+        # `libfuse2|libfuse2t64` is the script's alternative syntax: FUSE was
+        # renamed between releases, so it installs whichever the archive has.
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          fuse_package=libfuse2
-          if ! apt-cache show "$fuse_package" >/dev/null 2>&1; then
-            fuse_package=libfuse2t64
-          fi
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev \
+          .github/scripts/apt-install.sh --gui \
             libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
-            patchelf xvfb "$fuse_package"
+            patchelf xvfb 'libfuse2|libfuse2t64'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
