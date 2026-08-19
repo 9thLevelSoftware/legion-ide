@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "prompt_template_version": "legion-consented-decision-v1",
+  "corpus_id": "consented-accept-reject-v1",
+  "source_trace_count": 1200,
+  "candidate_count": 419,
+  "skipped_unconsented_count": 752,
+  "skipped_non_terminal_count": 29,
+  "accepted_count": 182,
+  "rejected_count": 237,
+  "corpus_fingerprint": "training-corpus-v1:4a94ac94e158dc9b",
+  "dataset_fingerprint": "training-adapter-v1:35266a657f6d67f4",
+  "train_count": 315,
+  "holdout_count": 104,
+  "holdout_every": 4,
+  "expand_seed": 20260819,
+  "expand_to": 1200,
+  "retained_consent_states": {
+    "Granted": 212,
+    "NotRequired": 207
+  },
+  "comparison": {
+    "baseline_id": "legion-bench-v0",
+    "baseline_suite_fingerprint": "bench-suite-v1:bd2aa3a7d84d9485",
+    "corpus_fingerprint": "training-corpus-v1:4a94ac94e158dc9b",
+    "dataset_fingerprint": "training-adapter-v1:35266a657f6d67f4",
+    "baseline_accepted_rate_bp": 6666,
+    "dataset_accepted_rate_bp": 4343,
+    "delta_bp": -2323,
+    "regressed": true,
+    "schema_version": 1
+  }
+}

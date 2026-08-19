@@ -2511,5 +2511,5 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- legion-bench --mode recorded", "ls plans/evidence/training-flywheel/"]
     acceptance = ["Adapter training is reproducible and the comparison vs Legion-Bench baseline is archived."]
     stop_condition = "Stop if a training run is not paired with a baseline comparison."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/training-flywheel/P9-F4-T3-consented-corpus-legion-bench-comparison.md"
