@@ -36,6 +36,36 @@ const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
 /// report.
 const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
+/// Environment switch that echoes every DAP frame to stderr.
+///
+/// Two rounds of diagnosis on this client were spent on hypotheses that fit the
+/// symptom and turned out to be wrong, because the symptom — "no frame within
+/// N seconds, adapter alive, stderr empty" — is the same for a deadlock, a
+/// silent refusal and an adapter that never got the message. What distinguishes
+/// them is the conversation, and nothing recorded it.
+///
+/// Off by default: this prints protocol traffic, which on a real session
+/// includes file paths from the debuggee.
+const FRAME_TRACE_ENV: &str = "LEGION_DAP_TRACE_FRAMES";
+
+/// Whether frame tracing is on for this process.
+fn frame_tracing_enabled() -> bool {
+    std::env::var(FRAME_TRACE_ENV).as_deref() == Ok("1")
+}
+
+/// Echo one frame, in the direction given.
+///
+/// Bounded per frame: a `variables` response can be enormous and the useful
+/// part of any frame is its head — the command, the sequence numbers, the
+/// event name.
+fn trace_frame(direction: &str, body: &str) {
+    if !frame_tracing_enabled() {
+        return;
+    }
+    let shown: String = body.chars().take(600).collect();
+    eprintln!("[dap-trace] {direction} {shown}");
+}
+
 /// Describe an adapter's liveness for an error message.
 ///
 /// A free function so the three outcomes can be tested without standing up a
@@ -761,6 +791,7 @@ impl LiveDapSession {
     ) -> Result<u64, LiveDapSessionError> {
         let seq = self.alloc_seq();
         let req = DapMessage::request(seq, command, arguments);
+        trace_frame("-->", &format!("seq={seq} command={command} {req:?}"));
         let stdin = self
             .stdin
             .as_mut()
@@ -946,7 +977,10 @@ impl LiveDapSession {
     fn read_frame(&mut self, deadline: Instant) -> Result<DapMessage, LiveDapSessionError> {
         let waited = deadline.saturating_duration_since(Instant::now());
         match self.frames.recv_timeout(waited) {
-            Ok(Ok(message)) => Ok(message),
+            Ok(Ok(message)) => {
+                trace_frame("<--", &format!("{message:?}"));
+                Ok(message)
+            }
             // A framing error is usually the adapter having exited, which is
             // the case where its stderr is most likely to say why. Reporting
             // the bare frame error is what left "unexpected EOF in headers"
@@ -957,13 +991,19 @@ impl LiveDapSession {
             // `waited`, not the remaining time: by the time this arm runs the
             // remainder is zero by definition, which is how the first version
             // of this message reported every timeout as "within 0ns".
-            Err(RecvTimeoutError::Timeout) => Err(LiveDapSessionError::Timeout {
-                message: format!(
-                    "no DAP frame within {waited:?}{}{}",
-                    self.exit_suffix(),
-                    self.stderr_suffix()
-                ),
-            }),
+            Err(RecvTimeoutError::Timeout) => {
+                trace_frame(
+                    "!!!",
+                    &format!("timed out after {waited:?} with nothing to read"),
+                );
+                Err(LiveDapSessionError::Timeout {
+                    message: format!(
+                        "no DAP frame within {waited:?}{}{}",
+                        self.exit_suffix(),
+                        self.stderr_suffix()
+                    ),
+                })
+            }
             Err(RecvTimeoutError::Disconnected) => Err(LiveDapSessionError::Protocol {
                 message: format!(
                     "adapter stopped producing frames{}{}",

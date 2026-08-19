@@ -420,9 +420,18 @@ jobs:
       # stopOnEntry, one step over, disconnect. This is a debug SESSION against
       # a real adapter. It is still not zero-config Rust debugging in the
       # product UI (roadmap 1.9) — no Legion UI is involved anywhere here.
+      # `LEGION_DAP_TRACE_FRAMES=1` echoes every DAP frame in both directions.
+      #
+      # macOS fails here with "no DAP frame within 15s; adapter still running;
+      # adapter stderr: <empty>", and two rounds of diagnosis produced
+      # hypotheses that fit that symptom and were wrong. The symptom is the same
+      # for a deadlock, a silent refusal, and an adapter that never received the
+      # message; what tells them apart is the conversation, and nothing was
+      # recording it. This records it.
       - name: Dogfood — launch and step a real Rust debugee
         env:
           LEGION_DAP_DOGFOOD: "1"
+          LEGION_DAP_TRACE_FRAMES: "1"
         run: cargo test -p legion-debug --test system_adapter_launch_step_dogfood -- --nocapture
 
       # Control: the policy gate must still refuse a non-allowlisted binary on a
