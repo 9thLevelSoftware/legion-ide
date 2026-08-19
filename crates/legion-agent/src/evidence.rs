@@ -74,6 +74,61 @@ pub fn external_log_evidence_record(
     })
 }
 
+/// One log an external agent emitted during a governed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalAgentLog {
+    /// Stable label identifying this log within the run.
+    pub label: String,
+    /// Raw log text. Never stored: only its length and digest reach evidence.
+    pub text: String,
+}
+
+/// Convert every external log into an evidence row — or none of them.
+///
+/// The acceptance criterion is a counting one ("every external log becomes an
+/// evidence row"), so the two ways of quietly producing fewer rows than logs are
+/// rejected rather than tolerated:
+///
+/// * An empty label yields an evidence id that identifies nothing, so the row
+///   cannot be traced back to the log it came from.
+/// * Two logs sharing a label yield the *same* evidence id
+///   (`legion-evidence:{worker}:external-log:{label}`). Two rows would be
+///   emitted, but any consumer keying by evidence id — which is what a stable
+///   id is for — sees one. That is a lost log wearing the shape of a kept one.
+///
+/// All-or-nothing: a partial result would be an evidence set that looks complete
+/// and is not.
+pub fn external_logs_to_evidence_records(
+    worker_id: &LegionWorkflowWorkerId,
+    logs: &[ExternalAgentLog],
+    generated_at: TimestampMillis,
+) -> Result<Vec<LegionEvidenceRecord>, AgentError> {
+    let mut seen: Vec<&str> = Vec::with_capacity(logs.len());
+    let mut records = Vec::with_capacity(logs.len());
+    for log in logs {
+        if log.label.trim().is_empty() {
+            return Err(AgentError::InvalidLegionWorkflow(
+                "external log requires a non-empty label to become a traceable evidence row"
+                    .to_string(),
+            ));
+        }
+        if seen.contains(&log.label.as_str()) {
+            return Err(AgentError::InvalidLegionWorkflow(format!(
+                "external log label {} is used more than once; evidence ids would collide",
+                log.label
+            )));
+        }
+        seen.push(log.label.as_str());
+        records.push(external_log_evidence_record(
+            worker_id,
+            &log.label,
+            &log.text,
+            generated_at,
+        )?);
+    }
+    Ok(records)
+}
+
 /// Convert a debug adapter audit record into metadata-only evidence for a worker.
 pub fn debug_adapter_audit_evidence_record(
     worker_id: &LegionWorkflowWorkerId,
@@ -157,6 +212,22 @@ impl LegionWorkflowCoordinator {
         Ok(LegionWorkflowCoordinatorOutput::EvidenceReady(Box::new(
             evidence,
         )))
+    }
+
+    /// Records one metadata-only evidence row for every external log, or none.
+    ///
+    /// The whole batch is converted before anything is pushed, so a rejected
+    /// batch leaves the ledger exactly as it found it rather than half-filled.
+    pub fn record_external_logs_evidence(
+        &mut self,
+        worker_id: &LegionWorkflowWorkerId,
+        logs: &[ExternalAgentLog],
+        generated_at: TimestampMillis,
+    ) -> Result<Vec<LegionEvidenceRecord>, AgentError> {
+        self.find_worker(worker_id)?;
+        let records = external_logs_to_evidence_records(worker_id, logs, generated_at)?;
+        self.evidence_records.extend(records.iter().cloned());
+        Ok(records)
     }
 }
 

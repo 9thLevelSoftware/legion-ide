@@ -38,7 +38,15 @@ pub use scope::{tool_call_feedback_for_scope_denial, validate_delegated_task_too
 pub use state::{AgentError, AgentRuntime, AgentRuntimeOutput};
 pub use worktree::{
     DelegatedTaskProposalGenerator, DelegatedTaskProposalInput, DelegatedTaskSandboxOrchestrator,
-    reap_orphaned_sandboxes, validate_containment,
+    reap_orphaned_sandboxes, resolve_lease_relative_read, validate_containment,
+    validate_not_main_workspace,
+};
+
+pub use evidence::{ExternalAgentLog, external_logs_to_evidence_records};
+pub use external::{
+    ExternalAgentAccessKind, ExternalAgentAccessRecord, ExternalAgentFilesystemAccess,
+    ExternalAgentScope, ExternalAgentSession, ExternalEditBatchInput, ExternalWorktreeEdit,
+    external_edit_content_fingerprint, external_edits_to_proposals,
 };
 
 use legion_protocol::{

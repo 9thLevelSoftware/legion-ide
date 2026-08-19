@@ -66,6 +66,37 @@ Delegated `TerminalCommand` tool calls in product composition go through `legion
 
 Compile-time profile summaries on the panel describe *typical* OS capability; **the live report is authoritative** for what the last spawn actually enforced. Interactive terminal PTY is **not** wrapped by batch `spawn_sandboxed` (trust/capability gates). **Live non-fake DAP adapters** use `spawn_sandboxed_stdio` (C4): Linux Landlock (+ optional bwrap net), macOS Seatbelt, Windows job-object kill-on-close when assignable — with honest caveats; fake adapter CI path stays unsandboxed.
 
+### External agents (M11, P6.F4.T2 / P6.F4.T3)
+
+An external agent runs inside a disposable leased worktree, never the main
+workspace, and reaches the filesystem only through
+`legion_agent::ExternalAgentSession`. Every read and every write is resolved
+against the lease root (not the host process's working directory), follows
+symlinks on both sides before the boundary comparison, and is refused and audited
+when it lands outside. The lease's `.git` link file is refused by name because it
+discloses the main repository's location.
+
+Read enforcement is the load-bearing caveat. As the matrix above states, **no
+backend confines reads at the OS level**;
+`legion_sandbox::os_read_enforcement(backend)` reports this per backend with a
+per-backend reason. Legion therefore distinguishes two external-agent transports:
+
+- **Host-brokered** — the agent holds no filesystem handle and every read is a
+  request Legion answers. The session is the real boundary, because there is no
+  other route to file content. This transport is admitted.
+- **Direct process** — the agent reads the filesystem with its own descriptors.
+  The session's decisions are advisory for such an agent, so it is admitted
+  **only** when the OS sandbox can be attested to confine its reads. Since no
+  backend can, Legion refuses to start a direct-process external agent on every
+  platform today.
+
+Nothing an external agent writes is a workspace mutation. Its edits leave the
+lease only as Legion proposals, and an edit reaches the main workspace only
+through `legion_app::proposal::admit_external_edits`, which requires each edit to
+be covered by exactly one proposal whose recorded content hash matches the bytes
+being admitted. Its logs leave only as metadata-only evidence rows — hash and
+byte count, never raw text.
+
 Legion should be treated as a trusted desktop application with sandboxed execution lanes, not as a formal operating-system boundary or a replacement for host hardening.
 
 ## Egress policy

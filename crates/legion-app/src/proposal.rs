@@ -334,6 +334,323 @@ impl ProposalHunkDispositionState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// External edit admission (P6.F4.T3)
+// ---------------------------------------------------------------------------
+
+/// A file an external agent changed, as it would land in the main workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalEditRecord {
+    /// Destination path, relative to the workspace root, forward-slash spelled.
+    pub workspace_relative_path: String,
+    /// Full post-edit content the external agent produced.
+    pub content: String,
+}
+
+/// Why an external edit batch was refused admission to the main workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalEditAdmissionError {
+    /// An edit arrived with no proposal covering it.
+    MissingProposal {
+        /// Path the unaccompanied edit targets.
+        path: String,
+    },
+    /// Two edits in one batch target the same path.
+    DuplicateEditPath {
+        /// The repeated path.
+        path: String,
+    },
+    /// Two proposals in one batch cover the same path.
+    DuplicateProposalForPath {
+        /// The repeated path.
+        path: String,
+    },
+    /// A proposal covers a path that no edit in the batch produced.
+    ProposalWithoutEdit {
+        /// Path the orphaned proposal covers.
+        path: String,
+        /// The orphaned proposal.
+        proposal_id: ProposalId,
+    },
+    /// The reviewed proposal's content hash does not match the edit's content.
+    ContentFingerprintMismatch {
+        /// Path whose content diverged from what was reviewed.
+        path: String,
+        /// The proposal that was reviewed.
+        proposal_id: ProposalId,
+    },
+    /// The proposal carries no content hash, so nothing binds it to the edit.
+    MissingContentFingerprint {
+        /// Path whose proposal carries no binding hash.
+        path: String,
+        /// The unbindable proposal.
+        proposal_id: ProposalId,
+    },
+    /// The proposal's affected-target coverage is partial or omits targets.
+    IncompleteCoverage {
+        /// The proposal with unusable coverage.
+        proposal_id: ProposalId,
+    },
+    /// The proposal payload cannot be bound to external edit content.
+    UnbindablePayload {
+        /// The proposal that cannot be bound.
+        proposal_id: ProposalId,
+    },
+    /// The edit path is not a safe workspace-relative path.
+    UnsafeEditPath {
+        /// The rejected path.
+        path: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for ExternalEditAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingProposal { path } => {
+                write!(f, "external edit to {path} has no proposal covering it")
+            }
+            Self::DuplicateEditPath { path } => {
+                write!(f, "external edit batch targets {path} more than once")
+            }
+            Self::DuplicateProposalForPath { path } => {
+                write!(f, "more than one proposal covers {path}")
+            }
+            Self::ProposalWithoutEdit { path, proposal_id } => write!(
+                f,
+                "proposal {proposal_id:?} covers {path}, which no external edit produced"
+            ),
+            Self::ContentFingerprintMismatch { path, proposal_id } => write!(
+                f,
+                "external edit to {path} does not match the content reviewed in proposal {proposal_id:?}"
+            ),
+            Self::MissingContentFingerprint { path, proposal_id } => write!(
+                f,
+                "proposal {proposal_id:?} for {path} carries no content hash to bind the edit to"
+            ),
+            Self::IncompleteCoverage { proposal_id } => write!(
+                f,
+                "proposal {proposal_id:?} does not declare complete affected-target coverage"
+            ),
+            Self::UnbindablePayload { proposal_id } => write!(
+                f,
+                "proposal {proposal_id:?} payload cannot be bound to external edit content"
+            ),
+            Self::UnsafeEditPath { path, reason } => {
+                write!(f, "external edit path {path} rejected: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExternalEditAdmissionError {}
+
+/// Proof that one external edit is covered by a reviewed Legion proposal.
+///
+/// The fields are private and [`admit_external_edits`] is the only constructor,
+/// so an apply path that requires an `ExternalEditAdmission` cannot be reached
+/// with an external edit that skipped the gate. That is the whole point of the
+/// type: the stop condition for this work is an external edit landing in the
+/// main workspace without a proposal, and the way to make that impossible is to
+/// make the unproposed case unrepresentable rather than merely checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalEditAdmission {
+    workspace_relative_path: String,
+    proposal_id: ProposalId,
+}
+
+impl ExternalEditAdmission {
+    /// Path this admission authorizes.
+    pub fn workspace_relative_path(&self) -> &str {
+        &self.workspace_relative_path
+    }
+
+    /// Proposal that authorized it.
+    pub fn proposal_id(&self) -> ProposalId {
+        self.proposal_id
+    }
+}
+
+/// Rejects any path that is not a safe workspace-relative destination.
+///
+/// Purely lexical on purpose: this runs in the composition layer, where the
+/// answer must not depend on what happens to exist on disk at the moment of the
+/// check. An absolute path, a drive prefix, a backslash separator, or any `..`
+/// component is refused outright rather than normalized into something that
+/// looks contained.
+fn validate_workspace_relative_path(path: &str) -> Result<(), ExternalEditAdmissionError> {
+    let unsafe_path = |reason: &str| ExternalEditAdmissionError::UnsafeEditPath {
+        path: path.to_string(),
+        reason: reason.to_string(),
+    };
+
+    if path.trim().is_empty() {
+        return Err(unsafe_path("path is empty"));
+    }
+    if path.contains('\\') {
+        return Err(unsafe_path(
+            "path must use forward slashes; a backslash is a separator on Windows",
+        ));
+    }
+    if path.starts_with('/') {
+        return Err(unsafe_path("path is absolute"));
+    }
+    if path.contains(':') {
+        return Err(unsafe_path("path carries a drive or scheme prefix"));
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(unsafe_path(
+            "path contains an empty, current-directory, or traversal segment",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the single path a workspace-edit proposal creates, with the content
+/// hash that binds it to the bytes a reviewer saw.
+fn external_proposal_binding(
+    proposal: &WorkspaceProposal,
+) -> Result<(String, legion_protocol::FileFingerprint), ExternalEditAdmissionError> {
+    let ProposalPayload::WorkspaceEdit(payload) = &proposal.payload else {
+        return Err(ExternalEditAdmissionError::UnbindablePayload {
+            proposal_id: proposal.proposal_id,
+        });
+    };
+    if payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
+        || payload.target_coverage.omitted_target_count != 0
+    {
+        return Err(ExternalEditAdmissionError::IncompleteCoverage {
+            proposal_id: proposal.proposal_id,
+        });
+    }
+    // A text-edit payload carries ranges, not whole-file content, so there is
+    // nothing here to hash the admitted bytes against. Refuse rather than admit
+    // an edit whose content nobody can tie back to the review.
+    if !payload.file_edits.is_empty() || payload.file_operations.len() != 1 {
+        return Err(ExternalEditAdmissionError::UnbindablePayload {
+            proposal_id: proposal.proposal_id,
+        });
+    }
+    match &payload.file_operations[0] {
+        legion_protocol::WorkspaceFileOperation::Create {
+            path,
+            initial_content_hash,
+        } => {
+            let path = path.0.clone();
+            let fingerprint = initial_content_hash.clone().ok_or(
+                ExternalEditAdmissionError::MissingContentFingerprint {
+                    path: path.clone(),
+                    proposal_id: proposal.proposal_id,
+                },
+            )?;
+            Ok((path, fingerprint))
+        }
+        _ => Err(ExternalEditAdmissionError::UnbindablePayload {
+            proposal_id: proposal.proposal_id,
+        }),
+    }
+}
+
+/// Admits an external edit batch into the main workspace, or refuses all of it.
+///
+/// Every edit must be covered by exactly one proposal, and every proposal must
+/// cover exactly one edit. Both directions matter:
+///
+/// * An edit with no proposal is the stop condition itself — an external change
+///   reaching the workspace unreviewed.
+/// * A proposal with no edit is the same failure wearing the opposite mask: a
+///   path a reviewer approved that no agent actually produced, which would let
+///   an extra file ride along inside an approved-looking batch.
+///
+/// Coverage alone is not enough, so the content hash the reviewer's proposal
+/// carries is re-derived from the bytes about to be admitted. Swapping content
+/// after review leaves the path and the proposal intact and changes only the
+/// bytes; without this comparison, that swap is invisible.
+///
+/// All-or-nothing: a partial admission would land some edits and drop others,
+/// leaving the workspace in a state no reviewer approved.
+pub fn admit_external_edits(
+    edits: &[ExternalEditRecord],
+    proposals: &[WorkspaceProposal],
+) -> Result<Vec<ExternalEditAdmission>, ExternalEditAdmissionError> {
+    let mut bindings: Vec<(String, legion_protocol::FileFingerprint, ProposalId)> =
+        Vec::with_capacity(proposals.len());
+    for proposal in proposals {
+        let (path, fingerprint) = external_proposal_binding(proposal)?;
+        if bindings.iter().any(|(seen, _, _)| seen == &path) {
+            return Err(ExternalEditAdmissionError::DuplicateProposalForPath { path });
+        }
+        bindings.push((path, fingerprint, proposal.proposal_id));
+    }
+
+    let mut admissions = Vec::with_capacity(edits.len());
+    let mut matched: Vec<&str> = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let path = edit.workspace_relative_path.as_str();
+        validate_workspace_relative_path(path)?;
+        if matched.contains(&path) {
+            return Err(ExternalEditAdmissionError::DuplicateEditPath {
+                path: path.to_string(),
+            });
+        }
+
+        let Some((_, fingerprint, proposal_id)) =
+            bindings.iter().find(|(covered, _, _)| covered == path)
+        else {
+            return Err(ExternalEditAdmissionError::MissingProposal {
+                path: path.to_string(),
+            });
+        };
+
+        if *fingerprint != legion_agent::external_edit_content_fingerprint(&edit.content) {
+            return Err(ExternalEditAdmissionError::ContentFingerprintMismatch {
+                path: path.to_string(),
+                proposal_id: *proposal_id,
+            });
+        }
+
+        matched.push(path);
+        admissions.push(ExternalEditAdmission {
+            workspace_relative_path: path.to_string(),
+            proposal_id: *proposal_id,
+        });
+    }
+
+    if let Some((path, _, proposal_id)) = bindings
+        .iter()
+        .find(|(path, _, _)| !matched.contains(&path.as_str()))
+    {
+        return Err(ExternalEditAdmissionError::ProposalWithoutEdit {
+            path: path.clone(),
+            proposal_id: *proposal_id,
+        });
+    }
+
+    Ok(admissions)
+}
+
+/// Selects the proposals an admitted external batch may apply.
+///
+/// Takes admissions rather than paths so the apply path cannot be handed a
+/// proposal list assembled by anything other than [`admit_external_edits`].
+pub fn admitted_external_proposals<'a>(
+    admissions: &[ExternalEditAdmission],
+    proposals: &'a [WorkspaceProposal],
+) -> Vec<&'a WorkspaceProposal> {
+    admissions
+        .iter()
+        .filter_map(|admission| {
+            proposals
+                .iter()
+                .find(|proposal| proposal.proposal_id == admission.proposal_id)
+        })
+        .collect()
+}
+
 fn proposal_risk_rule_ids_from_complete_coverage() -> Vec<String> {
     legion_protocol::risk::RiskRuleId::all()
         .iter()

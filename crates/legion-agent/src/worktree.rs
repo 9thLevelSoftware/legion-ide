@@ -743,6 +743,39 @@ pub fn validate_containment(base: &Path, path: &Path) -> Result<PathBuf, AgentEr
     Ok(relative.to_path_buf())
 }
 
+/// Resolve a path an external agent named against the lease it was assigned,
+/// returning the normalized lease-relative path.
+///
+/// This exists because [`validate_containment`] resolves a *relative* request
+/// against `std::env::current_dir()` — the host process's working directory.
+/// That base is correct for a delegated write target the host itself chose, and
+/// wrong for a path an external agent typed: the agent names paths relative to
+/// its own lease, and the host process is free to be running anywhere else
+/// entirely. Handing an agent-supplied relative path straight to
+/// `validate_containment` therefore measures traversal against the wrong
+/// boundary — `src/lib.rs` is rejected as an escape whenever the host's CWD is
+/// not the lease, and the `..` in `../../etc/passwd` is counted against the
+/// host's CWD rather than against the lease the agent is actually trying to
+/// climb out of.
+///
+/// Relative requests are joined onto `lease_root` first, so containment is
+/// always evaluated against the boundary the request is aimed at, independent of
+/// ambient host state. Absolute requests are passed through unchanged and must
+/// still land inside the lease. Symlink discipline, `..` collapsing, and the
+/// dangling-component failure mode are all inherited from
+/// [`validate_containment`].
+pub fn resolve_lease_relative_read(
+    lease_root: &Path,
+    requested: &Path,
+) -> Result<PathBuf, AgentError> {
+    let anchored = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        lease_root.join(requested)
+    };
+    validate_containment(lease_root, &anchored)
+}
+
 /// Proposal generator inside `legion-agent`.
 #[derive(Debug, Clone)]
 pub struct DelegatedTaskProposalGenerator {
