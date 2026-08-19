@@ -10,8 +10,9 @@ pub mod host;
 /// Itemised install-time permission review over a plugin manifest (P7.F2.T2).
 pub mod manifest;
 pub mod registry;
+pub mod wit_bindings;
 
-pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
+pub use host::{HOST_LOG_CAPABILITY, PluginAuditEntry, PluginAuditKind, WasmPluginHost};
 pub use manifest::{
     ExtensionInstallApproval, ExtensionPermissionDecision, ExtensionPermissionReview,
     ExtensionPermissionReviewError, ExtensionPermissionRisk, ExtensionPermissionRow,

@@ -55,4 +55,21 @@ Items 1 and 2 are W4.1. Item 3 is this note.
 
 ## Status
 
-Open. `P7.F1.T1` remains `todo`; every other P7 card stays behind it.
+**Cleared 2026-08-19.** All three items are done:
+
+1. `plans/adrs/ADR-0050-wasmtime-runtime-ratification.md` supersedes ADR-0019's
+   "future engine" clause, performs the supply-chain review, and ratifies
+   wasmtime with four conditions on the grant.
+2. `plans/dependency-policy.md` now carries a plugin-runtime engine entry in the
+   `legion-plugin` section.
+3. This file records that the dependency preceded the decision. The ordering
+   finding is restated precisely in ADR-0050 §Context: ADR-0019 *did* merge five
+   weeks before `236a492` added wasmtime, so the stop condition's literal words
+   were met — but ADR-0019 withheld authorization, so the runtime landed against
+   an ADR that said "not yet". The intent was violated; the letter was not.
+
+The paperwork gap is additionally closed against recurrence:
+`validate_plugin_runtime_dependency_gate` in `xtask` fails
+`cargo run -p xtask -- check-deps` if wasmtime is in the workspace while the
+ADR or the policy clause is absent, or if any crate other than `legion-plugin`
+declares it. See `plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md`.

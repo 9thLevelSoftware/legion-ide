@@ -1923,7 +1923,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Dependency policy admits the chosen runtime and the ADR explains the choice."]
     stop_condition = "Stop if the runtime is added to the workspace before the ADR is merged."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T2"
@@ -1935,7 +1936,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo build -p legion-plugin"]
     acceptance = ["WIT files compile and generate host bindings."]
     stop_condition = "Stop if the WIT ABI drifts from a real plugin fixture's expected shape."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T3"
@@ -1947,8 +1949,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test quotas", "cargo test -p legion-security"]
     acceptance = ["A fixture .wasm plugin loads, runs, and cannot escape permissions."]
     stop_condition = "Stop if a quota is allowed to be silently disabled per-plugin."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/quotas.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1-T3-T4-plugin-quota-and-hostile-containment.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T4"
@@ -1960,8 +1962,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test hostile"]
     acceptance = ["Each hostile fixture is contained and the audit row records the attempt."]
     stop_condition = "Stop if a hostile fixture is allowlisted instead of denied."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/hostile.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1-T3-T4-plugin-quota-and-hostile-containment.md"
 
   [[epics.features]]
   id = "P7.F2"
