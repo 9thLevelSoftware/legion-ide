@@ -291,6 +291,62 @@ jobs:
       # `continue-on-error` and `|| true`: this step must never decide the
       # job's colour. A diagnostic that can fail the run it is diagnosing is a
       # second problem, not a tool.
+      # Windows only, for a specific reason. `lldb-dap.exe` on the runner image
+      # reports `error while loading shared libraries` and exits 127, so it
+      # never reaches `main`. The loader prints `?` for the name because MSYS2
+      # is relaying a Windows DLL failure through a POSIX-shaped message, which
+      # means the shell cannot say which library is missing.
+      #
+      # `dumpbin /dependents` can. LLDB embeds Python, and a distribution that
+      # ships lldb-dap without its matching Python runtime is the most common
+      # way this fails — but that is a hypothesis, and this step exists to
+      # replace it with a name.
+      - name: Name the missing Windows DLL (report-only)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $adapter = Join-Path $env:ProgramFiles 'LLVM\bin\lldb-dap.exe'
+          if (-not (Test-Path $adapter)) { Write-Host "no adapter at $adapter"; exit 0 }
+          Write-Host "adapter: $adapter"
+
+          $dumpbin = Get-ChildItem -Path (Join-Path $env:ProgramFiles 'Microsoft Visual Studio') `
+            -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) {
+            $dumpbin = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio') `
+              -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $dumpbin) { Write-Host 'dumpbin not found on this image'; exit 0 }
+
+          Write-Host '--- dependents ---'
+          $lines = & $dumpbin.FullName /dependents $adapter 2>&1
+          $lines | Select-Object -First 40 | ForEach-Object { Write-Host $_ }
+
+          # A dependent that resolves is not the problem; the one that does not
+          # is the answer. Windows searches the exe's own directory first, then
+          # the system directories, then PATH.
+          Write-Host '--- resolvability ---'
+          $adapterDir = Split-Path $adapter
+          $searchPath = @($adapterDir, "$env:SystemRoot\System32", $env:SystemRoot) + ($env:PATH -split ';')
+          $deps = $lines | Select-String -Pattern '^\s+(\S+\.[Dd][Ll][Ll])\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          foreach ($dep in $deps) {
+            $hit = $null
+            foreach ($dir in $searchPath) {
+              if ($dir -and (Test-Path (Join-Path $dir $dep) -ErrorAction SilentlyContinue)) {
+                $hit = Join-Path $dir $dep
+                break
+              }
+            }
+            if ($hit) { Write-Host "  OK      $dep" } else { Write-Host "  MISSING $dep" }
+          }
+
+          Write-Host '--- python runtimes visible ---'
+          Get-ChildItem -Path $adapterDir -Filter 'python*.dll' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  beside adapter: $($_.Name)" }
+          Get-Command python -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  python on PATH: $($_.Source)" }
+
       - name: Interrogate the resolved adapter (report-only)
         continue-on-error: true
         shell: bash
