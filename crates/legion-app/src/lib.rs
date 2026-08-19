@@ -14831,6 +14831,10 @@ pub struct AppComposition {
     buffer_search_state: legion_editor::BufferSearchState,
     /// Vim modal editing state, carried across keystrokes.
     vim: crate::vim_session::VimSession,
+    /// Verified org policy bundle whose mode ceiling gates mode switches (P9.F2.T3).
+    /// `None` means no org bundle is installed; the type has no unverified
+    /// constructor, so a bundle here has had its signature checked.
+    org_policy_bundle: Option<legion_security::VerifiedPolicyBundle>,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -15140,6 +15144,7 @@ impl AppComposition {
             checkpoint_store: CheckpointStore::new(),
             buffer_search_state: legion_editor::BufferSearchState::default(),
             vim: crate::vim_session::VimSession::default(),
+            org_policy_bundle: None,
         }
     }
 
@@ -15652,8 +15657,43 @@ impl AppComposition {
         }
     }
 
+    /// Install a verified org policy bundle whose mode ceiling gates mode switches.
+    ///
+    /// Takes a [`VerifiedPolicyBundle`](legion_security::VerifiedPolicyBundle),
+    /// which has no constructor other than
+    /// [`SignedPolicyBundle::verify`](legion_security::SignedPolicyBundle::verify),
+    /// so an unsigned or tampered bundle cannot be installed here.
+    pub fn set_org_policy_bundle(&mut self, bundle: legion_security::VerifiedPolicyBundle) {
+        self.org_policy_bundle = Some(bundle);
+        // Re-assert the ceiling against the mode already in effect: installing a
+        // bundle that forbids the current mode must lower it, not merely block
+        // future raises.
+        let current = self.product_mode;
+        if self.org_policy_mode_ceiling_denies(current) {
+            self.product_mode = AppProductMode::Manual;
+            self.phase4_projection_state.assisted_ai_projection = None;
+        }
+    }
+
+    /// Whether the installed org policy bundle's mode ceiling refuses `mode`.
+    ///
+    /// `false` when no bundle is installed — an absent bundle imposes no ceiling,
+    /// which is different from an unverifiable one, which is never installed.
+    pub fn org_policy_mode_ceiling_denies(&self, mode: AppProductMode) -> bool {
+        self.org_policy_bundle
+            .as_ref()
+            .is_some_and(|bundle| !bundle.bundle().allows_mode(mode.to_product_mode()))
+    }
+
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        // Org policy bundle mode ceiling (P9.F2.T3) is checked before any other
+        // lane. A ceiling that only applied after the worker/stream checks below
+        // would let an above-ceiling mode take effect whenever those lanes
+        // happened to be idle.
+        if self.org_policy_mode_ceiling_denies(mode) {
+            return;
+        }
         self.reconcile_completed_workflow_drain();
         if let Some(worker) = &self.active_worker
             && !Self::mode_allows_active_worker(mode, &worker.identity)

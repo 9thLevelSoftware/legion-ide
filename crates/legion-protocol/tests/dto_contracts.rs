@@ -4480,6 +4480,16 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
             cloud_lane_forbidden_upload_count: 0,
             cloud_lane_task_packet_validated: true,
             cloud_lane_hard_cap_enforced: true,
+            // Signed org policy bundle operands (P9.F2.T3). Present in the
+            // golden so the wire shape of every surface's operand is pinned.
+            ai_provider_id: Some("ollama".to_string()),
+            mcp_server_id: Some("legion-internal".to_string()),
+            mcp_tool_name: Some("search_docs".to_string()),
+            budget_request_cost_cents: Some(12),
+            budget_request_tokens: Some(2048),
+            budget_session_spent_cents: Some(120),
+            retention_requested_days: Some(7),
+            export_destination: Some("org-siem".to_string()),
         },
         correlation_id: CorrelationId(91),
     };
@@ -4520,7 +4530,15 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 "cloud_lane_scope_visible_to_user": true,
                 "cloud_lane_forbidden_upload_count": 0,
                 "cloud_lane_task_packet_validated": true,
-                "cloud_lane_hard_cap_enforced": true
+                "cloud_lane_hard_cap_enforced": true,
+                "ai_provider_id": "ollama",
+                "mcp_server_id": "legion-internal",
+                "mcp_tool_name": "search_docs",
+                "budget_request_cost_cents": 12,
+                "budget_request_tokens": 2048,
+                "budget_session_spent_cents": 120,
+                "retention_requested_days": 7,
+                "export_destination": "org-siem"
             },
             "correlation_id": 91
         }

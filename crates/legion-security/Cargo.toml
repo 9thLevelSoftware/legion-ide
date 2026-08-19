@@ -10,10 +10,15 @@ legion-protocol = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# P9.F2.T3: signed org policy bundles reuse the ADR-0042 Ed25519 scheme rather
+# than inventing a second one. The primitive lives here and `xtask::signing`
+# re-exports it, so release manifests and policy bundles verify identically.
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-toml = { workspace = true }
 uuid = { workspace = true }
 
 [features]

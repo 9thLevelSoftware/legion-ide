@@ -69,10 +69,15 @@ pub mod synthetic_credentials {
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{
-    BatchRuntimeApplyPolicy, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy,
-    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, ProposalApplyGate,
-    ProposalAutoApprovalPolicy, approval_level_audit_metadata, classify_git_remote_url,
-    decide_git_remote_operation, derive_approval_level,
+    BatchRuntimeApplyPolicy, BudgetCapPolicy, BundleDecision, BundleEnforcementPolicy,
+    BundleRequest, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy, Ed25519VerifyFailure,
+    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, McpToolAllowlistPolicy,
+    POLICY_BUNDLE_SCHEMA_VERSION, POLICY_BUNDLE_SIGNATURE_ALGORITHM, PolicyBundleError,
+    PolicyKeyring, PolicySigningKey, PolicySurface, ProposalApplyGate, ProposalAutoApprovalPolicy,
+    ProviderAllowlistPolicy, RetentionExportPolicy, SignedPolicyBundle, VerifiedPolicyBundle,
+    approval_level_audit_metadata, classify_git_remote_url, decide_git_remote_operation,
+    derive_approval_level, policy_bundle_verifying_key_b64, sign_policy_bundle,
+    verify_ed25519_signature,
 };
 pub mod risk;
 
@@ -1019,6 +1024,18 @@ pub struct SecurityPolicy {
     /// Proposal auto-approval envelope policy.
     #[serde(default)]
     pub proposal_auto_approval_policy: ProposalAutoApprovalPolicy,
+    /// Signed org policy bundle enforcement: provider allowlist, MCP/tool
+    /// allowlist, budget caps, and retention/export rules (P9.F2.T3).
+    ///
+    /// These live inside `SecurityPolicy` rather than only on the bundle so that
+    /// every holder of a [`DenyByDefaultBroker`] enforces them. Under P5.F1.T2
+    /// every tool call is routed through the broker, and crates that are
+    /// forbidden from depending on `legion-security` (notably `legion-agent`)
+    /// reach policy only through the injected
+    /// [`CapabilityBrokerPort`](legion_protocol::CapabilityBrokerPort) trait
+    /// object — putting the rules anywhere else would leave those callers out.
+    #[serde(default)]
+    pub bundle_enforcement: BundleEnforcementPolicy,
 }
 
 /// Signed, versioned org policy bundle for admin distribution.
@@ -2021,6 +2038,17 @@ impl DenyByDefaultBroker {
             return SecurityDecision::deny(format!(
                 "capability {capability} denied: principal is required"
             ));
+        }
+
+        // Signed org policy bundle rules (P9.F2.T3) are evaluated before any
+        // per-family dispatch below, so they apply to every capability rather
+        // than only to the families whose `if` arm happens to consult them. A
+        // capability family added later inherits the bundle for free; one that
+        // returns early further down cannot escape it.
+        if let Some((surface, reason)) =
+            self.policy.bundle_enforcement.refusal(&capability, context)
+        {
+            return SecurityDecision::deny(format!("[{}] {reason}", surface.stable_id()));
         }
 
         if capability.starts_with("ai.")

@@ -4249,6 +4249,8 @@ dependencies = [
 name = "legion-security"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "ed25519-dalek",
  "legion-protocol",
  "regex",
  "serde",

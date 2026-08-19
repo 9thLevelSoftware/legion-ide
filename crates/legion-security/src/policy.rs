@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Envelope policy controlling when a proposal may be auto-approved without a human in the loop.
 ///
@@ -661,6 +663,996 @@ pub fn approval_level_audit_metadata(
     map
 }
 
+// ---------------------------------------------------------------------------
+// Signed org policy bundles (P9.F2.T3)
+// ---------------------------------------------------------------------------
+
+/// Signature algorithm accepted for policy bundles.
+///
+/// This is the ADR-0042 release-manifest algorithm, deliberately reused so the
+/// product has exactly one signing scheme. Any other value is rejected rather
+/// than treated as "no signature required".
+pub const POLICY_BUNDLE_SIGNATURE_ALGORITHM: &str = "ed25519";
+
+/// Bundle schema version this build understands.
+pub const POLICY_BUNDLE_SCHEMA_VERSION: u16 = 1;
+
+/// Why an Ed25519 verification attempt failed.
+///
+/// Split into two variants so callers can distinguish a malformed trust anchor
+/// (an operator configuration error) from a payload that does not match its
+/// signature (tampering). Both are failures — neither is ever a pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ed25519VerifyFailure {
+    /// The verifying key was not a valid 32-byte Ed25519 public key.
+    InvalidKey(String),
+    /// The signature was malformed, or valid-shaped but wrong for this payload.
+    VerifyFailed(String),
+}
+
+impl std::fmt::Display for Ed25519VerifyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
+            Self::VerifyFailed(msg) => write!(f, "verify failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for Ed25519VerifyFailure {}
+
+/// Verify a detached Ed25519 signature over `data`.
+///
+/// This is the single Ed25519 verification primitive in the workspace: the
+/// release-manifest path (`xtask::signing::verify_ed25519_signature`) delegates
+/// here, so a policy bundle and a release manifest are checked by the same code
+/// with the same `verify_strict` semantics.
+///
+/// `verify_strict` (rather than `verify`) is deliberate: it rejects signatures
+/// made under small-order public keys, which would otherwise verify against
+/// more than one message.
+pub fn verify_ed25519_signature(
+    data: &[u8],
+    signature: &[u8],
+    verifying_key: &[u8],
+) -> Result<(), Ed25519VerifyFailure> {
+    let key_bytes: &[u8; 32] = verifying_key.try_into().map_err(|_| {
+        Ed25519VerifyFailure::InvalidKey(format!(
+            "verifying key must be 32 bytes, got {}",
+            verifying_key.len()
+        ))
+    })?;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
+        .map_err(|err| Ed25519VerifyFailure::InvalidKey(err.to_string()))?;
+
+    let sig_bytes: &[u8; 64] = signature.try_into().map_err(|_| {
+        Ed25519VerifyFailure::VerifyFailed(format!(
+            "signature must be 64 bytes, got {}",
+            signature.len()
+        ))
+    })?;
+    let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+
+    vk.verify_strict(data, &sig)
+        .map_err(|err| Ed25519VerifyFailure::VerifyFailed(err.to_string()))
+}
+
+/// One trust anchor an org policy bundle may be signed under.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicySigningKey {
+    /// Stable identifier the bundle names in its `key_id` field.
+    pub key_id: String,
+    /// Base64 (standard alphabet) encoding of the 32-byte Ed25519 public key.
+    ///
+    /// Public key material only. A private seed must never be written here; the
+    /// bundle format has no field that would carry one.
+    pub verifying_key_b64: String,
+}
+
+/// The set of keys whose signatures this installation will honour.
+///
+/// An empty keyring trusts nothing. That is the fail-closed default and is what
+/// makes "no keys configured" mean "no bundle is honoured" rather than "every
+/// bundle is honoured".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyKeyring {
+    /// Trusted policy-signing keys.
+    pub keys: Vec<PolicySigningKey>,
+}
+
+impl PolicyKeyring {
+    /// Build a keyring from a list of trust anchors.
+    pub fn new(keys: Vec<PolicySigningKey>) -> Self {
+        Self { keys }
+    }
+
+    /// A keyring that trusts nothing.
+    pub fn empty() -> Self {
+        Self { keys: Vec::new() }
+    }
+
+    /// Whether the keyring holds no trust anchors.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Look up a trust anchor by its exact (case-sensitive) key id.
+    fn find(&self, key_id: &str) -> Option<&PolicySigningKey> {
+        self.keys.iter().find(|key| key.key_id == key_id)
+    }
+}
+
+/// Why a signed policy bundle was refused.
+///
+/// Every variant is a refusal. There is no "warn and continue" outcome: an org
+/// policy bundle that cannot be proven authentic is not applied at all.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PolicyBundleError {
+    /// The bundle declared an algorithm other than [`POLICY_BUNDLE_SIGNATURE_ALGORITHM`].
+    #[error("unsupported policy bundle signature algorithm `{0}`")]
+    UnsupportedAlgorithm(String),
+    /// No trust anchors are configured, so nothing can be honoured.
+    #[error("policy signing keyring is empty; no bundle can be honoured")]
+    EmptyKeyring,
+    /// The bundle named a key id that is not a configured trust anchor.
+    #[error("policy bundle signed by unknown key id `{0}`")]
+    UnknownKeyId(String),
+    /// The configured trust anchor could not be decoded.
+    #[error("policy signing key `{key_id}` is malformed: {reason}")]
+    MalformedKey {
+        /// Key id whose material failed to decode.
+        key_id: String,
+        /// Decoder or key-validation message.
+        reason: String,
+    },
+    /// The detached signature could not be decoded.
+    #[error("policy bundle signature is malformed: {0}")]
+    MalformedSignature(String),
+    /// The signature did not match the payload under the named key.
+    #[error("policy bundle signature does not match payload: {0}")]
+    SignatureMismatch(String),
+    /// The signed payload was not a parseable bundle.
+    #[error("policy bundle payload is not a valid bundle: {0}")]
+    MalformedPayload(String),
+    /// The payload parsed but declared a schema this build cannot enforce.
+    #[error(
+        "policy bundle schema version {found} is not supported (this build enforces {supported})"
+    )]
+    UnsupportedSchemaVersion {
+        /// Version the bundle declared.
+        found: u16,
+        /// Version this build enforces.
+        supported: u16,
+    },
+}
+
+/// A policy bundle as distributed: an opaque payload plus its detached signature.
+///
+/// The payload is carried as the *exact* TOML text that was signed. Re-serializing
+/// a parsed bundle to check the signature would let a formatting difference break
+/// verification, or worse, let a semantically different re-serialization verify.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedPolicyBundle {
+    /// Signature algorithm; must be [`POLICY_BUNDLE_SIGNATURE_ALGORITHM`].
+    pub algorithm: String,
+    /// Trust anchor id the signature was produced under.
+    pub key_id: String,
+    /// Base64 (standard alphabet) encoding of the 64-byte detached signature.
+    pub signature_b64: String,
+    /// The exact bundle TOML text the signature covers.
+    pub payload_toml: String,
+}
+
+impl SignedPolicyBundle {
+    /// Verify the bundle against a keyring and return the enforceable form.
+    ///
+    /// Fail-closed at every step. In particular an empty keyring, an unknown key
+    /// id, a non-Ed25519 algorithm, an undecodable signature, and a payload that
+    /// does not parse are all refusals — none of them yields a bundle.
+    ///
+    /// [`VerifiedPolicyBundle`] has no other constructor, so an unverified bundle
+    /// cannot be handed to the enforcement path by mistake: it is not the right
+    /// type.
+    pub fn verify(
+        &self,
+        keyring: &PolicyKeyring,
+    ) -> Result<VerifiedPolicyBundle, PolicyBundleError> {
+        if self.algorithm != POLICY_BUNDLE_SIGNATURE_ALGORITHM {
+            return Err(PolicyBundleError::UnsupportedAlgorithm(
+                self.algorithm.clone(),
+            ));
+        }
+        if keyring.is_empty() {
+            return Err(PolicyBundleError::EmptyKeyring);
+        }
+        let anchor = keyring
+            .find(&self.key_id)
+            .ok_or_else(|| PolicyBundleError::UnknownKeyId(self.key_id.clone()))?;
+
+        let engine = base64::engine::general_purpose::STANDARD;
+        let key_bytes = engine
+            .decode(anchor.verifying_key_b64.trim())
+            .map_err(|err| PolicyBundleError::MalformedKey {
+                key_id: anchor.key_id.clone(),
+                reason: err.to_string(),
+            })?;
+        let signature_bytes = engine
+            .decode(self.signature_b64.trim())
+            .map_err(|err| PolicyBundleError::MalformedSignature(err.to_string()))?;
+
+        verify_ed25519_signature(self.payload_toml.as_bytes(), &signature_bytes, &key_bytes)
+            .map_err(|err| match err {
+                Ed25519VerifyFailure::InvalidKey(reason) => PolicyBundleError::MalformedKey {
+                    key_id: anchor.key_id.clone(),
+                    reason,
+                },
+                Ed25519VerifyFailure::VerifyFailed(reason) => {
+                    PolicyBundleError::SignatureMismatch(reason)
+                }
+            })?;
+
+        let bundle: super::OrgPolicyBundle = toml::from_str(&self.payload_toml)
+            .map_err(|err| PolicyBundleError::MalformedPayload(err.to_string()))?;
+
+        if bundle.schema_version != POLICY_BUNDLE_SCHEMA_VERSION {
+            return Err(PolicyBundleError::UnsupportedSchemaVersion {
+                found: bundle.schema_version,
+                supported: POLICY_BUNDLE_SCHEMA_VERSION,
+            });
+        }
+
+        Ok(VerifiedPolicyBundle {
+            bundle,
+            signing_key_id: anchor.key_id.clone(),
+        })
+    }
+}
+
+/// Sign a bundle payload with a raw 32-byte Ed25519 seed.
+///
+/// The seed is borrowed, used, and never copied into the returned value; the
+/// output carries only the public signature. Callers are responsible for
+/// zeroizing their own seed buffer, exactly as `xtask::signing` does.
+pub fn sign_policy_bundle(
+    payload_toml: impl Into<String>,
+    key_id: impl Into<String>,
+    seed: &[u8; 32],
+) -> SignedPolicyBundle {
+    use ed25519_dalek::Signer as _;
+
+    let payload_toml = payload_toml.into();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed);
+    let signature: ed25519_dalek::Signature = signing_key.sign(payload_toml.as_bytes());
+    SignedPolicyBundle {
+        algorithm: POLICY_BUNDLE_SIGNATURE_ALGORITHM.to_string(),
+        key_id: key_id.into(),
+        signature_b64: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        payload_toml,
+    }
+}
+
+/// Derive the base64 trust anchor for a signing seed.
+///
+/// Returns public key material only.
+pub fn policy_bundle_verifying_key_b64(seed: &[u8; 32]) -> String {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed);
+    base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Per-surface bundle policies
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive membership test that treats an empty list as "deny all".
+///
+/// The vacuous-truth guard matters: `iter().any(..)` over an empty list is
+/// `false`, which is already deny — but an author reading `allowlist.is_empty()`
+/// as "unconfigured, therefore unrestricted" is the classic way this goes wrong,
+/// so the intent is written down once here and reused by every surface.
+fn allowlist_contains(allowlist: &[String], candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    allowlist
+        .iter()
+        .any(|allowed| allowed.trim().eq_ignore_ascii_case(candidate))
+}
+
+/// Whether `capability` starts with any of the configured prefixes.
+fn matches_any_prefix(prefixes: &[String], capability: &str) -> bool {
+    prefixes
+        .iter()
+        .any(|prefix| !prefix.is_empty() && capability.starts_with(prefix.as_str()))
+}
+
+/// Provider allowlist: which AI providers this org permits by name.
+///
+/// The pre-existing [`AiProviderPolicy`](super::AiProviderPolicy) only separates
+/// local from remote by network target. That cannot express "Anthropic yes,
+/// everything else no", which is the actual enterprise requirement, so provider
+/// *identity* is allowlisted here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderAllowlistPolicy {
+    /// Whether the allowlist is enforced.
+    pub enforced: bool,
+    /// Provider identifiers that may be invoked. Empty denies every provider.
+    pub allowed_provider_ids: Vec<String>,
+    /// Capability prefixes that must name a provider.
+    pub provider_capability_prefixes: Vec<String>,
+}
+
+impl ProviderAllowlistPolicy {
+    /// Prefixes used when a bundle does not name its own.
+    pub fn default_capability_prefixes() -> Vec<String> {
+        vec!["ai.provider.".to_string()]
+    }
+
+    fn prefixes(&self) -> Vec<String> {
+        if self.provider_capability_prefixes.is_empty() {
+            Self::default_capability_prefixes()
+        } else {
+            self.provider_capability_prefixes.clone()
+        }
+    }
+
+    /// Evaluate a request, returning `Some(deny_reason)` when it is refused.
+    pub fn refusal(&self, capability: &str, provider_id: Option<&str>) -> Option<String> {
+        if !self.enforced {
+            return None;
+        }
+        // Same two triggers as the MCP allowlist: a capability the author
+        // declared to be a provider call must declare its provider, and a
+        // request that names a provider is checked whatever its capability id.
+        if !matches_any_prefix(&self.prefixes(), capability) && provider_id.is_none() {
+            return None;
+        }
+        let Some(provider_id) = provider_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return Some(format!(
+                "capability `{capability}` did not declare a provider id; the org policy \
+                 bundle's provider allowlist cannot evaluate an undeclared provider"
+            ));
+        };
+        if allowlist_contains(&self.allowed_provider_ids, provider_id) {
+            None
+        } else {
+            Some(format!(
+                "provider `{provider_id}` is not on the org policy bundle provider allowlist"
+            ))
+        }
+    }
+}
+
+/// MCP server and tool allowlist.
+///
+/// Both dimensions are checked. A tool named on a server that is not allowlisted
+/// is refused, and a tool that is not itself allowlisted is refused even when its
+/// server is — otherwise adding a server would silently admit every tool it later
+/// chooses to advertise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpToolAllowlistPolicy {
+    /// Whether the allowlist is enforced.
+    pub enforced: bool,
+    /// MCP server ids that may be reached. Empty denies every server.
+    pub allowed_servers: Vec<String>,
+    /// Fully qualified `server/tool` names that may be called. Empty denies all.
+    pub allowed_tools: Vec<String>,
+    /// Capability prefixes that must name an MCP server and tool.
+    pub tool_capability_prefixes: Vec<String>,
+}
+
+impl McpToolAllowlistPolicy {
+    /// Prefixes used when a bundle does not name its own.
+    ///
+    /// `delegate.tool.mcp-passthrough` is the capability id the delegated-task
+    /// loop mints for an MCP call (`legion-agent`'s `check_broker_capability`).
+    /// It is listed explicitly because it does not start with `mcp.`, and
+    /// leaving it out would mean an MCP call that declares no server or tool id
+    /// slips past the allowlist instead of being refused for not declaring one.
+    pub fn default_capability_prefixes() -> Vec<String> {
+        vec![
+            "mcp.".to_string(),
+            "tool.".to_string(),
+            "delegate.tool.mcp-passthrough".to_string(),
+        ]
+    }
+
+    fn prefixes(&self) -> Vec<String> {
+        if self.tool_capability_prefixes.is_empty() {
+            Self::default_capability_prefixes()
+        } else {
+            self.tool_capability_prefixes.clone()
+        }
+    }
+
+    /// Canonical `server/tool` name used in the allowlist.
+    pub fn qualified_tool_name(server_id: &str, tool_name: &str) -> String {
+        format!("{}/{}", server_id.trim(), tool_name.trim())
+    }
+
+    /// Evaluate a request, returning `Some(deny_reason)` when it is refused.
+    pub fn refusal(
+        &self,
+        capability: &str,
+        server_id: Option<&str>,
+        tool_name: Option<&str>,
+    ) -> Option<String> {
+        if !self.enforced {
+            return None;
+        }
+        let server_id = server_id.map(str::trim).filter(|id| !id.is_empty());
+        let tool_name = tool_name.map(str::trim).filter(|name| !name.is_empty());
+        // Two independent triggers. The prefix catches a capability the policy
+        // author declared to be an MCP call, so omitting the operands is a
+        // denial rather than a bypass. The operand check catches a call whose
+        // capability id the author did not anticipate but which nonetheless
+        // names an MCP server or tool — a bundle that only matched prefixes
+        // would let a renamed capability route around the allowlist.
+        if !matches_any_prefix(&self.prefixes(), capability)
+            && server_id.is_none()
+            && tool_name.is_none()
+        {
+            return None;
+        }
+        let (Some(server_id), Some(tool_name)) = (server_id, tool_name) else {
+            return Some(format!(
+                "capability `{capability}` did not declare both an MCP server id and tool \
+                 name; the org policy bundle's tool allowlist cannot evaluate an \
+                 undeclared tool"
+            ));
+        };
+        if !allowlist_contains(&self.allowed_servers, server_id) {
+            return Some(format!(
+                "MCP server `{server_id}` is not on the org policy bundle server allowlist"
+            ));
+        }
+        let qualified = Self::qualified_tool_name(server_id, tool_name);
+        if allowlist_contains(&self.allowed_tools, &qualified) {
+            None
+        } else {
+            Some(format!(
+                "MCP tool `{qualified}` is not on the org policy bundle tool allowlist"
+            ))
+        }
+    }
+}
+
+/// Budget ceilings a bundle imposes on cost- and token-bearing requests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BudgetCapPolicy {
+    /// Whether budget caps are enforced.
+    pub enforced: bool,
+    /// Maximum cost, in cents, for a single request.
+    pub max_request_cost_cents: u64,
+    /// Maximum model tokens for a single request.
+    pub max_request_tokens: u64,
+    /// Maximum cumulative cost, in cents, across the enclosing session.
+    pub max_session_cost_cents: u64,
+    /// Capability prefixes whose requests must declare a cost before they run.
+    pub cost_declaration_required_prefixes: Vec<String>,
+}
+
+impl BudgetCapPolicy {
+    /// Evaluate a request, returning `Some(deny_reason)` when it is refused.
+    ///
+    /// A request that declares no cost is refused for capabilities named in
+    /// `cost_declaration_required_prefixes`. Without that rule a caller could
+    /// bypass every cap simply by omitting the estimate.
+    pub fn refusal(
+        &self,
+        capability: &str,
+        request_cost_cents: Option<u64>,
+        request_tokens: Option<u64>,
+        session_spent_cents: Option<u64>,
+    ) -> Option<String> {
+        if !self.enforced {
+            return None;
+        }
+
+        let declaration_required =
+            matches_any_prefix(&self.cost_declaration_required_prefixes, capability);
+        if declaration_required && request_cost_cents.is_none() {
+            return Some(format!(
+                "capability `{capability}` did not declare an estimated cost; the org policy \
+                 bundle's budget cap requires a declared cost before the request runs"
+            ));
+        }
+
+        if let Some(cost) = request_cost_cents
+            && cost > self.max_request_cost_cents
+        {
+            return Some(format!(
+                "request cost {cost} cents exceeds the org policy bundle per-request cap of {} cents",
+                self.max_request_cost_cents
+            ));
+        }
+
+        if let Some(tokens) = request_tokens
+            && tokens > self.max_request_tokens
+        {
+            return Some(format!(
+                "request of {tokens} tokens exceeds the org policy bundle per-request token cap of {}",
+                self.max_request_tokens
+            ));
+        }
+
+        let spent = session_spent_cents.unwrap_or(0);
+        let projected = spent.saturating_add(request_cost_cents.unwrap_or(0));
+        if projected > self.max_session_cost_cents {
+            return Some(format!(
+                "session spend would reach {projected} cents, exceeding the org policy bundle \
+                 session cap of {} cents",
+                self.max_session_cost_cents
+            ));
+        }
+
+        None
+    }
+}
+
+/// Retention window and export destination rules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionExportPolicy {
+    /// Whether retention and export rules are enforced.
+    pub enforced: bool,
+    /// Longest retention window, in days, the org permits.
+    pub max_retention_days: u32,
+    /// Whether any export is permitted at all.
+    pub export_enabled: bool,
+    /// Destination labels an export may target. Empty denies every destination.
+    pub allowed_export_destinations: Vec<String>,
+    /// Capability prefixes governed by the retention window rule.
+    pub retention_capability_prefixes: Vec<String>,
+    /// Capability substrings that identify an export.
+    pub export_capability_markers: Vec<String>,
+}
+
+impl RetentionExportPolicy {
+    /// Prefixes used when a bundle does not name its own.
+    pub fn default_retention_prefixes() -> Vec<String> {
+        vec!["retention.".to_string(), "memory.retain".to_string()]
+    }
+
+    /// Markers used when a bundle does not name its own.
+    pub fn default_export_markers() -> Vec<String> {
+        vec![".export".to_string()]
+    }
+
+    fn retention_prefixes(&self) -> Vec<String> {
+        if self.retention_capability_prefixes.is_empty() {
+            Self::default_retention_prefixes()
+        } else {
+            self.retention_capability_prefixes.clone()
+        }
+    }
+
+    fn export_markers(&self) -> Vec<String> {
+        if self.export_capability_markers.is_empty() {
+            Self::default_export_markers()
+        } else {
+            self.export_capability_markers.clone()
+        }
+    }
+
+    /// Whether the capability is an export under this policy.
+    pub fn is_export_capability(&self, capability: &str) -> bool {
+        self.export_markers()
+            .iter()
+            .any(|marker| !marker.is_empty() && capability.contains(marker.as_str()))
+    }
+
+    /// Retention-window refusal, returning `Some(deny_reason)` when refused.
+    pub fn retention_refusal(
+        &self,
+        capability: &str,
+        requested_days: Option<u32>,
+    ) -> Option<String> {
+        if !self.enforced {
+            return None;
+        }
+        if !matches_any_prefix(&self.retention_prefixes(), capability) && requested_days.is_none() {
+            return None;
+        }
+        let Some(days) = requested_days else {
+            // An export is governed by the export rule below. Demanding a
+            // retention window from it as well would refuse every export for
+            // the wrong reason and hide which rule actually objected.
+            if self.is_export_capability(capability) {
+                return None;
+            }
+            return Some(format!(
+                "capability `{capability}` did not declare a retention window; the org policy \
+                 bundle requires a declared window it can bound"
+            ));
+        };
+        if days > self.max_retention_days {
+            return Some(format!(
+                "retention window of {days} days exceeds the org policy bundle maximum of {} days",
+                self.max_retention_days
+            ));
+        }
+        None
+    }
+
+    /// Export refusal, returning `Some(deny_reason)` when refused.
+    pub fn export_refusal(&self, capability: &str, destination: Option<&str>) -> Option<String> {
+        if !self.enforced {
+            return None;
+        }
+        if !self.is_export_capability(capability) && destination.is_none() {
+            return None;
+        }
+        if !self.export_enabled {
+            return Some(format!(
+                "export capability `{capability}` is disabled by the org policy bundle"
+            ));
+        }
+        let Some(destination) = destination.map(str::trim).filter(|dest| !dest.is_empty()) else {
+            return Some(format!(
+                "export capability `{capability}` did not declare a destination; the org policy \
+                 bundle cannot evaluate an undeclared export target"
+            ));
+        };
+        if allowlist_contains(&self.allowed_export_destinations, destination) {
+            None
+        } else {
+            Some(format!(
+                "export destination `{destination}` is not on the org policy bundle export allowlist"
+            ))
+        }
+    }
+}
+
+/// The bundle-level policies that reach surfaces the base broker did not cover.
+///
+/// This lives inside [`SecurityPolicy`](super::SecurityPolicy) rather than beside
+/// it so that every existing caller of the broker — every tool call routed through
+/// the capability broker under P5.F1.T2 — is subject to it without needing a new
+/// call site.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BundleEnforcementPolicy {
+    /// Provider allowlist.
+    pub provider: ProviderAllowlistPolicy,
+    /// MCP server and tool allowlist.
+    pub mcp: McpToolAllowlistPolicy,
+    /// Budget caps.
+    pub budget: BudgetCapPolicy,
+    /// Retention window and export destination rules.
+    pub retention_export: RetentionExportPolicy,
+}
+
+impl BundleEnforcementPolicy {
+    /// The request cost a budget cap should be applied to.
+    ///
+    /// A cloud-lane task's estimated cost is a request cost. Falling back to it
+    /// means every existing `cloud.lane.submit` call site is budget-capped by an
+    /// org bundle without changing its code — and, more importantly, that a
+    /// caller cannot dodge the cap by filling in only the older field.
+    pub fn effective_request_cost_cents(
+        context: &legion_protocol::CapabilityRequestContext,
+    ) -> Option<u64> {
+        context
+            .budget_request_cost_cents
+            .or_else(|| context.cloud_lane_estimated_cost_cents.map(u64::from))
+    }
+
+    /// First refusal across the provider, MCP, budget, retention, and export
+    /// rules, paired with the surface that produced it.
+    ///
+    /// The mode-ceiling and base-capability surfaces are not evaluated here:
+    /// mode is a bundle-level field and the base capability matrix is the broker
+    /// itself. [`VerifiedPolicyBundle::decide`] runs all seven.
+    pub fn refusal(
+        &self,
+        capability: &str,
+        context: &legion_protocol::CapabilityRequestContext,
+    ) -> Option<(PolicySurface, String)> {
+        if let Some(reason) = self
+            .provider
+            .refusal(capability, context.ai_provider_id.as_deref())
+        {
+            return Some((PolicySurface::Provider, reason));
+        }
+        if let Some(reason) = self.mcp.refusal(
+            capability,
+            context.mcp_server_id.as_deref(),
+            context.mcp_tool_name.as_deref(),
+        ) {
+            return Some((PolicySurface::McpTool, reason));
+        }
+        if let Some(reason) = self.budget.refusal(
+            capability,
+            Self::effective_request_cost_cents(context),
+            context.budget_request_tokens,
+            context.budget_session_spent_cents,
+        ) {
+            return Some((PolicySurface::Budget, reason));
+        }
+        if let Some(reason) = self
+            .retention_export
+            .retention_refusal(capability, context.retention_requested_days)
+        {
+            return Some((PolicySurface::Retention, reason));
+        }
+        if let Some(reason) = self
+            .retention_export
+            .export_refusal(capability, context.export_destination.as_deref())
+        {
+            return Some((PolicySurface::Export, reason));
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Surface coverage
+// ---------------------------------------------------------------------------
+
+/// Every surface a signed policy bundle must reach.
+///
+/// The stop condition for P9.F2.T3 is that a bundle honoured on only some
+/// surfaces is a failure, so the surface set is a first-class enumeration rather
+/// than a list in a comment. [`VerifiedPolicyBundle::SURFACE_CHECKS`] holds one
+/// evaluator per variant and `decide` iterates that table, so a surface cannot be
+/// added to the product without an evaluator that runs on every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PolicySurface {
+    /// Which AI providers may be invoked.
+    Provider,
+    /// Which MCP servers and tools may be called.
+    McpTool,
+    /// The highest product mode the bundle permits.
+    Mode,
+    /// Per-request and per-session cost and token ceilings.
+    Budget,
+    /// How long captured raw source may be retained.
+    Retention,
+    /// Whether and where data may be exported.
+    Export,
+    /// The base deny-by-default capability matrix.
+    Capability,
+}
+
+impl PolicySurface {
+    /// Every surface, in evaluation order.
+    pub const ALL: [PolicySurface; 7] = [
+        PolicySurface::Mode,
+        PolicySurface::Provider,
+        PolicySurface::McpTool,
+        PolicySurface::Budget,
+        PolicySurface::Retention,
+        PolicySurface::Export,
+        PolicySurface::Capability,
+    ];
+
+    /// Stable identifier used in audit rows.
+    pub fn stable_id(self) -> &'static str {
+        match self {
+            Self::Provider => "policy.surface.provider",
+            Self::McpTool => "policy.surface.mcp_tool",
+            Self::Mode => "policy.surface.mode",
+            Self::Budget => "policy.surface.budget",
+            Self::Retention => "policy.surface.retention",
+            Self::Export => "policy.surface.export",
+            Self::Capability => "policy.surface.capability",
+        }
+    }
+}
+
+/// One capability request evaluated against a verified bundle.
+#[derive(Debug, Clone)]
+pub struct BundleRequest<'a> {
+    /// Product mode the request is made in.
+    pub mode: legion_protocol::ProductMode,
+    /// Workspace trust state.
+    pub trust: super::TrustState,
+    /// Requesting principal.
+    pub principal: legion_protocol::PrincipalId,
+    /// Capability being requested.
+    pub capability: legion_protocol::CapabilityId,
+    /// Path operand, when the capability has one.
+    pub path: Option<&'a str>,
+    /// Structured operation context carrying the per-surface operands.
+    pub context: legion_protocol::CapabilityRequestContext,
+}
+
+/// The outcome of evaluating a [`BundleRequest`] against a verified bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleDecision {
+    /// Surface that produced the verdict.
+    pub surface: PolicySurface,
+    /// Bundle that was enforced.
+    pub bundle_id: String,
+    /// Trust anchor whose signature was verified before enforcement.
+    pub signing_key_id: String,
+    /// Capability that was evaluated.
+    pub capability: String,
+    /// Allow or deny, with the reason when denied.
+    pub decision: super::SecurityDecision,
+}
+
+impl BundleDecision {
+    /// Whether the request may proceed.
+    pub fn is_allowed(&self) -> bool {
+        matches!(self.decision, super::SecurityDecision::Allow)
+    }
+
+    /// A display-safe audit row naming the bundle, key, surface, and verdict.
+    ///
+    /// Carries metadata only: no payloads, no path contents, no key material.
+    pub fn audit_row(&self) -> String {
+        let verdict = match &self.decision {
+            super::SecurityDecision::Allow => "allow".to_string(),
+            super::SecurityDecision::Deny(reason) => format!("deny ({reason})"),
+        };
+        format!(
+            "policy-bundle={} key={} surface={} capability={} decision={verdict}",
+            self.bundle_id,
+            self.signing_key_id,
+            self.surface.stable_id(),
+            self.capability
+        )
+    }
+}
+
+/// A policy bundle whose signature has been verified against a trust anchor.
+///
+/// Construction is only possible through [`SignedPolicyBundle::verify`]. There is
+/// no `new`, no `From<OrgPolicyBundle>`, and the fields are private, so "an
+/// unsigned bundle honoured as if signed" is not a runtime mistake that can be
+/// made — it does not typecheck.
+#[derive(Debug, Clone)]
+pub struct VerifiedPolicyBundle {
+    bundle: super::OrgPolicyBundle,
+    signing_key_id: String,
+}
+
+/// One surface evaluator: `None` means the surface raised no objection.
+type SurfaceCheck =
+    fn(&VerifiedPolicyBundle, &BundleRequest<'_>) -> Option<super::SecurityDecision>;
+
+impl VerifiedPolicyBundle {
+    /// One evaluator per [`PolicySurface`], in evaluation order.
+    ///
+    /// `decide` iterates this table rather than hard-coding a sequence of `if`
+    /// blocks, and `policy_surface_checks_cover_every_surface` asserts the table
+    /// matches [`PolicySurface::ALL`] entry for entry. Together those make a
+    /// half-covered bundle a test failure rather than a silent gap.
+    pub const SURFACE_CHECKS: [(PolicySurface, SurfaceCheck); 7] = [
+        (PolicySurface::Mode, Self::check_mode),
+        (PolicySurface::Provider, Self::check_provider),
+        (PolicySurface::McpTool, Self::check_mcp_tool),
+        (PolicySurface::Budget, Self::check_budget),
+        (PolicySurface::Retention, Self::check_retention),
+        (PolicySurface::Export, Self::check_export),
+        (PolicySurface::Capability, Self::check_capability),
+    ];
+
+    /// The verified bundle payload.
+    pub fn bundle(&self) -> &super::OrgPolicyBundle {
+        &self.bundle
+    }
+
+    /// Trust anchor id whose signature was verified.
+    pub fn signing_key_id(&self) -> &str {
+        &self.signing_key_id
+    }
+
+    fn check_mode(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        if self.bundle.allows_mode(request.mode) {
+            None
+        } else {
+            Some(super::SecurityDecision::deny(format!(
+                "{} ceiling denies {} mode request",
+                self.bundle.mode_ceiling.label(),
+                request.mode.label()
+            )))
+        }
+    }
+
+    fn enforcement(&self) -> &BundleEnforcementPolicy {
+        &self.bundle.security_policy.bundle_enforcement
+    }
+
+    fn check_provider(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        self.enforcement()
+            .provider
+            .refusal(
+                &request.capability.0,
+                request.context.ai_provider_id.as_deref(),
+            )
+            .map(super::SecurityDecision::deny)
+    }
+
+    fn check_mcp_tool(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        self.enforcement()
+            .mcp
+            .refusal(
+                &request.capability.0,
+                request.context.mcp_server_id.as_deref(),
+                request.context.mcp_tool_name.as_deref(),
+            )
+            .map(super::SecurityDecision::deny)
+    }
+
+    fn check_budget(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        self.enforcement()
+            .budget
+            .refusal(
+                &request.capability.0,
+                BundleEnforcementPolicy::effective_request_cost_cents(&request.context),
+                request.context.budget_request_tokens,
+                request.context.budget_session_spent_cents,
+            )
+            .map(super::SecurityDecision::deny)
+    }
+
+    fn check_retention(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        self.enforcement()
+            .retention_export
+            .retention_refusal(
+                &request.capability.0,
+                request.context.retention_requested_days,
+            )
+            .map(super::SecurityDecision::deny)
+    }
+
+    fn check_export(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        self.enforcement()
+            .retention_export
+            .export_refusal(
+                &request.capability.0,
+                request.context.export_destination.as_deref(),
+            )
+            .map(super::SecurityDecision::deny)
+    }
+
+    fn check_capability(&self, request: &BundleRequest<'_>) -> Option<super::SecurityDecision> {
+        let mut broker = self.bundle.broker();
+        match broker.decide_with_request_context(
+            request.trust,
+            request.principal.clone(),
+            request.capability.clone(),
+            request.path,
+            request.context.clone(),
+        ) {
+            super::SecurityDecision::Allow => None,
+            deny @ super::SecurityDecision::Deny(_) => Some(deny),
+        }
+    }
+
+    /// Evaluate a request against every surface the bundle governs.
+    ///
+    /// The first refusing surface wins and is named in the returned decision, so
+    /// a denial always says which rule refused it. A request only reaches
+    /// `Allow` after all seven surfaces have declined to refuse it.
+    pub fn decide(&self, request: &BundleRequest<'_>) -> BundleDecision {
+        for (surface, check) in Self::SURFACE_CHECKS {
+            if let Some(decision) = check(self, request) {
+                return BundleDecision {
+                    surface,
+                    bundle_id: self.bundle.bundle_id.clone(),
+                    signing_key_id: self.signing_key_id.clone(),
+                    capability: request.capability.0.clone(),
+                    decision,
+                };
+            }
+        }
+        BundleDecision {
+            surface: PolicySurface::Capability,
+            bundle_id: self.bundle.bundle_id.clone(),
+            signing_key_id: self.signing_key_id.clone(),
+            capability: request.capability.0.clone(),
+            decision: super::SecurityDecision::Allow,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +1706,311 @@ mod tests {
         assert!(!policy.allows_adapter_binary(""));
         assert!(!policy.allows_adapter_binary("   "));
         assert!(!policy.allows_adapter_binary("lldb-dap"));
+    }
+
+    // -----------------------------------------------------------------
+    // Signed bundle surfaces (P9.F2.T3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn policy_surface_all_lists_every_variant_exactly_once() {
+        // Exhaustive match: a new variant will not compile until it is given a
+        // slot, and the assertions then fail unless `ALL` grew to hold it.
+        fn position(surface: PolicySurface) -> usize {
+            match surface {
+                PolicySurface::Mode => 0,
+                PolicySurface::Provider => 1,
+                PolicySurface::McpTool => 2,
+                PolicySurface::Budget => 3,
+                PolicySurface::Retention => 4,
+                PolicySurface::Export => 5,
+                PolicySurface::Capability => 6,
+            }
+        }
+        for (index, surface) in PolicySurface::ALL.iter().enumerate() {
+            assert_eq!(position(*surface), index);
+        }
+        assert_eq!(PolicySurface::ALL.len(), 7);
+
+        let ids: std::collections::HashSet<&str> = PolicySurface::ALL
+            .iter()
+            .map(|surface| surface.stable_id())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            PolicySurface::ALL.len(),
+            "stable ids must differ"
+        );
+    }
+
+    #[test]
+    fn provider_allowlist_empty_list_denies_every_provider() {
+        // The vacuous-truth guard. `[]` must mean "nothing", never "anything".
+        let policy = ProviderAllowlistPolicy {
+            enforced: true,
+            allowed_provider_ids: Vec::new(),
+            provider_capability_prefixes: Vec::new(),
+        };
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some("ollama"))
+                .is_some()
+        );
+        assert!(policy.refusal("ai.provider.invoke", None).is_some());
+        assert!(policy.refusal("ai.provider.invoke", Some("   ")).is_some());
+    }
+
+    #[test]
+    fn provider_allowlist_is_inert_until_enforced() {
+        let policy = ProviderAllowlistPolicy {
+            enforced: false,
+            allowed_provider_ids: vec!["ollama".to_string()],
+            provider_capability_prefixes: Vec::new(),
+        };
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some("openai"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_allowlist_matches_case_insensitively() {
+        let policy = ProviderAllowlistPolicy {
+            enforced: true,
+            allowed_provider_ids: vec!["Ollama".to_string()],
+            provider_capability_prefixes: Vec::new(),
+        };
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some("ollama"))
+                .is_none()
+        );
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some("openai"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn mcp_allowlist_checks_server_and_tool_independently() {
+        let policy = McpToolAllowlistPolicy {
+            enforced: true,
+            allowed_servers: vec!["legion-internal".to_string()],
+            allowed_tools: vec!["legion-internal/search_docs".to_string()],
+            tool_capability_prefixes: Vec::new(),
+        };
+        let cap = "mcp.tool.call";
+        assert!(
+            policy
+                .refusal(cap, Some("legion-internal"), Some("search_docs"))
+                .is_none()
+        );
+        // Allowlisted server, tool that is not listed.
+        assert!(
+            policy
+                .refusal(cap, Some("legion-internal"), Some("run_shell"))
+                .is_some()
+        );
+        // Listed tool name, but on a server that is not allowlisted. Matching on
+        // the bare tool name would wrongly admit this.
+        assert!(
+            policy
+                .refusal(cap, Some("evil-corp"), Some("search_docs"))
+                .is_some()
+        );
+        assert!(policy.refusal(cap, None, None).is_some());
+    }
+
+    #[test]
+    fn mcp_allowlist_empty_lists_deny_everything() {
+        let policy = McpToolAllowlistPolicy {
+            enforced: true,
+            allowed_servers: Vec::new(),
+            allowed_tools: Vec::new(),
+            tool_capability_prefixes: Vec::new(),
+        };
+        assert!(
+            policy
+                .refusal("mcp.tool.call", Some("anything"), Some("anything"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn budget_cap_refuses_undeclared_cost_for_required_prefixes() {
+        let policy = BudgetCapPolicy {
+            enforced: true,
+            max_request_cost_cents: 25,
+            max_request_tokens: 1_000,
+            max_session_cost_cents: 500,
+            cost_declaration_required_prefixes: vec!["ai.provider.".to_string()],
+        };
+        // Undeclared cost on a capability that must declare one.
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", None, None, None)
+                .is_some()
+        );
+        // Declared and inside every cap.
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some(5), Some(10), Some(0))
+                .is_none()
+        );
+        // Each cap refuses on its own.
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some(26), Some(10), Some(0))
+                .is_some()
+        );
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some(5), Some(1_001), Some(0))
+                .is_some()
+        );
+        assert!(
+            policy
+                .refusal("ai.provider.invoke", Some(5), Some(10), Some(496))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn budget_session_cap_cannot_be_overflowed_past_the_ceiling() {
+        // A saturating add keeps a u64::MAX cost from wrapping to a small
+        // projected total that would slip under the cap.
+        let policy = BudgetCapPolicy {
+            enforced: true,
+            max_request_cost_cents: u64::MAX,
+            max_request_tokens: u64::MAX,
+            max_session_cost_cents: 500,
+            cost_declaration_required_prefixes: Vec::new(),
+        };
+        assert!(
+            policy
+                .refusal("x", Some(u64::MAX), None, Some(u64::MAX))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn retention_policy_bounds_the_window_and_requires_one() {
+        let policy = RetentionExportPolicy {
+            enforced: true,
+            max_retention_days: 7,
+            export_enabled: false,
+            allowed_export_destinations: Vec::new(),
+            retention_capability_prefixes: Vec::new(),
+            export_capability_markers: Vec::new(),
+        };
+        let cap = "retention.raw_source.capture";
+        assert!(policy.retention_refusal(cap, Some(7)).is_none());
+        assert!(policy.retention_refusal(cap, Some(8)).is_some());
+        assert!(policy.retention_refusal(cap, None).is_some());
+        // An export is governed by the export rule, not by the window rule.
+        assert!(
+            policy
+                .retention_refusal("retention.raw_source.export.hosted", None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn export_policy_refuses_when_disabled_and_when_destination_is_unlisted() {
+        let disabled = RetentionExportPolicy {
+            enforced: true,
+            max_retention_days: 7,
+            export_enabled: false,
+            allowed_export_destinations: vec!["org-siem".to_string()],
+            retention_capability_prefixes: Vec::new(),
+            export_capability_markers: Vec::new(),
+        };
+        assert!(
+            disabled
+                .export_refusal("telemetry.export.hosted", Some("org-siem"))
+                .is_some(),
+            "export_enabled = false must refuse even an allowlisted destination"
+        );
+
+        let enabled = RetentionExportPolicy {
+            export_enabled: true,
+            ..disabled
+        };
+        assert!(
+            enabled
+                .export_refusal("telemetry.export.hosted", Some("org-siem"))
+                .is_none()
+        );
+        assert!(
+            enabled
+                .export_refusal("telemetry.export.hosted", Some("s3://elsewhere"))
+                .is_some()
+        );
+        assert!(
+            enabled
+                .export_refusal("telemetry.export.hosted", None)
+                .is_some(),
+            "an undeclared destination must be refused, not waved through"
+        );
+    }
+
+    #[test]
+    fn export_policy_with_empty_destination_allowlist_refuses_every_destination() {
+        let policy = RetentionExportPolicy {
+            enforced: true,
+            max_retention_days: 7,
+            export_enabled: true,
+            allowed_export_destinations: Vec::new(),
+            retention_capability_prefixes: Vec::new(),
+            export_capability_markers: Vec::new(),
+        };
+        assert!(
+            policy
+                .export_refusal("telemetry.export.hosted", Some("anything"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn default_bundle_enforcement_refuses_nothing() {
+        // Every existing caller must keep working: the rules are opt-in.
+        let policy = BundleEnforcementPolicy::default();
+        let context = legion_protocol::CapabilityRequestContext {
+            ai_provider_id: Some("anything".to_string()),
+            mcp_server_id: Some("anything".to_string()),
+            mcp_tool_name: Some("anything".to_string()),
+            budget_request_cost_cents: Some(u64::MAX),
+            retention_requested_days: Some(u32::MAX),
+            export_destination: Some("anywhere".to_string()),
+            ..legion_protocol::CapabilityRequestContext::default()
+        };
+        assert!(policy.refusal("ai.provider.invoke", &context).is_none());
+    }
+
+    #[test]
+    fn cloud_lane_estimate_is_used_as_the_request_cost_when_no_budget_field_is_set() {
+        let context = legion_protocol::CapabilityRequestContext {
+            cloud_lane_estimated_cost_cents: Some(200),
+            ..legion_protocol::CapabilityRequestContext::default()
+        };
+        assert_eq!(
+            BundleEnforcementPolicy::effective_request_cost_cents(&context),
+            Some(200)
+        );
+
+        // The newer field wins when both are present, so a caller that has been
+        // updated is not double-counted against the older estimate.
+        let both = legion_protocol::CapabilityRequestContext {
+            budget_request_cost_cents: Some(5),
+            cloud_lane_estimated_cost_cents: Some(200),
+            ..legion_protocol::CapabilityRequestContext::default()
+        };
+        assert_eq!(
+            BundleEnforcementPolicy::effective_request_cost_cents(&both),
+            Some(5)
+        );
     }
 
     #[test]
