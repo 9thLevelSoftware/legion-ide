@@ -905,6 +905,22 @@ impl AppComposition {
         )
     }
 
+    /// The command outcome for a call-hierarchy request.
+    ///
+    /// Here rather than inline in the dispatch match: `lib.rs` is a chokepoint
+    /// with a growth budget, and three multi-line arms is precisely the shape
+    /// of feature work the rule says belongs in a module.
+    pub fn call_hierarchy_outcome(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        direction: Option<legion_protocol::CallHierarchyDirection>,
+    ) -> Result<crate::AppCommandOutcome, crate::AppCompositionError> {
+        Ok(crate::AppCommandOutcome::language_tooling(
+            self.run_call_hierarchy(buffer_id, position, direction)?,
+        ))
+    }
+
     /// Ask the server about the symbol under the caret.
     ///
     /// Returns the projection as it stands now. The rows are not in it yet and

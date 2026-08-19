@@ -51,6 +51,7 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 }
 
 /// Command-intent routing, extracted from this file (roadmap 1.1).
+mod command_outcome;
 mod intent_routing;
 pub use intent_routing::*;
 
@@ -13051,7 +13052,8 @@ pub enum AppCommandOutcome {
     /// Test explorer projection changed.
     TestExplorerUpdated(TestExplorerProjection),
     /// Language tooling projection changed.
-    LanguageToolingUpdated(LanguageToolingProjection),
+    /// Boxed; construct through [`AppCommandOutcome::language_tooling`].
+    LanguageToolingUpdated(Box<LanguageToolingProjection>),
     /// Assist inline prediction projection changed.
     AssistInlinePredictionUpdated(AssistInlinePredictionProjection),
     /// Terminal panel projection changed.
@@ -18810,7 +18812,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP hover (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_hover_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
                 ))
             }
@@ -18820,7 +18822,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP completion (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_completion_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
                 ))
             }
@@ -18858,7 +18860,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP definition (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_definition_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
                 ))
             }
@@ -18870,41 +18872,35 @@ impl AppComposition {
                 // frame via drain). The index answer below is returned now so
                 // the panel is never empty while the server thinks.
                 self.issue_lsp_references_request(buffer_id, position, true);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
                 ))
             }
             AppCommandRequest::PrepareCallHierarchy {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_call_hierarchy(buffer_id, position, None)?,
-            )),
+            } => self.call_hierarchy_outcome(buffer_id, position, None),
             AppCommandRequest::ShowIncomingCalls {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_call_hierarchy(
-                    buffer_id,
-                    position,
-                    Some(CallHierarchyDirection::Incoming),
-                )?,
-            )),
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Incoming),
+            ),
             AppCommandRequest::ShowOutgoingCalls {
                 buffer_id,
                 position,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_call_hierarchy(
-                    buffer_id,
-                    position,
-                    Some(CallHierarchyDirection::Outgoing),
-                )?,
-            )),
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Outgoing),
+            ),
             AppCommandRequest::RefreshOutline { buffer_id } => {
                 // Issue async LSP documentSymbol (non-blocking; result arrives
                 // next frame via drain).
                 self.issue_lsp_document_symbol_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::Outline,
@@ -18927,7 +18923,7 @@ impl AppComposition {
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_inlay_hint_request(buffer_id, range);
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::InlayHints,
@@ -18942,7 +18938,7 @@ impl AppComposition {
             }
             AppCommandRequest::RefreshCodeLenses { buffer_id } => {
                 self.issue_lsp_code_lens_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::CodeLens,
@@ -18957,7 +18953,7 @@ impl AppComposition {
             }
             AppCommandRequest::RequestFormattingProposal { buffer_id } => {
                 self.issue_lsp_formatting_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::Formatting,
@@ -18981,7 +18977,7 @@ impl AppComposition {
                 // now so the surface is never blank. Neither writes anything —
                 // both stop at Previewed.
                 self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::Rename,
@@ -18994,7 +18990,7 @@ impl AppComposition {
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_code_action_request(buffer_id, range, true);
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::OrganizeImports,
@@ -19011,7 +19007,7 @@ impl AppComposition {
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
                 action_id,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+            } => Ok(AppCommandOutcome::language_tooling(
                 self.run_language_proposal(
                     buffer_id,
                     LanguageProposalKind::CodeAction,
@@ -19028,7 +19024,7 @@ impl AppComposition {
                 let event_context = self.next_event_context();
                 self.language_tooling
                     .cancel_operation(operation_id, event_context);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.language_tooling.projection(),
                 ))
             }
