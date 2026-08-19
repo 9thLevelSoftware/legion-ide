@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-07",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:d8e990c3963f1bfe",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"test/money-reject.test.js\",\n    \"replacement\": \"//\\n'use strict';\\n\\nconst { check, report } = require('./harness');\\nconst { parseAmount } = require('../src/money');\\n\\ncheck('parseAmount rejects empty string', () => {\\n  expect(() => parseAmount('')).toThrow();\\n});\\n\\ncheck('parseAmount rejects three decimal places', () => {\\n  expect(() => parseAmount('1.234')).toThrow();\\n});\\n\\ncheck('parseAmount rejects non-numeric value', () => {\\n  expect(() => parseAmount('abc')).toThrow();\\n});\\n\\ncheck('parseAmount rejects value with whitespace', () => {\\n  expect(() => parseAmount('1 2')).toThrow();\\n});\\n\\nreport();\"\n  }\n}\n```\n```json\n{\n  \"name\": \"end_turn\"\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119498,
+        "id": "chatcmpl-311",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 222,
+          "prompt_tokens": 712,
+          "total_tokens": 934
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:43b59b64234ab1b7",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "end_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119498,
+        "id": "chatcmpl-413",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 1025,
+          "total_tokens": 1028
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-01",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:62f60047a570c850",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\"name\": \"read\", \"arguments\": {\"path\": \"src/money.js\"}}\n\n{\"name\": \"find\", \"arguments\": {\"pattern\": \"function parseAmount\", \"path\": \"src/money.js\"}}\n\n{\"name\": \"edit-as-proposal\", \"arguments\": {\n  \"path\": \"src/money.js\",\n  \"old_str\": \"return parseInt(amount.replace('.', '')) * 100;\",\n  \"new_str\": \"return parseInt(amount.replace(/\\\\.([0-9])$/, '.$10')) * 100;\",\n  \"proposal_title\": \"Fix parseAmount to handle amounts with a single decimal digit\",\n  \"proposal_reason\": \"parseAmount must correctly handle amounts with a single decimal digit, interpreting it as tenths of a dollar.\"\n}}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119327,
+        "id": "chatcmpl-381",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 163,
+          "prompt_tokens": 697,
+          "total_tokens": 860
+        }
+      }
+    }
+  ]
+}

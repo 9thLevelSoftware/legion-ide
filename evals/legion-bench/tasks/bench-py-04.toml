@@ -27,7 +27,11 @@ Do not run tests, build commands, or any shell command: this environment does no
 [verification]
 command = "python checks/verify_dedup.py"
 expected_exit = 0
-timeout_secs = 120
+# 300s, not the 120s the other tasks use: this is the two-file feature task and
+# the reference 14B model needs longer than that to finish it. At 120s the
+# watchdog cancelled the loop mid-request, which recorded a tape that ends
+# before the conversation does.
+timeout_secs = 300
 expected_files = ["textkit/dedup.py", "textkit/cli.py"]
 
 [scope]

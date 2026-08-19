@@ -655,21 +655,29 @@ enum Commands {
         /// Output directory for the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Run mode for the baseline. Recorded is the offline CI default
-        /// (synthetic budget arithmetic); live is reserved for the weekly
-        /// external run; live-local executes the corpus tasks for real against
-        /// an OpenAI-compatible endpoint (env: LEGION_BENCH_ENDPOINT, default
-        /// http://127.0.0.1:11434/v1; LEGION_BENCH_MODEL required;
-        /// LEGION_BENCH_API_KEY optional).
+        /// Run mode. `recorded` is the offline CI default: it executes every
+        /// corpus task for real against a fixture checkout, replaying the
+        /// model's side of the conversation from committed cassettes.
+        /// `record` runs live and writes those cassettes. `live-local` runs
+        /// live against an OpenAI-compatible endpoint without recording
+        /// (env: LEGION_BENCH_ENDPOINT, default http://127.0.0.1:11434/v1;
+        /// LEGION_BENCH_MODEL required; LEGION_BENCH_API_KEY optional).
         #[arg(long, default_value = "recorded")]
         mode: String,
-        /// Corpus directory of live-local task TOMLs (live-local mode only).
+        /// Corpus directory of task TOMLs.
         #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
         corpus: String,
-        /// Also execute corpus tasks marked `holdout = true` (live-local mode
-        /// only). Excluded holdout tasks are recorded as skipped.
+        /// Directory of recorded provider cassettes and the recorded baseline.
+        #[arg(long, default_value = xtask::legion_bench_recorded::DEFAULT_CASSETTE_PATH)]
+        cassettes: String,
+        /// Also execute corpus tasks marked `holdout = true`. Excluded holdout
+        /// tasks are recorded as skipped.
         #[arg(long = "include-holdout")]
         include_holdout: bool,
+        /// Recorded mode only: replace the committed baseline with this run's
+        /// measurements instead of gating against it. Use after re-recording.
+        #[arg(long = "write-baseline")]
+        write_baseline: bool,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -694,10 +702,12 @@ enum Commands {
         /// Output directory holding the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Corpus directory used to recompute the suite when verifying a
-        /// live-local report.
+        /// Corpus directory used to recompute the suite the report must match.
         #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
         corpus: String,
+        /// Directory of recorded provider cassettes and the recorded baseline.
+        #[arg(long, default_value = xtask::legion_bench_recorded::DEFAULT_CASSETTE_PATH)]
+        cassettes: String,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -992,19 +1002,30 @@ fn main() {
             out,
             mode,
             corpus,
+            cassettes,
             include_holdout,
+            write_baseline,
             strict,
             no_strict,
-        } => run_legion_bench_command(&out, &mode, &corpus, include_holdout, strict && !no_strict),
+        } => run_legion_bench_command(
+            &out,
+            &mode,
+            &corpus,
+            &cassettes,
+            include_holdout,
+            write_baseline,
+            strict && !no_strict,
+        ),
         Commands::VerifyLegionBenchCorpus { corpus, no_execute } => {
             run_verify_legion_bench_corpus_command(&corpus, !no_execute)
         }
         Commands::VerifyLegionBench {
             out,
             corpus,
+            cassettes,
             strict,
             no_strict,
-        } => run_verify_legion_bench_command(&out, &corpus, strict && !no_strict),
+        } => run_verify_legion_bench_command(&out, &corpus, &cassettes, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
         Commands::VerifyReadinessConsistency { ledger, backlog } => {
             run_verify_readiness_consistency_command(&ledger, &backlog)
@@ -1937,7 +1958,9 @@ fn run_legion_bench_command(
     out: &str,
     mode: &str,
     corpus: &str,
+    cassettes: &str,
     include_holdout: bool,
+    write_baseline: bool,
     strict: bool,
 ) -> i32 {
     let workspace_root = match env::current_dir() {
@@ -1947,62 +1970,51 @@ fn run_legion_bench_command(
             return 1;
         }
     };
-    let out_dir = workspace_root.join(out);
-    let mode = match parse_legion_bench_mode(mode) {
-        Ok(mode) => mode,
+    let execution = match parse_legion_bench_mode(mode) {
+        Ok(execution) => execution,
         Err(err) => {
             eprintln!("legion bench failed: {err}");
             return 1;
         }
     };
-    if mode == xtask::legion_bench::LegionBenchRunMode::LiveLocal {
-        let config = match xtask::legion_bench_live::live_config_from_env() {
+    // Replay dials nothing, so it must not demand endpoint configuration:
+    // requiring `LEGION_BENCH_MODEL` would make the offline CI gate depend on
+    // a local model being installed, which is the one thing recorded mode
+    // exists to avoid. The model name a replayed report cites comes from the
+    // committed baseline instead.
+    let config = if execution == xtask::legion_bench_live::ExecutionMode::Recorded {
+        let cassette_dir = workspace_root.join(cassettes);
+        let model = xtask::legion_bench_recorded::load_baseline(&cassette_dir)
+            .map(|baseline| baseline.model)
+            .unwrap_or_else(|_| "unbaselined".to_string());
+        xtask::legion_bench_live::LiveConfig {
+            endpoint: "replay://cassettes".to_string(),
+            model,
+            api_key: xtask::legion_bench_live::PLACEHOLDER_API_KEY.to_string(),
+        }
+    } else {
+        match xtask::legion_bench_live::live_config_from_env() {
             Ok(config) => config,
             Err(err) => {
                 eprintln!("legion bench failed: {err}");
                 return 1;
             }
-        };
-        let opts = xtask::legion_bench_live::LiveLocalOptions {
-            out_dir: out.to_string(),
-            corpus_dir: corpus.to_string(),
-            include_holdout,
-            strict,
-            config,
-        };
-        return xtask::legion_bench_live::run_live_local(&workspace_root, &opts);
-    }
-    let suite = xtask::legion_bench::plan_default_legion_bench_suite();
-    let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
-    let report =
-        xtask::legion_bench::plan_legion_bench_report("legion-desktop", &git_sha, mode, &suite);
-    let path = match xtask::legion_bench::write_report(&out_dir, &report) {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("legion bench failed: {err}");
-            return 1;
         }
     };
-    println!(
-        "legion bench: total={} passed={} failed={} regressed={} report={} strict={} mode={} provider={} fingerprint={}",
-        report.summary.total,
-        report.summary.passed,
-        report.summary.failed,
-        report.summary.regressed,
-        path.display(),
+    let opts = xtask::legion_bench_live::LiveLocalOptions {
+        out_dir: out.to_string(),
+        corpus_dir: corpus.to_string(),
+        cassette_dir: cassettes.to_string(),
+        execution,
+        include_holdout,
         strict,
-        report.mode.as_str(),
-        report.provider_profile,
-        report.suite_fingerprint,
-    );
-    if strict && report.summary.failed > 0 {
-        1
-    } else {
-        0
-    }
+        write_baseline,
+        config,
+    };
+    xtask::legion_bench_live::run_live_local(&workspace_root, &opts)
 }
 
-fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32 {
+fn run_verify_legion_bench_command(out: &str, corpus: &str, cassettes: &str, strict: bool) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -2021,24 +2033,50 @@ fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32
             return 1;
         }
     };
-    // Live-local reports are verified against the corpus-derived suite (the
-    // task list the runner actually executed); recorded reports keep verifying
-    // against the in-code default suite, byte-identical to the historical gate.
-    let suite = if report.scoring_mode == xtask::legion_bench::SCORING_MODE_LIVE_LOCAL {
-        let corpus_dir = workspace_root.join(corpus);
-        match xtask::legion_bench_corpus::load_corpus(&corpus_dir) {
-            Ok(tasks) => xtask::legion_bench_corpus::corpus_suite(&tasks),
-            Err(err) => {
-                eprintln!("legion bench verify failed: {err}");
-                return 1;
-            }
+    // Every bench report now describes a real run of the corpus, so there is
+    // one suite to verify against: the one on disk.
+    let corpus_dir = workspace_root.join(corpus);
+    let suite = match xtask::legion_bench_corpus::load_corpus(&corpus_dir) {
+        Ok(tasks) => xtask::legion_bench_corpus::corpus_suite(&tasks),
+        Err(err) => {
+            eprintln!("legion bench verify failed: {err}");
+            return 1;
         }
-    } else {
-        xtask::legion_bench::plan_default_legion_bench_suite()
     };
     if let Err(err) = xtask::legion_bench::verify_legion_bench_report(&report, &suite) {
         eprintln!("legion bench verify failed: {err}");
         return 1;
+    }
+    // The regression gate. Structural checks above prove the report is
+    // internally consistent; only this proves the run still measures what it
+    // measured when the baseline was cut.
+    if report.scoring_mode == xtask::legion_bench::SCORING_MODE_RECORDED_REPLAY {
+        let cassette_dir = workspace_root.join(cassettes);
+        let baseline = match xtask::legion_bench_recorded::load_baseline(&cassette_dir) {
+            Ok(baseline) => baseline,
+            Err(err) => {
+                eprintln!("legion bench verify failed: {err}");
+                return 1;
+            }
+        };
+        if let Err(problems) = xtask::legion_bench_recorded::compare_to_baseline(&report, &baseline)
+        {
+            eprintln!(
+                "legion bench verify failed: recorded run differs from the committed baseline \
+                 ({} difference(s)):",
+                problems.len()
+            );
+            for problem in &problems {
+                eprintln!("  - {problem}");
+            }
+            return 1;
+        }
+        println!(
+            "legion bench verify: recorded run matches baseline {} (model={} arm={})",
+            xtask::legion_bench_recorded::baseline_path(&cassette_dir).display(),
+            baseline.model,
+            baseline.arm,
+        );
     }
     println!(
         "legion bench verify: total={} passed={} failed={} regressed={} skipped={} report={} strict={} mode={} provider={} fingerprint={}",
@@ -2053,7 +2091,12 @@ fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32
         report.provider_profile,
         report.suite_fingerprint,
     );
-    if strict && report.summary.failed > 0 {
+    // See `run_live_local`: a recorded run's failures are the reference
+    // model's, and the baseline comparison above is what gates them.
+    if strict
+        && report.summary.failed > 0
+        && report.scoring_mode != xtask::legion_bench::SCORING_MODE_RECORDED_REPLAY
+    {
         1
     } else {
         0
@@ -2419,19 +2462,17 @@ fn run_verify_hostile_evals_command(out: &str) -> i32 {
     0
 }
 
-fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {
+fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench_live::ExecutionMode, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "recorded" | "recorded_offline" | "offline" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::RecordedOffline)
+        "recorded" | "recorded_offline" | "offline" | "replay" => {
+            Ok(xtask::legion_bench_live::ExecutionMode::Recorded)
         }
-        "live" | "live_weekly" | "weekly" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::LiveWeekly)
-        }
-        "live-local" | "live_local" | "local" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::LiveLocal)
+        "record" => Ok(xtask::legion_bench_live::ExecutionMode::Record),
+        "live-local" | "live_local" | "local" | "live" => {
+            Ok(xtask::legion_bench_live::ExecutionMode::LiveLocal)
         }
         other => Err(format!(
-            "unknown legion-bench mode `{other}`; expected recorded, live, or live-local"
+            "unknown legion-bench mode `{other}`; expected recorded, record, or live-local"
         )),
     }
 }

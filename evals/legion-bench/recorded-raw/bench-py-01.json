@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-01",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:35c0cd0602d4bfa1",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"textkit/stats.py\"\n  }\n}\n\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"textkit/stats.py\",\n    \"replacement\": \"return sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:n+1]\",\n    \"start_line\": <start-line-of-top_words-function-body>,\n    \"end_line\": <end-line-of-top_words-function-body>,\n    \"proposal_title\": \"Fix slice bug in top_words\",\n    \"proposal_reason\": \"The top_words function is currently returning one entry too few. Adjust the slice to return the correct number of entries.\"\n  }\n}\n\n{\n  \"name\": \"end_turn\"\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119757,
+        "id": "chatcmpl-385",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 164,
+          "prompt_tokens": 570,
+          "total_tokens": 734
+        }
+      }
+    }
+  ]
+}

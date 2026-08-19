@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-08",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:a6960d0e00fb9ee4",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"tests/test_wrap_edges.py\",\n    \"replacement\": \"import unittest\\nimport textkit.wrap\\n\\nclass TestWrapEdges(unittest.TestCase):\\n\\n    def test_whitespace_only_input(self):\\n        self.assertEqual(textkit.wrap.wrap_text('   ', width=10), [])\\n\\n    def test_single_word_longer_than_width(self):\\n        self.assertEqual(textkit.wrap.wrap_text('longword', width=5), ['longword'])\\n\\n    def test_zero_or_negative_width(self):\\n        with self.assertRaises(ValueError):\\n            textkit.wrap.wrap_text('test', width=0)\\n        with self.assertRaises(ValueError):\\n            textkit.wrap.wrap_text('test', width=-5)\\n\\nif __name__ == '__main__':\\n    unittest.main()\\n\",\n    \"proposal_title\": \"Add tests for textkit.wrap.wrap_text edge cases\",\n    \"proposal_reason\": \"The current implementation of `wrap_text` does not have tests for its documented edge cases.\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787118978,
+        "id": "chatcmpl-425",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 234,
+          "prompt_tokens": 661,
+          "total_tokens": 895
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:23b03b92ae2d51e1",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "end_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787118979,
+        "id": "chatcmpl-716",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 960,
+          "total_tokens": 963
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-08",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:993167f891e8f8eb",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"tests/error_display.rs\",\n    \"new_str\": \"use miniconf::error::ParseError;\\n\\n#[test]\\nfn test_parse_error_display() {\\n    assert_eq!(ParseError::UnterminatedSection { line: 1 }.to_string(), \\\"line 1: unterminated section (missing ']')\\\");\\n    assert_eq!(ParseError::EmptySectionName { line: 2 }.to_string(), \\\"line 2: empty section name\\\");\\n    assert_eq!(ParseError::EmptyKey { line: 3 }.to_string(), \\\"line 3: empty key\\\");\\n    assert_eq!(ParseError::MissingEquals { line: 4 }.to_string(), \\\"line 4: expected 'key = value' assignment\\\");\\n}\",\n    \"proposal_reason\": \"Add integration test for ParseError Display output\",\n    \"proposal_title\": \"Add integration test for ParseError Display output\"\n  }\n}\n```\n```json\n{\n  \"name\": \"end_turn\"\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119291,
+        "id": "chatcmpl-840",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 240,
+          "prompt_tokens": 691,
+          "total_tokens": 931
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:a3eff68f71c2e668",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"replacement\": \"use miniconf::error::ParseError;\\n\\n#[test]\\nfn test_parse_error_display() {\\n    assert_eq!(ParseError::UnterminatedSection { line: 1 }.to_string(), \\\"line 1: unterminated section (missing ']')\\\");\\n    assert_eq!(ParseError::EmptySectionName { line: 2 }.to_string(), \\\"line 2: empty section name\\\");\\n    assert_eq!(ParseError::EmptyKey { line: 3 }.to_string(), \\\"line 3: empty key\\\");\\n    assert_eq!(ParseError::MissingEquals { line: 4 }.to_string(), \\\"line 4: expected 'key = value' assignment\\\");\\n}\",\n    \"path\": \"tests/error_display.rs\",\n    \"proposal_reason\": \"Add integration test for ParseError Display output\",\n    \"proposal_title\": \"Add integration test for ParseError Display output\"\n  }\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119310,
+        "id": "chatcmpl-182",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 220,
+          "prompt_tokens": 1089,
+          "total_tokens": 1309
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:949fc8382533b808",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "end_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119311,
+        "id": "chatcmpl-106",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 1367,
+          "total_tokens": 1370
+        }
+      }
+    }
+  ]
+}

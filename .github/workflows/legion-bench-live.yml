@@ -1,0 +1,64 @@
+name: Legion Bench Live (opt-in)
+
+# Live mode: the same corpus execution as the recorded gate, but the model's
+# responses come from a real OpenAI-compatible endpoint instead of a cassette.
+#
+# This workflow deliberately CANNOT gate anything:
+#   * it has no `push` and no `pull_request` trigger — only a schedule and a
+#     manual dispatch,
+#   * it does not run at all unless the repository variable
+#     LEGION_BENCH_LIVE is set to "true" and a runner label is configured,
+#   * every step that touches a provider is `continue-on-error: true`.
+#
+# That is the P9.F1.T3 stop condition made structural rather than promised:
+# no branch protection can come to depend on a model being reachable.
+#
+# Enabling it needs a self-hosted runner that serves the model, because hosted
+# GitHub runners have no local model and this project does not send bench
+# traffic to a hosted provider.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model id served by the endpoint"
+        required: false
+        default: "qwen2.5-coder:14b"
+
+jobs:
+  live-local:
+    name: Legion bench live-local (never a gate)
+    if: vars.LEGION_BENCH_LIVE == 'true' && vars.LEGION_BENCH_LIVE_RUNNER != ''
+    runs-on: ${{ vars.LEGION_BENCH_LIVE_RUNNER }}
+    timeout-minutes: 180
+    continue-on-error: true
+    env:
+      CARGO_TERM_COLOR: always
+      LEGION_BENCH_MODEL: ${{ inputs.model || 'qwen2.5-coder:14b' }}
+      LEGION_BENCH_ENDPOINT: ${{ vars.LEGION_BENCH_ENDPOINT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      # Report-only: `--no-strict` keeps a model's task failures from turning
+      # into a workflow failure. What the run is for is the report artifact.
+      - name: Legion bench live-local (report only)
+        continue-on-error: true
+        run: cargo run -p xtask -- legion-bench --mode live-local --no-strict
+
+      - name: Upload live report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: legion-bench-live-report
+          path: target/legion-bench/legion_bench_report.toml
+          if-no-files-found: warn

@@ -62,6 +62,13 @@ struct LiveRunInput {
     schema_version: u32,
     endpoint: String,
     model: String,
+    /// `live` | `record` | `replay`. Absent means `live`, so an input written
+    /// by an older xtask still runs.
+    #[serde(default)]
+    provider_mode: Option<String>,
+    /// Directory holding per-task cassettes. Required by `record` and `replay`.
+    #[serde(default)]
+    cassette_dir: Option<String>,
     tasks: Vec<LiveRunTaskInput>,
 }
 
@@ -116,6 +123,21 @@ struct LiveRunTaskResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_tokens: Option<u64>,
     wall_ms: u64,
+    /// Model named by the replayed cassette. Empty when not replaying.
+    /// Carried out to xtask so a replayed report can cite the model whose
+    /// answers it replayed without xtask having to parse the tape.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    cassette_model: String,
+    /// `governed` | `raw` — the arm the replayed cassette was cut under.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    cassette_arm: String,
+    /// Recorded model exchanges replayed (or captured) for this task.
+    cassette_exchanges: u32,
+    /// Replayed exchanges whose request no longer fingerprints to the one that
+    /// was recorded. Zero means the loop asked the model exactly what it asked
+    /// when the cassette was cut; non-zero means the agent's request shape
+    /// moved and the cassette is answering a question nobody asked.
+    cassette_drift: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     notes: String,
@@ -140,6 +162,10 @@ impl LiveRunTaskResult {
             context_tokens: None,
             generation_tokens: None,
             wall_ms: 0,
+            cassette_model: String::new(),
+            cassette_arm: String::new(),
+            cassette_exchanges: 0,
+            cassette_drift: 0,
             error: None,
             notes: String::new(),
         }
@@ -158,20 +184,192 @@ struct MeterState {
     duplicate_tool_calls: u32,
 }
 
+/// How the runner obtains model responses.
+///
+/// `Replay` is what makes the benchmark runnable offline and byte-repeatably:
+/// the agent loop, the tools, the proposal pipeline and the verification
+/// command all execute for real against a real fixture checkout, and only the
+/// model's side of the conversation comes from disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderMode {
+    Live,
+    Record,
+    Replay,
+}
+
+impl ProviderMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "live" => Ok(Self::Live),
+            "record" => Ok(Self::Record),
+            "replay" => Ok(Self::Replay),
+            other => Err(format!(
+                "unknown provider_mode `{other}` (expected live|record|replay)"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Record => "record",
+            Self::Replay => "replay",
+        }
+    }
+}
+
+/// Schema version of the on-disk cassette format.
+const CASSETTE_SCHEMA_VERSION: u32 = 1;
+
+/// One task's recorded model conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Cassette {
+    schema_version: u32,
+    task_id: String,
+    /// The model that produced these responses. Recorded so a replayed report
+    /// can name the model it is standing in for instead of implying one.
+    model: String,
+    /// `governed` or `raw` — the value of the `LEGION_AI_GOVERNORS` seam when
+    /// the tape was cut. A cassette recorded under one arm replayed under the
+    /// other measures neither.
+    arm: String,
+    exchanges: Vec<CassetteExchange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CassetteExchange {
+    /// Fingerprint of the request that produced `response`, with the task's
+    /// checkout path normalized out (the checkout is a fresh temp directory
+    /// every run, so its name would otherwise make every request unique).
+    ///
+    /// Replay is ordered, not keyed: the fingerprint exists so that a change
+    /// to what the agent *asks* is counted and reported rather than silently
+    /// answered by a tape recorded for a different question.
+    request_fingerprint: String,
+    response: Value,
+}
+
+/// Replay bookkeeping for one task.
+#[derive(Debug, Default)]
+struct TapeState {
+    exchanges: Vec<CassetteExchange>,
+    cursor: usize,
+    drift: u32,
+}
+
+/// Replace every 8-4-4-4-12 hex token with `<UUID>`.
+///
+/// `edit-as-proposal` answers with a freshly generated proposal id, and that
+/// id travels back to the model in the next request. Without masking it, every
+/// request after the first edit differs from the recorded one on a value that
+/// carries no meaning for the model, and `cassette_drift` — the signal for
+/// "the loop no longer asks what the tape answers" — would be permanently
+/// non-zero and therefore useless.
+fn mask_uuids(text: &str) -> String {
+    // `uuid` is already a workspace dependency of this crate, and
+    // `try_parse_ascii` accepts exactly the 8-4-4-4-12 hex form this needs. A
+    // hand-written scanner would be a second implementation of a parser that is
+    // already here and already tested.
+    fn looks_like_uuid(bytes: &[u8]) -> bool {
+        bytes.len() == 36 && uuid::Uuid::try_parse_ascii(bytes).is_ok()
+    }
+
+    let bytes = text.as_bytes();
+    if bytes.len() < 36 {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        // A UUID is 36 ASCII bytes, so a match can neither start nor end
+        // inside a multi-byte character and `index` stays on a char boundary.
+        if index + 36 <= bytes.len() && looks_like_uuid(&bytes[index..index + 36]) {
+            out.push_str("<UUID>");
+            index += 36;
+            continue;
+        }
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index is always a char boundary");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// FNV-1a over the canonical JSON of a request payload.
+///
+/// Not a security hash: it exists to notice that two request payloads differ,
+/// and a dependency-free 64-bit hash is enough for that.
+fn fingerprint_request(payload: &Value, checkout: Option<&Path>) -> String {
+    let mut text = serde_json::to_string(payload).unwrap_or_default();
+    if let Some(checkout) = checkout {
+        let raw = checkout.to_string_lossy().into_owned();
+        // Two spellings, not three. `serde_json::to_string` escapes every
+        // backslash, so a raw Windows path with single separators can never
+        // appear in `text` — that arm was normalizing a form the haystack
+        // cannot contain. The escaped form covers the JSON encoding; the
+        // forward-slash form covers tool results that embed POSIX-style paths.
+        for form in [raw.replace('\\', "\\\\"), raw.replace('\\', "/")] {
+            if !form.is_empty() {
+                text = text.replace(&form, "<CHECKOUT>");
+            }
+        }
+    }
+    let text = mask_uuids(&text);
+    // Diagnosing cassette drift means comparing the exact bytes that were
+    // fingerprinted; reconstructing them from a hash is not possible, and
+    // storing every request on the tape would double its size for a case that
+    // comes up only when drift is already non-zero.
+    if let Ok(dir) = std::env::var("LEGION_BENCH_DUMP_REQUESTS")
+        && !dir.trim().is_empty()
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(dir);
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::write(dir.join(format!("request-{seq:03}.json")), &text);
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("req-v1:{hash:016x}")
+}
+
 /// Wraps the reqwest transport so the runner can observe token usage and
 /// repeated (name, arguments) tool calls without changing provider or loop
-/// code. All observation happens on the raw response JSON.
+/// code, and so a run can be recorded to — or served from — a cassette. All
+/// observation happens on the raw response JSON.
 #[derive(Clone)]
 struct MeteringTransport {
     inner: ReqwestProviderHttpTransport,
     state: Arc<Mutex<MeterState>>,
+    mode: ProviderMode,
+    tape: Arc<Mutex<TapeState>>,
+    /// Task checkout, normalized out of request fingerprints.
+    checkout: Option<PathBuf>,
 }
 
 impl MeteringTransport {
-    fn new() -> Self {
+    fn with_mode(
+        mode: ProviderMode,
+        exchanges: Vec<CassetteExchange>,
+        checkout: Option<PathBuf>,
+    ) -> Self {
         Self {
             inner: ReqwestProviderHttpTransport,
             state: Arc::new(Mutex::new(MeterState::default())),
+            mode,
+            tape: Arc::new(Mutex::new(TapeState {
+                exchanges,
+                cursor: 0,
+                drift: 0,
+            })),
+            checkout,
         }
     }
 
@@ -223,11 +421,58 @@ impl ProviderHttpTransport for MeteringTransport {
         bearer_token: Option<&str>,
         payload: Value,
     ) -> Result<Value, ProviderError> {
-        let response = self.inner.post_json(endpoint, bearer_token, payload)?;
+        let fingerprint = fingerprint_request(&payload, self.checkout.as_deref());
+        let response = match self.mode {
+            ProviderMode::Replay => self.replay(&fingerprint)?,
+            ProviderMode::Live | ProviderMode::Record => {
+                let response = self.inner.post_json(endpoint, bearer_token, payload)?;
+                if self.mode == ProviderMode::Record
+                    && let Ok(mut tape) = self.tape.lock()
+                {
+                    tape.exchanges.push(CassetteExchange {
+                        request_fingerprint: fingerprint,
+                        response: response.clone(),
+                    });
+                }
+                response
+            }
+        };
         if let Ok(mut state) = self.state.lock() {
             Self::record(&mut state, &response);
         }
         Ok(response)
+    }
+}
+
+impl MeteringTransport {
+    /// Serve the next recorded response.
+    ///
+    /// Running past the end of the tape is an error rather than a fabricated
+    /// "the model stopped": a replayed run that quietly ends early would score
+    /// as a real, worse result and the report would not say why.
+    fn replay(&self, fingerprint: &str) -> Result<Value, ProviderError> {
+        let mut tape = self.tape.lock().map_err(|_| ProviderError::RequestFailed {
+            provider: "legion-bench-live".to_string(),
+            message: "cassette tape lock poisoned".to_string(),
+        })?;
+        let cursor = tape.cursor;
+        let Some(exchange) = tape.exchanges.get(cursor).cloned() else {
+            let total = tape.exchanges.len();
+            return Err(ProviderError::RequestFailed {
+                provider: "legion-bench-live".to_string(),
+                message: format!(
+                    "cassette exhausted after {total} exchange(s): the agent loop asked for \
+                     response {} but the tape has none. Re-record with \
+                     `cargo run -p xtask -- legion-bench --mode record`.",
+                    cursor + 1
+                ),
+            });
+        };
+        tape.cursor += 1;
+        if exchange.request_fingerprint != fingerprint {
+            tape.drift += 1;
+        }
+        Ok(exchange.response)
     }
 }
 
@@ -282,6 +527,14 @@ impl<P: ToolCallingProvider> ToolCallingProvider for ModelOverrideProvider<P> {
 
 // ─── Checkout helpers ────────────────────────────────────────────────────────
 
+/// Copy `src` into `dst`, rewriting CRLF to LF in every UTF-8 text file.
+///
+/// The checkout's bytes are what the model reads, what its `old_str` anchors
+/// have to match, and what the recorded request fingerprints were computed
+/// over. Git hands Windows a CRLF working copy and Linux an LF one from the
+/// same commit, so without this the same cassette would replay against two
+/// different files and a recorded baseline could only ever be valid on the
+/// platform that cut it.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("create dir {}: {e}", dst.display()))?;
     for entry in fs::read_dir(src).map_err(|e| format!("read dir {}: {e}", src.display()))? {
@@ -292,9 +545,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         if ft.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else if ft.is_file() {
-            fs::copy(&src_path, &dst_path).map_err(|e| {
-                format!("copy {} -> {}: {e}", src_path.display(), dst_path.display())
-            })?;
+            let bytes =
+                fs::read(&src_path).map_err(|e| format!("read {}: {e}", src_path.display()))?;
+            match String::from_utf8(bytes) {
+                Ok(text) => fs::write(&dst_path, text.replace("\r\n", "\n")),
+                Err(err) => fs::write(&dst_path, err.into_bytes()),
+            }
+            .map_err(|e| format!("write {}: {e}", dst_path.display()))?;
         }
     }
     Ok(())
@@ -331,6 +588,10 @@ fn prepare_checkout(fixture_dir: &Path, task_id: &str) -> Result<PathBuf, String
     git_cmd(&checkout, &["init", "-b", "main"])?;
     git_cmd(&checkout, &["config", "user.email", "bench@legion.test"])?;
     git_cmd(&checkout, &["config", "user.name", "Legion Bench"])?;
+    // The checkout is already LF-normalized; leaving the developer's global
+    // `core.autocrlf` in force would let git rewrite it back per platform and
+    // undo the normalization that makes a cassette portable.
+    git_cmd(&checkout, &["config", "core.autocrlf", "false"])?;
     git_cmd(&checkout, &["add", "."])?;
     git_cmd(
         &checkout,
@@ -756,6 +1017,84 @@ fn run_verification(command: &str, cwd: &Path, timeout: Duration) -> Result<Opti
     }
 }
 
+// ─── Cassette I/O ────────────────────────────────────────────────────────────
+
+/// Which A/B arm the process is running under.
+///
+/// `LEGION_AI_GOVERNORS=off` is the tested seam that disables every
+/// SmallCode-derived governor; anything else is the governed arm. A cassette
+/// carries the arm it was cut under because replaying a governed tape while
+/// the loop runs ungoverned measures neither arm.
+fn current_arm() -> String {
+    match std::env::var("LEGION_AI_GOVERNORS").as_deref() {
+        Ok("off") => "raw".to_string(),
+        _ => "governed".to_string(),
+    }
+}
+
+fn load_cassette(path: &Path) -> Result<Cassette, String> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "unable to read cassette `{}`: {err} (record it with \
+             `cargo run -p xtask -- legion-bench --mode record`)",
+            path.display()
+        )
+    })?;
+    let cassette: Cassette = serde_json::from_str(&text)
+        .map_err(|err| format!("unable to parse cassette `{}`: {err}", path.display()))?;
+    if cassette.schema_version != CASSETTE_SCHEMA_VERSION {
+        return Err(format!(
+            "cassette `{}` has schema_version {} (expected {CASSETTE_SCHEMA_VERSION})",
+            path.display(),
+            cassette.schema_version
+        ));
+    }
+    if cassette.exchanges.is_empty() {
+        return Err(format!(
+            "cassette `{}` records no model exchanges; an empty tape would replay as a model \
+             that said nothing and score as a real failure",
+            path.display()
+        ));
+    }
+    let arm = current_arm();
+    if cassette.arm != arm {
+        return Err(format!(
+            "cassette `{}` was recorded under the `{}` arm but this process runs `{arm}` \
+             (LEGION_AI_GOVERNORS); replaying across arms measures neither",
+            path.display(),
+            cassette.arm
+        ));
+    }
+    Ok(cassette)
+}
+
+fn write_cassette(
+    path: &Path,
+    task_id: &str,
+    model: &str,
+    exchanges: &[CassetteExchange],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "unable to create cassette dir `{}`: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let cassette = Cassette {
+        schema_version: CASSETTE_SCHEMA_VERSION,
+        task_id: task_id.to_string(),
+        model: model.to_string(),
+        arm: current_arm(),
+        exchanges: exchanges.to_vec(),
+    };
+    let text = serde_json::to_string_pretty(&cassette)
+        .map_err(|err| format!("unable to serialize cassette: {err}"))?;
+    fs::write(path, format!("{text}\n"))
+        .map_err(|err| format!("unable to write cassette `{}`: {err}", path.display()))
+}
+
 // ─── Per-task execution ──────────────────────────────────────────────────────
 
 fn run_one_task(
@@ -763,10 +1102,43 @@ fn run_one_task(
     endpoint: &str,
     model: &str,
     api_key: &str,
+    mode: ProviderMode,
+    cassette_dir: Option<&Path>,
 ) -> LiveRunTaskResult {
     let started = Instant::now();
     let mut result = LiveRunTaskResult::new(&task.id);
     let mut notes: Vec<String> = Vec::new();
+
+    // Load the tape before touching the filesystem: a replay with no cassette
+    // must fail loudly, not run a task with an empty conversation and report
+    // the resulting zero as a measurement.
+    let cassette_path = cassette_dir.map(|dir| dir.join(format!("{}.json", task.id)));
+    let recorded = match (mode, cassette_path.as_deref()) {
+        (ProviderMode::Replay, Some(path)) => match load_cassette(path) {
+            Ok(cassette) => {
+                notes.push(format!(
+                    "cassette={} model={} arm={}",
+                    path.display(),
+                    cassette.model,
+                    cassette.arm
+                ));
+                result.cassette_model = cassette.model;
+                result.cassette_arm = cassette.arm;
+                cassette.exchanges
+            }
+            Err(err) => {
+                result.error = Some(err);
+                result.wall_ms = started.elapsed().as_millis() as u64;
+                return result;
+            }
+        },
+        (ProviderMode::Replay, None) => {
+            result.error = Some("replay mode requires a cassette directory".to_string());
+            result.wall_ms = started.elapsed().as_millis() as u64;
+            return result;
+        }
+        _ => Vec::new(),
+    };
 
     let fixture_dir = PathBuf::from(&task.fixture_dir);
     let checkout = match prepare_checkout(&fixture_dir, &task.id) {
@@ -789,6 +1161,20 @@ fn run_one_task(
         Ok(Some(exit)) if exit == task.expected_exit
     );
 
+    // Built outside the closure so the tape survives an early `?`: a run that
+    // dies because the cassette ran out must still report how far it got.
+    let meter = MeteringTransport::with_mode(mode, recorded, Some(checkout.clone()));
+
+    // The wire model id goes into the request payload, so replaying under a
+    // different name would make every request differ from the recorded one
+    // and report the whole run as drift. The tape names its own model; that
+    // is the one a replay must use.
+    let model = if result.cassette_model.is_empty() {
+        model.to_string()
+    } else {
+        result.cassette_model.clone()
+    };
+
     let outcome = (|| -> Result<AppDelegatedTaskOutcome, String> {
         let mut app = AppComposition::new();
         app.open_workspace(
@@ -801,7 +1187,6 @@ fn run_one_task(
 
         let scope = build_scope(&checkout, task)?;
 
-        let meter = MeteringTransport::new();
         let provider = ModelOverrideProvider {
             inner: OpenAiCompatibleProvider::with_transport(
                 "legion-bench-live",
@@ -809,7 +1194,7 @@ fn run_one_task(
                 Some(api_key.to_string()),
                 meter.clone(),
             ),
-            model: model.to_string(),
+            model: model.clone(),
         };
 
         // Wall-clock watchdog: cancel the loop through the product kill-switch
@@ -830,16 +1215,6 @@ fn run_one_task(
             .start_delegated_task(task.prompt.clone(), scope, &provider)
             .map_err(|e| format!("delegated task failed: {e:?}"))?;
 
-        // Harvest meter observations before app/provider drop.
-        if let Ok(state) = meter.state.lock() {
-            result.duplicate_tool_calls = state.duplicate_tool_calls;
-            if state.usage_seen {
-                result.context_tokens = Some(state.prompt_tokens);
-                result.generation_tokens = Some(state.completion_tokens);
-            }
-            notes.push(format!("model_http_requests={}", state.requests));
-        }
-
         // Apply proposals for every outcome that carries them, here, while
         // `app` still exists. A run the idle governor stopped is scored on the
         // same evidence as a completed one, and that parity is only real if
@@ -859,6 +1234,42 @@ fn run_one_task(
         }
         Ok(outcome)
     })();
+
+    // Harvest meter and tape observations. Done after the closure, not inside
+    // it, so a run that failed on an exhausted cassette still reports the
+    // exchanges it consumed.
+    if let Ok(state) = meter.state.lock() {
+        result.duplicate_tool_calls = state.duplicate_tool_calls;
+        if state.usage_seen {
+            result.context_tokens = Some(state.prompt_tokens);
+            result.generation_tokens = Some(state.completion_tokens);
+        }
+        notes.push(format!("model_http_requests={}", state.requests));
+    }
+    if let Ok(tape) = meter.tape.lock() {
+        result.cassette_drift = tape.drift;
+        result.cassette_exchanges = match mode {
+            ProviderMode::Replay => tape.cursor as u32,
+            _ => tape.exchanges.len() as u32,
+        };
+        // A failed write is reported here rather than folded into
+        // `result.error`, which the outcome arms below overwrite. It cannot go
+        // unnoticed: the next `--write-baseline` hashes the cassette set and
+        // fails on the missing file.
+        if mode == ProviderMode::Record
+            && let Some(path) = cassette_path.as_deref()
+            && let Err(err) = write_cassette(path, &task.id, &model, &tape.exchanges)
+        {
+            eprintln!("legion_bench_live: {err}");
+            notes.push(format!("cassette_write_failed: {err}"));
+        }
+        notes.push(format!(
+            "provider_mode={} cassette_exchanges={} cassette_drift={}",
+            mode.as_str(),
+            result.cassette_exchanges,
+            result.cassette_drift
+        ));
+    }
 
     // Records every audit-derived field at once. Split across the outcome arms
     // it was three copies of the same five lines, which is three places to
@@ -1139,8 +1550,27 @@ fn main() {
         );
         process::exit(2);
     }
+    let provider_mode = match ProviderMode::parse(input.provider_mode.as_deref().unwrap_or("live"))
+    {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("legion_bench_live: {err}");
+            process::exit(2);
+        }
+    };
+    let cassette_dir = input.cassette_dir.as_deref().map(PathBuf::from);
+    if provider_mode != ProviderMode::Live && cassette_dir.is_none() {
+        eprintln!(
+            "legion_bench_live: provider_mode `{}` requires cassette_dir",
+            provider_mode.as_str()
+        );
+        process::exit(2);
+    }
+    // Replay never opens a socket, so it must not demand a credential either:
+    // requiring one would make the offline CI leg depend on a secret.
     let api_key = match std::env::var(API_KEY_ENV) {
         Ok(value) if !value.trim().is_empty() => value,
+        _ if provider_mode == ProviderMode::Replay => "replay-no-network".to_string(),
         _ => {
             eprintln!("legion_bench_live: {API_KEY_ENV} is required");
             process::exit(2);
@@ -1148,10 +1578,12 @@ fn main() {
     };
 
     eprintln!(
-        "legion_bench_live: endpoint={} model={} tasks={}",
+        "legion_bench_live: endpoint={} model={} tasks={} provider_mode={} arm={}",
         input.endpoint,
         input.model,
-        input.tasks.len()
+        input.tasks.len(),
+        provider_mode.as_str(),
+        current_arm(),
     );
 
     let mut results: Vec<LiveRunTaskResult> = Vec::new();
@@ -1162,7 +1594,14 @@ fn main() {
             input.tasks.len(),
             task.id
         );
-        let result = run_one_task(task, &input.endpoint, &input.model, &api_key);
+        let result = run_one_task(
+            task,
+            &input.endpoint,
+            &input.model,
+            &api_key,
+            provider_mode,
+            cassette_dir.as_deref(),
+        );
         eprintln!(
             "legion_bench_live: [{}/{}] {} outcome={} task_success={} tests_passed={} tests_passed_at_rest={} \
              turns={} tool_calls={} wall_ms={}{}",
@@ -1302,7 +1741,14 @@ mod tests {
         // Port 9 (discard) on loopback: nothing listens there, so the provider
         // fails on the first model call. The run must produce a structured
         // error result — no panic, no partial state.
-        let result = run_one_task(&task, "http://127.0.0.1:9/v1", "test-model", "unused-key");
+        let result = run_one_task(
+            &task,
+            "http://127.0.0.1:9/v1",
+            "test-model",
+            "unused-key",
+            ProviderMode::Live,
+            None,
+        );
         assert_eq!(
             result.outcome, "error",
             "notes={} err={:?}",
@@ -1316,6 +1762,172 @@ mod tests {
             "error should name the provider failure, got: {error}"
         );
         let _ = fs::remove_dir_all(&fixture);
+    }
+
+    /// A cassette is only portable if the bytes it was cut against are the
+    /// bytes a replay sees. Git hands Windows CRLF and Linux LF from the same
+    /// commit, so the checkout copy is where that has to be equalized.
+    #[test]
+    fn checkout_copies_are_lf_normalized() {
+        let src = temp_fixture();
+        fs::write(src.join("src").join("crlf.rs"), "a\r\nb\r\n").expect("write crlf");
+        fs::write(src.join("src").join("mixed.txt"), "x\r\ny\nz\r\n").expect("write mixed");
+        let dst = src.with_extension("copy");
+
+        copy_dir_recursive(&src, &dst).expect("copy fixture");
+
+        let copied = fs::read(dst.join("src").join("crlf.rs")).expect("read copy");
+        assert_eq!(copied, b"a\nb\n");
+        let mixed = fs::read(dst.join("src").join("mixed.txt")).expect("read copy");
+        assert_eq!(mixed, b"x\ny\nz\n");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dst);
+    }
+
+    /// Every task runs in a freshly named temp checkout, so the path is
+    /// different on every run and would otherwise make every request unique.
+    #[test]
+    fn request_fingerprints_ignore_the_checkout_path() {
+        let first = PathBuf::from(r"C:\Temp\legion-bench-live-t-1");
+        let second = PathBuf::from("/tmp/legion-bench-live-t-2");
+        let payload = |checkout: &Path| {
+            serde_json::json!({
+                "model": "m",
+                "messages": [{
+                    "role": "tool",
+                    "content": format!("read {}/src/main.rs", checkout.display()),
+                }],
+            })
+        };
+
+        assert_eq!(
+            fingerprint_request(&payload(&first), Some(&first)),
+            fingerprint_request(&payload(&second), Some(&second)),
+            "the checkout path must not reach the fingerprint"
+        );
+        // But a real difference must still register.
+        let mut other = payload(&first);
+        other["model"] = serde_json::Value::String("other".to_string());
+        assert_ne!(
+            fingerprint_request(&payload(&first), Some(&first)),
+            fingerprint_request(&other, Some(&first))
+        );
+    }
+
+    /// A proposal id is freshly generated per edit and travels back to the
+    /// model in the next request, so it must not reach the fingerprint.
+    #[test]
+    fn request_fingerprints_ignore_proposal_ids() {
+        let with_id = |id: &str| {
+            serde_json::json!({
+                "messages": [{"role": "tool", "content": format!("proposal {id} created")}],
+            })
+        };
+        assert_eq!(
+            fingerprint_request(&with_id("fe77f6a7-71a5-4dde-bb9c-954f46ef8d72"), None),
+            fingerprint_request(&with_id("b9d4963e-d150-414f-aea2-4d9b7737eada"), None),
+        );
+        // A token that only looks UUID-ish must survive: masking too much
+        // would hide real differences.
+        assert_ne!(
+            fingerprint_request(&with_id("fe77f6a7-71a5-4dde-bb9c-954f46ef8d7"), None),
+            fingerprint_request(&with_id("b9d4963e-d150-414f-aea2-4d9b7737ead"), None),
+        );
+        assert_eq!(
+            mask_uuids("naïve fe77f6a7-71a5-4dde-bb9c-954f46ef8d72 ✓"),
+            "naïve <UUID> ✓"
+        );
+    }
+
+    #[test]
+    fn replay_serves_recorded_responses_in_order_then_refuses_to_invent_one() {
+        let exchanges = vec![
+            CassetteExchange {
+                request_fingerprint: "req-v1:0000000000000001".to_string(),
+                response: serde_json::json!({"choices": [{"message": {"content": "first"}}]}),
+            },
+            CassetteExchange {
+                request_fingerprint: "req-v1:0000000000000002".to_string(),
+                response: serde_json::json!({"choices": [{"message": {"content": "second"}}]}),
+            },
+        ];
+        let transport = MeteringTransport::with_mode(ProviderMode::Replay, exchanges, None);
+
+        let first = transport
+            .post_json("unused", None, serde_json::json!({"n": 1}))
+            .expect("first replay");
+        assert_eq!(first["choices"][0]["message"]["content"], "first");
+        let second = transport
+            .post_json("unused", None, serde_json::json!({"n": 2}))
+            .expect("second replay");
+        assert_eq!(second["choices"][0]["message"]["content"], "second");
+
+        let err = transport
+            .post_json("unused", None, serde_json::json!({"n": 3}))
+            .expect_err("a third call must not be answered");
+        assert!(
+            format!("{err}").contains("cassette exhausted"),
+            "unexpected error: {err}"
+        );
+
+        // Both live requests differ from the recorded fingerprints, so both
+        // count as drift — the metric that tells a reader the tape no longer
+        // answers the conversation the loop is having.
+        let drift = transport.tape.lock().expect("tape").drift;
+        assert_eq!(drift, 2);
+    }
+
+    #[test]
+    fn a_cassette_from_the_other_arm_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "legion-bench-cassette-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join("t.json");
+        let cassette = Cassette {
+            schema_version: CASSETTE_SCHEMA_VERSION,
+            task_id: "t".to_string(),
+            model: "m".to_string(),
+            // The process under test runs governed unless the seam is set.
+            arm: "raw".to_string(),
+            exchanges: vec![CassetteExchange {
+                request_fingerprint: "req-v1:0000000000000001".to_string(),
+                response: serde_json::json!({}),
+            }],
+        };
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&cassette).expect("serialize"),
+        )
+        .expect("write cassette");
+
+        let err = load_cassette(&path).expect_err("cross-arm replay must be refused");
+        assert!(err.contains("arm"), "unexpected error: {err}");
+
+        // An empty tape is refused too: replaying it would look like a model
+        // that said nothing and score as a real failure.
+        let empty = Cassette {
+            exchanges: Vec::new(),
+            arm: current_arm(),
+            ..cassette
+        };
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&empty).expect("serialize"),
+        )
+        .expect("write cassette");
+        let err = load_cassette(&path).expect_err("empty tape must be refused");
+        assert!(
+            err.contains("no model exchanges"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

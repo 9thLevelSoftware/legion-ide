@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-06",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:382b67d70fa67da5",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/dates.js\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787120021,
+        "id": "chatcmpl-844",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 31,
+          "prompt_tokens": 622,
+          "total_tokens": 653
+        }
+      }
+    }
+  ]
+}

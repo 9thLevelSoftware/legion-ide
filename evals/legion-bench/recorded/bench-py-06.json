@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-06",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:ecc7ef0e897cd003",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"textkit/dates.py\",\n    \"proposal_title\": \"Fix month_span to count months inclusively\",\n    \"proposal_reason\": \"The current implementation of month_span returns one less than the expected inclusive number of months. This change ensures the function returns the correct count without altering its signature, ValueError behavior, or the quarter_of function.\",\n    \"old_str\": \"return (end_year - start_year) * 12 + (end_month - start_month)\",\n    \"new_str\": \"return (end_year - start_year) * 12 + (end_month - start_month) + 1\"\n  }\n}\n\nend_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787118935,
+        "id": "chatcmpl-910",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 150,
+          "prompt_tokens": 679,
+          "total_tokens": 829
+        }
+      }
+    }
+  ]
+}

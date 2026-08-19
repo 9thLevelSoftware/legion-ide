@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-01",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:210f7427914bc3b1",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/stats.rs\",\n    \"start_line\": 0,\n    \"end_line\": 1000,\n    \"max_bytes\": 1000000\n  }\n}\n\n{\n  \"name\": \"outline\",\n  \"arguments\": {\n    \"path\": \"src/stats.rs\",\n    \"max_symbols\": 100\n  }\n}\n\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"src/stats.rs\",\n    \"proposal_title\": \"Fix `count_words` to count whitespace-separated words\",\n    \"proposal_reason\": \"The current implementation of `count_words` does not correctly handle runs of spaces, newlines, and empty strings, as described in the unit tests.\",\n    \"replacement\": \"...\\n\\nfn count_words(input: &str) -> usize {\\n    input.split_whitespace().count()\\n}\\n\\n...\"\n  }\n}\n\n{\n  \"name\": \"end_turn\"\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119002,
+        "id": "chatcmpl-588",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 217,
+          "prompt_tokens": 684,
+          "total_tokens": 901
+        }
+      }
+    }
+  ]
+}

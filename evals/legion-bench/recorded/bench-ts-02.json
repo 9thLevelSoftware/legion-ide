@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-02",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:9507b94f71fc6d21",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"src/ledger.js\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119331,
+        "id": "chatcmpl-900",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 31,
+          "prompt_tokens": 742,
+          "total_tokens": 773
+        }
+      }
+    }
+  ]
+}
