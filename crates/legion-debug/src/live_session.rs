@@ -8,9 +8,11 @@
 //! CI uses the in-tree `fake_dap_adapter` binary (same wire shape as real
 //! CodeLLDB / `lldb-dap`).
 
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -18,6 +20,135 @@ use thiserror::Error;
 
 use crate::framing::{DapFrameError, DapFramer, DapMessage};
 use crate::state::DapLifecycleState;
+
+/// How much adapter stderr to retain.
+///
+/// Bounded so a chatty adapter cannot grow the capture without limit over a
+/// long session. Generous relative to `stderr_suffix`, which shows the first
+/// 400 characters — the extra is headroom for reading the full capture while
+/// debugging, not for display.
+const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
+
+/// How long an error path waits for the stderr reader to catch up.
+///
+/// Long enough for a thread that has just been spawned to read a line that is
+/// already in the pipe; short enough that no error is noticeably slower to
+/// report.
+const STDERR_SETTLE: Duration = Duration::from_millis(250);
+
+/// Describe an adapter's liveness for an error message.
+///
+/// A free function so the three outcomes can be tested without standing up a
+/// session around a real child process.
+fn exit_clause(status: Result<Option<std::process::ExitStatus>, std::io::Error>) -> String {
+    match status {
+        Ok(Some(status)) => format!("; adapter exited: {status}"),
+        Ok(None) => "; adapter still running".to_string(),
+        Err(err) => format!("; adapter status unknown: {err}"),
+    }
+}
+
+/// Format captured stderr as a trailing clause for an error message.
+///
+/// Waits briefly when the capture is empty. The errors that want stderr are
+/// raised the instant stdout breaks — the Windows dogfood failure reaches
+/// `unexpected EOF in headers` in 20ms — and the reader thread may not have
+/// been scheduled yet, let alone read a line. Formatting immediately loses the
+/// message to a race and reports the same bare frame error the capture was
+/// added to explain. The wait is bounded and only on error paths.
+///
+/// When nothing arrives the clause says so rather than being omitted: "the
+/// adapter said nothing" and "we failed to capture what it said" are different
+/// diagnoses, and an absent clause cannot tell them apart.
+fn stderr_clause(sink: &Arc<Mutex<String>>) -> String {
+    let deadline = Instant::now() + STDERR_SETTLE;
+    loop {
+        match sink.lock() {
+            Ok(captured) if !captured.trim().is_empty() => break,
+            Ok(_) => {}
+            Err(_) => return String::new(),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Ok(captured) = sink.lock() else {
+        return String::new();
+    };
+    let trimmed = captured.trim();
+    if trimmed.is_empty() {
+        return "; adapter stderr: <empty>".to_string();
+    }
+    // Bounded: an adapter that logs heavily must not turn one error into a
+    // page of unrelated output.
+    let shown: String = trimmed.chars().take(400).collect();
+    format!("; adapter stderr: {shown}")
+}
+
+/// Drain a reader into `sink` on a background thread, a line at a time.
+///
+/// Line at a time rather than `read_to_string`: the latter returns at EOF,
+/// which is when the adapter exits — and the errors that most need stderr (a
+/// timeout, a broken frame) are raised while it is still running. Draining to
+/// EOF attached an empty string on exactly the path the capture exists for.
+///
+/// Bytes rather than `read_line`, and lossy conversion: `read_line` fails on
+/// invalid UTF-8, and an adapter writing in a locale code page or dumping
+/// binary addresses into a crash report would have killed the capture on its
+/// first bad byte — leaving the same empty string this function exists to
+/// prevent, on the platform that motivated it.
+///
+/// Reading continues after the cap is reached. Stopping would close the pipe,
+/// and the adapter's next write to stderr would take a `SIGPIPE`: a chatty but
+/// healthy adapter killed by the mechanism meant to bound a buffer, and
+/// reported afterwards as "adapter exited unexpectedly" with no stderr to
+/// explain it, because we closed the pipe ourselves. "Stop growing" and "stop
+/// reading" are different instructions.
+///
+/// Best effort throughout: a failure to read the adapter's complaints must not
+/// fail the session, only leave the error message thinner. A free function
+/// rather than an inline closure so it can be tested against a reader that
+/// never reaches EOF, which is the case that was wrong.
+fn spawn_stderr_capture<R>(stderr: R, sink: Arc<Mutex<String>>)
+where
+    R: Read + Send + 'static,
+{
+    let _ = std::thread::Builder::new()
+        .name("legion-dap-stderr".to_string())
+        .spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = Vec::new();
+            // Once set, keep draining the pipe but stop appending.
+            let mut capture_full = false;
+            loop {
+                line.clear();
+                // A clean EOF is the only reason to stop reading; an I/O error
+                // means the pipe is gone, so there is nothing left to drain.
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if capture_full {
+                    continue;
+                }
+                let Ok(mut sink) = sink.lock() else {
+                    // Poisoned: nothing can be appended again, but the pipe
+                    // still needs draining for the reason in the doc comment.
+                    capture_full = true;
+                    continue;
+                };
+                // Keep the head. `stderr_suffix` takes from the front, because
+                // the first complaint is usually the one that explains the
+                // failure.
+                if sink.len() >= STDERR_CAPTURE_BYTES {
+                    capture_full = true;
+                    continue;
+                }
+                sink.push_str(&String::from_utf8_lossy(&line));
+            }
+        });
+}
 
 /// Errors from a live DAP session.
 #[derive(Debug, Error)]
@@ -120,7 +251,22 @@ pub struct LiveDapStopOutcome {
 pub struct LiveDapSession {
     child: Child,
     stdin: Option<std::process::ChildStdin>,
-    stdout: BufReader<std::process::ChildStdout>,
+    /// Frames decoded off the adapter's stdout by a reader thread.
+    ///
+    /// Every read used to be `DapFramer::read_from(&mut self.stdout)`, a
+    /// blocking call inside a `while Instant::now() < deadline` loop — so the
+    /// deadline was only consulted *between* frames and could not fire while
+    /// waiting for one. An adapter that answered nothing blocked forever, and
+    /// the CI job's 60-minute timeout was the only thing that stopped it. A
+    /// timeout that cannot fire is worse than none: it made a hang look like a
+    /// protocol failure and hid which of the two was happening.
+    frames: Receiver<Result<DapMessage, DapFrameError>>,
+    /// Whatever the adapter wrote to stderr, for error messages.
+    ///
+    /// Previously `Stdio::null()`, which discarded the adapter's own account of
+    /// why it was unhappy — the single most useful thing to have when a
+    /// handshake fails.
+    stderr: Arc<Mutex<String>>,
     next_seq: u64,
     adapter_type: String,
 }
@@ -138,7 +284,7 @@ impl LiveDapSession {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|err| LiveDapSessionError::Spawn {
             message: format!("{}: {err}", program.display()),
         })?;
@@ -154,7 +300,8 @@ impl LiveDapSession {
             .ok_or_else(|| LiveDapSessionError::Spawn {
                 message: "missing stdout pipe".to_string(),
             })?;
-        Self::from_stdio(child, stdin, stdout, adapter_type)
+        let stderr = child.stderr.take();
+        Self::from_parts(child, stdin, stdout, stderr, adapter_type)
     }
 
     /// Build a session from an already-spawned child with stdio pipes (C4 sandbox).
@@ -164,10 +311,49 @@ impl LiveDapSession {
         stdout: std::process::ChildStdout,
         adapter_type: impl Into<String>,
     ) -> Result<Self, LiveDapSessionError> {
+        Self::from_parts(child, stdin, stdout, None, adapter_type)
+    }
+
+    /// Build a session, moving stdout (and stderr, when piped) onto reader
+    /// threads so every wait can honour a deadline.
+    fn from_parts(
+        child: std::process::Child,
+        stdin: std::process::ChildStdin,
+        stdout: std::process::ChildStdout,
+        stderr: Option<std::process::ChildStderr>,
+        adapter_type: impl Into<String>,
+    ) -> Result<Self, LiveDapSessionError> {
+        // Bounded so a chatty adapter cannot grow this without limit; DAP
+        // traffic for one session is small and the consumer keeps up.
+        let (tx, frames) = sync_channel(64);
+        std::thread::Builder::new()
+            .name("legion-dap-reader".to_string())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let frame = DapFramer::read_from(&mut reader);
+                    let failed = frame.is_err();
+                    // A closed receiver means the session is gone; stop rather
+                    // than block forever on a send nobody will take.
+                    if tx.send(frame).is_err() || failed {
+                        break;
+                    }
+                }
+            })
+            .map_err(|err| LiveDapSessionError::Spawn {
+                message: format!("cannot start DAP reader thread: {err}"),
+            })?;
+
+        let captured = Arc::new(Mutex::new(String::new()));
+        if let Some(stderr) = stderr {
+            spawn_stderr_capture(stderr, Arc::clone(&captured));
+        }
+
         Ok(Self {
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            frames,
+            stderr: captured,
             next_seq: 1,
             adapter_type: adapter_type.into(),
         })
@@ -204,11 +390,10 @@ impl LiveDapSession {
         let mut saw_initialized_event = false;
 
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            // No explicit remaining-time check: `read_frame` enforces the
+            // deadline through `recv_timeout` and returns `Timeout`, which `?`
+            // propagates.
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("initialized") {
                 saw_initialized_event = true;
             }
@@ -218,13 +403,21 @@ impl LiveDapSession {
                 })?;
                 saw_initialize_response = true;
             }
-            if saw_initialize_response && saw_initialized_event {
+            // The `initialize` response alone completes this step. Waiting for
+            // the `initialized` event as well is what made every real adapter
+            // fail: per the DAP sequence the adapter sends `initialized` when
+            // it is ready for configuration, which is after `launch`/`attach`,
+            // not after `initialize`. lldb-dap follows that on all three
+            // platforms; the in-tree fake adapter sends it early, so every test
+            // against the fake passed while the product hung against anything
+            // real. The event is still recorded when an adapter volunteers it.
+            if saw_initialize_response {
                 return Ok(LiveDapHandshakeOutcome {
                     lifecycle_state: DapLifecycleState::Launching,
                     adapter_type: self.adapter_type.clone(),
-                    initialized_event: true,
+                    initialized_event: saw_initialized_event,
                     metadata_summary: format!(
-                        "action=initialize state=launching adapter={} initialized=true live=true wire=microsoft-dap",
+                        "action=initialize state=launching adapter={} initialized={saw_initialized_event} live=true wire=microsoft-dap",
                         self.adapter_type
                     ),
                 });
@@ -361,7 +554,7 @@ impl LiveDapSession {
         let _ = self.request("continue", json!({ "threadId": thread_id }), timeout)?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("continued") {
                 return Ok(());
             }
@@ -406,7 +599,7 @@ impl LiveDapSession {
         let mut thread_id = 1u64;
         let mut saw_stopped = false;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if msg.event_name() == Some("stopped") {
                 saw_stopped = true;
                 if let Some(body) = msg.event_body() {
@@ -523,7 +716,7 @@ impl LiveDapSession {
 
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let msg = DapFramer::read_from(&mut self.stdout)?;
+            let msg = self.read_frame(deadline)?;
             if let Some(result) = msg.response_for(seq) {
                 return result
                     .map(|body| {
@@ -577,6 +770,67 @@ impl LiveDapSession {
         }
     }
 
+    /// Read one frame, or give up at `deadline`.
+    ///
+    /// The deadline is real here, which it was not before: the old loops called
+    /// a blocking `read_from` and only re-checked the clock after a frame
+    /// arrived, so an adapter that said nothing was waited on forever.
+    ///
+    /// A closed channel means the reader thread stopped — the adapter exited or
+    /// its stdout broke — and the adapter's own stderr is the most useful thing
+    /// to say about that, so it is attached when there is any.
+    fn read_frame(&mut self, deadline: Instant) -> Result<DapMessage, LiveDapSessionError> {
+        let waited = deadline.saturating_duration_since(Instant::now());
+        match self.frames.recv_timeout(waited) {
+            Ok(Ok(message)) => Ok(message),
+            // A framing error is usually the adapter having exited, which is
+            // the case where its stderr is most likely to say why. Reporting
+            // the bare frame error is what left "unexpected EOF in headers"
+            // unexplained for a day.
+            Ok(Err(source)) => Err(LiveDapSessionError::Protocol {
+                message: format!("{source}{}{}", self.exit_suffix(), self.stderr_suffix()),
+            }),
+            // `waited`, not the remaining time: by the time this arm runs the
+            // remainder is zero by definition, which is how the first version
+            // of this message reported every timeout as "within 0ns".
+            Err(RecvTimeoutError::Timeout) => Err(LiveDapSessionError::Timeout {
+                message: format!(
+                    "no DAP frame within {waited:?}{}{}",
+                    self.exit_suffix(),
+                    self.stderr_suffix()
+                ),
+            }),
+            Err(RecvTimeoutError::Disconnected) => Err(LiveDapSessionError::Protocol {
+                message: format!(
+                    "adapter stopped producing frames{}{}",
+                    self.exit_suffix(),
+                    self.stderr_suffix()
+                ),
+            }),
+        }
+    }
+
+    /// Whether the adapter process is still alive, as a trailing clause.
+    ///
+    /// The Windows dogfood failure reads `unexpected EOF in headers; adapter
+    /// stderr: <empty>`: the adapter closes stdout at once and says nothing at
+    /// all. Stderr cannot explain a process that never wrote to it, and the
+    /// next question — did it die, and how — is answered by its exit status.
+    ///
+    /// Worth the line on Windows in particular, where a missing DLL kills a
+    /// process silently and shows up only as an NTSTATUS in the exit code
+    /// (`0xc0000135` is STATUS_DLL_NOT_FOUND). A silent death and a live
+    /// adapter that simply is not speaking are different faults, and the bare
+    /// frame error looks identical for both.
+    fn exit_suffix(&mut self) -> String {
+        exit_clause(self.child.try_wait())
+    }
+
+    /// Whatever the adapter wrote to stderr, as a trailing clause.
+    fn stderr_suffix(&self) -> String {
+        stderr_clause(&self.stderr)
+    }
+
     fn alloc_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
@@ -613,4 +867,311 @@ pub fn fake_dap_adapter_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::mpsc::{Sender, channel};
+
+    /// A reader that yields some bytes and then blocks instead of ending.
+    ///
+    /// This is the adapter that is still running: it has complained, and it has
+    /// not exited. `read_to_string` on this never returns, which is why the
+    /// previous implementation had nothing to attach at the moment a timeout
+    /// or a framing error was raised.
+    struct WroteThenHung {
+        data: Vec<u8>,
+        position: usize,
+        release: Receiver<()>,
+    }
+
+    impl Read for WroteThenHung {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.position < self.data.len() {
+                let take = (self.data.len() - self.position).min(buf.len());
+                buf[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+                self.position += take;
+                return Ok(take);
+            }
+            // Not EOF: the process is alive and simply has nothing more to say
+            // yet. Blocks until the test lets go.
+            let _ = self.release.recv();
+            Ok(0)
+        }
+    }
+
+    /// A reader that reports how many bytes have been consumed, then ends.
+    struct CountingReader {
+        data: Vec<u8>,
+        position: usize,
+        drained: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.position >= self.data.len() {
+                return Ok(0);
+            }
+            let take = (self.data.len() - self.position).min(buf.len());
+            buf[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+            self.position += take;
+            self.drained
+                .fetch_add(take, std::sync::atomic::Ordering::SeqCst);
+            Ok(take)
+        }
+    }
+
+    fn counting_reader(text: String) -> (CountingReader, Arc<std::sync::atomic::AtomicUsize>) {
+        let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            CountingReader {
+                data: text.into_bytes(),
+                position: 0,
+                drained: Arc::clone(&drained),
+            },
+            drained,
+        )
+    }
+
+    fn hung_reader(text: &str) -> (WroteThenHung, Sender<()>) {
+        let (release_tx, release) = channel();
+        (
+            WroteThenHung {
+                data: text.as_bytes().to_vec(),
+                position: 0,
+                release,
+            },
+            release_tx,
+        )
+    }
+
+    /// Wait for `predicate`, so the test does not depend on thread scheduling.
+    fn within(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        predicate()
+    }
+
+    #[test]
+    fn stderr_is_captured_before_the_adapter_exits() {
+        // The defect this replaced: `read_to_string` returns at EOF, so the
+        // capture was empty for as long as the adapter was alive — which is
+        // every moment at which the error message wanted it.
+        let (reader, _release) = hung_reader("dyld: library not loaded\n");
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let captured = within(Duration::from_secs(5), || {
+            !sink.lock().expect("sink").is_empty()
+        });
+        assert!(
+            captured,
+            "stderr must be readable while the adapter is still running; got {:?}",
+            sink.lock().expect("sink")
+        );
+        assert!(
+            sink.lock().expect("sink").contains("library not loaded"),
+            "the captured text must be what was written"
+        );
+        // `_release` is still held: the reader has not seen EOF, and the
+        // assertions above already passed.
+    }
+
+    #[test]
+    fn a_clause_waits_for_stderr_that_has_not_arrived_yet() {
+        // The Windows dogfood failure reaches `unexpected EOF in headers` in
+        // 20ms. Formatting the error immediately raced the reader thread and
+        // printed the bare frame error — the exact message the capture was
+        // added to explain.
+        let sink = Arc::new(Mutex::new(String::new()));
+        let writer = Arc::clone(&sink);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            writer.lock().expect("sink").push_str(
+                "error: unable to find executable
+",
+            );
+        });
+
+        let clause = stderr_clause(&sink);
+        assert!(
+            clause.contains("unable to find executable"),
+            "the clause must wait for stderr that is still in flight; got {clause:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_capture_says_so_rather_than_vanishing() {
+        // "The adapter said nothing" and "we failed to capture what it said"
+        // are different diagnoses. An omitted clause cannot tell them apart,
+        // and that ambiguity is what made the first Windows failure unreadable.
+        let sink = Arc::new(Mutex::new(String::new()));
+        let clause = stderr_clause(&sink);
+        assert_eq!(clause, "; adapter stderr: <empty>");
+    }
+
+    #[test]
+    fn the_wait_is_bounded() {
+        let sink = Arc::new(Mutex::new(String::new()));
+        let started = Instant::now();
+        let _ = stderr_clause(&sink);
+        let waited = started.elapsed();
+        // A literal ceiling, not a multiple of the constant under test. With
+        // `STDERR_SETTLE * 4` the bound moved whenever the value moved, so
+        // raising the settle window to five seconds while chasing a flake
+        // would have slid this to twenty and still passed. An assertion whose
+        // threshold tracks the thing it bounds is not an assertion.
+        assert!(
+            waited < Duration::from_secs(1),
+            "an error path must not stall on a silent adapter; waited {waited:?}"
+        );
+    }
+
+    /// Run a trivial command that exits with `code`, and return its status.
+    fn exited_with(code: i32) -> std::process::ExitStatus {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", &format!("exit {code}")]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", &format!("exit {code}")]);
+            command
+        };
+        command.spawn().expect("spawn").wait().expect("wait")
+    }
+
+    #[test]
+    fn a_dead_adapter_reports_how_it_died() {
+        // The Windows failure says `adapter stderr: <empty>`: the process wrote
+        // nothing at all, so the exit status is the only thing left that can
+        // explain it. On Windows a missing DLL is a silent death visible only
+        // as an NTSTATUS in this code.
+        let clause = exit_clause(Ok(Some(exited_with(3))));
+        assert!(
+            clause.contains("adapter exited"),
+            "a dead adapter must be reported as dead: {clause:?}"
+        );
+        assert!(
+            clause.contains('3'),
+            "the exit code is the diagnostic; it must survive into the message: {clause:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_status_is_reported_rather_than_swallowed() {
+        // The doc claimed three outcomes were pinned while two were. Failing to
+        // read a child's status is rare and is exactly when a silent fallback
+        // would mislead: it would report a live adapter, which is a claim, not
+        // an absence of one.
+        let clause = exit_clause(Err(std::io::Error::other("no such process")));
+        assert!(
+            clause.contains("status unknown") && clause.contains("no such process"),
+            "an unreadable status must say so and carry the reason: {clause:?}"
+        );
+    }
+
+    #[test]
+    fn a_live_adapter_is_distinguished_from_a_dead_one() {
+        // Same bare frame error, two different faults: a process that died and
+        // one that is alive and simply not speaking DAP.
+        assert_eq!(exit_clause(Ok(None)), "; adapter still running");
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_kill_the_capture() {
+        // `read_line` returns `Err(InvalidData)` on the first non-UTF-8 byte.
+        // A Windows adapter writing in a locale code page, or any adapter
+        // dumping binary into a crash report, would have silently ended the
+        // capture there — leaving the empty stderr string this whole function
+        // exists to prevent, on the platform that motivated it.
+        let mut bytes = b"before".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b" after".as_slice());
+        bytes.push(b'\n');
+        let (release_tx, release) = channel();
+        let reader = WroteThenHung {
+            data: bytes,
+            position: 0,
+            release,
+        };
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let captured = within(Duration::from_secs(5), || {
+            sink.lock().expect("sink").contains("after")
+        });
+        drop(release_tx);
+        assert!(
+            captured,
+            "text after a bad byte must survive; got {:?}",
+            sink.lock().expect("sink")
+        );
+    }
+
+    #[test]
+    fn the_pipe_is_still_drained_after_the_cap() {
+        // Stopping the reads would close the pipe and hand the adapter a
+        // SIGPIPE on its next write — a healthy but chatty adapter killed by
+        // the mechanism meant to bound a buffer, and then reported as "exited
+        // unexpectedly" with no stderr to explain it.
+        //
+        // Reaching EOF is the observable proof the reader kept consuming: the
+        // reader below only ends when every byte has been read.
+        let line = "y".repeat(255);
+        let mut noisy = String::new();
+        while noisy.len() < STDERR_CAPTURE_BYTES * 3 {
+            noisy.push_str(&line);
+            noisy.push('\n');
+        }
+        let total = noisy.len();
+        let (reader, drained) = counting_reader(noisy);
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let finished = within(Duration::from_secs(10), || {
+            drained.load(std::sync::atomic::Ordering::SeqCst) >= total
+        });
+        assert!(
+            finished,
+            "the reader must consume the whole pipe past the cap; drained {} of {total}",
+            drained.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            sink.lock().expect("sink").len() < STDERR_CAPTURE_BYTES * 2,
+            "draining must not mean appending"
+        );
+    }
+
+    #[test]
+    fn capture_stops_at_the_byte_cap() {
+        // An adapter that logs steadily must not grow the capture without
+        // bound over a long session.
+        let line = "x".repeat(255);
+        let mut noisy = String::new();
+        while noisy.len() < STDERR_CAPTURE_BYTES * 2 {
+            noisy.push_str(&line);
+            noisy.push('\n');
+        }
+        let (reader, _release) = hung_reader(&noisy);
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let settled = within(Duration::from_secs(5), || {
+            sink.lock().expect("sink").len() >= STDERR_CAPTURE_BYTES
+        });
+        assert!(settled, "the capture should reach the cap and stop");
+        let len = sink.lock().expect("sink").len();
+        assert!(
+            len < STDERR_CAPTURE_BYTES * 2,
+            "the capture must stop near the cap, not drain everything: {len}"
+        );
+    }
 }
