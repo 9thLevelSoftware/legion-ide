@@ -32,6 +32,12 @@ fn make_symlink_dir(target: &std::path::Path, link: &std::path::Path) -> std::io
     std::os::unix::fs::symlink(target, link)
 }
 
+/// Why a failure to create a reparse point is fatal rather than a skip.
+///
+/// One source of truth: the same sentence appeared at three call sites, and the
+/// next person to reword it would have updated two of them.
+const REPARSE_POINT_REQUIRED: &str = "could not create a symlink or a directory junction; this host cannot host a containment test that depends on one, and reporting success would claim the check ran when it did not";
+
 #[cfg(windows)]
 fn make_symlink_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
     // A symlink needs `SeCreateSymbolicLinkPrivilege` — Developer Mode or admin
@@ -73,9 +79,7 @@ fn containment_accepts_symlink_aliased_base() {
 
     let alias_parent = unique_temp_dir("aliased-link-parent");
     let alias = alias_parent.join("alias");
-    make_symlink_dir(&real_root, &alias).expect(
-        "could not create a symlink or a directory junction; this host cannot host a containment test that depends on one, and reporting success would claim the check ran when it did not",
-    );
+    make_symlink_dir(&real_root, &alias).expect(REPARSE_POINT_REQUIRED);
 
     let relative = validate_containment(&alias, &alias.join("src/lib.rs"))
         .expect("alias-spelled path inside the aliased base must be contained");
@@ -95,9 +99,7 @@ fn containment_rejects_existing_symlink_escaping_sandbox() {
     fs::write(outside.join("secret.txt"), "outside\n").expect("write outside file");
 
     let link = sandbox.join("link");
-    make_symlink_dir(&outside, &link).expect(
-        "could not create a symlink or a directory junction; this host cannot host a containment test that depends on one, and reporting success would claim the check ran when it did not",
-    );
+    make_symlink_dir(&outside, &link).expect(REPARSE_POINT_REQUIRED);
 
     let result = validate_containment(&sandbox, &sandbox.join("link/secret.txt"));
     assert!(
@@ -135,9 +137,7 @@ fn containment_rejects_dangling_symlink_component() {
     let sandbox = unique_temp_dir("dangling-sandbox");
     let gone = unique_temp_dir("dangling-target");
     let link = sandbox.join("dangling");
-    make_symlink_dir(&gone, &link).expect(
-        "could not create a symlink or a directory junction; this host cannot host a containment test that depends on one, and reporting success would claim the check ran when it did not",
-    );
+    make_symlink_dir(&gone, &link).expect(REPARSE_POINT_REQUIRED);
     fs::remove_dir_all(&gone).expect("remove target to dangle the link");
 
     let result = validate_containment(&sandbox, &sandbox.join("dangling/file.txt"));
