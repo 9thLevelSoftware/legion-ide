@@ -1,0 +1,84 @@
+schema_version = 1
+
+# How far above the baseline a measurement may drift before it counts as a
+# regression. Wall-clock numbers on a real machine move by tens of percent
+# between runs for reasons that have nothing to do with the code; 60% is wide
+# enough that a green run means something and narrow enough that a 2x
+# regression cannot hide inside it.
+tolerance_percent = 60
+
+# Metrics set to 0 are not tracked for that workload: a single-sample workload
+# has no meaningful p95, and a latency workload has no byte value.
+#
+# Rows are keyed by `os` AND `profile`. `profile = "reference"` means a
+# developer workstation; `profile = "github-hosted"` means a shared GitHub
+# Actions runner, which is several times slower. Grading a hosted run against a
+# workstation baseline would produce a gate that fires on the hardware rather
+# than on the change, so the two never compare against each other.
+#
+# Only `windows` / `reference` rows exist today, because that is the only
+# combination a real run has been taken on. Every other run archives
+# `baseline_status = "missing_for_os"` until someone records theirs from a real
+# run's entry — see README.md.
+
+[[workload]]
+name = "p8.startup"
+os = "windows"
+profile = "reference"
+p50_micros = 7_333_389
+p95_micros = 0
+bytes_value = 0
+note = "2026-08-19, Windows 11 x86_64 release build. Observed 3.61s with a warm page cache and 7.33s with a cold one on the same machine within an hour; the slower number is used so the gate does not fire on the page cache. Most of it is open_file running the lexical retrieval indexer synchronously on a 1.5MB source file (3.3s warm / 4.7s cold) — a known defect, not a target."
+
+[[workload]]
+name = "p8.input_to_paint"
+os = "windows"
+profile = "reference"
+p50_micros = 2_011
+p95_micros = 2_304
+bytes_value = 0
+note = "2026-08-19, Windows 11 x86_64 release build. Real keystroke + real viewport projection on crates/legion-app/src/lib.rs (36K lines). ADR-0048 allows 16ms/32ms."
+
+[[workload]]
+name = "p8.scroll_jank"
+os = "windows"
+profile = "reference"
+p50_micros = 111
+p95_micros = 120
+bytes_value = 0
+note = "2026-08-19, Windows 11 x86_64 release build. 64 viewport projections spanning all 36K lines. ADR-0048 allows 32ms p95."
+
+[[workload]]
+name = "p8.memory_ceiling"
+os = "windows"
+profile = "reference"
+p50_micros = 0
+p95_micros = 0
+bytes_value = 23_767_922
+note = "2026-08-19, Windows 11 x86_64 release build. 5.94MB snapshot plus three retained snapshot descriptors of the same size after a 128-edit burst."
+
+# The two search workloads are deliberately UNTRACKED (all metrics 0). Both are
+# dominated by the host's per-file-open cost, not by Legion: the same 100K-file
+# search measured 74s with a warm page cache and ~950s with a cold one behind
+# real-time antivirus, on the same machine, in the same hour. A 60% tolerance
+# against either number would cry wolf on every second run, and a gate people
+# learn to ignore is worse than no gate. Their absolute ceilings in
+# `xtask/src/perf_workloads.rs` are liveness guards, and the archived entries
+# keep the numbers visible for humans to read.
+[[workload]]
+name = "p8.legion_repo"
+os = "windows"
+profile = "reference"
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+note = "2026-08-19, Windows 11 x86_64. Untracked: disk-bound. Observed 957ms warm on the reference machine."
+
+[[workload]]
+name = "p8.fixture_100k_files"
+os = "windows"
+profile = "reference"
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+note = "2026-08-19, Windows 11 x86_64. Untracked: disk-bound, 13x spread between warm and cold page cache. Observed 73.5s warm on the reference machine."

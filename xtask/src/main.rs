@@ -1660,8 +1660,18 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     let package_name = "legion-desktop".to_string();
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
     let mut report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
+    // Every row from here down comes from a product-crate subprocess, because
+    // `xtask` cannot depend on the product crates and a stand-in would measure
+    // the stand-in. None of them is behind a flag: a budget nobody runs is not
+    // a budget (P8.F4.T1's stop condition).
+    append_product_workload_measurements(&workspace_root, &out_dir, &mut report);
     append_manual_renderer_measurement(&workspace_root, &out_dir, &mut report);
     append_large_file_measurement(&workspace_root, &out_dir, &mut report);
+    report.workload_kind = "product+skeleton".to_string();
+
+    let (baseline_status, tolerance_percent, regressions) =
+        evaluate_perf_trend(&workspace_root, &report);
+
     let path = match xtask::perf_harness::write_report(&out_dir, &report) {
         Ok(path) => path,
         Err(err) => {
@@ -1669,8 +1679,75 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
             return 1;
         }
     };
+
+    let entry = xtask::perf_trend::build_entry(
+        &report,
+        xtask::perf_harness::host_os(),
+        xtask::perf_harness::host_arch(),
+        baseline_status,
+        tolerance_percent,
+        regressions.clone(),
+    );
+    let entry_path = match xtask::perf_trend::write_entry(&workspace_root, &entry) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            // A trend archive that silently stops recording is worse than one
+            // that fails loudly, so this is reported rather than swallowed.
+            eprintln!("perf harness: unable to archive trend entry: {err}");
+            None
+        }
+    };
+
+    print_perf_report(&report, &path, strict);
+    if let Some(entry_path) = &entry_path {
+        println!(
+            "  trend entry={} baseline={} tolerance={}%",
+            entry_path.display(),
+            baseline_status.as_str(),
+            tolerance_percent
+        );
+    }
+    for regression in &regressions {
+        println!("  REGRESSION {regression}");
+    }
+    for row in xtask::perf_trend::unmeasured_names(&report) {
+        println!("  UNMEASURED {row}");
+    }
+
+    let required = required_measured_workloads();
+    for row in xtask::perf_trend::missing_required_names(&report, &required) {
+        println!("  MISSING-REQUIRED {row}");
+    }
+    let strict_failure = xtask::perf_trend::strict_failure(&report, &regressions, &required);
+    if entry_path.is_none() || (strict && strict_failure) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Workloads that must produce a measurement on every host.
+///
+/// All headless: any machine that can build Legion can run them, so a missing
+/// measurement is a defect and not a property of the runner. The
+/// renderer-backed Manual measurement is deliberately absent — it needs a
+/// display, and a headless CI runner cannot supply one.
+fn required_measured_workloads() -> Vec<String> {
+    let mut names: Vec<String> = xtask::perf_workloads::product_workload_policies()
+        .into_iter()
+        .map(|policy| policy.name.to_string())
+        .collect();
+    names.push(xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb().name);
+    names
+}
+
+/// Print one line per workload, plus the header the dashboard is read from.
+fn print_perf_report(report: &xtask::perf_harness::PerfReport, path: &Path, strict: bool) {
     println!(
-        "perf harness: total={} passed={} failed={} skipped={} report={} strict={}",
+        "perf harness: os={} arch={} kind={} total={} passed={} failed={} skipped={} report={} strict={}",
+        report.os,
+        report.arch,
+        report.workload_kind,
         report.summary.total,
         report.summary.passed,
         report.summary.failed,
@@ -1680,22 +1757,83 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     );
     for skeleton in &report.skeletons {
         println!(
-            "  skeleton={} kind={} total_us={} p50_us={} p95_us={} budget_ms={} status={} message={}",
+            "  workload={} kind={} measured={} synthetic={} total_us={} p50_us={} p95_us={} bytes={} budget_ms={} status={} message={}",
             skeleton.name,
             skeleton.kind.as_str(),
+            skeleton.measured,
+            skeleton.synthetic_stand_in,
             skeleton.total_micros,
             skeleton.p50_micros,
             skeleton.p95_micros,
+            skeleton.bytes_value,
             skeleton.budget_millis,
             skeleton.status.as_str(),
             skeleton.message,
         );
     }
-    if strict && report.summary.failed > 0 {
-        1
-    } else {
-        0
+}
+
+/// Compare this run against the tracked baseline.
+///
+/// A missing or unreadable baseline is reported as `MissingForOs` rather than
+/// as a pass: the regression gate having no reference is a fact the archived
+/// entry has to carry.
+fn evaluate_perf_trend(
+    workspace_root: &Path,
+    report: &xtask::perf_harness::PerfReport,
+) -> (
+    xtask::perf_trend::BaselineStatus,
+    u64,
+    Vec<xtask::perf_trend::TrendRegression>,
+) {
+    match xtask::perf_trend::read_baseline(workspace_root) {
+        Ok(baseline) => {
+            let (status, regressions) = xtask::perf_trend::detect_regressions(
+                &baseline,
+                &report.skeletons,
+                xtask::perf_harness::host_os(),
+            );
+            if status == xtask::perf_trend::BaselineStatus::MissingForOs {
+                println!(
+                    "perf harness: no trend baseline recorded for os={} profile={}; regression gate \
+                     cannot run (add `[[workload]]` blocks with os = \"{}\" and profile = \"{}\" to {})",
+                    xtask::perf_harness::host_os(),
+                    xtask::perf_trend::baseline_profile(),
+                    xtask::perf_harness::host_os(),
+                    xtask::perf_trend::baseline_profile(),
+                    xtask::perf_trend::baseline_path(workspace_root).display(),
+                );
+            }
+            (status, baseline.tolerance_percent, regressions)
+        }
+        Err(err) => {
+            eprintln!("perf harness: {err}");
+            (
+                xtask::perf_trend::BaselineStatus::MissingForOs,
+                0,
+                Vec::new(),
+            )
+        }
     }
+}
+
+/// Run the real product workloads and fold them into the report.
+///
+/// `LEGION_PERF_FAIL_ON_BUDGET_MS` is deliberately not applied here. It exists
+/// so hosted runners can stop a 2ms microbenchmark from failing on VM noise,
+/// and applying it to the product workloads is what made every budget on every
+/// OS unfailable — P8.F4.T2's stop condition. The product ceilings are sized to
+/// survive a slow runner instead
+/// (`xtask::perf_workloads::product_budgets_are_host_enforced`).
+fn append_product_workload_measurements(
+    workspace_root: &Path,
+    out_dir: &Path,
+    report: &mut xtask::perf_harness::PerfReport,
+) {
+    debug_assert!(xtask::perf_workloads::product_budgets_are_host_enforced());
+    let measurements = xtask::perf_workloads::run_product_workloads(workspace_root, out_dir);
+    report.skeletons.extend(measurements);
+    report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }
 
 /// Run the real 100MB workload and replace its placeholder measurement.
@@ -1782,6 +1920,9 @@ fn placeholder_large_file_measurement(
         budget_millis: descriptor.budget_millis,
         status: xtask::perf_harness::SkeletonStatus::Skipped,
         message,
+        measured: false,
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -1843,7 +1984,10 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
         }
     };
     println!(
-        "perf harness verify: total={} passed={} failed={} skipped={} report={} strict={}",
+        "perf harness verify: os={} arch={} kind={} total={} passed={} failed={} skipped={} report={} strict={}",
+        report.os,
+        report.arch,
+        report.workload_kind,
         report.summary.total,
         report.summary.passed,
         report.summary.failed,
@@ -1851,7 +1995,55 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
         report_path.display(),
         strict,
     );
-    if strict && report.summary.failed > 0 {
+
+    // Coverage before budgets. A report can be green because everything passed
+    // or because half of it never ran, and on a three-OS matrix the second is
+    // the one that goes unnoticed (P8.F4.T2). This check is not conditioned on
+    // `strict`: report-only budgets are a policy choice about noise, not a
+    // licence for a workload to vanish on one OS.
+    let missing =
+        xtask::perf_trend::missing_required_names(&report, &required_measured_workloads());
+    let mut failed = !missing.is_empty();
+
+    // A report from a different OS than the one verifying it is a leftover, not
+    // a result. On a three-OS matrix that is how one job ends up "verifying"
+    // another job's numbers and passing without having measured anything.
+    let host = xtask::perf_harness::host_os();
+    if report.os != host {
+        eprintln!(
+            "perf harness verify failed: report was produced on os={} but this host is os={host} \
+             (run `cargo run -p xtask -- perf-harness` on this machine first)",
+            report.os
+        );
+        failed = true;
+    }
+    for row in &missing {
+        eprintln!(
+            "perf harness verify failed: required workload did not run on {}: {row}",
+            report.os
+        );
+    }
+    for row in xtask::perf_trend::unmeasured_names(&report) {
+        println!("  unmeasured {row}");
+    }
+    let synthetic = xtask::perf_trend::synthetic_names(&report);
+    if !synthetic.is_empty() {
+        println!(
+            "  synthetic stand-ins still in the report (labelled, not product measurements): {}",
+            synthetic.join(", ")
+        );
+    }
+
+    // Re-run the trend comparison against the archived report. Cheap — it
+    // re-reads numbers rather than re-measuring them — and it means a baseline
+    // edit can be checked without a 30-minute harness run.
+    let (baseline_status, _tolerance, regressions) = evaluate_perf_trend(&workspace_root, &report);
+    for regression in &regressions {
+        eprintln!("perf harness verify: REGRESSION {regression}");
+    }
+    println!("  baseline={}", baseline_status.as_str());
+
+    if failed || (strict && (report.summary.failed > 0 || !regressions.is_empty())) {
         1
     } else {
         0

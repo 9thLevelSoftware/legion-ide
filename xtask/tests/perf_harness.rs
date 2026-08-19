@@ -487,6 +487,9 @@ fn perf_harness_skeleton_measurement_serializes_stably() {
         budget_millis: 250,
         status: SkeletonStatus::Passed,
         message: "ok".to_string(),
+        measured: true,
+        bytes_value: 0,
+        synthetic_stand_in: true,
     };
     let text = toml::to_string_pretty(&measurement).expect("serialize");
     assert!(
@@ -528,6 +531,9 @@ fn perf_harness_skeleton_kind_serializes_stable_snake_case() {
             budget_millis: 0,
             status: SkeletonStatus::Skipped,
             message: "kind serialization test".to_string(),
+            measured: false,
+            bytes_value: 0,
+            synthetic_stand_in: false,
         };
         let serialized = toml::to_string(&measurement).expect("serialize skeleton measurement");
         assert!(
@@ -553,6 +559,9 @@ fn manual_renderer_measurement(status: SkeletonStatus) -> SkeletonMeasurement {
         budget_millis: 32,
         status,
         message: "Manual renderer measurement exceeded budget".to_string(),
+        measured: true,
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
