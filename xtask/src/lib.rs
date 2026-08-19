@@ -18,4 +18,5 @@ pub mod perf_harness;
 pub mod readiness_consistency;
 pub mod release_pipeline;
 pub mod signing;
+pub mod training_corpus;
 pub mod update_drill;

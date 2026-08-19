@@ -907,6 +907,38 @@ enum Commands {
         #[arg(long, default_value = "target/update-drill")]
         out: String,
     },
+    /// Export a trainer-ready dataset from the consent-gated training pipeline
+    /// (P9.F4.T1/T2) and archive its Legion-Bench baseline comparison.
+    ///
+    /// This is the only supported way to produce `train.jsonl` for
+    /// `training/qlora_train.py`: it routes every trace through
+    /// `build_training_candidate_corpus` and `build_training_adapter_dataset`,
+    /// then re-derives consent from the corpus for every emitted line.
+    #[command(name = "training-corpus")]
+    TrainingCorpus {
+        /// Source `(audit, proposal)` trace batch, as JSON.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_TRACES_PATH)]
+        traces: String,
+        /// Archived Legion-Bench baseline the dataset is compared against.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_BASELINE_PATH)]
+        baseline: String,
+        /// Output directory for `train.jsonl`, `holdout.jsonl`, and the manifest.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_EXPORT_OUTPUT_PATH)]
+        out: String,
+        /// Corpus identifier stamped on the exported artifacts.
+        #[arg(long = "corpus-id", default_value = xtask::training_corpus::DEFAULT_CORPUS_ID)]
+        corpus_id: String,
+        /// Expand the source batch to this many fixture traces before the
+        /// consent filter runs. 0 uses the batch verbatim.
+        #[arg(long, default_value_t = 0)]
+        expand: usize,
+        /// Seed for the deterministic trace expander.
+        #[arg(long, default_value_t = xtask::training_corpus::DEFAULT_EXPAND_SEED)]
+        seed: u64,
+        /// Every Nth candidate in corpus order is withheld for evaluation.
+        #[arg(long = "holdout-every", default_value_t = xtask::training_corpus::DEFAULT_HOLDOUT_EVERY)]
+        holdout_every: usize,
+    },
 }
 
 fn main() {
@@ -1024,9 +1056,116 @@ fn main() {
         Commands::HostileEvals { out } => run_hostile_evals_command(&out),
         Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
         Commands::UpdateDrill { out } => run_update_drill_command(&out),
+        Commands::TrainingCorpus {
+            traces,
+            baseline,
+            out,
+            corpus_id,
+            expand,
+            seed,
+            holdout_every,
+        } => run_training_corpus_command(
+            &traces,
+            &baseline,
+            &out,
+            &corpus_id,
+            expand,
+            seed,
+            holdout_every,
+        ),
     };
 
     process::exit(code);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_training_corpus_command(
+    traces: &str,
+    baseline: &str,
+    out: &str,
+    corpus_id: &str,
+    expand: usize,
+    seed: u64,
+    holdout_every: usize,
+) -> i32 {
+    use xtask::training_corpus as tc;
+
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("training corpus failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+
+    let source = match tc::read_traces(&workspace_root.join(traces)) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+    let baseline = match tc::read_baseline(&workspace_root.join(baseline)) {
+        Ok(baseline) => baseline,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+
+    let batch = if expand > 0 {
+        tc::expand_traces(&source, expand, seed)
+    } else {
+        source
+    };
+    let options = tc::ExportOptions {
+        corpus_id: corpus_id.to_string(),
+        expand_to: expand,
+        seed,
+        holdout_every,
+    };
+    let export = match tc::build_export(&batch, &baseline, &options) {
+        Ok(export) => export,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+    let manifest = tc::build_manifest(&export, &options);
+    let out_dir = workspace_root.join(out);
+    let written = match tc::write_export(&out_dir, &export, &manifest) {
+        Ok(written) => written,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+
+    println!(
+        "training corpus: source_traces={} consented={} dropped_unconsented={} dropped_non_terminal={} \
+         accepted={} rejected={} train={} holdout={} corpus_fingerprint={} dataset_fingerprint={} \
+         baseline={} baseline_rate_bp={} dataset_rate_bp={} delta_bp={} regressed={} out={}",
+        manifest.source_trace_count,
+        manifest.candidate_count,
+        manifest.skipped_unconsented_count,
+        manifest.skipped_non_terminal_count,
+        manifest.accepted_count,
+        manifest.rejected_count,
+        manifest.train_count,
+        manifest.holdout_count,
+        manifest.corpus_fingerprint,
+        manifest.dataset_fingerprint,
+        manifest.comparison.baseline_id,
+        manifest.comparison.baseline_accepted_rate_bp,
+        manifest.comparison.dataset_accepted_rate_bp,
+        manifest.comparison.delta_bp,
+        manifest.comparison.regressed,
+        out_dir.display(),
+    );
+    for path in written {
+        println!("training corpus wrote {}", path.display());
+    }
+    0
 }
 
 fn run_docs_hygiene_command(allowlist: &str) -> i32 {

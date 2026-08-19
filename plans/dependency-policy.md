@@ -16,11 +16,17 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `legion-project`
   - `legion-platform`
   - `legion-security`
+  - `legion-observability`
 
   (`legion-project`/`legion-platform`/`legion-security` are permitted solely so
   the perf-harness reference workloads exercise the REAL product search stack —
   streaming walker, native filesystem/watcher, deny-by-default broker — per the
-  WS18.T1 follow-on. `xtask` is tooling at the top of the dependency graph; it
+  WS18.T1 follow-on. `legion-observability` is permitted solely so
+  `xtask training-corpus` builds its trainer dataset with the REAL consent-gated
+  pipeline (`legion_observability::training`) rather than a reimplementation of
+  it — an exporter that reimplemented the consent filter could disagree with it,
+  and the disagreement would only be visible in the file handed to a GPU, per
+  P9.F4.T3. `xtask` is tooling at the top of the dependency graph; it
   gains no product authority and no crate may depend on `xtask`.)
 
 - `legion-protocol` may depend on:
