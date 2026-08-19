@@ -108,6 +108,23 @@ pub struct RustAnalyzerSession {
     pub(crate) stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
+/// Capability keys the read side gates requests on.
+///
+/// One list, because this was two: the parser recorded three keys while
+/// `issue_lsp_read` checked nine, so five requests could never be sent. Adding
+/// a gated request means adding its key here, and
+/// `tests/lsp_capability_gating.rs` fails when the two drift.
+const GATED_READ_CAPABILITIES: &[&str] = &[
+    "hoverProvider",
+    "definitionProvider",
+    "completionProvider",
+    "referencesProvider",
+    "documentSymbolProvider",
+    "inlayHintProvider",
+    "codeLensProvider",
+    "callHierarchyProvider",
+];
+
 impl RustAnalyzerSession {
     /// Resolves discovery for provenance, launches the stdio process, and seeds
     /// the health record with `init_status = Unavailable` until `initialize` is called.
@@ -196,11 +213,29 @@ impl RustAnalyzerSession {
                 .get("capabilities")
                 .and_then(|v| v.as_object())
         {
-            // Track the capability keys we care about for read-side gating.
-            for cap_name in ["hoverProvider", "definitionProvider", "completionProvider"] {
+            // Every capability the read side gates on, from one list, because
+            // two lists in two files drifted: `issue_lsp_read` refused to send
+            // references, document symbols, inlay hints and code lenses for as
+            // long as this loop named only three keys, and the gate cannot be
+            // opened by a capability nobody recorded.
+            //
+            // Nothing caught it. The tests for those requests inject a health
+            // record directly, so they asserted that a request fires when the
+            // capability is present — true — and never that it was present.
+            // In use it looked like a working feature, because a refused gate
+            // falls back to the lexical index and the panel still fills.
+            //
+            // `tests/lsp_capability_gating.rs` now drives the real handshake
+            // against a mock advertising all of them and fails if this list
+            // falls behind again.
+            for &cap_name in GATED_READ_CAPABILITIES {
+                // `boolean | XOptions` per LSP: rust-analyzer sends an object
+                // for several of these, and `as_bool()` on an object is `None`
+                // — which read as "unsupported" and closed the gate on a server
+                // that had just said yes.
                 let supported = caps
                     .get(cap_name)
-                    .map(|v| v.as_bool().unwrap_or(false))
+                    .map(|v| !v.is_null() && v.as_bool() != Some(false))
                     .unwrap_or(false);
                 self.health.capabilities.push(LspCapabilitySummary {
                     capability: cap_name.to_string(),

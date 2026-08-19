@@ -34,24 +34,15 @@ route_sources = [
 [[allowed]]
 intent = "PrepareCallHierarchy"
 reason = """
-Not implemented. Routes to `AppCommandRequest::Noop` in intent_routing.rs, so
-wiring a control would offer the user a button that does nothing. The
-`legion-lsp` protocol layer is complete and contract-tested
-(`prepare_call_hierarchy_request`, `project_prepare_call_hierarchy_response`)
-with no app plumbing behind it. Tracked by backlog task P2.F1.T6, "wire the
-call-hierarchy app stub so incoming/outgoing calls reach a panel".
-"""
-
-[[allowed]]
-intent = "ShowIncomingCalls"
-reason = """
-Not implemented; same stub and same backlog task (P2.F1.T6) as PrepareCallHierarchy.
-"""
-
-[[allowed]]
-intent = "ShowOutgoingCalls"
-reason = """
-Not implemented; same stub and same backlog task (P2.F1.T6) as PrepareCallHierarchy.
+Prepare-only asks no question a panel can answer. It resolves the symbol under
+the caret and stops; `run_call_hierarchy` with no direction returns the
+projection untouched, by its own comment. A key for it would be a control that
+does nothing — the defect this gate exists to prevent. The two directions it
+would prepare for, ShowIncomingCalls and ShowOutgoingCalls, both issue the
+prepare leg themselves and are bound to Ctrl/Cmd+Alt+H and Ctrl/Cmd+Alt+Shift+H,
+so the capability is reachable; only this half-step is not. Give prepare a
+visible result of its own — a peek popup listing the resolved item — before
+giving it a gesture.
 """
 
 [[allowed]]

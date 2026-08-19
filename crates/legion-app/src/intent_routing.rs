@@ -680,11 +680,36 @@ impl CommandDispatcher {
             | CommandDispatchIntent::VimPut
             | CommandDispatchIntent::VimSearchForward
             | CommandDispatchIntent::VimDeleteChar => Ok(AppCommandRequest::Noop),
-            // Call hierarchy intents are dispatched by the language subsystem;
-            // satisfy exhaustiveness until app-layer wiring lands.
-            CommandDispatchIntent::PrepareCallHierarchy { .. }
-            | CommandDispatchIntent::ShowIncomingCalls { .. }
-            | CommandDispatchIntent::ShowOutgoingCalls { .. } => Ok(AppCommandRequest::Noop),
+            CommandDispatchIntent::PrepareCallHierarchy {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::PrepareCallHierarchy {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::ShowIncomingCalls {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ShowIncomingCalls {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::ShowOutgoingCalls {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ShowOutgoingCalls {
+                    buffer_id,
+                    position,
+                })
+            }
             // Find/replace intents are handled by AppComposition::dispatch_ui_intent
             // before reaching this router; these arms satisfy exhaustiveness.
             CommandDispatchIntent::ToggleFindBar

@@ -731,13 +731,14 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     title = "Wire the call-hierarchy app stub so incoming/outgoing calls reach a panel"
     mode = "Manual"
     readiness_row = "PR-LANG-002"
-    status = "todo"
+    status = "done"
     files = ["crates/legion-app/src/language/intent_routing.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-desktop/src/bridge.rs"]
     dependencies = ["P2.F1.T4"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-app", "cargo run -p xtask -- intent-reachability"]
     acceptance = ["Incoming and outgoing calls for the symbol under the caret are listed in a reachable panel, and the three call-hierarchy intents are removed from the intent-reachability allowlist."]
     stop_condition = "Do not add a control before the intents do something: a button wired to Noop is the defect the intent-reachability gate exists to catch."
-    notes = "Split from P2.F1.T4, which shipped the rest of the read-side navigation set. See `xtask/intent-reachability.toml` for why the three intents are allowlisted rather than wired."
+    notes = "Split from P2.F1.T4, which shipped the rest of the read-side navigation set. Done 2026-08-19: both directions are bound to Ctrl/Cmd+Alt+H and Ctrl/Cmd+Alt+Shift+H and render in the locations panel, and the intent-reachability allowlist entries for ShowIncomingCalls and ShowOutgoingCalls are retired. PrepareCallHierarchy stays allowlisted with an accurate reason: it resolves a symbol and stops, so a gesture for it would be the do-nothing control the gate exists to prevent. Wiring this uncovered a larger defect recorded in the evidence file: five LSP capabilities were gated on keys the initialize parser never recorded, so references, document symbols, inlay hints and code lenses had never reached rust-analyzer despite P2.F1.T4 being marked done."
+    evidence = "plans/evidence/production/WS-LANG-01/2026-08-19-call-hierarchy-and-the-capability-gate.md"
 
   [[epics.features]]
   id = "P2.F2"

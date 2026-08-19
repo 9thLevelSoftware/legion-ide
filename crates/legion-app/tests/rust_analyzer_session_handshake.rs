@@ -112,16 +112,22 @@ fn initialize_populates_capability_summaries() {
         "definitionProvider must be supported=true (mock advertises it)"
     );
 
-    // The mock does NOT advertise completionProvider, so it must be false.
-    let comp_cap = health
+    // The mock does NOT advertise codeLensProvider, so it must be false.
+    //
+    // This was `completionProvider` until the mock grew the full set of gated
+    // capabilities: the parser recorded three keys while the read side gated on
+    // nine, so references, document symbols, inlay hints and code lenses could
+    // never be sent, and a mock advertising only what the parser handled could
+    // never have shown it. `codeLensProvider` is now the deliberate omission —
+    // see `tests/lsp_capability_gating.rs`.
+    let lens_cap = health
         .capabilities
         .iter()
-        .find(|c| c.capability == "completionProvider");
-    // completionProvider is tracked but supported=false (not in mock response).
-    if let Some(c) = comp_cap {
+        .find(|c| c.capability == "codeLensProvider");
+    if let Some(c) = lens_cap {
         assert!(
             !c.supported,
-            "completionProvider must be supported=false (mock does not advertise it)"
+            "codeLensProvider must be supported=false (mock does not advertise it)"
         );
     }
     // Whether completionProvider is absent or present-but-false, what matters is
