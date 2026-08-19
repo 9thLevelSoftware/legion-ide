@@ -121,6 +121,77 @@ cannot mistake one for the other.
 The transport hypothesis is therefore still **untested**. Nothing has yet run
 this binary successfully outside the handshake.
 
+## Round 4 — the answer, and the hypothesis was wrong
+
+The corrected probe answered on its first run.
+
+**Windows. The binary cannot start.**
+
+```
+--- resolved: /c/Program Files/LLVM/bin/lldb-dap.exe ---
+--- --version ---     (nothing)
+--- --help ---        (nothing)
+exit=127
+lldb-dap.exe: error while loading shared libraries: ?: cannot open shared object file
+```
+
+`lldb-dap.exe` on the windows-latest image is missing a library it links
+against. It is not refusing to speak DAP over stdio; it never reaches `main`.
+
+That explains every observation, including the one that looked strangest. The
+Rust side reported `adapter still running` because on Windows the process *is*
+created — `CreateProcess` succeeds — and then dies in loader initialisation.
+`try_wait` catches it alive in that window, its stdout is closed without a byte
+ever being written, and the framer reports `unexpected EOF in headers`. Three
+symptoms, one cause, and none of them about the protocol.
+
+**The transport hypothesis is disproved.** From the macOS `--help`:
+
+```
+--connection <connection>
+     Communicate with the lldb-dap tool over the specified connection.
+     Connections are specified like 'listen://[host]:port' or 'accept:///path'.
+```
+
+`--connection` is optional and names the *alternative*. Stdio is the default, so
+the way the product invokes the adapter was correct all along. Two rounds of
+diagnostic work were spent inside a handshake that had nothing wrong with it.
+
+**macOS. The binary is healthy.**
+
+```
+lldb-dap: LLVM (http://llvm.org/): LLVM version 21.0.0
+liblldb: lldb-2100.0.17.203
+Apple Swift version 6.3.3
+```
+
+It answers `--version` and `--help` normally, which rules out the Windows fault
+entirely and confirms the macOS failure at `launch` is a separate problem with
+its own cause, not yet investigated.
+
+## What this changes
+
+Windows is an **environment** defect, not a product one. No amount of work on
+the handshake, the framer or the session would have fixed it, and the two
+rounds spent there were the cost of a diagnostic that could not speak.
+
+The remaining Windows question is which library is missing — the loader printed
+`?` rather than a name, which is MSYS2 reporting a Windows DLL failure through a
+POSIX-shaped message. Identifying it needs a Windows-native tool
+(`dumpbin /dependents`) rather than the shell, and then either a fuller LLVM
+install or the right directory on `PATH`.
+
+## Status
+
+P2.F3.T2 stays in-progress, with the three platforms now separated by cause
+rather than lumped as "DAP is failing":
+
+| Platform | State | Cause |
+| --- | --- | --- |
+| Ubuntu | green end to end | — |
+| Windows | red | adapter binary cannot load a shared library; environment |
+| macOS | red at `launch` | unknown; binary itself is healthy |
+
 ## Status
 
 P2.F3.T2 stays in-progress. Ubuntu is green. Windows is now diagnosed rather
