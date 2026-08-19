@@ -8,6 +8,32 @@
 use legion_protocol::{EventSequence, TerminalPanelProjection};
 use legion_terminal::grid::{TerminalGrid, TerminalGridSelection};
 
+/// A scrollback summary worth showing a person, or `None` for silence.
+///
+/// The panel header used to print the render model's `visible=0 omitted=0
+/// matches=0` verbatim. That string exists so evidence tests can assert exact
+/// counts and it is good at that job, but rendering it put three zeroes and two
+/// equals signs at the top of an empty terminal — which is how a product ends
+/// up looking like a debugger attached to itself.
+///
+/// Counts are only interesting once they are non-zero: an empty terminal has
+/// nothing to say about its scrollback, and saying it anyway trains people to
+/// stop reading the line that will eventually matter.
+#[must_use]
+pub fn scrollback_summary(projection: &TerminalPanelProjection) -> Option<String> {
+    let mut parts = Vec::new();
+    if projection.scrollback.omitted_row_count > 0 {
+        parts.push(format!(
+            "{} earlier rows hidden",
+            projection.scrollback.omitted_row_count
+        ));
+    }
+    if projection.search.match_count > 0 {
+        parts.push(format!("{} matches", projection.search.match_count));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// Renderer-friendly terminal panel model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalPanelRenderModel {

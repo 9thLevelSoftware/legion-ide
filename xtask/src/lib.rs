@@ -7,6 +7,7 @@ pub mod golden_path_2;
 pub mod golden_path_3;
 pub mod golden_path_4;
 pub mod golden_path_5;
+pub mod intent_reachability;
 pub mod kanban_backlog;
 pub mod legion_bench;
 pub mod legion_bench_corpus;

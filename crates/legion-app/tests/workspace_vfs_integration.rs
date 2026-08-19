@@ -46,14 +46,14 @@ use uuid::Uuid;
 
 fn create_root() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "legion-app-integration-{}-{}",
+        "legion-app-integration-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+            .map_or(0, |value| value.as_millis() as u64),
+        TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&root).expect("create temp root");
+    std::fs::create_dir(&root).expect("create temp root");
     root
 }
 
@@ -2389,10 +2389,13 @@ fn workspace_vfs_integration_conflicted_registered_save_preserves_dirty_buffer_a
         .handle_proposal_request(ProposalRequest::Apply(proposal))
         .expect("apply conflicted generic save proposal");
 
-    assert!(matches!(
-        response,
-        ProposalResponse::Conflict { .. } | ProposalResponse::Stale { .. }
-    ));
+    assert!(
+        matches!(
+            response,
+            ProposalResponse::Conflict { .. } | ProposalResponse::Stale { .. }
+        ),
+        "an external overwrite between preview and apply must be refused, got {response:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&target).expect("disk content preserved"),
         "external"

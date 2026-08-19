@@ -81,6 +81,16 @@ pub enum LspReadKind {
     Outline,
     /// Inlay-hint request (`textDocument/inlayHint`).
     InlayHints,
+    /// Call-hierarchy prepare (`textDocument/prepareCallHierarchy`).
+    ///
+    /// Carries the direction the caller ultimately wants, because the response
+    /// to this request is what makes the follow-up possible and the follow-up
+    /// is what the user actually asked for.
+    CallHierarchyPrepare,
+    /// Callers (`callHierarchy/incomingCalls`).
+    IncomingCalls,
+    /// Callees (`callHierarchy/outgoingCalls`).
+    OutgoingCalls,
     /// Code-lens request (`textDocument/codeLens`).
     CodeLens,
     /// Formatting request (`textDocument/formatting`).

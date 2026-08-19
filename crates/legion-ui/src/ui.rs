@@ -62,6 +62,14 @@ pub struct ExplorerNodeProjection {
     pub name: String,
     /// Child identifiers for directory rows.
     pub children: Vec<FileId>,
+    /// Whether this row is a directory.
+    ///
+    /// The renderer cannot infer this from [`Self::children`]: an empty
+    /// directory has none, and a directory whose children have not been
+    /// projected yet looks identical to a file. Activating a row does
+    /// different things for the two — a file opens, a directory expands — so
+    /// the distinction has to come from the authority that knows it.
+    pub is_directory: bool,
 }
 
 /// Projected explorer selection.
@@ -1475,6 +1483,17 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
         KeybindingEntry {
             combo: KeyCombo::new("Tab", true, true, false),
             action_label: "PrevTab".into(),
+        },
+        // Ctrl+Alt+Up/Down, matching the convention most editors use for
+        // stacking cursors down a column. Plain Ctrl+Up/Down is scroll in many
+        // of them, and Alt alone is the menu key on Windows.
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowUp", true, false, true),
+            action_label: "AddCursorAbove".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowDown", true, false, true),
+            action_label: "AddCursorBelow".into(),
         },
         KeybindingEntry {
             combo: KeyCombo::new("F12", false, false, false),
@@ -7643,6 +7662,7 @@ mod tests {
                 canonical_path: CanonicalPath("C:/repo/src/main.rs".to_string()),
                 name: "main.rs".to_string(),
                 children: vec![],
+                is_directory: false,
             }],
             selection: Some(ExplorerSelectionProjection {
                 file_id: FileId(10),

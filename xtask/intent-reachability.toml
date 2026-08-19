@@ -1,0 +1,56 @@
+# Intent-reachability gate.
+#
+# Every `CommandDispatchIntent` variant must be named by some file that can turn
+# a user gesture into it. See `xtask/src/intent_reachability.rs` for why this
+# exists: on 2026-08-17 four capabilities were found complete, tested, and with
+# no route in, one at a time, by a person running the app.
+#
+# Adding to `allowed` is not free. The reason is required, is read by people,
+# and the gate fails if an allowlisted variant later becomes reachable — so a
+# stale entry cannot quietly outlive its justification.
+
+intent_source = "crates/legion-ui/src/ui.rs"
+intent_enum = "CommandDispatchIntent"
+
+# Every route a gesture can travel to an intent.
+#
+# The renderer is deliberately absent. `view.rs` and its `view/` submodules
+# name `DesktopAction`, never `CommandDispatchIntent` — the bridge is where a
+# gesture becomes an intent — so listing them adds no evidence and misleads a
+# reader about where routes are declared. That asymmetry is also why this gate
+# does not yet cover `DesktopAction`; see the scope note in the evidence file.
+route_sources = [
+  # Gesture translation and the keyboard handler.
+  "crates/legion-desktop/src/bridge.rs",
+  "crates/legion-desktop/src/workflow.rs",
+  # The `:` command line.
+  "crates/legion-ui/src/shell_commands.rs",
+  # Vim mappings.
+  "crates/legion-ui/src/vim_intent.rs",
+  # The command palette's string-keyed table, which resolves ids to intents.
+  "crates/legion-app/src/lib.rs",
+]
+
+[[allowed]]
+intent = "PrepareCallHierarchy"
+reason = """
+Prepare-only asks no question a panel can answer. It resolves the symbol under
+the caret and stops; `run_call_hierarchy` with no direction returns the
+projection untouched, by its own comment. A key for it would be a control that
+does nothing — the defect this gate exists to prevent. The two directions it
+would prepare for, ShowIncomingCalls and ShowOutgoingCalls, both issue the
+prepare leg themselves and are bound to Ctrl/Cmd+Alt+H and Ctrl/Cmd+Alt+Shift+H,
+so the capability is reachable; only this half-step is not. Give prepare a
+visible result of its own — a peek popup listing the resolved item — before
+giving it a gesture.
+"""
+
+[[allowed]]
+intent = "SetEditorFontFamily"
+reason = """
+Would not do anything. The setting is persisted, projected and displayed in the
+Settings overlay, but every code-canvas call site hard-codes
+`egui::FontId::monospace(...)`, so the family never reaches text layout. Wiring
+a picker would offer a control that appears to work and does not — exactly what
+this gate exists to prevent. Give it an effect first, then a control.
+"""

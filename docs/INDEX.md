@@ -45,6 +45,12 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 
+## UI direction (reference, not current work)
+
+- `ui/four-mode-prototype-fidelity.md` — fidelity ledger for the four-mode workbench: which parts of the v1 prototype are historical visual direction and which are the native v2 baseline.
+- `ui/snapshot-testing.md` — visual regression snapshots of the rendered shell: what they catch, what they do not, why baselines are per platform, and how to regenerate one for a platform you do not have.
+- `ui/canvas-workspace-direction.md` — **explored, not scheduled.** An infinite pan/zoom canvas workspace replacing the tabbed editor, plus the companion shell audit. Records the spec, the codebase constraints that would have to be solved first, and the conflicts with ADR-0046/ADR-0048 and the production roadmap. No ADR, no backlog task, no ledger row.
+
 ## Forward-looking / non-current release templates
 
 - The former `releases/v8.0.0/` GA-checklist/migration templates were removed in the 2026-08-12 cleanup. No v8.0.0 release exists or is scheduled; the workspace is pre-beta (`0.1.0`). Current readiness is in `../plans/product-readiness-ledger.md`.

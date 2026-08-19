@@ -202,12 +202,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("Cargo.toml".to_string()),
                 name: "Cargo.toml".to_string(),
                 children: vec![FileId(8)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(8),
                 canonical_path: CanonicalPath("src/lib.rs".to_string()),
                 name: "lib.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
@@ -249,13 +251,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
             ],
             active_buffer_id: Some(BufferId(3)),
         },
-        close_dirty_prompt: Some(CloseDirtyPromptProjection {
-            buffer_id: BufferId(3),
-            file_id: Some(FileId(2)),
-            file_path: Some(CanonicalPath("Cargo.toml".to_string())),
-            title: "Cargo.toml".to_string(),
-            message: "Save changes before closing Cargo.toml?".to_string(),
-        }),
+        // Deliberately `None`. The unsaved-changes prompt is a modal: while it
+        // is raised it blocks interaction with the whole shell, which is what a
+        // modal is for. Leaving it set in the shared fixture meant every test
+        // in this file rendered a shell no one could click, and the tests only
+        // passed because the prompt used to be inert flow content laid out off
+        // the bottom of the window. Tests that want the prompt raise it
+        // themselves; see `close_dirty_prompt_snapshot`.
+        close_dirty_prompt: None,
         viewport_states: vec![EditorViewportStateProjection {
             buffer_id: BufferId(3),
             scroll: ViewportScroll {
@@ -965,8 +968,20 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("scroll=2:4"))
     );
+    // The prompt is not part of the shared fixture (it is a modal and would
+    // block every other surface), so raise it here to check the row it
+    // produces.
+    let mut prompted = populated_snapshot();
+    prompted.daily_editing_projection.close_dirty_prompt = Some(CloseDirtyPromptProjection {
+        buffer_id: BufferId(3),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+        title: "Cargo.toml".to_string(),
+        message: "Save changes before closing Cargo.toml?".to_string(),
+    });
+    let prompted_model = DesktopProjectionViewModel::from_snapshot(&prompted);
     assert!(
-        model
+        prompted_model
             .close_prompt_rows
             .iter()
             .any(|row| row.contains("close_dirty"))
@@ -6047,4 +6062,167 @@ fn projection_rendering_tests_preserve_app_boundary() {
         .expect("renderer source should be readable");
 
     common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
+}
+
+/// A restored splitter fraction must reach the rendered panel.
+///
+/// This is the assertion whose absence kept P1.F2.T4 open: `splitter_fraction`
+/// was persisted and reloaded for a long time while no renderer read it, so a
+/// restart restored the record rather than the layout the user had arranged.
+/// Asserting on the projection or the stored layout would not have caught that
+/// — only the painted panel rect does.
+#[test]
+fn projection_rendering_applies_a_restored_left_splitter_fraction() {
+    use legion_ui::{DockLayout, DockSideLayout, PanelId};
+
+    let snapshot = populated_snapshot();
+    let mode = snapshot.product_mode;
+
+    let render_with_left_fraction = |fraction: f32| -> f32 {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        // A restored arrangement, which is the only kind allowed to override
+        // the shell's designed panel sizes.
+        let state = DesktopProjectionViewState {
+            dock_layouts_user_arranged: true,
+            dock_layouts: vec![DockLayout {
+                mode,
+                left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), fraction, false),
+                right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.22, false),
+                bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.25, false),
+            }],
+            ..DesktopProjectionViewState::default()
+        };
+        // Two frames: egui settles panel sizes from `default_size` on the
+        // first, and a single frame can report a pre-layout rect.
+        for _ in 0..2 {
+            let _ = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+        }
+        view.last_shell_panel_rects()
+            .expect("the shell should have recorded its panel rects")
+            .left
+            .width()
+    };
+
+    let narrow = render_with_left_fraction(0.18);
+    let wide = render_with_left_fraction(0.42);
+
+    assert!(
+        wide > narrow,
+        "a wider restored fraction must produce a wider explorer panel, \
+         got {wide} for 0.42 and {narrow} for 0.18 — if these are equal the \
+         renderer is ignoring the persisted layout again"
+    );
+}
+
+/// A steady layout reports no drag, so rendering never rewrites stored sizes.
+///
+/// This is the regression that `product_mode_changes_preserve_projected_editor_and_panel_state`
+/// caught: an earlier version reported the rendered size every frame, which fed
+/// the geometry default straight back over every restored fraction.
+#[test]
+fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    // Several settled frames with no pointer input at a fixed window size.
+    let mut last = None;
+    for _ in 0..3 {
+        let (output, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+        last = Some(output);
+    }
+    let observed = last.expect("rendered").observed_dock_fractions;
+
+    assert_eq!(
+        observed,
+        legion_desktop::view::dock_geometry::DockFractions::default(),
+        "an untouched layout must report nothing to persist, or every frame          overwrites the user's arrangement with the current geometry default"
+    );
+}
+
+/// Every cursor in a multi-cursor set must be painted, not just the primary.
+///
+/// P1.F3.T2's remaining acceptance clause. The projection has carried the full
+/// cursor set all along and the painter loops it, but nothing asserted the
+/// loop — and a multi-cursor edit whose other carets are invisible looks like
+/// text changing on its own.
+///
+/// Counted as a delta rather than an absolute: the shell paints many vertical
+/// hairlines (separators, icon strokes), and the only thing that differs
+/// between the two renders here is how many cursors the viewport carries.
+#[test]
+fn projection_rendering_paints_every_cursor_in_a_multi_cursor_set() {
+    fn vertical_hairlines(output: &egui::FullOutput) -> usize {
+        fn count(shape: &egui::epaint::Shape) -> usize {
+            match shape {
+                egui::epaint::Shape::LineSegment { points, stroke } => usize::from(
+                    (points[0].x - points[1].x).abs() < 0.01
+                        && (points[0].y - points[1].y).abs() > 1.0
+                        && (stroke.width - 1.0).abs() < 0.01,
+                ),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
+                _ => 0,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .map(|clipped| count(&clipped.shape))
+            .sum()
+    }
+
+    // `time` is pinned because the caret blinks: `paint_code_cursor` returns
+    // early on the off phase, so an unpinned clock makes this pass or fail by
+    // when it happened to run.
+    let render = |cursors: Vec<legion_protocol::TextCoordinate>| -> usize {
+        let ctx = egui::Context::default();
+        let mut view = ProjectionView::new();
+        // `degraded_snapshot` rather than `populated_snapshot`: only the
+        // former carries a `ViewportProjection`, and the cursor set lives on
+        // the viewport. Asserted rather than assumed — an `if let Some(...)`
+        // here would silently test nothing.
+        let mut snapshot = degraded_snapshot();
+        let viewport = snapshot
+            .active_buffer_projection
+            .viewport
+            .as_mut()
+            .expect("the fixture must carry a viewport for cursors to live on");
+        viewport.cursors = cursors;
+        // Two frames, keeping the second: egui settles panel layout and font
+        // metrics on the first pass, so frame one can report caret geometry
+        // that the next frame immediately revises.
+        let mut painted = 0;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                focused: true,
+                time: Some(0.0),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_440.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = view.render(ui, &snapshot);
+            });
+            painted = vertical_hairlines(&output);
+        }
+        painted
+    };
+
+    // Both on the single line this fixture renders. A caret only paints on the
+    // row matching its line, so putting the second one on line 1 would test the
+    // fixture's line count rather than the painter's loop.
+    let one = render(vec![coord(0, 0, 0)]);
+    let two = render(vec![coord(0, 0, 0), coord(0, 5, 5)]);
+
+    assert_eq!(
+        two,
+        one + 1,
+        "a second cursor must paint a second caret; got {one} hairline(s) with one \
+         cursor and {two} with two, so the extra cursor was not drawn"
+    );
 }

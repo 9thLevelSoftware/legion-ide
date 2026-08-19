@@ -9,9 +9,9 @@ use legion_protocol::{
     DebugConfigurationId, DebugSessionId, DelegatedTaskPlanId,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, EditablePlanSection,
     FileId, InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
-    ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
-    RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
+    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, LineWrappingPolicy,
+    ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
+    ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
 use legion_protocol::{PluginContribution, PluginId};
 use legion_ui::{
@@ -181,6 +181,20 @@ pub enum DesktopAction {
     SetEditorFontSize {
         /// Requested editor font size in points.
         font_size_pt: u16,
+    },
+    /// Run a runnable code lens through app authority.
+    ActivateLanguageCodeLens {
+        /// Buffer the lens belongs to.
+        buffer_id: BufferId,
+        /// Lens identifier selected from projection data.
+        lens_id: String,
+    },
+    /// Set the editor's line wrapping policy through app authority.
+    SetLineWrappingPolicy {
+        /// Requested policy.
+        policy: LineWrappingPolicy,
+        /// Fixed wrap column, carried through unchanged for the fixed policy.
+        wrap_column: Option<u32>,
     },
     /// Update toast verbosity through app authority.
     SetToastVerbosity {
@@ -381,7 +395,12 @@ pub enum DesktopAction {
         /// Canonical path represented by the explorer row.
         path: String,
     },
-    /// Select/reveal an explorer file through app authority.
+    /// The user activated an explorer row (clicked it).
+    ///
+    /// Named for the gesture, not the effect, because the effect depends on
+    /// what the row is: a file opens and is revealed, a directory expands.
+    /// The variant used to mean "reveal only", which is why clicking a file
+    /// used to do nothing a user could see.
     SelectExplorerFile {
         /// Projected workspace file identifier.
         file_id: FileId,
@@ -670,6 +689,24 @@ pub enum DesktopAction {
         /// Cursor coordinate in projection space.
         cursor: TextCoordinate,
     },
+    /// Add a cursor one line above every existing one.
+    ///
+    /// The buffer falls back to the active tab, like the other editing
+    /// actions: the keyboard has no buffer to name.
+    AddCursorAbove {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Add a cursor one line below every existing one.
+    AddCursorBelow {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Collapse a multi-cursor set back to the primary caret.
+    ClearExtraCursors {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
     /// Set the primary selection for a buffer or the active buffer.
     SetSelection {
         /// Optional target buffer; falls back to the active tab.
@@ -748,6 +785,16 @@ pub enum DesktopAction {
     },
     /// Request reference locations for the active buffer.
     FindReferences {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callers of the symbol under the caret in the active buffer.
+    ShowIncomingCalls {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callees of the symbol under the caret in the active buffer.
+    ShowOutgoingCalls {
         /// Projected cursor position.
         position: TextCoordinate,
     },
@@ -1018,6 +1065,31 @@ pub enum DesktopAppRequest {
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
         path: String,
+    },
+    /// Answer the unsaved-changes prompt by saving, then closing the tab.
+    ///
+    /// Two dispatches, so this is adapter sequencing rather than one intent.
+    /// The prompt used to emit a bare `Save`, which saved the file and left the
+    /// tab open — the close the user had asked for never happened, and the
+    /// prompt's own button was therefore lying about what it did.
+    SaveAndCloseTab {
+        /// Buffer to save and then close.
+        buffer_id: BufferId,
+    },
+    /// Activate an explorer row: open the file, or expand the directory.
+    ///
+    /// Activation is two app dispatches for a file — open the buffer, then
+    /// reveal the row — because the explorer projection is push-updated by the
+    /// reveal outcome and would otherwise keep highlighting the previous
+    /// selection after the new file opened. Sequencing them is adapter work,
+    /// so this arrives as an app *request* rather than a single intent.
+    ActivateExplorerFile {
+        /// File identifier of the activated row.
+        file_id: FileId,
+        /// Canonical path represented by the activated row.
+        path: String,
+        /// Whether the row is a directory.
+        is_directory: bool,
     },
     /// Open an external URL in the system browser.
     OpenExternalUrl {
@@ -1439,7 +1511,9 @@ impl DesktopCommandBridge {
             }),
             DesktopAction::SaveDirtyClose { buffer_id } => {
                 self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })
+                    DesktopBridgeOutput::AppRequest(DesktopAppRequest::SaveAndCloseTab {
+                        buffer_id,
+                    })
                 })
             }
             DesktopAction::CancelDirtyClose { buffer_id } => {
@@ -1516,6 +1590,19 @@ impl DesktopCommandBridge {
                     font_size_pt,
                 })
             }
+            DesktopAction::ActivateLanguageCodeLens { buffer_id, lens_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ActivateLanguageCodeLens {
+                    buffer_id,
+                    lens_id,
+                })
+            }
+            DesktopAction::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            }),
             DesktopAction::SetToastVerbosity { verbosity } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetToastVerbosity { verbosity })
             }
@@ -1768,10 +1855,17 @@ impl DesktopCommandBridge {
                 None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPathInput),
             },
             DesktopAction::SelectExplorerFile { file_id } => {
-                if explorer_contains_file(snapshot, file_id) {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id })
-                } else {
-                    DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile { file_id })
+                match explorer_node(snapshot, file_id) {
+                    Some(node) => {
+                        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+                            file_id,
+                            path: node.canonical_path.0.clone(),
+                            is_directory: node.is_directory,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile {
+                        file_id,
+                    }),
                 }
             }
             DesktopAction::PreviewProposal { proposal_id } => {
@@ -2123,6 +2217,21 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::SetCursor { buffer_id, cursor }
                 })
             }
+            DesktopAction::AddCursorAbove { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorAbove { buffer_id }
+                })
+            }
+            DesktopAction::AddCursorBelow { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorBelow { buffer_id }
+                })
+            }
+            DesktopAction::ClearExtraCursors { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::ClearExtraCursors { buffer_id }
+                })
+            }
             DesktopAction::SetSelection { buffer_id, range } => {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SetSelection { buffer_id, range }
@@ -2224,6 +2333,22 @@ impl DesktopCommandBridge {
             DesktopAction::FindReferences { position } => {
                 self.with_active_buffer(snapshot, |buffer_id| {
                     CommandDispatchIntent::FindReferences {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::ShowIncomingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowIncomingCalls {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::ShowOutgoingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowOutgoingCalls {
                         buffer_id,
                         position,
                     }
@@ -3025,12 +3150,20 @@ fn tab_is_known(snapshot: &ShellProjectionSnapshot, buffer_id: BufferId) -> bool
     tabs.iter().any(|tab| tab.buffer_id == buffer_id)
 }
 
-fn explorer_contains_file(snapshot: &ShellProjectionSnapshot, file_id: FileId) -> bool {
+/// The projected explorer row for `file_id`, if the tree still holds one.
+///
+/// Rows are addressed by `FileId` rather than by path because the renderer
+/// only ever has what the projection gave it, and a stale id must fail loudly
+/// rather than resolve to whatever now sits at the same path.
+fn explorer_node(
+    snapshot: &ShellProjectionSnapshot,
+    file_id: FileId,
+) -> Option<&legion_ui::ExplorerNodeProjection> {
     snapshot
         .explorer_projection
         .nodes
         .iter()
-        .any(|node| node.file_id == file_id)
+        .find(|node| node.file_id == file_id)
 }
 
 fn proposal_is_known(snapshot: &ShellProjectionSnapshot, proposal_id: ProposalId) -> bool {

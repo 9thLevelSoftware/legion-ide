@@ -50,6 +50,8 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
     legion_editor::TextPosition::new(line, column)
 }
 
+/// Outcome construction, extracted from this file for the chokepoint budget.
+mod command_outcome;
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
 pub use intent_routing::*;
@@ -139,6 +141,7 @@ use legion_project::{
     prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
     stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
 };
+use legion_protocol::CallHierarchyDirection;
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
     AssistedAiProviderInvocationState, BatchProposalPayload, BufferId, BufferVersion, ByteRange,
@@ -7074,10 +7077,16 @@ enum LanguageReadKind {
     Outline,
     InlayHints,
     CodeLens,
+    /// Callers of the symbol under the caret.
+    IncomingCalls,
+    /// Callees of the symbol under the caret.
+    OutgoingCalls,
 }
 
 struct LspReadProjectionIngest {
     kind: LanguageReadKind,
+    /// Call-hierarchy rows, when `kind` is one of the two call directions.
+    call_hierarchy: Vec<LanguageLocationProjection>,
     hover: Option<LanguageHoverProjection>,
     completions: Vec<LanguageCompletionProjection>,
     locations: Vec<LanguageLocationProjection>,
@@ -7259,6 +7268,8 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
             LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
             LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
+            LanguageReadKind::IncomingCalls => LanguageToolingOperationKind::IncomingCalls,
+            LanguageReadKind::OutgoingCalls => LanguageToolingOperationKind::OutgoingCalls,
         };
         let same_identity = self.projection.workspace_id == Some(input.workspace_id)
             && self.projection.buffer_id == Some(input.buffer_id)
@@ -7293,6 +7304,16 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => projection.outline = ingest.outline,
             LanguageReadKind::InlayHints => projection.inlay_hints = ingest.inlay_hints,
             LanguageReadKind::CodeLens => projection.code_lenses = ingest.code_lenses,
+            LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls => {
+                // The answer is here, so the wait is over — including when the
+                // answer is "nobody", which is a result rather than a silence.
+                projection.call_hierarchy_awaiting = false;
+                projection.call_hierarchy = ingest.call_hierarchy;
+                projection.call_hierarchy_direction = Some(match ingest.kind {
+                    LanguageReadKind::IncomingCalls => CallHierarchyDirection::Incoming,
+                    _ => CallHierarchyDirection::Outgoing,
+                });
+            }
         }
         self.projection = projection;
         let operation_id = self.next_operation_id(operation_kind);
@@ -7325,6 +7346,8 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
             LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
             LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
+            LanguageReadKind::IncomingCalls => LanguageToolingOperationKind::IncomingCalls,
+            LanguageReadKind::OutgoingCalls => LanguageToolingOperationKind::OutgoingCalls,
         };
         let operation_id = self.next_operation_id(operation_kind);
         let same_identity = self.projection.workspace_id == Some(input.workspace_id)
@@ -7369,7 +7392,14 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::References => SemanticQueryKind::References,
             LanguageReadKind::Outline
             | LanguageReadKind::InlayHints
-            | LanguageReadKind::CodeLens => SemanticQueryKind::SymbolLookup,
+            | LanguageReadKind::CodeLens
+            // The index has no call graph, so this leg cannot answer either
+            // direction. It runs anyway, for the reason the inlay-hint arm
+            // gives: it records the operation and stamps the projection with
+            // this buffer's identity, so the panel has a row to update when the
+            // server answers rather than one appearing from nowhere.
+            | LanguageReadKind::IncomingCalls
+            | LanguageReadKind::OutgoingCalls => SemanticQueryKind::SymbolLookup,
         };
         let response = self.semantic_index.query(&SemanticQueryRequest {
             query_id: SemanticQueryId(uuid::Uuid::now_v7()),
@@ -7521,6 +7551,30 @@ impl LanguageToolingWorkflow {
             } else {
                 previous_projection.references
             },
+            // The index leg cannot answer "who calls this" — it has no call
+            // graph — so rows only ever arrive from the server via
+            // `ingest_lsp_read_projection`. What this leg must do is stop the
+            // previous answer from masquerading as this one: asking for callees
+            // while the panel still lists callers under an "incoming" heading
+            // shows a confident wrong answer, and shows it forever if the
+            // server never replies.
+            call_hierarchy: if matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ) {
+                Vec::new()
+            } else {
+                previous_projection.call_hierarchy
+            },
+            call_hierarchy_direction: match kind {
+                LanguageReadKind::IncomingCalls => Some(CallHierarchyDirection::Incoming),
+                LanguageReadKind::OutgoingCalls => Some(CallHierarchyDirection::Outgoing),
+                _ => previous_projection.call_hierarchy_direction,
+            },
+            call_hierarchy_awaiting: matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ),
             outline: if matches!(kind, LanguageReadKind::Outline) {
                 outline
             } else {
@@ -10199,6 +10253,28 @@ pub enum AppCommandRequest {
         /// Cursor position.
         position: TextCoordinate,
     },
+    /// Resolve the symbol under the caret for call hierarchy, without asking a
+    /// direction yet.
+    PrepareCallHierarchy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callers of the symbol under the caret.
+    ShowIncomingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callees of the symbol under the caret.
+    ShowOutgoingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
     /// Refresh the active document outline through app-owned language tooling.
     RefreshOutline {
         /// Target buffer identifier.
@@ -10765,6 +10841,9 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelAssistInlinePrediction { .. }
             | AppCommandRequest::GoToDefinition { .. }
             | AppCommandRequest::FindReferences { .. }
+            | AppCommandRequest::PrepareCallHierarchy { .. }
+            | AppCommandRequest::ShowIncomingCalls { .. }
+            | AppCommandRequest::ShowOutgoingCalls { .. }
             | AppCommandRequest::RefreshOutline { .. }
             | AppCommandRequest::RefreshInlayHints { .. }
             | AppCommandRequest::RefreshCodeLenses { .. }
@@ -11590,6 +11669,18 @@ impl ProjectionBuilder {
                 file_id: node.identity.file_id,
                 canonical_path: node.identity.canonical_path,
                 name: node.name,
+                // A node with children is a directory whether or not metadata
+                // arrived, and metadata is the authority when it did. Nodes
+                // with neither are treated as files, which is the safe default:
+                // opening one either succeeds or surfaces a read error, where
+                // mis-classifying a file as a directory would silently make it
+                // unopenable with no error to point at.
+                is_directory: node
+                    .metadata
+                    .as_ref()
+                    .map_or(!node.children.is_empty(), |metadata| {
+                        matches!(metadata.kind, FileKind::Directory)
+                    }),
                 children: node.children,
             })
             .collect();
@@ -12962,7 +13053,8 @@ pub enum AppCommandOutcome {
     /// Test explorer projection changed.
     TestExplorerUpdated(TestExplorerProjection),
     /// Language tooling projection changed.
-    LanguageToolingUpdated(LanguageToolingProjection),
+    /// Boxed; construct through [`AppCommandOutcome::language_tooling`].
+    LanguageToolingUpdated(Box<LanguageToolingProjection>),
     /// Assist inline prediction projection changed.
     AssistInlinePredictionUpdated(AssistInlinePredictionProjection),
     /// Terminal panel projection changed.
@@ -14707,6 +14799,13 @@ pub struct AppComposition {
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
     lsp_session: crate::language::LspSessionHandle,
+    /// Direction awaiting a `prepareCallHierarchy` response.
+    ///
+    /// Call hierarchy is two round trips: `prepareCallHierarchy` resolves the
+    /// caret to a symbol item, and only then can callers or callees be asked
+    /// for. The direction is chosen at the first step and needed at the second,
+    /// so it waits here in between. See `language/call_hierarchy.rs`.
+    pending_call_hierarchy: Option<crate::language::PendingCallHierarchy>,
     /// Arming instant, buffer, and position for the completion debounce (I1).
     lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
@@ -15031,6 +15130,7 @@ impl AppComposition {
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
+            pending_call_hierarchy: None,
             lsp_ui_completion_debounce: None,
             lsp_ui_last_completion_count: 0,
             lsp_ui_hover_debounce: None,
@@ -17604,6 +17704,66 @@ impl AppComposition {
         Ok(Some(outcome))
     }
 
+    /// Delete backwards at every cursor when more than one is active.
+    ///
+    /// The mirror of [`Self::dispatch_multi_cursor_insert`], and needed for the
+    /// same reason: without it, typing reaches every cursor but Backspace
+    /// reaches only the caret, so a multi-cursor edit could be made and not
+    /// unmade. `None` keeps the ordinary single-cursor case on the normal path.
+    ///
+    /// The incoming range is ignored deliberately. It was computed by the
+    /// renderer from the active cursor alone and describes one deletion;
+    /// `delete_before_all` recomputes every position from the text, which is
+    /// the only view that stays valid once the first character is removed.
+    fn dispatch_multi_cursor_delete(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let CommandDispatchIntent::Delete { buffer_id, .. } = intent else {
+            return Ok(None);
+        };
+        let cursors: Vec<legion_editor::TextPosition> = self
+            .editor
+            .cursors(*buffer_id)?
+            .iter()
+            .map(|cursor| cursor.position)
+            .collect();
+        if cursors.len() < 2 {
+            return Ok(None);
+        }
+
+        let before = self.editor.text(*buffer_id)?.to_string();
+        let (after, moved) = legion_editor::multi_cursor::delete_before_all(&before, &cursors);
+        if after == before {
+            // No cursor had anything before it to delete. Hard to reach —
+            // `delete_before_all` skips only offset zero, and normalization
+            // leaves at most one cursor there — but an empty edit would push an
+            // undo step that undoes nothing, which is worse than a branch that
+            // rarely runs.
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+
+        // One whole-buffer edit, for the same reason as the insert path: the
+        // positions are valid only against the text they were computed from.
+        let edit = TextEdit::new(
+            legion_editor::TextRange::new(
+                legion_editor::TextPosition::new(0, 0),
+                end_position(&before),
+            ),
+            after,
+        );
+        let outcome = self.apply_vim_edit(*buffer_id, edit, event_context)?;
+        self.editor.set_cursors(
+            *buffer_id,
+            moved
+                .into_iter()
+                .map(|position| legion_editor::Cursor { position })
+                .collect(),
+        )?;
+        Ok(Some(outcome))
+    }
+
     /// Handle a multi-cursor intent, or return `None` if it is not one.
     fn dispatch_cursor_intent(
         &mut self,
@@ -18021,6 +18181,9 @@ impl AppComposition {
             return Ok(outcome);
         }
         if let Some(outcome) = self.dispatch_multi_cursor_insert(&intent, &event_context)? {
+            return Ok(outcome);
+        }
+        if let Some(outcome) = self.dispatch_multi_cursor_delete(&intent, &event_context)? {
             return Ok(outcome);
         }
 
@@ -18650,7 +18813,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP hover (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_hover_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
                 ))
             }
@@ -18660,7 +18823,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP completion (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_completion_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
                 ))
             }
@@ -18698,7 +18861,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP definition (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_definition_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
                 ))
             }
@@ -18710,15 +18873,35 @@ impl AppComposition {
                 // frame via drain). The index answer below is returned now so
                 // the panel is never empty while the server thinks.
                 self.issue_lsp_references_request(buffer_id, position, true);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
                 ))
             }
+            AppCommandRequest::PrepareCallHierarchy {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(buffer_id, position, None),
+            AppCommandRequest::ShowIncomingCalls {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Incoming),
+            ),
+            AppCommandRequest::ShowOutgoingCalls {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Outgoing),
+            ),
             AppCommandRequest::RefreshOutline { buffer_id } => {
                 // Issue async LSP documentSymbol (non-blocking; result arrives
                 // next frame via drain).
                 self.issue_lsp_document_symbol_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::Outline,
@@ -18741,7 +18924,7 @@ impl AppComposition {
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_inlay_hint_request(buffer_id, range);
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::InlayHints,
@@ -18756,7 +18939,7 @@ impl AppComposition {
             }
             AppCommandRequest::RefreshCodeLenses { buffer_id } => {
                 self.issue_lsp_code_lens_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::CodeLens,
@@ -18771,7 +18954,7 @@ impl AppComposition {
             }
             AppCommandRequest::RequestFormattingProposal { buffer_id } => {
                 self.issue_lsp_formatting_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::Formatting,
@@ -18795,7 +18978,7 @@ impl AppComposition {
                 // now so the surface is never blank. Neither writes anything —
                 // both stop at Previewed.
                 self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::Rename,
@@ -18808,7 +18991,7 @@ impl AppComposition {
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_code_action_request(buffer_id, range, true);
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_proposal(
                         buffer_id,
                         LanguageProposalKind::OrganizeImports,
@@ -18825,7 +19008,7 @@ impl AppComposition {
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
                 action_id,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
+            } => Ok(AppCommandOutcome::language_tooling(
                 self.run_language_proposal(
                     buffer_id,
                     LanguageProposalKind::CodeAction,
@@ -18842,7 +19025,7 @@ impl AppComposition {
                 let event_context = self.next_event_context();
                 self.language_tooling
                     .cancel_operation(operation_id, event_context);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.language_tooling.projection(),
                 ))
             }
@@ -26706,6 +26889,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Completion,
                 hover: None,
                 completions,
@@ -26734,6 +26918,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Hover,
                 hover,
                 completions: Vec::new(),
@@ -26761,6 +26946,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Definition,
                 hover: None,
                 completions: Vec::new(),
@@ -26788,6 +26974,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::References,
                 hover: None,
                 completions: Vec::new(),
@@ -26815,6 +27002,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Outline,
                 hover: None,
                 completions: Vec::new(),
@@ -26843,6 +27031,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::InlayHints,
                 hover: None,
                 completions: Vec::new(),
@@ -26871,6 +27060,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::CodeLens,
                 hover: None,
                 completions: Vec::new(),

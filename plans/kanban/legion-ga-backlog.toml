@@ -280,7 +280,8 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     acceptance = ["A dispatched 3-OS run is recorded with per-job outcomes; failures are diagnosed toward the four-consecutive-green promotion criteria."]
     stop_condition = "Stop if smoke promotion is claimed without four consecutive green scheduled 3-OS runs."
     status = "in-progress"
-    evidence = "plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md"
+    evidence = "plans/evidence/production/WS-P0/2026-08-18-smoke-promotion-clock.md"
+    notes = "2026-08-18: four consecutive green 3-OS runs on `main` now exist, so criterion 1 is met as written, and criterion 2 (rust-analyzer provisioning) is verified from the GP-1 log rather than inferred from a green tick. Held at in-progress because criteria 3 and 4 are owner decisions and no sign-off is written. The evidence file also records why the count is thinner than four rows suggest: runs 3 and 4 are the same SHA, three of the four were dispatched by hand, and all four fall inside ~37 hours. Recommendation there is to treat the 2026-08-24 scheduled run as the fourth data point."
 
   [[epics.features]]
   id = "P0.F5"
@@ -453,8 +454,30 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     # `ctx.content_rect()` and egui `resizable`. Restart restores the *record*,
     # not the layout the user sees. Found while closing P1.F2.T2; verified by
     # inspection of every reader of both fields.
-    status = "in-progress"
-    evidence = "crates/legion-desktop/tests/session_restore.rs"
+    #
+    # 2026-08-17 (second pass): a *different* half of the same clause was also
+    # broken and is now fixed. The record was not being written at all in a
+    # normal launch — `session_state` had no default, so `--session-state` was
+    # the only way to enable persistence and `save_session_state` returned
+    # immediately. Ten tests passed throughout because each one hands the
+    # runtime a path the product never supplied. Interactive launches now
+    # default to `<workspace>/.legion/session.json`, and `save_session_state`
+    # skips unchanged records so the per-action durable write does not land
+    # inside the ADR-0048 keypress budget. Evidence below.
+    #
+    # The original reason for the revert is also closed. `view/dock_geometry.rs`
+    # applies a stored splitter fraction to each dock's `default_size` and
+    # reports a drag back for persistence, gated on `dock_layouts_user_arranged`
+    # so the shipped `DockLayout` defaults — whose fractions disagree with
+    # `ShellGeometry`'s constants — cannot override the designed panel sizes.
+    # Proven non-vacuously: reverting the reader makes the rendered explorer the
+    # same width for 0.18 and 0.42.
+    #
+    # `collapsed` is still unread, deliberately: no renderer affordance can set
+    # it, so there is no user state for restore to honour. Wiring it belongs
+    # with whatever adds a collapse control.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/session-persistence-default-evidence.md"
 
   [[epics.features]]
   id = "P1.F3"
@@ -483,8 +506,19 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-editor", "cargo test -p legion-desktop"]
     acceptance = ["Editor is usable via rendered desktop UI, not only API tests.", "A second cursor can be created, typed at, and cleared; every cursor is painted."]
     stop_condition = "Stop if scroll jank exceeds the perf budget at GP-1 scale."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
+    # 2026-08-17: both acceptance clauses now hold. Clause 1 was settled by the
+    # first non-headless dogfood session. Clause 2 needed a keyboard path, not
+    # an algorithm: `multi_cursor`'s pure functions, the three intents and the
+    # app handling all existed with eight passing tests, and there was no
+    # `DesktopAction`, no bridge translation and no keybinding — so the feature
+    # could not be reached. Ctrl+Alt+Up/Down and Esc are now bound, Backspace
+    # reaches every cursor (`delete_before_all` previously had no callers), and
+    # "every cursor is painted" is measured on painted output rather than on
+    # the projection that feeds it. Both new load-bearing tests were
+    # vacuity-checked. Row virtualization, gutter lanes, selection and scroll
+    # were already in place.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/multi-cursor-reachable-evidence.md"
 
     [[epics.features.tasks]]
     id = "P1.F3.T3"
@@ -691,6 +725,20 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     acceptance = ["Rename across files is reviewable and reversible."]
     stop_condition = "Write-side actions must never bypass the proposal pipeline."
     notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply activation (P3.F1.T2) is deferred to M9; this task stays in-progress until the apply path lands."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T6"
+    title = "Wire the call-hierarchy app stub so incoming/outgoing calls reach a panel"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    status = "done"
+    files = ["crates/legion-app/src/language/intent_routing.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-desktop/src/bridge.rs"]
+    dependencies = ["P2.F1.T4"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-app", "cargo run -p xtask -- intent-reachability"]
+    acceptance = ["Incoming and outgoing calls for the symbol under the caret are listed in a reachable panel, and the three call-hierarchy intents are removed from the intent-reachability allowlist."]
+    stop_condition = "Do not add a control before the intents do something: a button wired to Noop is the defect the intent-reachability gate exists to catch."
+    notes = "Split from P2.F1.T4, which shipped the rest of the read-side navigation set. Done 2026-08-19: both directions are bound to Ctrl/Cmd+Alt+H and Ctrl/Cmd+Alt+Shift+H and render in the locations panel, and the intent-reachability allowlist entries for ShowIncomingCalls and ShowOutgoingCalls are retired. PrepareCallHierarchy stays allowlisted with an accurate reason: it resolves a symbol and stops, so a gesture for it would be the do-nothing control the gate exists to prevent. Wiring this uncovered a larger defect recorded in the evidence file: five LSP capabilities were gated on keys the initialize parser never recorded, so references, document symbols, inlay hints and code lenses had never reached rust-analyzer despite P2.F1.T4 being marked done."
+    evidence = "plans/evidence/production/WS-LANG-01/2026-08-19-call-hierarchy-and-the-capability-gate.md"
 
   [[epics.features]]
   id = "P2.F2"
@@ -2419,7 +2467,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-observability", "cargo run -p xtask -- legion-bench --mode recorded"]
     acceptance = ["End-to-end consented trace -> adapter -> eval comparison is reproducible."]
     stop_condition = "Stop if a non-consented trace can land in the training candidate set."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T2"
@@ -2431,7 +2480,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-retention", "cargo test -p legion-observability"]
     acceptance = ["Raw trace storage is opt-in and redaction is enforced at the boundary."]
     stop_condition = "Stop if a raw trace can be stored without an opt-in row."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T3"

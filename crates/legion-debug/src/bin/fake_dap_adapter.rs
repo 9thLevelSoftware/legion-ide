@@ -10,12 +10,25 @@
 //! - `disconnect` → response + exit
 //!
 //! Contract stand-in for real CodeLLDB / `lldb-dap` wire shape.
+//!
+//! **Caution:** this adapter sends `initialized` immediately after the
+//! `initialize` response. Real adapters send it after `launch`/`attach`, per
+//! the DAP sequence. That difference is not cosmetic — a client that waits for
+//! `initialized` at handshake time passes against this binary and hangs
+//! against every real one, which is exactly what happened. Do not "fix" a
+//! client by making it match this fixture.
+//!
+//! `--silent` accepts requests and answers nothing, which is how a client's
+//! read deadlines are tested. Without it a broken deadline is invisible until
+//! CI hangs for its whole budget.
 
 use std::io::{self, BufRead, BufReader, Write};
 
 use serde_json::{Value, json};
 
 fn main() {
+    // A mode that answers nothing, for exercising client-side timeouts.
+    let silent = std::env::args().any(|arg| arg == "--silent");
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut stdout = io::stdout().lock();
@@ -29,6 +42,11 @@ fn main() {
             .unwrap_or("")
             .to_string();
         if msg_type != "request" {
+            continue;
+        }
+        if silent {
+            // Drain the request and say nothing, the way an adapter waiting on
+            // a request the client has not sent behaves.
             continue;
         }
         let command = msg

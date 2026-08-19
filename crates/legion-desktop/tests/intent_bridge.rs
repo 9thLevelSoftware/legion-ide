@@ -86,12 +86,14 @@ fn snapshot_with_daily_tabs() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("src".to_string()),
                 name: "src".to_string(),
                 children: vec![FileId(3)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(3),
                 canonical_path: CanonicalPath("src/main.rs".to_string()),
                 name: "main.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: None,
@@ -426,7 +428,24 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
             DesktopAction::SelectExplorerFile { file_id: FileId(3) },
             &snapshot,
         ),
-        DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id: FileId(3) })
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+            file_id: FileId(3),
+            path: "src/main.rs".to_string(),
+            is_directory: false,
+        })
+    );
+    // The same gesture on a directory row carries the directory flag, so the
+    // workflow expands instead of trying to open a folder as text.
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::SelectExplorerFile { file_id: FileId(2) },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+            file_id: FileId(2),
+            path: "src".to_string(),
+            is_directory: true,
+        })
     );
     assert_eq!(
         bridge.translate(DesktopAction::RefreshGit, &snapshot),
