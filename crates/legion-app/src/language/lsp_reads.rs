@@ -936,8 +936,20 @@ impl AppComposition {
         position: TextCoordinate,
         direction: Option<legion_protocol::CallHierarchyDirection>,
     ) -> Result<legion_protocol::LanguageToolingProjection, crate::AppCompositionError> {
-        self.issue_lsp_prepare_call_hierarchy_request(buffer_id, position, direction);
-        match direction {
+        // The return value decides whether a question was actually asked.
+        // Discarding it left `call_hierarchy_awaiting` set by the index leg
+        // below even when nothing went out — no live session, or a server that
+        // never advertised `callHierarchyProvider` — so the panel sat on
+        // "asking…" forever for a question the product had silently declined to
+        // ask. That is the inversion of the misreading the flag exists to
+        // prevent: instead of an empty answer looking like a conclusion, a
+        // conclusion that will never come looks like an answer in flight.
+        //
+        // The read leg still runs when nothing was issued. Pressing the key is
+        // a thing that happened and the operation record says so; what must not
+        // survive is the claim that an answer is on its way.
+        let issued = self.issue_lsp_prepare_call_hierarchy_request(buffer_id, position, direction);
+        let projection = match direction {
             Some(legion_protocol::CallHierarchyDirection::Incoming) => {
                 self.run_language_read(buffer_id, crate::LanguageReadKind::IncomingCalls, position)
             }
@@ -947,7 +959,12 @@ impl AppComposition {
             // Prepare-only asks no question a panel can answer, so there is
             // nothing to stamp and nothing to record.
             None => Ok(self.language_tooling_projection()),
+        }?;
+        if issued {
+            return Ok(projection);
         }
+        self.language_tooling.cancel_call_hierarchy_wait();
+        Ok(self.language_tooling_projection())
     }
 
     /// Shared tail of both call-hierarchy ingests.
