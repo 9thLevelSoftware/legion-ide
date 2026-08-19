@@ -349,6 +349,7 @@ pub struct ExternalEditRecord {
 
 /// Why an external edit batch was refused admission to the main workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "ai")]
 pub enum ExternalEditAdmissionError {
     /// An edit arrived with no proposal covering it.
     MissingProposal {
@@ -405,6 +406,7 @@ pub enum ExternalEditAdmissionError {
     },
 }
 
+#[cfg(feature = "ai")]
 impl std::fmt::Display for ExternalEditAdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -444,6 +446,7 @@ impl std::fmt::Display for ExternalEditAdmissionError {
     }
 }
 
+#[cfg(feature = "ai")]
 impl std::error::Error for ExternalEditAdmissionError {}
 
 /// Proof that one external edit is covered by a reviewed Legion proposal.
@@ -455,11 +458,13 @@ impl std::error::Error for ExternalEditAdmissionError {}
 /// main workspace without a proposal, and the way to make that impossible is to
 /// make the unproposed case unrepresentable rather than merely checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "ai")]
 pub struct ExternalEditAdmission {
     workspace_relative_path: String,
     proposal_id: ProposalId,
 }
 
+#[cfg(feature = "ai")]
 impl ExternalEditAdmission {
     /// Path this admission authorizes.
     pub fn workspace_relative_path(&self) -> &str {
@@ -479,6 +484,7 @@ impl ExternalEditAdmission {
 /// check. An absolute path, a drive prefix, a backslash separator, or any `..`
 /// component is refused outright rather than normalized into something that
 /// looks contained.
+#[cfg(feature = "ai")]
 fn validate_workspace_relative_path(path: &str) -> Result<(), ExternalEditAdmissionError> {
     let unsafe_path = |reason: &str| ExternalEditAdmissionError::UnsafeEditPath {
         path: path.to_string(),
@@ -512,6 +518,7 @@ fn validate_workspace_relative_path(path: &str) -> Result<(), ExternalEditAdmiss
 
 /// Returns the single path a workspace-edit proposal creates, with the content
 /// hash that binds it to the bytes a reviewer saw.
+#[cfg(feature = "ai")]
 fn external_proposal_binding(
     proposal: &WorkspaceProposal,
 ) -> Result<(String, legion_protocol::FileFingerprint), ExternalEditAdmissionError> {
@@ -573,6 +580,7 @@ fn external_proposal_binding(
 ///
 /// All-or-nothing: a partial admission would land some edits and drop others,
 /// leaving the workspace in a state no reviewer approved.
+#[cfg(feature = "ai")]
 pub fn admit_external_edits(
     edits: &[ExternalEditRecord],
     proposals: &[WorkspaceProposal],
@@ -637,6 +645,7 @@ pub fn admit_external_edits(
 ///
 /// Takes admissions rather than paths so the apply path cannot be handed a
 /// proposal list assembled by anything other than [`admit_external_edits`].
+#[cfg(feature = "ai")]
 pub fn admitted_external_proposals<'a>(
     admissions: &[ExternalEditAdmission],
     proposals: &'a [WorkspaceProposal],
