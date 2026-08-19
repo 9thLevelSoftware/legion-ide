@@ -51,6 +51,9 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 }
 
 /// Outcome construction, extracted from this file for the chokepoint budget.
+/// App-owned extension catalog: verification, permission review, install (P7.F2).
+pub mod extension_management;
+
 mod command_outcome;
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
@@ -10569,6 +10572,8 @@ pub enum AppCommandRequest {
         /// Metadata-only label for audit and bounded output.
         metadata_label: String,
     },
+    /// Extension catalog lifecycle operation (P7.F2).
+    ExtensionCatalog(extension_management::ExtensionCatalogRequest),
     /// Join a collaboration session through app-owned composition.
     JoinCollaborationSession {
         /// Session identifier selected from projection data.
@@ -10888,6 +10893,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ReplayAiRun { .. }
             | AppCommandRequest::InspectAiRun { .. }
             | AppCommandRequest::InvokePluginCommand { .. }
+            | AppCommandRequest::ExtensionCatalog(_)
             | AppCommandRequest::JoinCollaborationSession { .. }
             | AppCommandRequest::LeaveCollaborationSession { .. }
             | AppCommandRequest::PublishCollaborationPresence { .. }
@@ -13089,6 +13095,8 @@ pub enum AppCommandOutcome {
     AiRunInspected(Box<AppAiInspectionSnapshot>),
     /// Phase 5 plugin command was invoked through app-owned plugin composition.
     PluginCommandInvoked(Box<PluginHostCallResponse>),
+    /// Extension catalog changed through app-owned extension authority (P7.F2).
+    ExtensionCatalogChanged(extension_management::ExtensionCatalogChange),
     /// Collaboration session was joined through app-owned composition.
     CollaborationSessionJoined(CollaborationSessionId),
     /// Collaboration session was left through app-owned composition.
@@ -14744,6 +14752,7 @@ pub struct AppComposition {
     assist_inline_prediction_state: AssistInlinePredictionState,
     plugin_runtime: PluginRuntimeHost,
     plugin_contribution_projections: Vec<PluginContributionProjection>,
+    extension_catalog: extension_management::ExtensionCatalog,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
     legion_cloud_lane: LegionCloudLaneComposition,
@@ -15100,6 +15109,7 @@ impl AppComposition {
             assist_inline_prediction_state: AssistInlinePredictionState::default(),
             plugin_runtime: PluginRuntimeHost::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: extension_management::ExtensionCatalog::with_bundled_extensions(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
             legion_cloud_lane: LegionCloudLaneComposition::default(),
@@ -19419,6 +19429,9 @@ impl AppComposition {
             } => Ok(AppCommandOutcome::PluginCommandInvoked(Box::new(
                 self.invoke_plugin_command(plugin_id, command_id, metadata_label)?,
             ))),
+            AppCommandRequest::ExtensionCatalog(request) => Ok(
+                AppCommandOutcome::ExtensionCatalogChanged(self.apply_extension_request(request)?),
+            ),
             AppCommandRequest::JoinCollaborationSession { session_id } => {
                 self.join_collaboration_session(session_id)?;
                 Ok(AppCommandOutcome::CollaborationSessionJoined(session_id))
@@ -19448,6 +19461,27 @@ impl AppComposition {
             }
             _ => unreachable!("command execution service handled non-workflow command"),
         }
+    }
+
+    /// Apply one extension-catalog request through app-owned extension authority.
+    ///
+    /// Verification and per-capability approval both live in
+    /// [`extension_management::ExtensionCatalog`]; this is only the routing seam.
+    pub fn apply_extension_request(
+        &mut self,
+        request: extension_management::ExtensionCatalogRequest,
+    ) -> Result<extension_management::ExtensionCatalogChange, AppCompositionError> {
+        self.extension_catalog.apply(request).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "extension_catalog_refused".to_string(),
+                message: error.to_string(),
+            })
+        })
+    }
+
+    /// Extension catalog entries for projection and tests.
+    pub fn extension_catalog_projection(&self) -> Vec<legion_protocol::ExtensionCatalogEntry> {
+        self.extension_catalog.projection()
     }
 
     /// Load a Phase 5 plugin manifest after app-level trust and manifest validation.
@@ -29183,6 +29217,7 @@ impl AppComposition {
             legion_workflow_comm_rows,
             legion_workflow_budget_rows,
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
+            extension_catalog: self.extension_catalog.projection(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
             remote_gui_projection,

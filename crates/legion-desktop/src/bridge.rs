@@ -13,7 +13,7 @@ use legion_protocol::{
     ProposalCancellationReason, ProposalId, ProposalRejectionReason, ProposalRollbackReason,
     ProtocolTextRange, RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
 };
-use legion_protocol::{PluginContribution, PluginId};
+use legion_protocol::{CapabilityId, PluginContribution, PluginId};
 use legion_ui::{
     CommandDispatchIntent, DebugStepKindProjection, DockMode, GitConflictChoiceProjection,
     PaletteMode, SearchScopeProjection, ShellProjectionSnapshot, ThemePreferenceProjection,
@@ -477,6 +477,34 @@ pub enum DesktopAction {
         plugin_id: PluginId,
         /// Command identifier selected from projection data.
         command_id: String,
+    },
+    /// Decide exactly one extension permission row (P7.F2.T2).
+    ///
+    /// One capability per action. A control that decided several at once would
+    /// be the "trust this extension" toggle the task forbids, and there is no
+    /// action here that could express it.
+    SetExtensionPermission {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+        /// The single capability this decision applies to.
+        capability: CapabilityId,
+        /// Whether the user granted that one capability.
+        granted: bool,
+    },
+    /// Install a signed extension through app-owned extension authority (P7.F2.T1).
+    InstallExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Update an installed extension through app-owned extension authority.
+    UpdateExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Remove an installed extension through app-owned extension authority.
+    RemoveExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
     },
     /// Join a collaboration session through app-owned collaboration authority.
     JoinCollaborationSession {
@@ -1284,6 +1312,35 @@ pub enum DesktopBridgeError {
         /// Unknown plugin id.
         plugin_id: PluginId,
     },
+    /// Manifest id was not present in the current extension catalog projection.
+    #[error("unknown extension: {manifest_id}")]
+    UnknownExtension {
+        /// Unknown manifest id.
+        manifest_id: String,
+    },
+    /// The capability is not one this extension asks for.
+    #[error("extension {manifest_id} does not request capability {capability}")]
+    UnknownExtensionCapability {
+        /// Manifest the decision targeted.
+        manifest_id: String,
+        /// Capability with no matching review row.
+        capability: String,
+    },
+    /// The projection says this lifecycle operation is not currently offered.
+    ///
+    /// Emitted when a gesture arrives for an entry the app would refuse — an
+    /// unsigned artifact, a failed signature, or an incomplete permission
+    /// review. Keeping this on the bridge means the renderer cannot smuggle an
+    /// install past the projection's own `can_install` answer.
+    #[error("extension {manifest_id} cannot be {operation} right now: {reason}")]
+    ExtensionOperationUnavailable {
+        /// Manifest the gesture targeted.
+        manifest_id: String,
+        /// Lifecycle operation requested.
+        operation: &'static str,
+        /// Metadata-only refusal reason.
+        reason: String,
+    },
     /// Plugin command id was empty after normalization.
     #[error("plugin command id is empty for plugin {plugin_id:?}")]
     InvalidPluginCommand {
@@ -1955,6 +2012,25 @@ impl DesktopCommandBridge {
                 plugin_id,
                 command_id,
             } => self.with_known_plugin_command(snapshot, plugin_id, command_id),
+            DesktopAction::SetExtensionPermission {
+                manifest_id,
+                capability,
+                granted,
+            } => Self::with_reviewable_extension_permission(
+                snapshot,
+                manifest_id,
+                capability,
+                granted,
+            ),
+            DesktopAction::InstallExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "installed")
+            }
+            DesktopAction::UpdateExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "updated")
+            }
+            DesktopAction::RemoveExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "removed")
+            }
             DesktopAction::JoinCollaborationSession { session_id } => {
                 self.with_collaboration_join(snapshot, session_id)
             }
@@ -2715,6 +2791,91 @@ impl DesktopCommandBridge {
         } else {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownAiRun { run_id })
         }
+    }
+
+    /// Translate a single-capability permission gesture, validated against the
+    /// catalog projection so a decision cannot be invented for a capability the
+    /// extension never asked for.
+    fn with_reviewable_extension_permission(
+        snapshot: &ShellProjectionSnapshot,
+        manifest_id: String,
+        capability: CapabilityId,
+        granted: bool,
+    ) -> DesktopBridgeOutput {
+        let Some(entry) = snapshot
+            .extension_catalog
+            .iter()
+            .find(|entry| entry.manifest_id == manifest_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtension {
+                manifest_id,
+            });
+        };
+        if !entry
+            .permissions
+            .iter()
+            .any(|permission| permission.capability == capability)
+        {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtensionCapability {
+                manifest_id,
+                capability: capability.0,
+            });
+        }
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetExtensionPermission {
+            manifest_id,
+            capability,
+            granted,
+        })
+    }
+
+    /// Translate an install / update / remove gesture only when the projection
+    /// itself says the operation is currently offered.
+    ///
+    /// The projection's `can_install` already requires a verified signature and
+    /// every permission row individually granted, so an unsigned or tampered
+    /// artifact is refused here as well as in app authority.
+    fn with_offered_extension_operation(
+        snapshot: &ShellProjectionSnapshot,
+        manifest_id: String,
+        operation: &'static str,
+    ) -> DesktopBridgeOutput {
+        let Some(entry) = snapshot
+            .extension_catalog
+            .iter()
+            .find(|entry| entry.manifest_id == manifest_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtension {
+                manifest_id,
+            });
+        };
+
+        let offered = match operation {
+            "installed" => entry.can_install(),
+            "updated" => entry.can_update(),
+            "removed" => entry.can_remove(),
+            _ => false,
+        };
+        if !offered {
+            let reason = entry.blocked_reason.clone().unwrap_or_else(|| {
+                format!(
+                    "signature={} install_state={} undecided_permissions={}",
+                    entry.signature_state.label(),
+                    entry.install_state.label(),
+                    entry.undecided_permissions().len()
+                )
+            });
+            return DesktopBridgeOutput::Error(DesktopBridgeError::ExtensionOperationUnavailable {
+                manifest_id,
+                operation,
+                reason,
+            });
+        }
+
+        DesktopBridgeOutput::Intent(match operation {
+            "installed" => CommandDispatchIntent::InstallExtension { manifest_id },
+            "updated" => CommandDispatchIntent::UpdateExtension { manifest_id },
+            _ => CommandDispatchIntent::RemoveExtension { manifest_id },
+        })
     }
 
     fn with_known_plugin_command(

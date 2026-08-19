@@ -1,9 +1,12 @@
 //! Metadata-only platform and accessibility smoke projection.
 
-use legion_protocol::TextCoordinate;
+use legion_protocol::{ExtensionPermissionState, TextCoordinate};
 use legion_ui::ShellProjectionSnapshot;
 
-use crate::bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge};
+use crate::{
+    bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge},
+    view::extensions_panel::DesktopExtensionsPanelViewModel,
+};
 
 const ADAPTER_PATH_PASSED: &str = "adapter-path passed";
 const NOT_OBSERVED: &str = "not observed";
@@ -260,6 +263,29 @@ fn accessibility_nodes(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopAccessi
             &mut nodes,
             "status",
             format!("{} status messages", snapshot.status_messages.len()),
+        );
+    }
+
+    // The extensions panel is where a user grants capabilities to third-party
+    // code, and it projected no accessibility node at all -- so a screen-reader
+    // user got no announcement of the one surface in the shell that asks for
+    // consent. The label carries counts and the pending-decision count, since
+    // an extension awaiting review is the state worth hearing first.
+    let extensions = DesktopExtensionsPanelViewModel::from_snapshot(snapshot);
+    if !extensions.is_empty() {
+        let undecided = extensions
+            .rows
+            .iter()
+            .flat_map(|row| row.permissions.iter())
+            .filter(|permission| permission.state == ExtensionPermissionState::Undecided)
+            .count();
+        push_node(
+            &mut nodes,
+            "extensions",
+            format!(
+                "{} extensions, {undecided} permissions awaiting review",
+                extensions.rows.len()
+            ),
         );
     }
 

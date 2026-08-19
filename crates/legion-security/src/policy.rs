@@ -908,6 +908,34 @@ impl SignedPolicyBundle {
     }
 }
 
+/// Produce a detached Ed25519 signature over `data` from a raw 32-byte seed.
+///
+/// This is the counterpart to [`verify_ed25519_signature`] and, like it, the
+/// single place the workspace reaches for `ed25519_dalek` signing. Callers that
+/// need a signature over something other than a policy bundle — signed extension
+/// artifacts, for instance — use this rather than depending on `ed25519-dalek`
+/// themselves, so there stays exactly one signing scheme.
+///
+/// The seed is borrowed, used, and never copied into the returned value; the
+/// output carries only the public signature. Callers are responsible for
+/// zeroizing their own seed buffer, exactly as `xtask::signing` does.
+pub fn sign_ed25519_detached(data: &[u8], seed: &[u8; 32]) -> [u8; 64] {
+    use ed25519_dalek::Signer as _;
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed);
+    let signature: ed25519_dalek::Signature = signing_key.sign(data);
+    signature.to_bytes()
+}
+
+/// Derive the 32-byte Ed25519 public key for a signing seed.
+///
+/// Returns public key material only.
+pub fn ed25519_verifying_key(seed: &[u8; 32]) -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(seed)
+        .verifying_key()
+        .to_bytes()
+}
+
 /// Sign a bundle payload with a raw 32-byte Ed25519 seed.
 ///
 /// The seed is borrowed, used, and never copied into the returned value; the
@@ -918,15 +946,12 @@ pub fn sign_policy_bundle(
     key_id: impl Into<String>,
     seed: &[u8; 32],
 ) -> SignedPolicyBundle {
-    use ed25519_dalek::Signer as _;
-
     let payload_toml = payload_toml.into();
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed);
-    let signature: ed25519_dalek::Signature = signing_key.sign(payload_toml.as_bytes());
+    let signature = sign_ed25519_detached(payload_toml.as_bytes(), seed);
     SignedPolicyBundle {
         algorithm: POLICY_BUNDLE_SIGNATURE_ALGORITHM.to_string(),
         key_id: key_id.into(),
-        signature_b64: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        signature_b64: base64::engine::general_purpose::STANDARD.encode(signature),
         payload_toml,
     }
 }
@@ -935,8 +960,7 @@ pub fn sign_policy_bundle(
 ///
 /// Returns public key material only.
 pub fn policy_bundle_verifying_key_b64(seed: &[u8; 32]) -> String {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(seed);
-    base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
+    base64::engine::general_purpose::STANDARD.encode(ed25519_verifying_key(seed))
 }
 
 // ---------------------------------------------------------------------------
