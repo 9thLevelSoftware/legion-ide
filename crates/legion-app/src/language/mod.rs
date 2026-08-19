@@ -30,6 +30,12 @@ pub use translate::{
 
 mod lsp_reads;
 
+mod call_hierarchy;
+pub use call_hierarchy::{
+    CALL_HIERARCHY_ROW_CAP, PendingCallHierarchy, call_params, call_row_label, first_item,
+    prepare_params, rows_from_incoming, rows_from_outgoing, status_message,
+};
+
 mod app_lsp;
 pub use app_lsp::{LspReadKind, LspRequestTag, LspSessionHandle, LspWorkerResult};
 

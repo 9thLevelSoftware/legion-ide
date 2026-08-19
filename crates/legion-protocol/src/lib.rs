@@ -16206,6 +16206,10 @@ pub enum LanguageToolingOperationKind {
     InlayHints,
     /// Code lens refresh.
     CodeLens,
+    /// Call-hierarchy callers lookup.
+    IncomingCalls,
+    /// Call-hierarchy callees lookup.
+    OutgoingCalls,
     /// Formatting proposal conversion.
     FormattingProposal,
     /// Rename proposal conversion.
@@ -16512,6 +16516,22 @@ pub struct LspSessionLogProjection {
     pub schema_version: u16,
 }
 
+/// Which way a call-hierarchy query was asked.
+///
+/// The rows for both directions are `LanguageLocationProjection`, because a
+/// call is a place in a file like a reference is, and reusing the row type puts
+/// call hierarchy in the panel that already lists locations rather than
+/// requiring a surface of its own. What the row type cannot carry is which
+/// question produced it, and "who calls this" and "what does this call" are
+/// opposite answers that look identical in a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallHierarchyDirection {
+    /// Callers of the symbol: `callHierarchy/incomingCalls`.
+    Incoming,
+    /// Callees of the symbol: `callHierarchy/outgoingCalls`.
+    Outgoing,
+}
+
 /// Projection-only language tooling panel state for the active editor buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageToolingProjection {
@@ -16545,6 +16565,10 @@ pub struct LanguageToolingProjection {
     pub definitions: Vec<LanguageLocationProjection>,
     /// Current reference locations.
     pub references: Vec<LanguageLocationProjection>,
+    /// Current call-hierarchy rows, in the direction last asked for.
+    pub call_hierarchy: Vec<LanguageLocationProjection>,
+    /// Direction the call-hierarchy rows answer, when any have been requested.
+    pub call_hierarchy_direction: Option<CallHierarchyDirection>,
     /// Current outline rows.
     pub outline: Vec<LanguageOutlineSymbolProjection>,
     /// Recent operation status rows.
@@ -16601,6 +16625,8 @@ impl LanguageToolingProjection {
             completions: Vec::new(),
             definitions: Vec::new(),
             references: Vec::new(),
+            call_hierarchy: Vec::new(),
+            call_hierarchy_direction: None,
             outline: Vec::new(),
             operations: Vec::new(),
             stale_result_count: 0,

@@ -116,6 +116,54 @@ impl AppComposition {
                     None,
                 );
             }
+            LspReadKind::CallHierarchyPrepare => {
+                // Step one of two. The prepare response resolves the caret to a
+                // symbol; the direction the user asked for has been waiting in
+                // `pending_call_hierarchy` since the request went out.
+                let pending = self.pending_call_hierarchy.take();
+                let items =
+                    legion_lsp::project_prepare_call_hierarchy_response(&lsp_outcome.result)
+                        .unwrap_or_default();
+                let Some(pending) = pending else {
+                    return;
+                };
+                if pending.buffer_id != tag.buffer_id {
+                    // The caret moved to another buffer between the two
+                    // requests. Answering with this buffer's symbol would put a
+                    // list under a heading it does not belong to.
+                    return;
+                }
+                let Some(item) = crate::language::first_item(&items) else {
+                    // No symbol under the caret. Ordinary, not a failure, and
+                    // there is nothing to follow up on.
+                    return;
+                };
+                match pending.direction {
+                    Some(legion_protocol::CallHierarchyDirection::Incoming) => {
+                        self.issue_lsp_incoming_calls_request(tag.buffer_id, item);
+                    }
+                    Some(legion_protocol::CallHierarchyDirection::Outgoing) => {
+                        self.issue_lsp_outgoing_calls_request(tag.buffer_id, item);
+                    }
+                    // Prepare-only: the caller wanted the symbol resolved and
+                    // nothing more.
+                    None => {}
+                }
+            }
+            LspReadKind::IncomingCalls => {
+                let _ = self.ingest_lsp_incoming_calls_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
+            LspReadKind::OutgoingCalls => {
+                let _ = self.ingest_lsp_outgoing_calls_response_for_buffer(
+                    tag.buffer_id,
+                    &lsp_outcome.result,
+                    None,
+                );
+            }
             LspReadKind::Rename { new_name } => {
                 let spec = LspWriteSideSpec {
                     proposal_kind: LanguageProposalKind::Rename,
@@ -782,6 +830,172 @@ impl AppComposition {
                     "context": { "includeDeclaration": include_declaration }
                 })
             },
+        )
+    }
+
+    /// Issues `textDocument/prepareCallHierarchy` for the caret position.
+    ///
+    /// Step one of two: the response resolves a position to a symbol item, and
+    /// only then can callers or callees be asked for. `direction` is stashed in
+    /// `pending_call_hierarchy` so the drain knows which follow-up to issue —
+    /// `None` means the caller wanted only the symbol resolved.
+    ///
+    /// Returns `false` if the session is not Live or the server did not
+    /// advertise `callHierarchyProvider`.
+    pub fn issue_lsp_prepare_call_hierarchy_request(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        direction: Option<legion_protocol::CallHierarchyDirection>,
+    ) -> bool {
+        let issued = self.issue_lsp_read(
+            buffer_id,
+            "callHierarchyProvider",
+            "textDocument/prepareCallHierarchy",
+            crate::language::LspReadKind::CallHierarchyPrepare,
+            |uri| crate::language::prepare_params(uri, position),
+        );
+        // Only remembered when the request actually went out. Setting it
+        // regardless would leave a direction waiting for a response that will
+        // never arrive, and the next prepare would answer the wrong question.
+        self.pending_call_hierarchy = issued.then(|| crate::language::PendingCallHierarchy {
+            buffer_id,
+            direction,
+        });
+        issued
+    }
+
+    /// Issues `callHierarchy/incomingCalls` for a prepared item.
+    pub fn issue_lsp_incoming_calls_request(
+        &mut self,
+        buffer_id: BufferId,
+        item: &legion_protocol::LspCallHierarchyItem,
+    ) -> bool {
+        let params = crate::language::call_params(item);
+        self.issue_lsp_read(
+            buffer_id,
+            "callHierarchyProvider",
+            "callHierarchy/incomingCalls",
+            crate::language::LspReadKind::IncomingCalls,
+            move |_uri| params,
+        )
+    }
+
+    /// Issues `callHierarchy/outgoingCalls` for a prepared item.
+    pub fn issue_lsp_outgoing_calls_request(
+        &mut self,
+        buffer_id: BufferId,
+        item: &legion_protocol::LspCallHierarchyItem,
+    ) -> bool {
+        let params = crate::language::call_params(item);
+        self.issue_lsp_read(
+            buffer_id,
+            "callHierarchyProvider",
+            "callHierarchy/outgoingCalls",
+            crate::language::LspReadKind::OutgoingCalls,
+            move |_uri| params,
+        )
+    }
+
+    /// Ask the server about the symbol under the caret.
+    ///
+    /// Returns the projection as it stands now. The rows are not in it yet and
+    /// cannot be: the answer takes two round trips to the server and arrives on
+    /// a later frame through `drain`. What this does synchronously is stamp the
+    /// projection with this buffer's identity and record the operation, so the
+    /// panel has a row to update when the answer lands rather than one
+    /// appearing from nowhere — the same reason the inlay-hint path runs its
+    /// index leg knowing the index has nothing to say.
+    pub fn run_call_hierarchy(
+        &mut self,
+        buffer_id: BufferId,
+        position: TextCoordinate,
+        direction: Option<legion_protocol::CallHierarchyDirection>,
+    ) -> Result<legion_protocol::LanguageToolingProjection, crate::AppCompositionError> {
+        self.issue_lsp_prepare_call_hierarchy_request(buffer_id, position, direction);
+        match direction {
+            Some(legion_protocol::CallHierarchyDirection::Incoming) => {
+                self.run_language_read(buffer_id, crate::LanguageReadKind::IncomingCalls, position)
+            }
+            Some(legion_protocol::CallHierarchyDirection::Outgoing) => {
+                self.run_language_read(buffer_id, crate::LanguageReadKind::OutgoingCalls, position)
+            }
+            // Prepare-only asks no question a panel can answer, so there is
+            // nothing to stamp and nothing to record.
+            None => Ok(self.language_tooling_projection()),
+        }
+    }
+
+    /// Shared tail of both call-hierarchy ingests.
+    ///
+    /// Both directions produce the same row type and differ only in which
+    /// question was asked, so the direction is the one thing that has to be
+    /// carried separately.
+    fn ingest_call_hierarchy_rows(
+        &mut self,
+        buffer_id: BufferId,
+        rows: Vec<legion_protocol::LanguageLocationProjection>,
+        direction: legion_protocol::CallHierarchyDirection,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<legion_protocol::LanguageToolingProjection, crate::AppCompositionError> {
+        let count = rows.len();
+        let event_context = self.next_event_context();
+        let input = self.language_request_input(buffer_id, event_context)?;
+        Ok(self.language_tooling.ingest_lsp_read_projection(
+            &input,
+            crate::LspReadProjectionIngest {
+                kind: match direction {
+                    legion_protocol::CallHierarchyDirection::Incoming => {
+                        crate::LanguageReadKind::IncomingCalls
+                    }
+                    legion_protocol::CallHierarchyDirection::Outgoing => {
+                        crate::LanguageReadKind::OutgoingCalls
+                    }
+                },
+                call_hierarchy: rows,
+                hover: None,
+                completions: Vec::new(),
+                locations: Vec::new(),
+                outline: Vec::new(),
+                inlay_hints: Vec::new(),
+                code_lenses: Vec::new(),
+                request_id,
+                message: crate::language::status_message(direction, count),
+            },
+        ))
+    }
+
+    /// Ingest a `callHierarchy/incomingCalls` response into the projection.
+    pub fn ingest_lsp_incoming_calls_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &serde_json::Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<legion_protocol::LanguageToolingProjection, crate::AppCompositionError> {
+        let calls = legion_lsp::project_incoming_calls_response(response);
+        let rows = crate::language::rows_from_incoming(&calls);
+        self.ingest_call_hierarchy_rows(
+            buffer_id,
+            rows,
+            legion_protocol::CallHierarchyDirection::Incoming,
+            request_id,
+        )
+    }
+
+    /// Ingest a `callHierarchy/outgoingCalls` response into the projection.
+    pub fn ingest_lsp_outgoing_calls_response_for_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        response: &serde_json::Value,
+        request_id: Option<legion_protocol::LspRequestId>,
+    ) -> Result<legion_protocol::LanguageToolingProjection, crate::AppCompositionError> {
+        let calls = legion_lsp::project_outgoing_calls_response(response);
+        let rows = crate::language::rows_from_outgoing(&calls);
+        self.ingest_call_hierarchy_rows(
+            buffer_id,
+            rows,
+            legion_protocol::CallHierarchyDirection::Outgoing,
+            request_id,
         )
     }
 
