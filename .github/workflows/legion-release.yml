@@ -100,12 +100,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install Linux GUI build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+        run: .github/scripts/install-linux-gui-deps.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -174,17 +169,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # The FUSE package was renamed in noble; probe for the name that
+          # exists rather than pinning one. This needs an apt cache, and the
+          # shared script's `apt-get update` runs before its install, so the
+          # probe goes after the base install and gets its own bounded call.
+          .github/scripts/install-linux-gui-deps.sh \
+            libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
+            patchelf xvfb
           fuse_package=libfuse2
           if ! apt-cache show "$fuse_package" >/dev/null 2>&1; then
             fuse_package=libfuse2t64
           fi
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev \
-            libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
-            patchelf xvfb "$fuse_package"
+          timeout 600 sudo apt-get -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends "$fuse_package"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

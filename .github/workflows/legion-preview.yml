@@ -37,12 +37,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+        run: .github/scripts/install-linux-gui-deps.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -103,7 +98,13 @@ jobs:
             BIN=$(ls target/preview/linux-*/legion-desktop target/preview/macos-*/legion-desktop 2>/dev/null | head -n1)
           fi
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo apt-get install -y --no-install-recommends xvfb >/dev/null 2>&1 || true
+            # `|| true` keeps a missing xvfb from failing the smoke, but it
+            # does nothing about a stalled mirror -- the job would hang here
+            # with the failure already tolerated. `timeout` is what makes the
+            # tolerance real.
+            timeout 300 sudo apt-get -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              install -y --no-install-recommends xvfb >/dev/null 2>&1 || true
             if command -v xvfb-run >/dev/null 2>&1; then
               xvfb-run -a "$BIN" --beta-smoke --duration-ms 1500 || true
             else
