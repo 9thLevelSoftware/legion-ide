@@ -226,6 +226,24 @@ jobs:
           ls -1 "$prefix/bin" 2>/dev/null | grep -i lldb
           exit 1
 
+      # LLDB embeds CPython, and the image's `liblldb.dll` links against
+      # `python310.dll` specifically. That library is the one dependent of the
+      # whole chain that does not resolve — every other one, including
+      # `liblldb.dll` itself, is present. Without it `lldb-dap.exe` dies during
+      # loader initialisation before reaching `main`, which is why the process
+      # showed as alive with an empty stderr and stdout closed: the framing
+      # error `unexpected EOF in headers` was the only symptom of a program
+      # that never started.
+      #
+      # `setup-python` puts the interpreter's directory on PATH, and
+      # `python310.dll` lives beside `python.exe`, so this is a PATH fix rather
+      # than an LLVM reinstall.
+      - name: Provide the Python runtime LLDB links against (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Provision an adapter (Windows)
         if: runner.os == 'Windows'
         shell: bash
