@@ -494,6 +494,20 @@ fn validate_workspace_relative_path(path: &str) -> Result<(), ExternalEditAdmiss
     if path.trim().is_empty() {
         return Err(unsafe_path("path is empty"));
     }
+    // Surrounding whitespace is rejected rather than trimmed, because every
+    // check below reads the untrimmed string. `"   /etc/passwd"` passed all of
+    // them: it is not empty after trimming, and `starts_with('/')` is false
+    // while the leading spaces are still attached. Trimming here instead would
+    // mean admitting one path and writing another.
+    if path != path.trim() {
+        return Err(unsafe_path("path has leading or trailing whitespace"));
+    }
+    // A `Path` carries control characters without complaint, so nothing below
+    // would notice one. A filename nobody can type is not a filename an
+    // external agent should be able to introduce.
+    if path.chars().any(char::is_control) {
+        return Err(unsafe_path("path contains a control character"));
+    }
     if path.contains('\\') {
         return Err(unsafe_path(
             "path must use forward slashes; a backslash is a separator on Windows",
@@ -527,8 +541,15 @@ fn external_proposal_binding(
             proposal_id: proposal.proposal_id,
         });
     };
+    // `targets` is checked, not just the coverage kind and the omitted count.
+    // A payload declaring `Complete` coverage with an empty target list is
+    // "complete coverage of nothing", and it sailed through while carrying a
+    // file-creating operation — so a reviewer approving a proposal that claims
+    // to affect zero targets was approving a file write. The claim and the list
+    // have to agree before either is trusted.
     if payload.target_coverage.coverage_kind != ProposalTargetCoverageKind::Complete
         || payload.target_coverage.omitted_target_count != 0
+        || payload.target_coverage.targets.is_empty()
     {
         return Err(ExternalEditAdmissionError::IncompleteCoverage {
             proposal_id: proposal.proposal_id,

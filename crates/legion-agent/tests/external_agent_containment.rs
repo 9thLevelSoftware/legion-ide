@@ -184,10 +184,20 @@ fn a_relative_traversal_out_of_the_lease_is_refused() {
 fn a_read_through_an_in_lease_symlink_pointing_outside_is_refused() {
     let run = GovernedRun::new("symlink-escape");
     let link = run.lease.join("escape");
-    if make_symlink_dir(run.outside_secret.parent().expect("parent"), &link).is_err() {
-        eprintln!("skipping: symlink creation not permitted on this host");
-        return;
-    }
+    // No skip branch. The previous version printed a line and returned, which
+    // meant that on any host where the reparse point could not be created the
+    // test asserted nothing at all while still reporting `ok` — the vacuous
+    // pattern this whole file exists to avoid, hiding inside the test written
+    // to prove containment.
+    //
+    // `make_symlink_dir` already falls back to a directory junction on Windows,
+    // which needs no privilege. If even that fails, the environment cannot host
+    // this test and saying so loudly is the only honest outcome; a green tick
+    // would be a claim that containment was checked when it was not.
+    make_symlink_dir(run.outside_secret.parent().expect("parent"), &link).expect(
+        "could not create a symlink or junction inside the lease; this test cannot verify \
+         symlink containment on this host and must not report success",
+    );
 
     let mut session = run.session();
     let error = session

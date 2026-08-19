@@ -121,9 +121,27 @@ fn proposal_covering(
             edit_id: uuid::Uuid::now_v7(),
             title: format!("External agent edit: {path}"),
             source: WorkspaceEditSourceKind::AiAssisted,
+            // A real target, not an empty list. This helper used to declare
+            // `Complete` coverage of nothing while carrying a file-creating
+            // operation, and the admission gate accepted it — so every test
+            // built on it was proving the gate's behaviour against a proposal
+            // shape the gate should never have allowed.
             target_coverage: ProposalTargetCoverage {
                 coverage_kind: ProposalTargetCoverageKind::Complete,
-                targets: vec![],
+                targets: vec![legion_protocol::ProposalAffectedTarget {
+                    target_id: format!("target:{path}"),
+                    kind: legion_protocol::ProposalTargetKind::PathOnly,
+                    workspace_id: Some(WorkspaceId(1)),
+                    file_id: None,
+                    buffer_id: None,
+                    path: Some(CanonicalPath(path.to_string())),
+                    terminal_session_id: None,
+                    plugin_id: None,
+                    remote_authority: None,
+                    collaboration_session_id: None,
+                    byte_ranges: vec![],
+                    redaction_hints: vec![],
+                }],
                 omitted_target_count: 0,
                 redaction_hints: vec![],
             },
@@ -457,4 +475,67 @@ fn no_sandbox_backend_admits_a_direct_filesystem_external_agent() {
             "{backend:?} must not admit a direct-filesystem external agent while its reads are unconfined"
         );
     }
+}
+
+/// Leading whitespace must not smuggle an absolute path past the validator.
+///
+/// The checks read the untrimmed string while emptiness was tested against the
+/// trimmed one, so a space-prefixed absolute path was not empty and
+/// `starts_with('/')` was false because the spaces were still attached. Every
+/// later check passed for the same reason, and the path reached the gate
+/// looking relative.
+#[test]
+fn a_path_with_leading_whitespace_is_refused() {
+    let hash = external_edit_content_fingerprint("payload\n");
+    let proposals = vec![proposal_covering(1, "   /etc/passwd", Some(hash))];
+
+    let error = admit_external_edits(&[record("   /etc/passwd", "payload\n")], &proposals)
+        .expect_err("a whitespace-prefixed absolute path must be refused");
+
+    assert!(
+        matches!(error, ExternalEditAdmissionError::UnsafeEditPath { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.to_string().contains("whitespace"),
+        "the refusal must name the reason rather than merely refuse: {error}"
+    );
+}
+
+/// A control character must not reach a filename.
+///
+/// `Path` carries them without complaint, so nothing downstream would notice.
+/// A filename nobody can type is not one an external agent should introduce.
+#[test]
+fn a_path_carrying_a_control_character_is_refused() {
+    let hash = external_edit_content_fingerprint("payload\n");
+    let path = "src/ma\u{0}in.rs";
+    let proposals = vec![proposal_covering(1, path, Some(hash))];
+
+    let error = admit_external_edits(&[record(path, "payload\n")], &proposals)
+        .expect_err("a control character in a path must be refused");
+
+    assert!(
+        error.to_string().contains("control character"),
+        "the refusal must name the reason: {error}"
+    );
+}
+
+/// "Complete coverage of nothing" is a contradiction and must be refused.
+///
+/// The gate checked the coverage kind and the omitted count but never the
+/// target list, so a payload could declare complete coverage of zero targets
+/// while carrying a file-creating operation. A reviewer approving a proposal
+/// that claims to affect nothing was approving a file write.
+#[test]
+fn a_proposal_claiming_complete_coverage_of_nothing_is_refused() {
+    let hash = external_edit_content_fingerprint("payload\n");
+    let mut proposal = proposal_covering(1, "src/main.rs", Some(hash));
+    match &mut proposal.payload {
+        ProposalPayload::WorkspaceEdit(payload) => payload.target_coverage.targets.clear(),
+        _ => panic!("helper must build a workspace-edit payload"),
+    }
+
+    admit_external_edits(&[record("src/main.rs", "payload\n")], &[proposal])
+        .expect_err("Complete coverage with no targets must be refused");
 }
