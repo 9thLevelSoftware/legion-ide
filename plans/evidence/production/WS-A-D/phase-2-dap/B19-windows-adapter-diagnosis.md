@@ -1,4 +1,4 @@
-# B10 — What the Windows adapter is actually doing
+# B19 — What the Windows adapter is actually doing
 
 **Date:** 2026-08-18
 **Task:** P2.F3.T2
@@ -192,8 +192,3 @@ rather than lumped as "DAP is failing":
 | Windows | red | adapter binary cannot load a shared library; environment |
 | macOS | red at `launch` | unknown; binary itself is healthy |
 
-## Status
-
-P2.F3.T2 stays in-progress. Ubuntu is green. Windows is now diagnosed rather
-than merely failing, which is the difference between a blocked task and an
-unreadable one. macOS `launch` is untouched.

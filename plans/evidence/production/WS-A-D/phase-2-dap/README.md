@@ -35,6 +35,7 @@ launch/step remain residual.
 | `B16-stop-on-entry-default.md` | Cargo locator stop_on_entry default |
 | `B17-smart-f5-launch.md` | Smart F5 launch first config |
 | `B18-residual-honesty-b17.md` | Closeout/ledger residual honesty |
+| `B19-windows-adapter-diagnosis.md` | Windows adapter root cause: the binary cannot load a shared library |
 
 ## Residual
 

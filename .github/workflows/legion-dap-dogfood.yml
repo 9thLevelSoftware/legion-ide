@@ -286,7 +286,7 @@ jobs:
       # serve DAP over stdio for the way we invoke it. `--version` and `--help`
       # either support that or kill it, which is cheaper than another round of
       # guessing from inside the handshake. See
-      # `plans/evidence/production/WS-A-D/phase-2-dap/B10-windows-adapter-diagnosis.md`.
+      # `plans/evidence/production/WS-A-D/phase-2-dap/B19-windows-adapter-diagnosis.md`.
       #
       # `continue-on-error` and `|| true`: this step must never decide the
       # job's colour. A diagnostic that can fail the run it is diagnosing is a
@@ -318,8 +318,16 @@ jobs:
           echo "--- resolved: $adapter ---"
           # Prove the probe can execute it at all before trusting anything it
           # reports about the binary's behaviour.
-          if ! "$adapter" --version >/dev/null 2>&1 && [ "$?" = "127" ]; then
-            echo "PROBE BROKEN: cannot execute $adapter (127); findings below are about the probe, not the adapter"
+          #
+          # The exit code is captured before any test touches it. Written as
+          # `if ! cmd && [ "$?" = "127" ]`, `$?` is the negation's own status —
+          # 0 or 1, never 127 — so the check could never fire. A detector for
+          # "the probe is broken" that is itself broken is worse than none: it
+          # reads as evidence that the probe was fine.
+          "$adapter" --version >/dev/null 2>&1
+          version_rc=$?
+          if [ "$version_rc" = "127" ]; then
+            echo "PROBE BROKEN: cannot execute $adapter (127); everything below is about the probe, not the adapter"
           fi
           echo "--- --version ---"
           "$adapter" --version 2>&1 | head -20 || true

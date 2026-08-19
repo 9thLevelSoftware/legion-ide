@@ -93,6 +93,19 @@ fn stderr_clause(sink: &Arc<Mutex<String>>) -> String {
 /// timeout, a broken frame) are raised while it is still running. Draining to
 /// EOF attached an empty string on exactly the path the capture exists for.
 ///
+/// Bytes rather than `read_line`, and lossy conversion: `read_line` fails on
+/// invalid UTF-8, and an adapter writing in a locale code page or dumping
+/// binary addresses into a crash report would have killed the capture on its
+/// first bad byte — leaving the same empty string this function exists to
+/// prevent, on the platform that motivated it.
+///
+/// Reading continues after the cap is reached. Stopping would close the pipe,
+/// and the adapter's next write to stderr would take a `SIGPIPE`: a chatty but
+/// healthy adapter killed by the mechanism meant to bound a buffer, and
+/// reported afterwards as "adapter exited unexpectedly" with no stderr to
+/// explain it, because we closed the pipe ourselves. "Stop growing" and "stop
+/// reading" are different instructions.
+///
 /// Best effort throughout: a failure to read the adapter's complaints must not
 /// fail the session, only leave the error message thinner. A free function
 /// rather than an inline closure so it can be tested against a reader that
@@ -105,25 +118,34 @@ where
         .name("legion-dap-stderr".to_string())
         .spawn(move || {
             let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
+            let mut line = Vec::new();
+            // Once set, keep draining the pipe but stop appending.
+            let mut capture_full = false;
             loop {
                 line.clear();
-                match reader.read_line(&mut line) {
+                // A clean EOF is the only reason to stop reading; an I/O error
+                // means the pipe is gone, so there is nothing left to drain.
+                match reader.read_until(b'\n', &mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
+                if capture_full {
+                    continue;
+                }
                 let Ok(mut sink) = sink.lock() else {
-                    break;
+                    // Poisoned: nothing can be appended again, but the pipe
+                    // still needs draining for the reason in the doc comment.
+                    capture_full = true;
+                    continue;
                 };
-                // Keep the head and stop. An adapter that logs steadily must
-                // not grow this without bound, and the head is what gets
-                // shown: `stderr_suffix` takes from the front, because the
-                // first complaint is usually the one that explains the
+                // Keep the head. `stderr_suffix` takes from the front, because
+                // the first complaint is usually the one that explains the
                 // failure.
                 if sink.len() >= STDERR_CAPTURE_BYTES {
-                    break;
+                    capture_full = true;
+                    continue;
                 }
-                sink.push_str(&line);
+                sink.push_str(&String::from_utf8_lossy(&line));
             }
         });
 }
@@ -880,6 +902,39 @@ mod stderr_capture_tests {
         }
     }
 
+    /// A reader that reports how many bytes have been consumed, then ends.
+    struct CountingReader {
+        data: Vec<u8>,
+        position: usize,
+        drained: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.position >= self.data.len() {
+                return Ok(0);
+            }
+            let take = (self.data.len() - self.position).min(buf.len());
+            buf[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+            self.position += take;
+            self.drained
+                .fetch_add(take, std::sync::atomic::Ordering::SeqCst);
+            Ok(take)
+        }
+    }
+
+    fn counting_reader(text: String) -> (CountingReader, Arc<std::sync::atomic::AtomicUsize>) {
+        let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            CountingReader {
+                data: text.into_bytes(),
+                position: 0,
+                drained: Arc::clone(&drained),
+            },
+            drained,
+        )
+    }
+
     fn hung_reader(text: &str) -> (WroteThenHung, Sender<()>) {
         let (release_tx, release) = channel();
         (
@@ -968,8 +1023,13 @@ mod stderr_capture_tests {
         let started = Instant::now();
         let _ = stderr_clause(&sink);
         let waited = started.elapsed();
+        // A literal ceiling, not a multiple of the constant under test. With
+        // `STDERR_SETTLE * 4` the bound moved whenever the value moved, so
+        // raising the settle window to five seconds while chasing a flake
+        // would have slid this to twenty and still passed. An assertion whose
+        // threshold tracks the thing it bounds is not an assertion.
         assert!(
-            waited < STDERR_SETTLE * 4,
+            waited < Duration::from_secs(1),
             "an error path must not stall on a silent adapter; waited {waited:?}"
         );
     }
@@ -1023,6 +1083,71 @@ mod stderr_capture_tests {
         // Same bare frame error, two different faults: a process that died and
         // one that is alive and simply not speaking DAP.
         assert_eq!(exit_clause(Ok(None)), "; adapter still running");
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_kill_the_capture() {
+        // `read_line` returns `Err(InvalidData)` on the first non-UTF-8 byte.
+        // A Windows adapter writing in a locale code page, or any adapter
+        // dumping binary into a crash report, would have silently ended the
+        // capture there — leaving the empty stderr string this whole function
+        // exists to prevent, on the platform that motivated it.
+        let mut bytes = b"before".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b" after".as_slice());
+        bytes.push(b'\n');
+        let (release_tx, release) = channel();
+        let reader = WroteThenHung {
+            data: bytes,
+            position: 0,
+            release,
+        };
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let captured = within(Duration::from_secs(5), || {
+            sink.lock().expect("sink").contains("after")
+        });
+        drop(release_tx);
+        assert!(
+            captured,
+            "text after a bad byte must survive; got {:?}",
+            sink.lock().expect("sink")
+        );
+    }
+
+    #[test]
+    fn the_pipe_is_still_drained_after_the_cap() {
+        // Stopping the reads would close the pipe and hand the adapter a
+        // SIGPIPE on its next write — a healthy but chatty adapter killed by
+        // the mechanism meant to bound a buffer, and then reported as "exited
+        // unexpectedly" with no stderr to explain it.
+        //
+        // Reaching EOF is the observable proof the reader kept consuming: the
+        // reader below only ends when every byte has been read.
+        let line = "y".repeat(255);
+        let mut noisy = String::new();
+        while noisy.len() < STDERR_CAPTURE_BYTES * 3 {
+            noisy.push_str(&line);
+            noisy.push('\n');
+        }
+        let total = noisy.len();
+        let (reader, drained) = counting_reader(noisy);
+        let sink = Arc::new(Mutex::new(String::new()));
+        spawn_stderr_capture(reader, Arc::clone(&sink));
+
+        let finished = within(Duration::from_secs(10), || {
+            drained.load(std::sync::atomic::Ordering::SeqCst) >= total
+        });
+        assert!(
+            finished,
+            "the reader must consume the whole pipe past the cap; drained {} of {total}",
+            drained.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            sink.lock().expect("sink").len() < STDERR_CAPTURE_BYTES * 2,
+            "draining must not mean appending"
+        );
     }
 
     #[test]
