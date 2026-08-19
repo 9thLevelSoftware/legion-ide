@@ -7,7 +7,9 @@
 #![warn(missing_docs)]
 
 pub mod host;
+pub mod manifest;
 pub mod registry;
+pub mod wit_bindings;
 
 pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
 

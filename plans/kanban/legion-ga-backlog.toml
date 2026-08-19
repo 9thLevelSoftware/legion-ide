@@ -1923,7 +1923,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Dependency policy admits the chosen runtime and the ADR explains the choice."]
     stop_condition = "Stop if the runtime is added to the workspace before the ADR is merged."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T2"
@@ -1935,7 +1936,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo build -p legion-plugin"]
     acceptance = ["WIT files compile and generate host bindings."]
     stop_condition = "Stop if the WIT ABI drifts from a real plugin fixture's expected shape."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T3"
