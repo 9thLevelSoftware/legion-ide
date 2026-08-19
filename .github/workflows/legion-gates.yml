@@ -54,14 +54,14 @@ jobs:
       # a failing test rather than as a mystery in the middle of an apt log.
       - name: Shared installer unit test
         if: runner.os == 'Linux'
-        run: bash .github/scripts/install-linux-gui-deps.test.sh
+        run: bash .github/scripts/apt-install.test.sh
 
       # Bounded and retried; see the script for why, and for the budgets. The
       # step cap is the backstop if the script's own timeouts are ever removed.
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 45
-        run: .github/scripts/install-linux-gui-deps.sh mesa-vulkan-drivers
+        run: .github/scripts/apt-install.sh --gui mesa-vulkan-drivers
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -100,7 +100,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Install Linux GUI build dependencies
-        run: .github/scripts/install-linux-gui-deps.sh
+        run: .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -170,7 +170,7 @@ jobs:
         # `libfuse2|libfuse2t64` is the script's alternative syntax: FUSE was
         # renamed between releases, so it installs whichever the archive has.
         run: |
-          .github/scripts/install-linux-gui-deps.sh \
+          .github/scripts/apt-install.sh --gui \
             libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
             patchelf xvfb 'libfuse2|libfuse2t64'
 

@@ -77,7 +77,7 @@ jobs:
       # own comment says "report-only" went red on its first CI run.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-gui-deps.sh libdbus-1-dev
+        run: .github/scripts/apt-install.sh --gui libdbus-1-dev
 
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
@@ -123,7 +123,7 @@ jobs:
       # own comment says "report-only" went red on its first CI run.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-gui-deps.sh libdbus-1-dev
+        run: .github/scripts/apt-install.sh --gui libdbus-1-dev
 
       - name: Cache Cargo registry and target
         uses: swatinem/rust-cache@v2
@@ -146,14 +146,16 @@ jobs:
           fi
 
           echo "LEGION_DAP_PROVENANCE=installed" >> "$GITHUB_ENV"
-          # Bounded for the same reason as the GUI dependency install: a
-          # stalled mirror here would hold the job with nothing to show for it.
-          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          timeout 300 sudo apt-get "${apt_opts[@]}" update
+          # Through the shared script, not by hand. The hand-rolled version of
+          # this call is what failed: it had a bound but no retry, so when the
+          # azure mirror started returning Ign and apt fell back to
+          # archive.ubuntu.com, the update ran past its cap and killed the job.
+          #
           # The `lldb` metapackage pulls the distro-default versioned LLVM,
           # which lands lldb-dap (or lldb-vscode on older LLVM) under a
-          # VERSIONED name that the resolver does not search for.
-          timeout 900 sudo apt-get "${apt_opts[@]}" install -y lldb
+          # VERSIONED name that the resolver does not search for. No `--gui`:
+          # this job needs the debugger, not the desktop shell's link deps.
+          .github/scripts/apt-install.sh lldb
 
           target=""
           for candidate in \
