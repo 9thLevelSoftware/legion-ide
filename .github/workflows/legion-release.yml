@@ -167,22 +167,12 @@ jobs:
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
         shell: bash
+        # `libfuse2|libfuse2t64` is the script's alternative syntax: FUSE was
+        # renamed between releases, so it installs whichever the archive has.
         run: |
-          set -euo pipefail
-          # The FUSE package was renamed in noble; probe for the name that
-          # exists rather than pinning one. This needs an apt cache, and the
-          # shared script's `apt-get update` runs before its install, so the
-          # probe goes after the base install and gets its own bounded call.
           .github/scripts/install-linux-gui-deps.sh \
             libglib2.0-dev librsvg2-dev desktop-file-utils dpkg-dev file \
-            patchelf xvfb
-          fuse_package=libfuse2
-          if ! apt-cache show "$fuse_package" >/dev/null 2>&1; then
-            fuse_package=libfuse2t64
-          fi
-          timeout 600 sudo apt-get -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-            install -y --no-install-recommends "$fuse_package"
+            patchelf xvfb 'libfuse2|libfuse2t64'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

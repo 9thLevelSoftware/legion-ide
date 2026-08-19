@@ -25,8 +25,16 @@
 #
 # The base list is what every Linux job needs to build and link the egui
 # desktop shell. Callers add only what is theirs: `mesa-vulkan-drivers` for
-# jobs that render, `libdbus-1-dev` for the DAP dogfood, the FUSE package for
-# AppImage packaging.
+# jobs that render, `libdbus-1-dev` for the DAP dogfood, the packaging set for
+# AppImage builds.
+#
+# An extra may be written `name-a|name-b` to mean "whichever of these the
+# archive actually has" -- FUSE was renamed between releases, so AppImage
+# packaging needs libfuse2 on some and libfuse2t64 on others. Resolving it
+# here rather than in the caller is not tidiness: the probe needs a populated
+# apt cache, and a caller doing it by hand also had to hand-roll the retry,
+# which is how the release job ended up with a bounded install that could not
+# recover from the stall it was bounded against.
 
 set -euo pipefail
 
@@ -66,9 +74,37 @@ for attempt in 1 2 3; do
   sleep 15
 done
 
+# Resolve `a|b` alternatives now that the cache is fresh. An alternative with
+# no available candidate is fatal: silently dropping it would install a subset
+# and fail later in the job, somewhere less obvious.
+EXTRA_PACKAGES=()
+for extra in "$@"; do
+  case "$extra" in
+    *"|"*)
+      resolved=""
+      IFS="|" read -r -a candidates <<<"$extra"
+      for candidate in "${candidates[@]}"; do
+        if apt-cache show "$candidate" >/dev/null 2>&1; then
+          resolved="$candidate"
+          break
+        fi
+      done
+      if [ -z "$resolved" ]; then
+        echo "none of the alternatives in '$extra' exist in this archive" >&2
+        exit 1
+      fi
+      echo "resolved '$extra' to $resolved"
+      EXTRA_PACKAGES+=("$resolved")
+      ;;
+    *)
+      EXTRA_PACKAGES+=("$extra")
+      ;;
+  esac
+done
+
 for attempt in 1 2; do
   if timeout 1200 sudo apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
-    "${BASE_PACKAGES[@]}" "$@"; then
+    "${BASE_PACKAGES[@]}" ${EXTRA_PACKAGES[@]+"${EXTRA_PACKAGES[@]}"}; then
     exit 0
   fi
   if [ "$attempt" = "2" ]; then

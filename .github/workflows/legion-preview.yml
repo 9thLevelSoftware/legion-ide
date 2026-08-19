@@ -35,9 +35,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # xvfb belongs here rather than at smoke time: it is the same job, and
+      # installing it inline later meant a second apt call whose only error
+      # handling was `|| true`.
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-gui-deps.sh
+        run: .github/scripts/install-linux-gui-deps.sh xvfb
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -98,13 +101,9 @@ jobs:
             BIN=$(ls target/preview/linux-*/legion-desktop target/preview/macos-*/legion-desktop 2>/dev/null | head -n1)
           fi
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # `|| true` keeps a missing xvfb from failing the smoke, but it
-            # does nothing about a stalled mirror -- the job would hang here
-            # with the failure already tolerated. `timeout` is what makes the
-            # tolerance real.
-            timeout 300 sudo apt-get -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-              install -y --no-install-recommends xvfb >/dev/null 2>&1 || true
+            # xvfb is installed with the other Linux dependencies above. The
+            # fallback below stays: this smoke is best-effort, and a missing
+            # xvfb-run should degrade it rather than fail the job.
             if command -v xvfb-run >/dev/null 2>&1; then
               xvfb-run -a "$BIN" --beta-smoke --duration-ms 1500 || true
             else

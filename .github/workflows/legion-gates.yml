@@ -50,6 +50,12 @@ jobs:
           # skip on every run and never say anything.
           fetch-depth: 0
 
+      # Runs before the install it covers, so a broken installer is reported as
+      # a failing test rather than as a mystery in the middle of an apt log.
+      - name: Shared installer unit test
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/install-linux-gui-deps.test.sh
+
       # Bounded and retried; see the script for why, and for the budgets. The
       # step cap is the backstop if the script's own timeouts are ever removed.
       - name: Install Linux GUI build dependencies
