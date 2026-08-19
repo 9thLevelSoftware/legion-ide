@@ -142,7 +142,7 @@ The pre-existing single test built a manifest that set its own
 attacker does not label their own artifact as tampered, so that test proved
 almost nothing.
 
-`crates/legion-plugin/tests/tampered.rs` is now six tests over **genuinely
+`crates/legion-plugin/tests/tampered.rs` is now seven tests over **genuinely
 valid, instantiable wasm modules**:
 
 * `honest_artifact_actually_loads_in_the_host` — the control. The untampered
@@ -152,8 +152,11 @@ valid, instantiable wasm modules**:
 * `swapped_payload_with_recomputed_hash_is_refused_by_the_signature` — the
   attacker recomputes the checksum so it is internally consistent; only the
   signature can refuse it.
-* `artifact_resigned_by_an_untrusted_key_is_refused` — internally perfect,
+* `artifact_resigned_by_a_different_key_is_refused` — internally perfect,
   wrong key.
+* `artifact_from_a_signer_with_no_trust_anchor_is_refused` — a signer the
+  keyring has never heard of, refused as `UnknownSigner` rather than as a
+  signature mismatch.
 * `capability_escalation_after_signing_is_refused` — the capability list is
   inside the signed payload.
 * `a_tampered_artifact_never_reaches_execution_in_either_layer` — the malicious
@@ -231,6 +234,41 @@ no pixels in any of them.
 
 `crates/legion-desktop/src/view.rs` grew 15 lines against its 120-line
 `extract-before-modify` slack; the panel itself is a new module.
+
+## Corrections made under review
+
+Three of the eight review findings on the PR were defects rather than tidying,
+and the claims this document made before them were wrong:
+
+**The signing payload was not length-prefixed.** It was newline-terminated while
+claiming otherwise, which is forgeable: a field value containing a newline can
+reproduce a different manifest's byte sequence and reuse its signature.
+`extension_signing_payload` now emits `<name-len>:<name><value-len>:<value>`
+per field, so no value can be mistaken for a field boundary.
+
+**The permission review mis-handled a repeated capability.** Rows were emitted
+one per requested-capability *entry*, and `index_of` resolves a capability to
+the first matching row. A manifest listing a capability twice therefore produced
+a review that could not be completed — the second row was undecidable — while
+`approval()` succeeded anyway, and a denial recorded on the duplicate row was
+discarded. Rows and grants are deduplicated at the source now.
+
+The test written for that took two attempts, which is worth recording: the first
+draft denied *by capability* and passed with the dedup mutated out, because
+`decide` reached the first row either way. It documented the outcome without
+guarding it. The version that ships denies by row index — the way a UI decides —
+and dies when the dedup is removed.
+
+**One tamper test was named for a guard it did not exercise.**
+`artifact_resigned_by_an_untrusted_key_is_refused` kept
+`signer = "legion-first-party"`, which *is* anchored, so it tested the signature
+check with the wrong key. The unknown-signer guard had no test at all. Both now
+exist under accurate names.
+
+Also from that round, with no claim in this document to correct: the extensions
+panel projected no accessibility node, so the one surface that asks a user to
+grant capabilities to third-party code was silent to a screen reader; it now
+announces its entry count and pending-review count.
 
 ## Known limitation
 
