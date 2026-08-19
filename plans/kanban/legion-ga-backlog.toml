@@ -2194,13 +2194,13 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     title = "Replace stand-ins with real input-to-paint, scroll jank, startup, memory ceiling, Legion repo, 100K-file fixture, and 100MB file workloads"
     mode = "Manual"
     readiness_row = "PR-REL-001"
-    files = ["xtask/src/perf_harness.rs", "xtask/tests/perf_harness.rs", "plans/evidence/perf-harness-fixtures/"]
+    files = ["crates/legion-app/src/bin/product_perf.rs", "xtask/src/perf_workloads.rs", "xtask/src/perf_harness.rs", "xtask/tests/perf_workloads.rs", "plans/evidence/perf-harness-fixtures/"]
     dependencies = ["P1.F4.T2", "P2.F4.T4"]
-    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
+    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness", "cargo test -p xtask --test perf_workloads"]
     acceptance = ["xtask perf-harness enforces product workloads, not only synthetic stand-ins."]
     stop_condition = "Stop if any workload is hidden behind a non-default flag."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
     [[epics.features.tasks]]
     id = "P8.F4.T2"
@@ -2212,20 +2212,21 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- perf-harness", "cargo run -p xtask -- verify-perf-harness"]
     acceptance = ["Perf-harness runs on all three OSes and archives the reports."]
     stop_condition = "Stop if any OS job is allowed to silently skip."
-    status = "in-progress"
-    evidence = ".github/workflows/legion-gates.yml"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
     [[epics.features.tasks]]
     id = "P8.F4.T3"
     title = "Add dashboard/report trend and regression threshold"
     mode = "Manual"
     readiness_row = "PR-REL-001"
-    files = ["xtask/src/perf_harness.rs", "plans/evidence/perf-harness-trend/"]
+    files = ["xtask/src/perf_trend.rs", "xtask/tests/perf_trend.rs", "plans/evidence/perf-harness-trend/"]
     dependencies = ["P8.F4.T2"]
-    verification = ["cargo run -p xtask -- perf-harness --strict"]
+    verification = ["cargo run -p xtask -- perf-harness --strict", "cargo test -p xtask --test perf_trend"]
     acceptance = ["Each CI run archives a trend entry and the strict flag fails the build on regression."]
     stop_condition = "Stop if the trend directory is not in the tracked tree."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
   [[epics.features]]
   id = "P8.F5"

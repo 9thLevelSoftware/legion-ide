@@ -17,6 +17,8 @@ pub mod legion_bench_live;
 pub mod legion_bench_recorded;
 pub mod no_egui_textedit;
 pub mod perf_harness;
+pub mod perf_trend;
+pub mod perf_workloads;
 pub mod readiness_consistency;
 pub mod release_pipeline;
 pub mod signing;

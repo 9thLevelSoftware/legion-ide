@@ -1,0 +1,152 @@
+schema_version = 1
+recorded_at_utc = "2026-08-19T06:24:16Z"
+git_sha = "91e707a894302822c86e71d5d9b8df28b347da66"
+os = "windows"
+arch = "x86_64"
+profile = "reference"
+baseline_status = "compared"
+tolerance_percent = 60
+total = 12
+passed = 11
+failed = 0
+skipped = 1
+unmeasured = 0
+
+[[workload]]
+name = "m0.input_to_paint_microbenchmark"
+kind = "input_to_paint_microbenchmark"
+status = "passed"
+measured = true
+synthetic_stand_in = true
+p50_micros = 79
+p95_micros = 83
+bytes_value = 0
+budget_millis = 250
+
+[[workload]]
+name = "m1.line_galley_shaping_cache"
+kind = "line_galley_shaping_cache"
+status = "passed"
+measured = true
+synthetic_stand_in = true
+p50_micros = 196
+p95_micros = 196
+bytes_value = 0
+budget_millis = 2
+
+[[workload]]
+name = "m2.memory_ceiling_1mb"
+kind = "memory_ceiling_1mb"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "m8.search_stream_50k"
+kind = "search_stream_50k"
+status = "skipped"
+measured = true
+synthetic_stand_in = false
+p50_micros = 20442945
+p95_micros = 4536088
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "p8.startup"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 7333389
+p95_micros = 7333389
+bytes_value = 0
+budget_millis = 30000
+
+[[workload]]
+name = "p8.input_to_paint"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 1547
+p95_micros = 1953
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "p8.scroll_jank"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 68
+p95_micros = 79
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "p8.memory_ceiling"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 23767922
+budget_millis = 0
+
+[[workload]]
+name = "p8.legion_repo"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 1193718
+p95_micros = 1193718
+bytes_value = 0
+budget_millis = 120000
+
+[[workload]]
+name = "p8.fixture_100k_files"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 38149417
+p95_micros = 38149417
+bytes_value = 0
+budget_millis = 1800000
+
+[[workload]]
+name = "manual.renderer_input_to_paint"
+kind = "renderer_backed_manual_input_to_paint"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 4032
+p95_micros = 14740
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "m9.large_file_100mb"
+kind = "large_file_100mb"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 269
+p95_micros = 367
+bytes_value = 0
+budget_millis = 16
+
+[[regression]]
+name = "p8.startup"
+metric = "p50_micros"
+baseline = 3612368
+observed = 7333389
+allowed = 5779788
