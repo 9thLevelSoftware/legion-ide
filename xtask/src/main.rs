@@ -1113,6 +1113,21 @@ fn run_training_corpus_command(
         }
     };
 
+    // An empty source is refused rather than expanded into nothing.
+    //
+    // `expand_traces` returns the source untouched when it is empty, so
+    // `--expand 1200` over zero traces produced zero traces, a manifest saying
+    // `source_trace_count: 0`, an empty `train.jsonl`, and a trainer that would
+    // dutifully train an adapter on no examples. The consent gate is built to
+    // reject data it should not have; it says nothing about having none, and a
+    // pipeline that produces an empty dataset without complaint is the louder
+    // failure.
+    if source.is_empty() {
+        eprintln!(
+            "training corpus failed: no traces to export. The consent filter dropped every candidate, or the input carried none. Either way there is nothing to train on, and an empty dataset must not be written as though there were."
+        );
+        return 1;
+    }
     let batch = if expand > 0 {
         tc::expand_traces(&source, expand, seed)
     } else {

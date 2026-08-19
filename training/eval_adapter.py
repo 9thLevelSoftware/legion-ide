@@ -67,7 +67,24 @@ def score_examples(model, tokenizer, examples, torch, sequence_length):
             )["input_ids"]
             scores: dict[str, float] = {}
             for label, continuation in label_ids.items():
-                ids = (prompt_ids + continuation)[:sequence_length]
+                # Truncate the PROMPT from the left, never the continuation.
+                #
+                # `(prompt_ids + continuation)[:sequence_length]` cut from the
+                # end, so a prompt longer than the window sliced the
+                # continuation away entirely, `start` went negative, and
+                # PyTorch's negative indexing scored the last few prompt tokens
+                # instead. The eval then reports confident, internally
+                # consistent nonsense and the arm collapses to one label —
+                # which is the failure this evaluation already produced once,
+                # by a different route.
+                if len(continuation) >= sequence_length:
+                    raise SystemExit(
+                        f"sequence_length {sequence_length} cannot hold the continuation for "
+                        f"label {label!r} ({len(continuation)} tokens); scoring it would "
+                        f"measure the prompt instead"
+                    )
+                room = sequence_length - len(continuation)
+                ids = prompt_ids[-room:] + continuation
                 input_ids = torch.tensor([ids], device=device)
                 logits = model(input_ids=input_ids).logits.float()
                 log_probs = torch.log_softmax(logits, dim=-1)[0]
