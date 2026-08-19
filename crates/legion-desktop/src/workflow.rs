@@ -2845,6 +2845,12 @@ impl DesktopRuntime {
                     message,
                 }
             }
+            // P7.F2: the extension catalog changed. The status line is the
+            // renderer-visible confirmation that the app really acted.
+            AppCommandOutcome::ExtensionCatalogChanged(change) => {
+                self.set_status(StatusSeverity::Info, change.status_message());
+                DesktopWorkflowOutcome::Noop
+            }
             AppCommandOutcome::PluginCommandInvoked(response) => {
                 let Some((plugin_id, command_id)) = plugin_context else {
                     self.set_status(StatusSeverity::Info, "Plugin command handled");

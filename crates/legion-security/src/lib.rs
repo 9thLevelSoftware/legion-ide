@@ -76,8 +76,8 @@ pub use policy::{
     PolicyKeyring, PolicySigningKey, PolicySurface, ProposalApplyGate, ProposalAutoApprovalPolicy,
     ProviderAllowlistPolicy, RetentionExportPolicy, SignedPolicyBundle, VerifiedPolicyBundle,
     approval_level_audit_metadata, classify_git_remote_url, decide_git_remote_operation,
-    derive_approval_level, policy_bundle_verifying_key_b64, sign_policy_bundle,
-    verify_ed25519_signature,
+    derive_approval_level, ed25519_verifying_key, policy_bundle_verifying_key_b64,
+    sign_ed25519_detached, sign_policy_bundle, verify_ed25519_signature,
 };
 pub mod risk;
 

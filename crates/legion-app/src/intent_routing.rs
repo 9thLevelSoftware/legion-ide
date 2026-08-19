@@ -10,6 +10,8 @@
 
 use crate::*;
 
+use crate::extension_management::ExtensionCatalogRequest;
+
 /// Service that maps UI intents into application command requests without invoking concrete adapters.
 #[derive(Debug)]
 pub struct CommandDispatcher;
@@ -627,6 +629,34 @@ impl CommandDispatcher {
                 command_id,
                 metadata_label,
             }),
+            // P7.F2: extension lifecycle. One capability per permission intent —
+            // the routing layer never widens a decision to the whole extension.
+            CommandDispatchIntent::SetExtensionPermission {
+                manifest_id,
+                capability,
+                granted,
+            } => Ok(AppCommandRequest::ExtensionCatalog(
+                ExtensionCatalogRequest::SetPermission {
+                    manifest_id,
+                    capability,
+                    granted,
+                },
+            )),
+            CommandDispatchIntent::InstallExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Install { manifest_id },
+                ))
+            }
+            CommandDispatchIntent::UpdateExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Update { manifest_id },
+                ))
+            }
+            CommandDispatchIntent::RemoveExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Remove { manifest_id },
+                ))
+            }
             CommandDispatchIntent::JoinCollaborationSession { session_id } => {
                 Ok(AppCommandRequest::JoinCollaborationSession { session_id })
             }

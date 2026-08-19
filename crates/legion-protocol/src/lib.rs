@@ -28,6 +28,8 @@ pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 pub mod capability;
 /// Budget caps and audit-step DTOs for the delegated task execution loop.
 pub mod delegate_loop;
+/// Extension catalog projection DTOs for install / update / remove (P7.F2).
+pub mod extensions;
 /// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
@@ -40,6 +42,10 @@ pub mod tools;
 pub use capability::AssistedAiCapabilityMatrix;
 pub use delegate_loop::{
     DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind, DelegatedTaskLoopStepRecord,
+};
+pub use extensions::{
+    ExtensionCatalogEntry, ExtensionInstallState, ExtensionPermissionProjection,
+    ExtensionPermissionState, ExtensionSignatureState,
 };
 pub use manifest::{ContextManifestAssembly, ContextManifestSources};
 pub use plan::{

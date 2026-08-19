@@ -2,23 +2,24 @@
 
 use legion_protocol::{
     AgentRunId, ArtifactLedgerProjection, AssistedAiProjection, BufferId, BufferVersion,
-    CanonicalPath, CheckpointRollbackProjection, CollaborationGuiProjection,
+    CanonicalPath, CapabilityId, CheckpointRollbackProjection, CollaborationGuiProjection,
     CollaborationParticipantId, CollaborationPresenceProjection, CollaborationSessionId,
     CommandRegistryProjection, ContextManifestEgressStatus, ContextManifestProjection,
     ContextManifestPurpose, ContextManifestRecord, DebugBreakpointId, DebugConfigurationId,
     DebugSessionId, DebugSessionState, DelegatedTaskProjection,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRuntimeActivationState,
-    DelegatedTaskToolPermissionDecision, FileFingerprint, FileId, LanguageToolingProjection,
-    LegionWorkflowConflictId, LegionWorkflowProjection, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, LineWrappingPolicy,
-    PermissionBudgetProjection, PluginContributionProjection, PluginId, PrivacyInspectorProjection,
-    ProductMode, ProductRuntimeSurface, ProposalApprovalChecklistProjection,
-    ProposalCancellationReason, ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel,
-    ProposalRejectionReason, ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange,
-    RedactionHint, RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
-    TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
-    ViewportLineTruncationState, ViewportScroll, WorkbenchFontFallbackDiagnostic,
-    WorkbenchTelemetryConsent, WorkspaceId, product_mode_allows_runtime_surface,
+    DelegatedTaskToolPermissionDecision, ExtensionCatalogEntry, FileFingerprint, FileId,
+    LanguageToolingProjection, LegionWorkflowConflictId, LegionWorkflowProjection,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowVerificationGateId,
+    LineWrappingPolicy, PermissionBudgetProjection, PluginContributionProjection, PluginId,
+    PrivacyInspectorProjection, ProductMode, ProductRuntimeSurface,
+    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
+    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
+    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection, SnapshotId,
+    SystemGraphProjection, TerminalPanelProjection, TerminalSessionId, TextCoordinate,
+    TimestampMillis, Utf16Range, VerificationRunProjection, ViewportLineTruncationState,
+    ViewportScroll, WorkbenchFontFallbackDiagnostic, WorkbenchTelemetryConsent, WorkspaceId,
+    product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -3629,6 +3630,33 @@ pub enum CommandDispatchIntent {
         /// Metadata-only label for audit/UI display.
         metadata_label: String,
     },
+    /// Record the user's decision on exactly one extension permission (P7.F2.T2).
+    ///
+    /// One capability per intent. There is deliberately no "trust this
+    /// extension" intent that would decide several at once.
+    SetExtensionPermission {
+        /// Manifest id of the extension being reviewed.
+        manifest_id: String,
+        /// The single capability this decision applies to.
+        capability: CapabilityId,
+        /// Whether the user granted that one capability.
+        granted: bool,
+    },
+    /// Install a signed extension through app-owned extension authority (P7.F2.T1).
+    InstallExtension {
+        /// Manifest id selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Update an installed extension through app-owned extension authority.
+    UpdateExtension {
+        /// Manifest id selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Remove an installed extension through app-owned extension authority.
+    RemoveExtension {
+        /// Manifest id selected from catalog projection data.
+        manifest_id: String,
+    },
     /// Join a collaboration session through app-owned collaboration composition.
     JoinCollaborationSession {
         /// Session identifier selected from projection data or user input.
@@ -3971,6 +3999,8 @@ pub struct ShellProjectionSnapshot {
     pub legion_workflow_budget_rows: Vec<LegionWorkflowBudgetUsageRowProjection>,
     /// Plugin contribution projections supplied by the application layer.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
+    /// Extension catalog entries supplied by the application layer (P7.F2).
+    pub extension_catalog: Vec<ExtensionCatalogEntry>,
     /// Collaboration presence projections supplied by the application layer.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Collaboration GUI summary projection supplied by the application layer.
@@ -4078,6 +4108,8 @@ pub struct Shell {
     pub legion_workflow_budget_rows: Vec<LegionWorkflowBudgetUsageRowProjection>,
     /// Static plugin contribution projections.
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
+    /// Static extension catalog entries (P7.F2).
+    pub extension_catalog: Vec<ExtensionCatalogEntry>,
     /// Static collaboration presence projections.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Static collaboration GUI summary projection.
@@ -4138,6 +4170,7 @@ impl Shell {
             legion_workflow_comm_rows: snapshot.legion_workflow_comm_rows,
             legion_workflow_budget_rows: snapshot.legion_workflow_budget_rows,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
+            extension_catalog: snapshot.extension_catalog,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             collaboration_gui_projection: snapshot.collaboration_gui_projection,
             remote_gui_projection: snapshot.remote_gui_projection,
@@ -4187,6 +4220,7 @@ impl Shell {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -4234,6 +4268,7 @@ impl Shell {
             legion_workflow_comm_rows: self.legion_workflow_comm_rows.clone(),
             legion_workflow_budget_rows: self.legion_workflow_budget_rows.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
+            extension_catalog: self.extension_catalog.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             collaboration_gui_projection: self.collaboration_gui_projection.clone(),
             remote_gui_projection: self.remote_gui_projection.clone(),
@@ -4279,6 +4314,7 @@ impl Shell {
         self.legion_workflow_comm_rows = snapshot.legion_workflow_comm_rows;
         self.legion_workflow_budget_rows = snapshot.legion_workflow_budget_rows;
         self.plugin_contribution_projections = snapshot.plugin_contribution_projections;
+        self.extension_catalog = snapshot.extension_catalog;
         self.collaboration_presence_projections = snapshot.collaboration_presence_projections;
         self.collaboration_gui_projection = snapshot.collaboration_gui_projection;
         self.remote_gui_projection = snapshot.remote_gui_projection;
@@ -6120,6 +6156,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6240,6 +6277,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6419,6 +6457,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6498,6 +6537,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6571,6 +6611,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6815,6 +6856,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6913,6 +6955,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7046,6 +7089,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7141,6 +7185,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7300,6 +7345,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7407,6 +7453,7 @@ mod tests {
             legion_workflow_comm_rows: Vec::new(),
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: Vec::new(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),

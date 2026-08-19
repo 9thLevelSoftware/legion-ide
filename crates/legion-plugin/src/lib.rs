@@ -7,9 +7,22 @@
 #![warn(missing_docs)]
 
 pub mod host;
+/// Itemised install-time permission review over a plugin manifest (P7.F2.T2).
+pub mod manifest;
 pub mod registry;
 
 pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
+pub use manifest::{
+    ExtensionInstallApproval, ExtensionPermissionDecision, ExtensionPermissionReview,
+    ExtensionPermissionReviewError, ExtensionPermissionRisk, ExtensionPermissionRow,
+    plugin_manifest_permission_review_lines, plugin_manifest_permission_review_rows,
+};
+pub use registry::{
+    EXTENSION_SIGNATURE_ALGORITHM, ExtensionKeyring, ExtensionSigningKey, InstalledExtension,
+    SignedExtensionArtifact, SignedExtensionRegistry, SignedExtensionRegistryError,
+    extension_artifact_digest, extension_signing_payload, extension_verifying_key_b64,
+    sign_extension_artifact,
+};
 
 use std::{
     collections::{HashMap, HashSet},

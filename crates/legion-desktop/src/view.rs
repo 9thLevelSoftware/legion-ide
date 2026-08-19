@@ -20,6 +20,8 @@ use tab_strip::render_tab_strip;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Install / update / remove controls for signed extension artifacts (P7.F2).
+pub mod extensions_panel;
 /// Projection-backed Legion workflow board.
 pub mod fleet_board;
 /// Projection-backed Legion workflow cards.
@@ -1021,6 +1023,8 @@ pub struct DesktopProjectionViewModel {
     pub manual_control_rows: Vec<String>,
     /// Plugin contribution summary rows.
     pub plugin_rows: Vec<String>,
+    /// Extension catalog panel model (P7.F2).
+    pub extensions_panel: extensions_panel::DesktopExtensionsPanelViewModel,
     /// Collaboration presence rows.
     pub collaboration_rows: Vec<String>,
     /// Remote workspace manager rows.
@@ -1201,6 +1205,9 @@ impl DesktopProjectionViewModel {
             operational_health_rows: operational_health_rows(snapshot),
             manual_control_rows: manual_control_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
+            extensions_panel: extensions_panel::DesktopExtensionsPanelViewModel::from_snapshot(
+                snapshot,
+            ),
             collaboration_rows: collaboration_rows(snapshot),
             remote_rows: remote_rows(snapshot),
             sandbox_rows,
@@ -1297,16 +1304,18 @@ enum SettingsSection {
     Appearance,
     Editor,
     AiProviders,
+    Extensions,
     Notifications,
     Privacy,
     Advanced,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Editor,
         Self::AiProviders,
+        Self::Extensions,
         Self::Notifications,
         Self::Privacy,
         Self::Advanced,
@@ -1317,6 +1326,7 @@ impl SettingsSection {
             Self::Appearance => "Appearance",
             Self::Editor => "Editor",
             Self::AiProviders => "AI Providers",
+            Self::Extensions => "Extensions",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
             Self::Advanced => "Advanced",
@@ -5381,6 +5391,9 @@ fn render_settings_panel(
                     actions.push(DesktopAction::SetZoomPercent { zoom_percent: 100 });
                 }
             });
+        }
+        if view.settings_section == SettingsSection::Extensions {
+            extensions_panel::render_extensions_panel(ui, &model.extensions_panel, actions);
         }
         if view.settings_section == SettingsSection::Editor {
             ui.horizontal(|ui| {

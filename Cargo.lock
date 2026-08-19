@@ -4153,11 +4153,13 @@ dependencies = [
 name = "legion-plugin"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "legion-observability",
  "legion-platform",
  "legion-protocol",
  "legion-security",
  "legion-storage",
+ "sha2",
  "thiserror 2.0.18",
  "uuid",
  "wasmtime",
