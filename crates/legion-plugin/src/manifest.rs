@@ -38,7 +38,7 @@ impl ExtensionPermissionRisk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionPermissionRow {
     /// 1-based position in the review list.
-    pub ordinal: usize,
+    pub ordinal: u32,
     /// The capability this row grants or withholds.
     pub capability: CapabilityId,
     /// Short human-readable title for the capability.
@@ -72,26 +72,39 @@ impl ExtensionPermissionRow {
 pub fn plugin_manifest_permission_review_rows(
     manifest: &PluginManifest,
 ) -> Vec<ExtensionPermissionRow> {
-    manifest
-        .requested_capabilities
-        .iter()
-        .enumerate()
-        .map(|(index, capability)| {
-            let contributions = contributions_for_capability(manifest, capability);
-            let reason = contributions
-                .first()
-                .cloned()
-                .unwrap_or_else(|| format!("requested capability {}", capability.0));
-            ExtensionPermissionRow {
-                ordinal: index + 1,
-                capability: capability.clone(),
-                title: capability_title(capability),
-                reason,
-                contributions,
-                risk: capability_risk(capability),
-            }
-        })
-        .collect()
+    // One row per *distinct* capability, not per entry.
+    //
+    // A manifest controls its own `requested_capabilities` and nothing rejects
+    // a repeat, so the naive one-row-per-entry mapping produced two rows for
+    // the same capability -- and `index_of` resolves a capability to the FIRST
+    // matching row. The consequences were not cosmetic: the second row could
+    // never be decided (`decide` only ever reaches the first), so the review
+    // showed a permanently-undecided row while `approval()` succeeded anyway;
+    // and a user who denied the duplicate row via `decide_at` had that denial
+    // silently ignored. A manifest could therefore ship a capability twice and
+    // be granted it by a review the user never completed.
+    let mut seen: Vec<&CapabilityId> = Vec::with_capacity(manifest.requested_capabilities.len());
+    let mut rows = Vec::with_capacity(manifest.requested_capabilities.len());
+    for capability in &manifest.requested_capabilities {
+        if seen.contains(&capability) {
+            continue;
+        }
+        seen.push(capability);
+        let contributions = contributions_for_capability(manifest, capability);
+        let reason = contributions
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("requested capability {}", capability.0));
+        rows.push(ExtensionPermissionRow {
+            ordinal: u32::try_from(rows.len() + 1).unwrap_or(u32::MAX),
+            capability: capability.clone(),
+            title: capability_title(capability),
+            reason,
+            contributions,
+            risk: capability_risk(capability),
+        });
+    }
+    rows
 }
 
 /// Render every review row as a text line, one line per capability.
@@ -339,7 +352,13 @@ impl ExtensionPermissionReview {
                         capability: capability.0.clone(),
                     });
                 }
-                ExtensionPermissionDecision::Granted => granted.push(capability.clone()),
+                // Deduplicated to match the rows: a repeated capability is one
+                // decision, so it is one grant.
+                ExtensionPermissionDecision::Granted => {
+                    if !granted.contains(capability) {
+                        granted.push(capability.clone());
+                    }
+                }
             }
         }
 
@@ -474,6 +493,89 @@ mod tests {
         assert!(lines[0].contains("capability=plugin.command"));
         assert!(lines[0].contains("risk=elevated"));
         assert!(lines[1].contains("capability=plugin.grammar.tree_sitter"));
+    }
+
+    /// A manifest that lists the same capability twice gets one row, one
+    /// decision, and one grant.
+    ///
+    /// Before the dedup this was a hole with three separate symptoms, all from
+    /// `index_of` resolving to the first matching row: the duplicate row could
+    /// not be decided, `is_complete()` therefore stayed false while `approval()`
+    /// succeeded, and denying the duplicate row had no effect on the outcome.
+    #[test]
+    fn a_capability_requested_twice_is_reviewed_once_and_granted_once() {
+        let mut manifest = manifest();
+        let repeated = manifest.requested_capabilities[0].clone();
+        manifest.requested_capabilities.push(repeated.clone());
+
+        let rows = plugin_manifest_permission_review_rows(&manifest);
+        assert_eq!(
+            rows.len(),
+            2,
+            "three entries naming two capabilities must produce two rows: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.ordinal).collect::<Vec<_>>(),
+            vec![1, 2],
+            "ordinals number the rows shown, so they must stay dense"
+        );
+
+        let mut review = ExtensionPermissionReview::for_manifest(&manifest);
+        for row in review.rows().to_vec() {
+            assert!(review.decide(&row.capability, ExtensionPermissionDecision::Granted));
+        }
+        assert!(
+            review.is_complete(),
+            "every row is decidable, so deciding each one completes the review"
+        );
+
+        let approval = review
+            .approval(&manifest)
+            .expect("a fully granted review approves");
+        assert_eq!(
+            approval
+                .granted()
+                .iter()
+                .filter(|c| **c == repeated)
+                .count(),
+            1,
+            "the repeated capability is granted once, not once per mention"
+        );
+    }
+
+    /// Every row the review renders can be denied, and any denial refuses.
+    ///
+    /// Stated per-row on purpose. The first draft of this test denied by
+    /// capability and passed with the dedup disabled, because `decide` resolves
+    /// to the first matching row and that row was reachable either way -- it
+    /// documented the outcome without guarding it. The defect only shows when a
+    /// row is decided the way a UI decides it: by the index it was drawn at.
+    /// With duplicate rows, denying the second one changed nothing and the
+    /// install went through.
+    #[test]
+    fn denying_any_single_row_by_its_index_refuses_the_install() {
+        let mut manifest = manifest();
+        let repeated = manifest.requested_capabilities[0].clone();
+        manifest.requested_capabilities.push(repeated);
+
+        let row_count = ExtensionPermissionReview::for_manifest(&manifest)
+            .rows()
+            .len();
+        for denied_index in 0..row_count {
+            let mut review = ExtensionPermissionReview::for_manifest(&manifest);
+            for index in 0..row_count {
+                assert!(review.decide_at(index, ExtensionPermissionDecision::Granted));
+            }
+            assert!(review.decide_at(denied_index, ExtensionPermissionDecision::Denied));
+
+            let error = review.approval(&manifest).expect_err(
+                "denying row {denied_index} must refuse the install, whatever else was granted",
+            );
+            assert!(
+                matches!(error, ExtensionPermissionReviewError::Denied { .. }),
+                "row {denied_index}: expected a denial refusal, got {error:?}"
+            );
+        }
     }
 
     /// P7.F2.T2 stop condition, asserted directly: the review must expose one

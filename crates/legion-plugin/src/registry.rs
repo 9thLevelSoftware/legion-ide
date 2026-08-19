@@ -143,35 +143,71 @@ pub fn extension_artifact_digest(bytes: &[u8]) -> String {
 
 /// Canonical bytes an extension signature is computed over.
 ///
-/// Deterministic, domain-separated, and length-prefixed on the capability list
-/// so two different manifests cannot serialize to the same payload. Trust
-/// metadata is deliberately excluded: trust is a local decision made by this
-/// installation, not something a remote signer gets to assert. The signature
-/// metadata itself is excluded because it is the output.
+/// Every field is length-prefixed, which the doc comment previously claimed
+/// while the implementation newline-terminated each value. That was forgeable:
+/// a `name` containing a newline could reproduce the byte sequence of a
+/// different manifest with a different `version`, and both would verify under
+/// one signature. Framing has to be unambiguous or the signature covers a
+/// string rather than a structure.
+///
+/// Trust metadata is deliberately excluded: trust is a local decision made by
+/// this installation, not something a remote signer gets to assert. The
+/// signature metadata itself is excluded because it is the output.
 pub fn extension_signing_payload(manifest: &PluginManifest, artifact_bytes: &[u8]) -> Vec<u8> {
-    let mut payload = String::new();
-    payload.push_str(EXTENSION_SIGNING_DOMAIN);
-    payload.push('\n');
-    payload.push_str(&format!("manifest_id={}\n", manifest.manifest_id));
-    payload.push_str(&format!("plugin_id={}\n", manifest.plugin_id.0));
-    payload.push_str(&format!("name={}\n", manifest.name));
-    payload.push_str(&format!("version={}\n", manifest.version));
-    payload.push_str(&format!("schema_version={}\n", manifest.schema_version));
-    payload.push_str(&format!("min_abi_version={}\n", manifest.min_abi_version));
-    payload.push_str(&format!("max_abi_version={}\n", manifest.max_abi_version));
-    payload.push_str(&format!("module_hash={}\n", manifest.module_hash));
-    payload.push_str(&format!(
-        "requested_capabilities={}\n",
-        manifest.requested_capabilities.len()
-    ));
-    for capability in &manifest.requested_capabilities {
-        payload.push_str(&format!("capability={}\n", capability.0));
+    /// Append a length-prefixed field: `<name-len>:<name><value-len>:<value>`.
+    ///
+    /// Prefixing both halves means no value can be mistaken for the start of
+    /// the next field however it is spelled, including one that contains a
+    /// newline, a colon, or a digit run.
+    fn push_field(payload: &mut Vec<u8>, name: &str, value: &str) {
+        payload.extend_from_slice(name.len().to_string().as_bytes());
+        payload.push(b':');
+        payload.extend_from_slice(name.as_bytes());
+        payload.extend_from_slice(value.len().to_string().as_bytes());
+        payload.push(b':');
+        payload.extend_from_slice(value.as_bytes());
     }
-    payload.push_str(&format!(
-        "artifact_digest={}\n",
-        extension_artifact_digest(artifact_bytes)
-    ));
-    payload.into_bytes()
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(EXTENSION_SIGNING_DOMAIN.as_bytes());
+    push_field(
+        &mut payload,
+        "manifest_id",
+        &manifest.manifest_id.to_string(),
+    );
+    push_field(&mut payload, "plugin_id", &manifest.plugin_id.0.to_string());
+    push_field(&mut payload, "name", &manifest.name);
+    push_field(&mut payload, "version", &manifest.version);
+    push_field(
+        &mut payload,
+        "schema_version",
+        &manifest.schema_version.to_string(),
+    );
+    push_field(
+        &mut payload,
+        "min_abi_version",
+        &manifest.min_abi_version.to_string(),
+    );
+    push_field(
+        &mut payload,
+        "max_abi_version",
+        &manifest.max_abi_version.to_string(),
+    );
+    push_field(&mut payload, "module_hash", &manifest.module_hash);
+    push_field(
+        &mut payload,
+        "requested_capabilities",
+        &manifest.requested_capabilities.len().to_string(),
+    );
+    for capability in &manifest.requested_capabilities {
+        push_field(&mut payload, "capability", &capability.0);
+    }
+    push_field(
+        &mut payload,
+        "artifact_digest",
+        &extension_artifact_digest(artifact_bytes),
+    );
+    payload
 }
 
 /// Sign an artifact with a raw 32-byte Ed25519 seed.
@@ -193,7 +229,7 @@ pub fn extension_verifying_key_b64(seed: &[u8; 32]) -> String {
 }
 
 /// Fail-closed registry errors. Every variant is a refusal, never a warning.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SignedExtensionRegistryError {
     /// The manifest did not include a signature.
     #[error("unsigned extension artifacts are rejected")]
@@ -242,8 +278,11 @@ pub enum SignedExtensionRegistryError {
     #[error("extension artifact is not trusted")]
     UntrustedArtifact,
     /// The install was attempted without a complete per-capability review.
+    // `#[source]`, not `#[from]`: nothing converts with `?` here, because
+    // `check_approval` builds this variant deliberately rather than propagating.
+    // A `#[from]` that no `?` uses reads as an available conversion that isn't.
     #[error("extension permission review incomplete: {0}")]
-    PermissionReview(#[from] ExtensionPermissionReviewError),
+    PermissionReview(#[source] ExtensionPermissionReviewError),
     /// The approval was issued for a different manifest.
     #[error("permission approval for `{expected}` does not cover `{actual}`")]
     ApprovalMismatch {
@@ -407,11 +446,6 @@ impl SignedExtensionRegistry {
             signer: signature.signer.clone(),
             artifact_digest: manifest.module_hash.clone(),
         })
-    }
-
-    /// Whether an artifact would verify. Never mutates state.
-    pub fn is_installable(&self, artifact: &SignedExtensionArtifact) -> bool {
-        self.verify(artifact).is_ok()
     }
 
     /// Install a verified artifact under an itemised permission approval.
@@ -627,7 +661,6 @@ mod tests {
         let approval = approval(&artifact.manifest);
 
         let mut registry = registry();
-        assert!(!registry.is_installable(&artifact));
         let error = registry
             .install(&artifact, &approval)
             .expect_err("unsigned artifacts must fail closed");

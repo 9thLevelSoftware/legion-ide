@@ -100,7 +100,11 @@ impl ExtensionPermissionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionPermissionProjection {
     /// 1-based position in the review list.
-    pub ordinal: usize,
+    ///
+    /// `u32`, not `usize`: this crosses the projection boundary as serialized
+    /// data, and a width that depends on the host it was encoded on is not a
+    /// wire type. No review has 4 billion rows.
+    pub ordinal: u32,
     /// Capability this row grants or withholds.
     pub capability: CapabilityId,
     /// Short human-readable title.

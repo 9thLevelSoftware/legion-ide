@@ -96,36 +96,6 @@ impl DesktopExtensionsPanelViewModel {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
-
-    /// Stable text rows for audit assertions and accessibility projections.
-    pub fn audit_rows(&self) -> Vec<String> {
-        let mut rows = Vec::new();
-        for entry in &self.rows {
-            rows.push(format!(
-                "extension {}: {} signature={} state={} install_offered={} permissions={}",
-                entry.manifest_id,
-                entry.heading,
-                entry.signature_label,
-                entry.install_label,
-                entry.install_action.is_some(),
-                entry.permissions.len()
-            ));
-            for permission in &entry.permissions {
-                rows.push(format!(
-                    "extension {} permission {}: risk={} decision={} reason={}",
-                    entry.manifest_id,
-                    permission.label,
-                    permission.risk_label,
-                    permission.state.label(),
-                    permission.reason
-                ));
-            }
-            if let Some(reason) = &entry.blocked_reason {
-                rows.push(format!("extension {} blocked: {reason}", entry.manifest_id));
-            }
-        }
-        rows
-    }
 }
 
 fn row(entry: &ExtensionCatalogEntry) -> ExtensionRowViewModel {
@@ -300,7 +270,7 @@ mod tests {
     use super::*;
 
     fn permission(
-        ordinal: usize,
+        ordinal: u32,
         capability: &str,
         state: ExtensionPermissionState,
     ) -> ExtensionPermissionProjection {
@@ -346,7 +316,7 @@ mod tests {
     fn an_empty_catalog_renders_no_rows() {
         let model = DesktopExtensionsPanelViewModel::from_snapshot(&snapshot_with(Vec::new()));
         assert!(model.is_empty());
-        assert!(model.audit_rows().is_empty());
+        assert!(model.rows.is_empty());
     }
 
     /// P7.F2.T2 stop condition, asserted at the renderer boundary.
@@ -445,12 +415,10 @@ mod tests {
         let row = &model.rows[0];
         assert_eq!(row.signature_label, "signature invalid — refused");
         assert_eq!(row.install_action, None);
-        assert!(row.blocked_reason.is_some());
-        assert!(
-            model
-                .audit_rows()
-                .iter()
-                .any(|line| line.contains("blocked: extension signature verification failed"))
+        assert_eq!(
+            row.blocked_reason.as_deref(),
+            Some("extension signature verification failed"),
+            "the refusal reason reaches the renderer verbatim"
         );
     }
 

@@ -169,14 +169,14 @@ pub enum ExtensionCatalogError {
         capability: String,
     },
     /// The registry refused the operation.
-    #[error("{0}")]
-    Registry(String),
-}
-
-impl From<SignedExtensionRegistryError> for ExtensionCatalogError {
-    fn from(error: SignedExtensionRegistryError) -> Self {
-        Self::Registry(error.to_string())
-    }
+    ///
+    /// Carries the registry's own typed refusal rather than its rendered text.
+    /// The string form collapsed "unsigned", "unknown signer", "already
+    /// installed" and "capability not granted" into one opaque variant, so a
+    /// caller wanting to react differently to a *refusal* than to a *conflict*
+    /// had to match on message text.
+    #[error(transparent)]
+    Registry(#[from] SignedExtensionRegistryError),
 }
 
 /// The bundled first-party extension, assembled and signed at startup.
@@ -421,7 +421,11 @@ impl ExtensionCatalog {
         })?;
         let approval = review
             .approval(&candidate.artifact.manifest)
-            .map_err(|error| ExtensionCatalogError::Registry(error.to_string()))?;
+            .map_err(|error| {
+                ExtensionCatalogError::Registry(SignedExtensionRegistryError::PermissionReview(
+                    error,
+                ))
+            })?;
         Ok((candidate.artifact.clone(), approval))
     }
 

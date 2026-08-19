@@ -202,7 +202,6 @@ fn swapped_payload_with_stale_manifest_is_refused() {
     let approval = approval(&tampered.manifest);
 
     let mut registry = trusted_registry();
-    assert!(!registry.is_installable(&tampered));
     let error = registry
         .install(&tampered, &approval)
         .expect_err("a swapped payload must be refused, not warned about");
@@ -257,7 +256,7 @@ fn swapped_payload_with_recomputed_hash_is_refused_by_the_signature() {
 ///
 /// Internally perfect, but the signer has no trust anchor.
 #[test]
-fn artifact_resigned_by_an_untrusted_key_is_refused() {
+fn artifact_resigned_by_a_different_key_is_refused() {
     let malicious = malicious_wasm();
     let manifest = manifest_for("manifest-attacker-signed", &malicious);
     let signature = sign_extension_artifact(&manifest, &malicious, &ATTACKER_SEED);
@@ -267,13 +266,41 @@ fn artifact_resigned_by_an_untrusted_key_is_refused() {
     let mut registry = trusted_registry();
     let error = registry
         .install(&tampered, &approval)
-        .expect_err("a forged signature under an untrusted key must be refused");
+        .expect_err("a signature from a key other than the anchored one must be refused");
     assert!(
         matches!(
             error,
             SignedExtensionRegistryError::SignatureVerificationFailed { .. }
         ),
         "expected a signature refusal, got {error:?}"
+    );
+}
+
+/// A signer with no trust anchor is refused, and refused as such.
+///
+/// The neighbouring test was named for this case and did not cover it: it kept
+/// `signer = "legion-first-party"`, which IS anchored, so it exercised the
+/// signature check with the wrong key rather than the unknown-signer guard.
+/// Those are different guards producing different errors, and the guard this
+/// one names had no test at all.
+#[test]
+fn artifact_from_a_signer_with_no_trust_anchor_is_refused() {
+    let malicious = malicious_wasm();
+    let mut manifest = manifest_for("manifest-unanchored-signer", &malicious);
+    let signature = sign_extension_artifact(&manifest, &malicious, &ATTACKER_SEED);
+    if let Some(metadata) = manifest.signature.as_mut() {
+        metadata.signer = "totally-unknown-signer".to_string();
+    }
+    let tampered = SignedExtensionArtifact::new(manifest.clone(), malicious, signature);
+    let approval = approval(&manifest);
+
+    let mut registry = trusted_registry();
+    let error = registry
+        .install(&tampered, &approval)
+        .expect_err("a signer with no trust anchor must be refused");
+    assert!(
+        matches!(error, SignedExtensionRegistryError::UnknownSigner { .. }),
+        "the refusal must name the missing anchor rather than a signature mismatch, or the          two guards are indistinguishable to a caller: {error:?}"
     );
 }
 
