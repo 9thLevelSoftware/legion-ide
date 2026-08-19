@@ -859,8 +859,8 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     # spawned or handshaken, and CodeLLDB itself remains unexercised (the runners
     # provide lldb-dap via LLVM). To close: dispatch that workflow and record the
     # per-platform result in the evidence file's 2026-08-17 section.
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B3-resolution-trust-dual-mode.md"
+    status = "done"
+    evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B20-three-platform-dogfood.md"
 
     [[epics.features.tasks]]
     id = "P2.F3.T3"
