@@ -304,6 +304,13 @@ pub struct LiveDapSession {
     /// already gone past is indistinguishable from an adapter that never sent
     /// it.
     saw_initialized_event: bool,
+    /// Responses read while waiting for something else, by request sequence.
+    ///
+    /// lldb-dap answers `launch` immediately and emits `initialized` after it,
+    /// so the wait for `initialized` necessarily reads the launch response
+    /// first. Dropping it made the later wait hang for a frame that had already
+    /// arrived — which is how this fix broke the one platform that worked.
+    answered: std::collections::HashMap<u64, Result<(), String>>,
     /// A `stopped` event read while waiting for something else.
     ///
     /// Adapters may report the stop before answering `launch`. Dropping it
@@ -399,6 +406,7 @@ impl LiveDapSession {
             stderr: captured,
             saw_initialized_event: false,
             pending_stopped: None,
+            answered: std::collections::HashMap::new(),
             next_seq: 1,
             adapter_type: adapter_type.into(),
         })
@@ -840,7 +848,22 @@ impl LiveDapSession {
         label: &str,
         timeout: Duration,
     ) -> Result<(), LiveDapSessionError> {
-        let mut outstanding: Vec<u64> = seqs.to_vec();
+        // Anything already answered while an earlier wait was running counts.
+        // Without this the launch response — which lldb-dap sends before
+        // `initialized`, so the wait for `initialized` always reads it — would
+        // be waited for a second time and never arrive.
+        let mut outstanding: Vec<u64> = Vec::new();
+        for seq in seqs {
+            match self.answered.remove(seq) {
+                Some(Ok(())) => {}
+                Some(Err(message)) => {
+                    return Err(LiveDapSessionError::Protocol {
+                        message: format!("{label} error: {message}"),
+                    });
+                }
+                None => outstanding.push(*seq),
+            }
+        }
         let deadline = Instant::now() + timeout;
         while !outstanding.is_empty() && Instant::now() < deadline {
             let msg = self.read_frame(deadline)?;
@@ -878,6 +901,9 @@ impl LiveDapSession {
     /// A `stopped` event can land before the `launch` response, and dropping it
     /// would make the subsequent wait hang for an event that already happened.
     fn record_pending(&mut self, msg: &DapMessage) {
+        if let Some((seq, outcome)) = msg.response_outcome() {
+            self.answered.insert(seq, outcome);
+        }
         if msg.event_name() == Some("initialized") {
             self.saw_initialized_event = true;
         }
