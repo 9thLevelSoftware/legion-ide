@@ -638,6 +638,13 @@ impl<'a> ProviderRouter<'a> {
                 decision_id: request.policy_decision_id,
                 context: legion_protocol::CapabilityRequestContext {
                     network_target: request.network_target.clone(),
+                    // The org policy bundle's provider allowlist (P9.F2.T3)
+                    // matches on provider identity, not on network target: an
+                    // org that permits only `anthropic` is not served by a
+                    // local/remote split. The id must reach the broker before
+                    // the provider is looked up in the registry, so it is
+                    // declared here rather than after the grant.
+                    ai_provider_id: Some(request.provider_id.clone()),
                     ..Default::default()
                 },
                 correlation_id: request.correlation_id,
@@ -1117,6 +1124,63 @@ mod tests {
         let prompt = route_prompt(&request);
 
         assert!(prompt.starts_with("workspace AGENTS.md\nbe precise\n\noperation=ProposeEdit"));
+    }
+
+    /// A broker whose only extra rule is the org bundle's provider allowlist.
+    fn provider_allowlist_broker(allowed: &[&str]) -> DenyByDefaultBroker {
+        let policy = SecurityPolicy {
+            bundle_enforcement: legion_security::BundleEnforcementPolicy {
+                provider: legion_security::ProviderAllowlistPolicy {
+                    enforced: true,
+                    allowed_provider_ids: allowed.iter().map(|id| (*id).to_string()).collect(),
+                    provider_capability_prefixes: Vec::new(),
+                },
+                ..legion_security::BundleEnforcementPolicy::default()
+            },
+            ..SecurityPolicy::default()
+        };
+        DenyByDefaultBroker::new(policy, CapabilityNamespace("test.ai.bundle".to_string()))
+    }
+
+    #[test]
+    fn router_refuses_a_provider_outside_the_org_bundle_allowlist() {
+        // P9.F2.T3: the org allowlist is on provider *identity*. `local` is a
+        // registered, loopback, completion-capable provider — every pre-existing
+        // gate says yes — so the only thing that can refuse it here is the
+        // bundle's allowlist.
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(LocalProvider));
+        let broker = provider_allowlist_broker(&["ollama"]);
+        let router = ProviderRouter::new(&registry, &broker);
+
+        let response = router
+            .route_completion(route_request(AssistedAiProviderClass::LocalLoopback))
+            .expect("route completes");
+
+        assert_eq!(
+            response.invocation_state,
+            AssistedAiProviderInvocationState::Refused
+        );
+    }
+
+    #[test]
+    fn router_permits_a_provider_on_the_org_bundle_allowlist() {
+        // The isolation half. If `provider_id` did not reach the broker, this
+        // would also be refused — for failing to declare a provider — and the
+        // refusal test above would prove nothing about the allowlist.
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(LocalProvider));
+        let broker = provider_allowlist_broker(&["local"]);
+        let router = ProviderRouter::new(&registry, &broker);
+
+        let response = router
+            .route_completion(route_request(AssistedAiProviderClass::LocalLoopback))
+            .expect("route completes");
+
+        assert_eq!(
+            response.invocation_state,
+            AssistedAiProviderInvocationState::Completed
+        );
     }
 
     #[test]

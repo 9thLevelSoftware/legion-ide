@@ -370,16 +370,44 @@ fn worktree_path_is_forbidden(config: &DelegatedTaskLoopConfig, path: &Path) -> 
 fn check_broker_capability(
     broker: &dyn legion_protocol::CapabilityBrokerPort,
     tool: LegionToolKind,
+    input: &serde_json::Value,
     loop_correlation_id: u64,
 ) -> Result<(), LegionToolCallFeedback> {
     let cap_id = format!("delegate.tool.{}", tool.tool_name());
+    // An org policy bundle's MCP allowlist (P9.F2.T3) matches on server id and
+    // tool name. Every MCP call mints the same capability id
+    // (`delegate.tool.mcp-passthrough`), so without these operands the broker
+    // cannot tell `filesystem/read_file` from `shell/exec` and a per-tool
+    // allowlist would be unenforceable on the delegated-task path — the one
+    // path every agent tool call goes through.
+    //
+    // Omission is not a bypass: `delegate.tool.mcp-passthrough` is one of the
+    // MCP allowlist's default capability prefixes, so an enforcing bundle
+    // refuses a passthrough that declares no server or tool.
+    let (mcp_server_id, mcp_tool_name) = match tool {
+        LegionToolKind::McpPassthrough => (
+            input
+                .get("server_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            input
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        ),
+        _ => (None, None),
+    };
     let request = CapabilityRequest::Request {
         principal_id: PrincipalId("agent.delegated".to_string()),
         capability_id: CapabilityId(cap_id.clone()),
         workspace_trust_state: WorkspaceTrustState::Trusted,
         target_path: None,
         decision_id: None,
-        context: CapabilityRequestContext::default(),
+        context: CapabilityRequestContext {
+            mcp_server_id,
+            mcp_tool_name,
+            ..CapabilityRequestContext::default()
+        },
         correlation_id: CorrelationId(loop_correlation_id),
     };
 
@@ -1250,7 +1278,7 @@ fn validate_and_execute(
     }
 
     // Step 5: broker capability check
-    check_broker_capability(broker, tool, loop_correlation_id)?;
+    check_broker_capability(broker, tool, input, loop_correlation_id)?;
 
     // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
     match tool {

@@ -21348,6 +21348,34 @@ pub struct CapabilityRequestContext {
     /// Whether a hard cost cap is enforced for this cloud request.
     #[serde(default)]
     pub cloud_lane_hard_cap_enforced: bool,
+    /// Stable identifier of the AI provider this request would dispatch to.
+    ///
+    /// Signed org policy bundles (P9.F2.T3) match this against the provider
+    /// allowlist. `None` means the caller did not declare a provider, which a
+    /// bundle with an active allowlist treats as a denial rather than a pass.
+    #[serde(default)]
+    pub ai_provider_id: Option<String>,
+    /// MCP server identifier for an MCP tool call.
+    #[serde(default)]
+    pub mcp_server_id: Option<String>,
+    /// MCP tool name for an MCP tool call.
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
+    /// Estimated cost of this single request, in cents, for budget-cap checks.
+    #[serde(default)]
+    pub budget_request_cost_cents: Option<u64>,
+    /// Model tokens this single request is estimated to consume.
+    #[serde(default)]
+    pub budget_request_tokens: Option<u64>,
+    /// Cost already spent in the enclosing session, in cents.
+    #[serde(default)]
+    pub budget_session_spent_cents: Option<u64>,
+    /// Retention window, in days, requested for captured raw source.
+    #[serde(default)]
+    pub retention_requested_days: Option<u32>,
+    /// Destination label an export request would write to.
+    #[serde(default)]
+    pub export_destination: Option<String>,
 }
 
 /// Plugin action proposal.

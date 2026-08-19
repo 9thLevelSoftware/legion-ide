@@ -25,7 +25,7 @@ use legion_protocol::{
     validate_raw_source_retention_access_audit, validate_raw_source_vault_envelope,
     validate_raw_source_vault_recovery_report,
 };
-use legion_security::{ScanPosture, SecretRuleId, scan_text_for_secrets};
+use legion_security::{BundleEnforcementPolicy, ScanPosture, SecretRuleId, scan_text_for_secrets};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -660,6 +660,15 @@ pub struct FileBackedRawSourceVault<K, C> {
     key_provider: K,
     cipher: C,
     index: PersistedVaultIndex,
+    /// Signed org policy bundle retention/export rules (P9.F2.T3).
+    ///
+    /// The vault is not broker-mediated: capture and hosted export are decided
+    /// here, against `self.policy` and `self.config`, with no
+    /// `CapabilityBrokerPort` in sight. That makes it the one surface an org
+    /// bundle could not otherwise reach, so the rules are carried directly.
+    /// The default is unenforced, which preserves the behaviour of every
+    /// existing caller of [`FileBackedRawSourceVault::open`].
+    bundle_enforcement: BundleEnforcementPolicy,
 }
 
 impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceVault<K, C> {
@@ -706,7 +715,32 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
             key_provider,
             cipher,
             index,
+            bundle_enforcement: BundleEnforcementPolicy::default(),
         })
+    }
+
+    /// Apply a verified org policy bundle's retention and export rules to this vault.
+    ///
+    /// Pass `verified.bundle().security_policy.bundle_enforcement.clone()` from a
+    /// [`VerifiedPolicyBundle`](legion_security::VerifiedPolicyBundle). Taking the
+    /// already-extracted policy rather than the bundle keeps `legion-retention`
+    /// free of signature-verification responsibility: it enforces rules that were
+    /// verified upstream, and cannot be handed an unverified bundle to enforce
+    /// because the caller has to have unwrapped one first.
+    #[must_use]
+    pub fn with_bundle_enforcement(mut self, enforcement: BundleEnforcementPolicy) -> Self {
+        self.bundle_enforcement = enforcement;
+        self
+    }
+
+    /// Retention window, in whole days, implied by a consent grant.
+    ///
+    /// Rounded **up** so a 36-hour window counts as 2 days against a 1-day
+    /// ceiling. Rounding down would let a window longer than the ceiling pass.
+    fn consent_window_days(issued_at: TimestampMillis, expires_at: TimestampMillis) -> u32 {
+        const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+        let span_ms = expires_at.0.saturating_sub(issued_at.0);
+        u32::try_from(span_ms.div_ceil(MS_PER_DAY)).unwrap_or(u32::MAX)
     }
 
     /// Capture raw-source files into encrypted vault content and descriptor metadata.
@@ -719,6 +753,21 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
     {
         if !self.config.enabled || !self.policy.capture_enabled {
             return Err(RawSourceVaultError::Disabled);
+        }
+        // Org policy bundle retention window (P9.F2.T3), checked before the
+        // request validator so a bundle that forbids the window refuses the
+        // capture whether or not the grant is otherwise well formed.
+        if let Some(reason) = self.bundle_enforcement.retention_export.retention_refusal(
+            "retention.raw_source.capture",
+            // The grant carries no issue timestamp, so the window is
+            // measured from now to expiry — the span the data would
+            // actually be retained for if captured at this moment.
+            Some(Self::consent_window_days(
+                TimestampMillis::now(),
+                grant.expires_at,
+            )),
+        ) {
+            return Err(RawSourceVaultError::Denied { reason });
         }
         validate_raw_source_capture_request(&self.policy, &grant, &request).map_err(|err| {
             RawSourceVaultError::Denied {
@@ -1291,6 +1340,17 @@ impl<K: RawSourceVaultKeyProvider, C: RawSourceVaultCipher> FileBackedRawSourceV
     ) -> Result<HostedRetentionExportLinkage, RawSourceVaultError> {
         if !self.config.enabled || !self.policy.capture_enabled {
             return Err(RawSourceVaultError::Disabled);
+        }
+        // Org policy bundle export rules (P9.F2.T3). The endpoint id is the
+        // destination the bundle allowlists. This runs before consent
+        // validation because an org that forbids the destination forbids it
+        // however well-consented the request is — a user cannot consent their
+        // way past the org policy.
+        if let Some(reason) = self.bundle_enforcement.retention_export.export_refusal(
+            "retention.raw_source.export.hosted",
+            Some(endpoint.endpoint_id.as_str()),
+        ) {
+            return Err(RawSourceVaultError::Denied { reason });
         }
         validate_raw_source_hosted_export_consent(&consent).map_err(|err| {
             RawSourceVaultError::Denied {
@@ -2582,6 +2642,214 @@ mod tests {
         assert!(!format!("{wrapped:?}").contains("0123456789abcdef"));
         let unwrapped = kms.unwrap_key(&wrapped).expect("unwrap key");
         assert_eq!(&*unwrapped, key_provider.key_bytes().as_slice());
+    }
+
+    // ---------------------------------------------------------------
+    // Signed org policy bundle retention/export rules (P9.F2.T3)
+    // ---------------------------------------------------------------
+
+    /// The retention/export rules a restrictive enterprise bundle carries:
+    /// a one-week window and no export at all.
+    fn enterprise_retention_rules() -> BundleEnforcementPolicy {
+        BundleEnforcementPolicy {
+            retention_export: legion_security::RetentionExportPolicy {
+                enforced: true,
+                max_retention_days: 7,
+                export_enabled: false,
+                allowed_export_destinations: Vec::new(),
+                retention_capability_prefixes: Vec::new(),
+                export_capability_markers: Vec::new(),
+            },
+            ..BundleEnforcementPolicy::default()
+        }
+    }
+
+    /// A grant whose window runs far past the org's seven-day ceiling.
+    fn long_window_grant() -> RawSourceRetentionConsentGrant {
+        RawSourceRetentionConsentGrant {
+            expires_at: TimestampMillis(TimestampMillis::now().0 + 400 * 24 * 60 * 60 * 1000),
+            ..grant()
+        }
+    }
+
+    #[test]
+    fn org_bundle_refuses_a_capture_window_longer_than_the_org_maximum() {
+        let root = temp_vault_root("bundle-window-denied");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault")
+        .with_bundle_enforcement(enterprise_retention_rules());
+
+        let result = vault.capture_bundle(
+            long_window_grant(),
+            request(),
+            vec![RawSourceVaultFile {
+                path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                bytes: b"fn main() {}".to_vec(),
+            }],
+        );
+        let Err(RawSourceVaultError::Denied { reason }) = result else {
+            panic!("a 400-day retention window must be refused under a 7-day org ceiling");
+        };
+        assert!(
+            reason.contains("exceeds the org policy bundle maximum"),
+            "reason: {reason}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn org_bundle_permits_a_capture_window_inside_the_org_maximum() {
+        // Non-vacuity: the refusal above must be caused by the window, not by
+        // the enforcement flag refusing every capture.
+        let root = temp_vault_root("bundle-window-allowed");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault")
+        .with_bundle_enforcement(enterprise_retention_rules());
+
+        let short_grant = RawSourceRetentionConsentGrant {
+            expires_at: TimestampMillis(TimestampMillis::now().0 + 3 * 24 * 60 * 60 * 1000),
+            ..grant()
+        };
+        vault
+            .capture_bundle(
+                short_grant,
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("a 3-day window is inside the 7-day org ceiling");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn org_bundle_refuses_a_hosted_export_the_retention_rules_forbid() {
+        let root = temp_vault_root("bundle-export-denied");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+
+        // The same vault, now under the org bundle. Everything else about this
+        // export is valid — allowlisted HTTPS endpoint, current consent — and
+        // the existing test above proves it succeeds without the bundle. The
+        // only new thing is the org rule.
+        let vault = vault.with_bundle_enforcement(enterprise_retention_rules());
+        let mut client = AcceptingHostedRawExport {
+            saw_plaintext: false,
+        };
+        let result = vault.export_encrypted_bundle_hosted(
+            &descriptor.bundle_id,
+            hosted_export_consent(),
+            hosted_endpoint(),
+            &mut client,
+        );
+        let Err(RawSourceVaultError::Denied { reason }) = result else {
+            panic!("an export the org bundle forbids must be refused");
+        };
+        assert!(
+            reason.contains("disabled by the org policy bundle"),
+            "reason: {reason}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn org_bundle_refuses_an_export_destination_outside_the_allowlist() {
+        let root = temp_vault_root("bundle-export-destination");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        let (_lease, descriptor) = vault
+            .capture_bundle(
+                grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("capture bundle");
+
+        // Export permitted, but only to the org's own endpoint. The vault's own
+        // `allowlisted` flag is set on this endpoint, so without the org rule
+        // this export would go through — which is what makes this a test of the
+        // org destination allowlist rather than of the endpoint flag.
+        let mut rules = enterprise_retention_rules();
+        rules.retention_export.export_enabled = true;
+        rules.retention_export.allowed_export_destinations = vec!["org-siem".to_string()];
+        let vault = vault.with_bundle_enforcement(rules);
+
+        let mut client = AcceptingHostedRawExport {
+            saw_plaintext: false,
+        };
+        let result = vault.export_encrypted_bundle_hosted(
+            &descriptor.bundle_id,
+            hosted_export_consent(),
+            hosted_endpoint(),
+            &mut client,
+        );
+        let Err(RawSourceVaultError::Denied { reason }) = result else {
+            panic!("an export to a destination outside the org allowlist must be refused");
+        };
+        assert!(
+            reason.contains("not on the org policy bundle export allowlist"),
+            "reason: {reason}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_vault_without_an_org_bundle_is_unaffected() {
+        // The rules are opt-in. A vault opened the old way must behave exactly
+        // as it did, or this feature would be a regression rather than a policy.
+        let root = temp_vault_root("bundle-absent");
+        let mut vault = FileBackedRawSourceVault::open_production(
+            &root,
+            policy(true),
+            RawSourceVaultConfig::enabled(),
+            TestKeyProvider::default(),
+        )
+        .expect("open vault");
+        vault
+            .capture_bundle(
+                long_window_grant(),
+                request(),
+                vec![RawSourceVaultFile {
+                    path: CanonicalPath("C:/repo/src/main.rs".to_string()),
+                    bytes: b"fn main() {}".to_vec(),
+                }],
+            )
+            .expect("a 400-day window is fine when no org bundle is installed");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

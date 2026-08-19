@@ -2380,7 +2380,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-security", "cargo run -p xtask -- check-deps"]
     acceptance = ["Org policy pack enforces a restrictive enterprise profile end-to-end."]
     stop_condition = "Stop if a policy bundle is honored only for some surfaces."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F2-T3-signed-policy-bundles.md"
 
     [[epics.features.tasks]]
     id = "P9.F2.T4"

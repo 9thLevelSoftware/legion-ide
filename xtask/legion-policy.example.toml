@@ -194,6 +194,87 @@ repair_enabled = false
 explicit_repair_required = true
 
 # ---------------------------------------------------------------------------
+# Signed bundle enforcement (P9.F2.T3)
+# ---------------------------------------------------------------------------
+#
+# These five rule sets are what makes the bundle reach every surface rather than
+# only the capability matrix. They live under `security_policy` so that the
+# capability broker — which every tool call is routed through (P5.F1.T2) —
+# enforces them for callers that never see this file, including crates that are
+# forbidden from depending on `legion-security` at all.
+#
+# Every rule set is `enforced = false` by default. This example turns all five
+# on; that is what "restrictive enterprise profile" means here.
+#
+# The `signature_label` field above is a *label*, not a signature. The real
+# signature is detached: an operator distributes this file's exact bytes as the
+# `payload_toml` of a `SignedPolicyBundle` alongside an Ed25519 signature and a
+# key id, and the client refuses the bundle unless the signature verifies under
+# a configured trust anchor. See `crates/legion-security/src/policy.rs`.
+
+# Provider allowlist — provider *identity*, not just local-vs-remote.
+# An empty `allowed_provider_ids` denies every provider; it does not mean
+# "unrestricted". A request for an `ai.provider.*` capability that names no
+# provider is denied for failing to name one.
+[security_policy.bundle_enforcement.provider]
+enforced = true
+allowed_provider_ids = [
+  "deterministic-local",
+  "ollama",
+]
+provider_capability_prefixes = [
+  "ai.provider.",
+]
+
+# MCP server and tool allowlist. Both dimensions are checked: allowlisting a
+# server does not admit every tool that server later advertises.
+# `delegate.tool.mcp-passthrough` is the capability id the delegated-task loop
+# mints for MCP calls, so it is listed to make an undeclared passthrough a
+# denial rather than a gap.
+[security_policy.bundle_enforcement.mcp]
+enforced = true
+allowed_servers = [
+  "legion-internal",
+]
+allowed_tools = [
+  "legion-internal/search_docs",
+  "legion-internal/read_ticket",
+]
+tool_capability_prefixes = [
+  "mcp.",
+  "tool.",
+  "delegate.tool.mcp-passthrough",
+]
+
+# Budget caps. `cost_declaration_required_prefixes` is what stops a caller from
+# bypassing every cap by declaring no cost at all.
+[security_policy.bundle_enforcement.budget]
+enforced = true
+max_request_cost_cents = 25
+max_request_tokens = 32000
+max_session_cost_cents = 500
+cost_declaration_required_prefixes = [
+  "ai.provider.",
+  "cloud.lane.",
+]
+
+# Retention window and export destinations. This profile permits a one-week
+# retention window and no export at all; `allowed_export_destinations` is empty
+# to match, but `export_enabled = false` is the rule that refuses.
+[security_policy.bundle_enforcement.retention_export]
+enforced = true
+max_retention_days = 7
+export_enabled = false
+allowed_export_destinations = []
+retention_capability_prefixes = [
+  "retention.",
+  "memory.retain",
+]
+export_capability_markers = [
+  ".export",
+]
+
+# ---------------------------------------------------------------------------
 # Proposal auto-approval policy — graduated approval ladder
 # ---------------------------------------------------------------------------
 #
