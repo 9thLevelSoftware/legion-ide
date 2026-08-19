@@ -86,10 +86,18 @@ pub fn cassette_set_hash(cassette_dir: &Path, task_ids: &[String]) -> Result<Str
         })?;
         // Cassettes are JSON written by the runner; a git checkout can still
         // hand them back with CRLF, and the hash must not depend on that.
-        let normalized: Vec<u8> = String::from_utf8(bytes)
-            .map(|text| text.replace("\r\n", "\n").into_bytes())
-            .map_err(|err| err.into_bytes())
-            .unwrap_or_else(|bytes| bytes);
+        // A match, not a combinator chain. The chain read `map(...)`,
+        // `map_err(...)` then `unwrap_or_else(...)`, where the `map_err` existed
+        // only to make both arms the same type — using the type system to erase
+        // the difference between "valid text we normalized" and "bytes that are
+        // not UTF-8 and were left alone". Those are different outcomes and the
+        // code should say which one it took.
+        let normalized: Vec<u8> = match String::from_utf8(bytes) {
+            Ok(text) => text.replace("\r\n", "\n").into_bytes(),
+            // Not text, so there are no line endings to normalize. Hashing the
+            // bytes unchanged is the honest answer rather than a failure.
+            Err(err) => err.into_bytes(),
+        };
         hasher.update((id.len() as u64).to_le_bytes());
         hasher.update(id.as_bytes());
         hasher.update((normalized.len() as u64).to_le_bytes());

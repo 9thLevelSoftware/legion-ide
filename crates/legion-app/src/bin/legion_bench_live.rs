@@ -266,16 +266,12 @@ struct TapeState {
 /// "the loop no longer asks what the tape answers" — would be permanently
 /// non-zero and therefore useless.
 fn mask_uuids(text: &str) -> String {
+    // `uuid` is already a workspace dependency of this crate, and
+    // `try_parse_ascii` accepts exactly the 8-4-4-4-12 hex form this needs. A
+    // hand-written scanner would be a second implementation of a parser that is
+    // already here and already tested.
     fn looks_like_uuid(bytes: &[u8]) -> bool {
-        const DASHES: [usize; 4] = [8, 13, 18, 23];
-        bytes.len() == 36
-            && bytes.iter().enumerate().all(|(index, byte)| {
-                if DASHES.contains(&index) {
-                    *byte == b'-'
-                } else {
-                    byte.is_ascii_hexdigit()
-                }
-            })
+        bytes.len() == 36 && uuid::Uuid::try_parse_ascii(bytes).is_ok()
     }
 
     let bytes = text.as_bytes();
@@ -310,13 +306,12 @@ fn fingerprint_request(payload: &Value, checkout: Option<&Path>) -> String {
     let mut text = serde_json::to_string(payload).unwrap_or_default();
     if let Some(checkout) = checkout {
         let raw = checkout.to_string_lossy().into_owned();
-        // Serialized JSON escapes Windows separators, and tool results carry
-        // the path in both spellings; normalize every form to one token.
-        for form in [
-            raw.replace('\\', "\\\\"),
-            raw.replace('\\', "/"),
-            raw.clone(),
-        ] {
+        // Two spellings, not three. `serde_json::to_string` escapes every
+        // backslash, so a raw Windows path with single separators can never
+        // appear in `text` — that arm was normalizing a form the haystack
+        // cannot contain. The escaped form covers the JSON encoding; the
+        // forward-slash form covers tool results that embed POSIX-style paths.
+        for form in [raw.replace('\\', "\\\\"), raw.replace('\\', "/")] {
             if !form.is_empty() {
                 text = text.replace(&form, "<CHECKOUT>");
             }
