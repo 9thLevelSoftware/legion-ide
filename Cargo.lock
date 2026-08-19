@@ -4225,6 +4225,7 @@ version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
  "keyring",
+ "legion-observability",
  "legion-protocol",
  "legion-security",
  "rand_core 0.6.4",

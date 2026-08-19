@@ -2467,7 +2467,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-observability", "cargo run -p xtask -- legion-bench --mode recorded"]
     acceptance = ["End-to-end consented trace -> adapter -> eval comparison is reproducible."]
     stop_condition = "Stop if a non-consented trace can land in the training candidate set."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T2"
@@ -2479,7 +2480,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-retention", "cargo test -p legion-observability"]
     acceptance = ["Raw trace storage is opt-in and redaction is enforced at the boundary."]
     stop_condition = "Stop if a raw trace can be stored without an opt-in row."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T3"

@@ -39,6 +39,7 @@ pub mod crash_capture;
 pub mod export;
 pub mod minidump;
 pub mod telemetry;
+pub mod training;
 
 /// Observability validation and redaction errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

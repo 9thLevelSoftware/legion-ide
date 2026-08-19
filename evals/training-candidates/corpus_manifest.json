@@ -1,0 +1,22 @@
+{
+  "accepted_count": 2,
+  "candidate_count": 3,
+  "comparison": {
+    "baseline_accepted_rate_bp": 6666,
+    "baseline_id": "legion-bench-v0",
+    "baseline_suite_fingerprint": "bench-suite-v1:bd2aa3a7d84d9485",
+    "corpus_fingerprint": "training-corpus-v1:19bf58cc1855d8c0",
+    "dataset_accepted_rate_bp": 6666,
+    "dataset_fingerprint": "training-adapter-v1:aa466e80c17f557a",
+    "delta_bp": 0,
+    "regressed": false,
+    "schema_version": 1
+  },
+  "corpus_fingerprint": "training-corpus-v1:19bf58cc1855d8c0",
+  "corpus_id": "consented-accept-reject-v1",
+  "dataset_fingerprint": "training-adapter-v1:aa466e80c17f557a",
+  "rejected_count": 1,
+  "skipped_non_terminal_count": 1,
+  "skipped_unconsented_count": 3,
+  "source_trace_count": 7
+}
