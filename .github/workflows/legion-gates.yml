@@ -83,6 +83,9 @@ jobs:
       - name: xtask intent-reachability
         run: cargo run -p xtask -- intent-reachability
 
+      - name: xtask deferred-surfaces
+        run: cargo run -p xtask -- deferred-surfaces
+
       - name: xtask verify-kanban-backlog
         run: cargo run -p xtask -- verify-kanban-backlog
 
