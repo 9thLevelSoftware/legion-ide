@@ -9197,6 +9197,7 @@ fn language_terminal_projection_roundtrips_language_surface() {
         references: Vec::new(),
         call_hierarchy: Vec::new(),
         call_hierarchy_direction: None,
+        call_hierarchy_awaiting: false,
         outline: vec![LanguageOutlineSymbolProjection {
             symbol_id: "outline-1".to_string(),
             label: "main".to_string(),

@@ -788,6 +788,16 @@ pub enum DesktopAction {
         /// Projected cursor position.
         position: TextCoordinate,
     },
+    /// Request callers of the symbol under the caret in the active buffer.
+    ShowIncomingCalls {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callees of the symbol under the caret in the active buffer.
+    ShowOutgoingCalls {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
     /// Refresh the active buffer outline.
     RefreshOutline,
     /// Refresh inlay hints for the active buffer.
@@ -2323,6 +2333,22 @@ impl DesktopCommandBridge {
             DesktopAction::FindReferences { position } => {
                 self.with_active_buffer(snapshot, |buffer_id| {
                     CommandDispatchIntent::FindReferences {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::ShowIncomingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowIncomingCalls {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::ShowOutgoingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowOutgoingCalls {
                         buffer_id,
                         position,
                     }

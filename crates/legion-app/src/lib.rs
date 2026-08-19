@@ -7303,6 +7303,9 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::InlayHints => projection.inlay_hints = ingest.inlay_hints,
             LanguageReadKind::CodeLens => projection.code_lenses = ingest.code_lenses,
             LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls => {
+                // The answer is here, so the wait is over — including when the
+                // answer is "nobody", which is a result rather than a silence.
+                projection.call_hierarchy_awaiting = false;
                 projection.call_hierarchy = ingest.call_hierarchy;
                 projection.call_hierarchy_direction = Some(match ingest.kind {
                     LanguageReadKind::IncomingCalls => CallHierarchyDirection::Incoming,
@@ -7546,12 +7549,30 @@ impl LanguageToolingWorkflow {
             } else {
                 previous_projection.references
             },
-            // Carried through untouched. This is the index leg, and the
-            // lexical indexer cannot answer "who calls this" — it has no call
-            // graph. Call-hierarchy rows only ever arrive from the server, via
-            // `ingest_lsp_read_projection`.
-            call_hierarchy: previous_projection.call_hierarchy,
-            call_hierarchy_direction: previous_projection.call_hierarchy_direction,
+            // The index leg cannot answer "who calls this" — it has no call
+            // graph — so rows only ever arrive from the server via
+            // `ingest_lsp_read_projection`. What this leg must do is stop the
+            // previous answer from masquerading as this one: asking for callees
+            // while the panel still lists callers under an "incoming" heading
+            // shows a confident wrong answer, and shows it forever if the
+            // server never replies.
+            call_hierarchy: if matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ) {
+                Vec::new()
+            } else {
+                previous_projection.call_hierarchy
+            },
+            call_hierarchy_direction: match kind {
+                LanguageReadKind::IncomingCalls => Some(CallHierarchyDirection::Incoming),
+                LanguageReadKind::OutgoingCalls => Some(CallHierarchyDirection::Outgoing),
+                _ => previous_projection.call_hierarchy_direction,
+            },
+            call_hierarchy_awaiting: matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ),
             outline: if matches!(kind, LanguageReadKind::Outline) {
                 outline
             } else {

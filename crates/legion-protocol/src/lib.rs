@@ -16569,6 +16569,15 @@ pub struct LanguageToolingProjection {
     pub call_hierarchy: Vec<LanguageLocationProjection>,
     /// Direction the call-hierarchy rows answer, when any have been requested.
     pub call_hierarchy_direction: Option<CallHierarchyDirection>,
+    /// Whether a call-hierarchy question has been asked and not yet answered.
+    ///
+    /// Three states, not two. Empty rows with a direction means "the server
+    /// answered: nobody calls this", which is a real answer and must be shown
+    /// as one. Empty rows while waiting is a different thing entirely, and
+    /// rendering it as the first would state a conclusion the product does not
+    /// have — permanently, if the answer never arrives because the server
+    /// lacks the capability or the caret was on whitespace.
+    pub call_hierarchy_awaiting: bool,
     /// Current outline rows.
     pub outline: Vec<LanguageOutlineSymbolProjection>,
     /// Recent operation status rows.
@@ -16627,6 +16636,7 @@ impl LanguageToolingProjection {
             references: Vec::new(),
             call_hierarchy: Vec::new(),
             call_hierarchy_direction: None,
+            call_hierarchy_awaiting: false,
             outline: Vec::new(),
             operations: Vec::new(),
             stale_result_count: 0,

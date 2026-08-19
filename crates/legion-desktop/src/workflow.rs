@@ -3936,6 +3936,34 @@ impl DesktopEframeApp {
                 });
             }
 
+            // Call hierarchy: Ctrl/Cmd+Alt+H for callers, Ctrl/Cmd+Alt+Shift+H
+            // for callees — the direction convention most editors already
+            // train, with Shift meaning "the other way round".
+            //
+            // Both combinations are free. `default_keymap()` binds H only as
+            // Ctrl+H (find/replace) with alt cleared, and `dispatch_keybindings`
+            // compares every modifier for equality, so an Alt-carrying press
+            // never reaches that entry. Nothing else in this function, in the
+            // editor control helpers, or in the keymap claims H with Alt.
+            //
+            // Gated on `editor_input_enabled` because the question these ask is
+            // "what calls the symbol under the caret" — meaningless while the
+            // palette, the dirty-close prompt, or a BYOK/terminal text field
+            // owns the keyboard, and firing then would answer about a caret the
+            // user is not looking at.
+            if command
+                && input.modifiers.alt
+                && editor_input_enabled
+                && input.key_pressed(egui::Key::H)
+            {
+                let position = projected_cursor(&snapshot);
+                actions.push(if input.modifiers.shift {
+                    DesktopAction::ShowOutgoingCalls { position }
+                } else {
+                    DesktopAction::ShowIncomingCalls { position }
+                });
+            }
+
             // T4: Problems-panel keyboard navigation.
             //
             // Handled here in `handle_keyboard` (from a cloned `InputState`)

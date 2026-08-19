@@ -3,6 +3,8 @@
 #[cfg(feature = "ai")]
 mod assistant_rail;
 mod brand_mark;
+/// Call-hierarchy rows for the language section: direction and degraded marking.
+mod call_hierarchy;
 mod code_canvas_painter;
 mod components;
 /// Applying persisted dock splitter fractions, and observing new ones.
@@ -13,6 +15,7 @@ pub mod rail_icons;
 /// The editor tab strip: tabs, close affordance, drag-to-reorder.
 mod tab_strip;
 
+use call_hierarchy::call_hierarchy_rows;
 use tab_strip::render_tab_strip;
 
 /// Agent communication row parsing and rendering.
@@ -10335,6 +10338,11 @@ fn language_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             language.cancellation_count
         ));
     }
+    // Ahead of the ambient rows (problems, completions, references) because the
+    // panel shows only the first dozen: call hierarchy is the answer to a
+    // question the reader just asked, and an answer pushed off the end of the
+    // list has not been rendered at all.
+    rows.extend(call_hierarchy_rows(language));
     if let Some(hover) = &language.hover {
         rows.push(format!("hover {} {}", hover.hover_id, hover.label));
         rows.push(format!("hover docs {} {}", hover.label, hover.summary));

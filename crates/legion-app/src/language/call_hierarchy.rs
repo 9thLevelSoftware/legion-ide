@@ -136,12 +136,16 @@ pub fn status_message(direction: CallHierarchyDirection, count: usize) -> String
 }
 
 /// Rows for an `incomingCalls` response.
-pub fn rows_from_incoming(calls: &[LspCallHierarchyIncomingCall]) -> Vec<LanguageLocationProjection> {
+pub fn rows_from_incoming(
+    calls: &[LspCallHierarchyIncomingCall],
+) -> Vec<LanguageLocationProjection> {
     rows(calls.iter().map(|call| (&call.from, &call.from_ranges)))
 }
 
 /// Rows for an `outgoingCalls` response.
-pub fn rows_from_outgoing(calls: &[LspCallHierarchyOutgoingCall]) -> Vec<LanguageLocationProjection> {
+pub fn rows_from_outgoing(
+    calls: &[LspCallHierarchyOutgoingCall],
+) -> Vec<LanguageLocationProjection> {
     rows(calls.iter().map(|call| (&call.to, &call.from_ranges)))
 }
 
@@ -189,7 +193,7 @@ fn row(
         // job under its own workspace and redaction rules, not this module's.
         file_id: None,
         path: None,
-        range: Some(range.clone()),
+        range: Some(*range),
         label: call_row_label(item),
         degraded,
         schema_version: 1,

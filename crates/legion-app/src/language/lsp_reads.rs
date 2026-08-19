@@ -120,19 +120,27 @@ impl AppComposition {
                 // Step one of two. The prepare response resolves the caret to a
                 // symbol; the direction the user asked for has been waiting in
                 // `pending_call_hierarchy` since the request went out.
-                let pending = self.pending_call_hierarchy.take();
+                //
+                // Matched before it is taken. Taking first and checking after
+                // meant a late response for an abandoned buffer consumed the
+                // pending slot belonging to a newer request: ask for callers in
+                // A, switch to B, ask for callees, and A's slow answer arrives,
+                // takes B's slot, fails this check and returns — after which
+                // B's own answer finds nothing pending and is discarded. The
+                // user's most recent question then produces nothing, forever.
+                if self
+                    .pending_call_hierarchy
+                    .as_ref()
+                    .is_none_or(|pending| pending.buffer_id != tag.buffer_id)
+                {
+                    return;
+                }
+                let Some(pending) = self.pending_call_hierarchy.take() else {
+                    return;
+                };
                 let items =
                     legion_lsp::project_prepare_call_hierarchy_response(&lsp_outcome.result)
                         .unwrap_or_default();
-                let Some(pending) = pending else {
-                    return;
-                };
-                if pending.buffer_id != tag.buffer_id {
-                    // The caret moved to another buffer between the two
-                    // requests. Answering with this buffer's symbol would put a
-                    // list under a heading it does not belong to.
-                    return;
-                }
                 let Some(item) = crate::language::first_item(&items) else {
                     // No symbol under the caret. Ordinary, not a failure, and
                     // there is nothing to follow up on.
@@ -858,7 +866,7 @@ impl AppComposition {
         // Only remembered when the request actually went out. Setting it
         // regardless would leave a direction waiting for a response that will
         // never arrive, and the next prepare would answer the wrong question.
-        self.pending_call_hierarchy = issued.then(|| crate::language::PendingCallHierarchy {
+        self.pending_call_hierarchy = issued.then_some(crate::language::PendingCallHierarchy {
             buffer_id,
             direction,
         });
