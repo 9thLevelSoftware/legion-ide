@@ -221,7 +221,7 @@ cargo run -q -p xtask -- verify-kanban-backlog
 cargo run -q -p xtask -- verify-readiness-consistency
 ```
 
-All pass. `legion-plugin` went from 14 to 27 unit tests and from 1 to 6 tampered
+All pass. `legion-plugin` went from 14 to 29 unit tests and from 1 to 7 tampered
 tests.
 
 ## Snapshot impact

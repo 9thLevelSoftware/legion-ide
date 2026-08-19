@@ -170,11 +170,7 @@ pub fn extension_signing_payload(manifest: &PluginManifest, artifact_bytes: &[u8
 
     let mut payload = Vec::new();
     payload.extend_from_slice(EXTENSION_SIGNING_DOMAIN.as_bytes());
-    push_field(
-        &mut payload,
-        "manifest_id",
-        &manifest.manifest_id.to_string(),
-    );
+    push_field(&mut payload, "manifest_id", &manifest.manifest_id);
     push_field(&mut payload, "plugin_id", &manifest.plugin_id.0.to_string());
     push_field(&mut payload, "name", &manifest.name);
     push_field(&mut payload, "version", &manifest.version);

@@ -9,6 +9,8 @@
 //! any single capability is undecided or denied. There is no API on this type
 //! that grants more than one capability at a time.
 
+use std::collections::HashSet;
+
 use legion_protocol::{CapabilityId, PluginContribution, PluginManifest};
 use thiserror::Error;
 
@@ -83,13 +85,13 @@ pub fn plugin_manifest_permission_review_rows(
     // and a user who denied the duplicate row via `decide_at` had that denial
     // silently ignored. A manifest could therefore ship a capability twice and
     // be granted it by a review the user never completed.
-    let mut seen: Vec<&CapabilityId> = Vec::with_capacity(manifest.requested_capabilities.len());
+    let mut seen: HashSet<&CapabilityId> =
+        HashSet::with_capacity(manifest.requested_capabilities.len());
     let mut rows = Vec::with_capacity(manifest.requested_capabilities.len());
     for capability in &manifest.requested_capabilities {
-        if seen.contains(&capability) {
+        if !seen.insert(capability) {
             continue;
         }
-        seen.push(capability);
         let contributions = contributions_for_capability(manifest, capability);
         let reason = contributions
             .first()
