@@ -1977,7 +1977,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
     acceptance = ["User can install a safe bundled grammar/theme extension through product UI."]
     stop_condition = "Stop if an unsigned artifact is allowed to install by default."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T2"
@@ -1989,7 +1990,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
     acceptance = ["Each install prompts the user with a structured permission list."]
     stop_condition = "Stop if permissions are summarized in a single 'trust this extension' toggle."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T3"
@@ -2001,8 +2003,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test tampered"]
     acceptance = ["A tampered artifact is refused before any code runs."]
     stop_condition = "Stop if a tampered artifact is allowed to load with a warning instead of a refusal."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/tampered.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T4"
