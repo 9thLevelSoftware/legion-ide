@@ -9,7 +9,7 @@
 pub mod host;
 pub mod registry;
 
-pub use host::{PluginAuditEntry, PluginAuditKind, WasmPluginHost};
+pub use host::{HOST_LOG_CAPABILITY, PluginAuditEntry, PluginAuditKind, WasmPluginHost};
 
 use std::{
     collections::{HashMap, HashSet},

@@ -72,12 +72,12 @@ pub use policy::{
     BatchRuntimeApplyPolicy, BudgetCapPolicy, BundleDecision, BundleEnforcementPolicy,
     BundleRequest, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy, Ed25519VerifyFailure,
     GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, McpToolAllowlistPolicy,
-    POLICY_BUNDLE_SCHEMA_VERSION, POLICY_BUNDLE_SIGNATURE_ALGORITHM, PolicyBundleError,
-    PolicyKeyring, PolicySigningKey, PolicySurface, ProposalApplyGate, ProposalAutoApprovalPolicy,
-    ProviderAllowlistPolicy, RetentionExportPolicy, SignedPolicyBundle, VerifiedPolicyBundle,
-    approval_level_audit_metadata, classify_git_remote_url, decide_git_remote_operation,
-    derive_approval_level, policy_bundle_verifying_key_b64, sign_policy_bundle,
-    verify_ed25519_signature,
+    POLICY_BUNDLE_SCHEMA_VERSION, POLICY_BUNDLE_SIGNATURE_ALGORITHM, PluginQuotaCeiling,
+    PluginQuotaClamp, PluginQuotaGrant, PolicyBundleError, PolicyKeyring, PolicySigningKey,
+    PolicySurface, ProposalApplyGate, ProposalAutoApprovalPolicy, ProviderAllowlistPolicy,
+    RetentionExportPolicy, SignedPolicyBundle, VerifiedPolicyBundle, approval_level_audit_metadata,
+    classify_git_remote_url, decide_git_remote_operation, derive_approval_level,
+    policy_bundle_verifying_key_b64, sign_policy_bundle, verify_ed25519_signature,
 };
 pub mod risk;
 

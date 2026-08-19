@@ -1653,6 +1653,185 @@ impl VerifiedPolicyBundle {
     }
 }
 
+/// Record of one quota dimension that was reduced below the plugin's request.
+///
+/// A clamp is the audit evidence that a plugin asked for more than the host
+/// grants. Every clamp is surfaced to the caller so it can be written to the
+/// plugin audit log; a clamp is never applied silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginQuotaClamp {
+    /// Quota dimension that was reduced.
+    pub class: legion_protocol::PluginQuotaClass,
+    /// Value the plugin manifest asked for.
+    pub declared: u64,
+    /// Value the host actually granted.
+    pub granted: u64,
+}
+
+/// Quotas actually granted to a plugin, plus the record of every reduction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginQuotaGrant {
+    /// Enforced quota values. Never larger than the host ceiling.
+    pub granted: legion_protocol::PluginQuotaDeclaration,
+    /// One entry per dimension the manifest tried to exceed.
+    pub clamps: Vec<PluginQuotaClamp>,
+}
+
+impl PluginQuotaGrant {
+    /// Whether the manifest asked for more than the host was willing to give.
+    pub fn was_clamped(&self) -> bool {
+        !self.clamps.is_empty()
+    }
+}
+
+/// Host-owned ceiling on plugin runtime quotas.
+///
+/// # Why this type has no "enforced" switch
+///
+/// Plugin quotas are enforced unconditionally. There is deliberately no
+/// `enforced: bool`, no `unlimited` sentinel, and no per-plugin override: a
+/// plugin manifest is attacker-controlled input, so if a manifest could raise
+/// its own ceiling — or set a dimension to a value the host reads as
+/// "unlimited" — every quota would be optional in practice. [`Self::grant`]
+/// therefore takes the *minimum* of the manifest's request and the ceiling,
+/// which can only ever narrow what a plugin receives.
+///
+/// [`Self::HARD_MAX`] is a second floor under the first: even a configured or
+/// deserialized ceiling is itself clamped, so a policy bundle cannot widen the
+/// sandbox beyond what this crate compiled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginQuotaCeiling {
+    /// Maximum fuel units granted for a single invocation.
+    pub max_fuel: u64,
+    /// Maximum wall-clock milliseconds granted for a single invocation.
+    pub max_wall_time_ms: u64,
+    /// Maximum WebAssembly memory pages granted to the guest.
+    pub max_memory_pages: u32,
+    /// Maximum storage bytes granted to the plugin.
+    pub max_storage_bytes: u64,
+    /// Maximum host calls granted for a single invocation.
+    pub max_host_calls: u32,
+    /// Maximum invocations granted over the plugin's lifetime.
+    pub max_events: u32,
+    /// Maximum bytes a single host call may hand to the host.
+    pub max_output_bytes: u64,
+}
+
+impl PluginQuotaCeiling {
+    /// Absolute compiled-in maximum.
+    ///
+    /// No configuration file, policy bundle, or plugin manifest can raise a
+    /// quota past these values, because [`Self::grant`] mins against them in
+    /// addition to `self`.
+    pub const HARD_MAX: Self = Self {
+        max_fuel: 50_000_000,
+        max_wall_time_ms: 5_000,
+        max_memory_pages: 256,
+        max_storage_bytes: 8 * 1024 * 1024,
+        max_host_calls: 1_024,
+        max_events: 4_096,
+        max_output_bytes: 256 * 1024,
+    };
+
+    /// The ceiling as it is actually applied: `min(self, HARD_MAX)` per field.
+    pub fn effective(&self) -> Self {
+        Self {
+            max_fuel: self.max_fuel.min(Self::HARD_MAX.max_fuel),
+            max_wall_time_ms: self.max_wall_time_ms.min(Self::HARD_MAX.max_wall_time_ms),
+            max_memory_pages: self.max_memory_pages.min(Self::HARD_MAX.max_memory_pages),
+            max_storage_bytes: self.max_storage_bytes.min(Self::HARD_MAX.max_storage_bytes),
+            max_host_calls: self.max_host_calls.min(Self::HARD_MAX.max_host_calls),
+            max_events: self.max_events.min(Self::HARD_MAX.max_events),
+            max_output_bytes: self.max_output_bytes.min(Self::HARD_MAX.max_output_bytes),
+        }
+    }
+
+    /// Grant a plugin the smaller of what it declared and what the host allows.
+    ///
+    /// Every dimension where the declaration lost is reported in
+    /// [`PluginQuotaGrant::clamps`] so the host can audit the attempt.
+    pub fn grant(&self, declared: &legion_protocol::PluginQuotaDeclaration) -> PluginQuotaGrant {
+        use legion_protocol::PluginQuotaClass;
+
+        let ceiling = self.effective();
+        let mut clamps = Vec::new();
+
+        let mut clamp_u64 = |class: PluginQuotaClass, declared: u64, ceiling: u64| -> u64 {
+            if declared > ceiling {
+                clamps.push(PluginQuotaClamp {
+                    class,
+                    declared,
+                    granted: ceiling,
+                });
+                ceiling
+            } else {
+                declared
+            }
+        };
+
+        let max_fuel = clamp_u64(PluginQuotaClass::Fuel, declared.max_fuel, ceiling.max_fuel);
+        let max_wall_time_ms = clamp_u64(
+            PluginQuotaClass::WallTime,
+            declared.max_wall_time_ms,
+            ceiling.max_wall_time_ms,
+        );
+        let max_memory_pages = clamp_u64(
+            PluginQuotaClass::Memory,
+            u64::from(declared.max_memory_pages),
+            u64::from(ceiling.max_memory_pages),
+        ) as u32;
+        let max_storage_bytes = clamp_u64(
+            PluginQuotaClass::Storage,
+            declared.max_storage_bytes,
+            ceiling.max_storage_bytes,
+        );
+        let max_host_calls = clamp_u64(
+            PluginQuotaClass::HostCall,
+            u64::from(declared.max_host_calls),
+            u64::from(ceiling.max_host_calls),
+        ) as u32;
+        let max_events = clamp_u64(
+            PluginQuotaClass::Event,
+            u64::from(declared.max_events),
+            u64::from(ceiling.max_events),
+        ) as u32;
+        let max_output_bytes = clamp_u64(
+            PluginQuotaClass::Output,
+            declared.max_output_bytes,
+            ceiling.max_output_bytes,
+        );
+
+        PluginQuotaGrant {
+            granted: legion_protocol::PluginQuotaDeclaration {
+                max_fuel,
+                max_wall_time_ms,
+                max_memory_pages,
+                max_storage_bytes,
+                max_host_calls,
+                max_events,
+                max_output_bytes,
+            },
+            clamps,
+        }
+    }
+}
+
+impl Default for PluginQuotaCeiling {
+    /// The shipped ceiling, well below [`Self::HARD_MAX`].
+    fn default() -> Self {
+        Self {
+            max_fuel: 5_000_000,
+            max_wall_time_ms: 2_000,
+            max_memory_pages: 64,
+            max_storage_bytes: 1024 * 1024,
+            max_host_calls: 64,
+            max_events: 256,
+            max_output_bytes: 64 * 1024,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2022,5 +2201,160 @@ mod tests {
         assert!(!policy.allows_rule_ids(&["rule-b".to_string()]));
         assert!(!policy.allows_rule_ids(&[String::new()]));
         assert!(policy.allows_rule_ids(&["rule-a".to_string()]));
+    }
+
+    fn greedy_declaration() -> legion_protocol::PluginQuotaDeclaration {
+        legion_protocol::PluginQuotaDeclaration {
+            max_fuel: u64::MAX,
+            max_wall_time_ms: u64::MAX,
+            max_memory_pages: u32::MAX,
+            max_storage_bytes: u64::MAX,
+            max_host_calls: u32::MAX,
+            max_events: u32::MAX,
+            max_output_bytes: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn a_manifest_cannot_raise_its_own_quotas_above_the_ceiling() {
+        // The manifest is attacker-controlled. Asking for everything must get
+        // the host ceiling, not the request.
+        let ceiling = PluginQuotaCeiling::default();
+        let grant = ceiling.grant(&greedy_declaration());
+
+        assert_eq!(grant.granted.max_fuel, ceiling.max_fuel);
+        assert_eq!(grant.granted.max_wall_time_ms, ceiling.max_wall_time_ms);
+        assert_eq!(grant.granted.max_memory_pages, ceiling.max_memory_pages);
+        assert_eq!(grant.granted.max_storage_bytes, ceiling.max_storage_bytes);
+        assert_eq!(grant.granted.max_host_calls, ceiling.max_host_calls);
+        assert_eq!(grant.granted.max_events, ceiling.max_events);
+        assert_eq!(grant.granted.max_output_bytes, ceiling.max_output_bytes);
+    }
+
+    #[test]
+    fn every_clamped_dimension_is_reported_so_it_can_be_audited() {
+        // A quota reduced without a record would be a silent clamp; the host
+        // could not write an audit row for an attempt it never learned about.
+        let grant = PluginQuotaCeiling::default().grant(&greedy_declaration());
+        assert!(grant.was_clamped());
+
+        let classes: Vec<_> = grant.clamps.iter().map(|clamp| clamp.class).collect();
+        for expected in [
+            legion_protocol::PluginQuotaClass::Fuel,
+            legion_protocol::PluginQuotaClass::WallTime,
+            legion_protocol::PluginQuotaClass::Memory,
+            legion_protocol::PluginQuotaClass::Storage,
+            legion_protocol::PluginQuotaClass::HostCall,
+            legion_protocol::PluginQuotaClass::Event,
+            legion_protocol::PluginQuotaClass::Output,
+        ] {
+            assert!(
+                classes.contains(&expected),
+                "clamp for {expected:?} was not reported: {classes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_ceiling_cannot_exceed_the_compiled_hard_max() {
+        // Policy-bundle configuration is one indirection away from being
+        // attacker-controlled too, so it is clamped in the same direction.
+        let wide_open = PluginQuotaCeiling {
+            max_fuel: u64::MAX,
+            max_wall_time_ms: u64::MAX,
+            max_memory_pages: u32::MAX,
+            max_storage_bytes: u64::MAX,
+            max_host_calls: u32::MAX,
+            max_events: u32::MAX,
+            max_output_bytes: u64::MAX,
+        };
+
+        assert_eq!(wide_open.effective(), PluginQuotaCeiling::HARD_MAX);
+
+        let grant = wide_open.grant(&greedy_declaration());
+        assert_eq!(
+            grant.granted.max_fuel,
+            PluginQuotaCeiling::HARD_MAX.max_fuel
+        );
+        assert_eq!(
+            grant.granted.max_memory_pages,
+            PluginQuotaCeiling::HARD_MAX.max_memory_pages
+        );
+        assert!(grant.was_clamped());
+    }
+
+    #[test]
+    fn a_ceiling_deserialized_from_policy_configuration_is_still_clamped() {
+        // Serde is the realistic path by which an operator-supplied ceiling
+        // arrives. It must not become a quota-disable switch.
+        let ceiling: PluginQuotaCeiling = serde_json::from_str(
+            r#"{"max_fuel":18446744073709551615,"max_memory_pages":4294967295}"#,
+        )
+        .expect("ceiling deserializes");
+
+        let grant = ceiling.grant(&greedy_declaration());
+        assert_eq!(
+            grant.granted.max_fuel,
+            PluginQuotaCeiling::HARD_MAX.max_fuel
+        );
+        assert_eq!(
+            grant.granted.max_memory_pages,
+            PluginQuotaCeiling::HARD_MAX.max_memory_pages
+        );
+    }
+
+    #[test]
+    fn a_modest_declaration_is_granted_as_declared_and_reports_no_clamp() {
+        // Narrowing itself is always allowed: the ceiling is a maximum, not a
+        // target, so a plugin that asks for less keeps less.
+        let declared = legion_protocol::PluginQuotaDeclaration {
+            max_fuel: 1_000,
+            max_wall_time_ms: 50,
+            max_memory_pages: 8,
+            max_storage_bytes: 4_096,
+            max_host_calls: 4,
+            max_events: 4,
+            max_output_bytes: 512,
+        };
+        let grant = PluginQuotaCeiling::default().grant(&declared);
+        assert_eq!(grant.granted, declared);
+        assert!(!grant.was_clamped());
+    }
+
+    #[test]
+    fn a_zero_quota_is_zero_and_never_means_unlimited() {
+        // A sentinel that read 0 as "unbounded" would be a per-plugin quota
+        // disable spelled differently.
+        let declared = legion_protocol::PluginQuotaDeclaration {
+            max_fuel: 0,
+            max_wall_time_ms: 0,
+            max_memory_pages: 0,
+            max_storage_bytes: 0,
+            max_host_calls: 0,
+            max_events: 0,
+            max_output_bytes: 0,
+        };
+        let grant = PluginQuotaCeiling::default().grant(&declared);
+        assert_eq!(grant.granted, declared);
+        assert!(!grant.was_clamped());
+    }
+
+    #[test]
+    fn the_hard_max_is_itself_bounded() {
+        // Guards against a future edit that "raises the cap a little" into
+        // uselessness. These are absolute sanity bounds on the sandbox, and
+        // they are compile-time: raising HARD_MAX past them fails the build
+        // rather than waiting for someone to run the tests.
+        const {
+            assert!(
+                PluginQuotaCeiling::HARD_MAX.max_memory_pages <= 1024,
+                "over 64 MiB of guest memory is not a sandbox"
+            );
+            assert!(PluginQuotaCeiling::HARD_MAX.max_fuel <= 1_000_000_000);
+            assert!(PluginQuotaCeiling::HARD_MAX.max_wall_time_ms <= 30_000);
+        }
+        let default = PluginQuotaCeiling::default();
+        assert!(default.max_fuel <= PluginQuotaCeiling::HARD_MAX.max_fuel);
+        assert!(default.max_memory_pages <= PluginQuotaCeiling::HARD_MAX.max_memory_pages);
     }
 }
