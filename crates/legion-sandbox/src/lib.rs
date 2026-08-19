@@ -55,6 +55,11 @@ pub enum SandboxAction {
         /// Target path being written.
         path: PathBuf,
     },
+    /// A filesystem read attempt.
+    Read {
+        /// Target path being read.
+        path: PathBuf,
+    },
     /// A raw egress attempt.
     Egress {
         /// Target hostname or URL.
@@ -127,20 +132,34 @@ impl SandboxDecision {
 }
 
 /// Sandbox scope used by all backends.
+///
+/// Reads are scoped as deliberately as writes. `workspace_root` is the only
+/// readable location unless a caller adds more with [`SandboxScope::with_readable_root`],
+/// and any prefix added to `denied_read_paths` is refused even when it falls
+/// inside a readable root (deny wins over allow).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxScope {
     /// Workspace root that is writable.
     pub workspace_root: PathBuf,
     /// Allowed egress destinations.
     pub allowed_egress: BTreeSet<String>,
+    /// Roots readable in addition to `workspace_root`. Empty by default: a
+    /// scope that names no extra roots confines reads to the workspace root.
+    pub readable_roots: BTreeSet<PathBuf>,
+    /// Path prefixes that are refused for reads even when they resolve inside
+    /// a readable root. Evaluated before the allow list, so a denied prefix
+    /// cannot be re-opened by widening the readable roots.
+    pub denied_read_paths: BTreeSet<PathBuf>,
 }
 
 impl SandboxScope {
-    /// Creates a new scope that only allows workspace-local writes.
+    /// Creates a new scope that only allows workspace-local writes and reads.
     pub fn workspace_only(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
             allowed_egress: BTreeSet::new(),
+            readable_roots: BTreeSet::new(),
+            denied_read_paths: BTreeSet::new(),
         }
     }
 
@@ -148,6 +167,72 @@ impl SandboxScope {
     pub fn with_egress(mut self, target: impl Into<String>) -> Self {
         self.allowed_egress.insert(target.into());
         self
+    }
+
+    /// Adds a root that may be read in addition to the workspace root.
+    ///
+    /// Writes are unaffected: widening the read surface never widens the write
+    /// surface, because [`ActivatedSandbox::authorize_write`] only ever consults
+    /// `workspace_root`.
+    pub fn with_readable_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.readable_roots.insert(root.into());
+        self
+    }
+
+    /// Refuses reads at or beneath `path`, even inside a readable root.
+    pub fn deny_read_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.denied_read_paths.insert(path.into());
+        self
+    }
+}
+
+/// Whether the OS backend itself enforces the read boundary, or whether the
+/// boundary only exists at the Legion decision layer.
+///
+/// This distinction is the read-side analogue of the "no silent fallback to
+/// 'no sandbox'" rule: a caller that hands raw filesystem access to a worker
+/// must not assume [`ActivatedSandbox::authorize_read`] constrains that worker,
+/// because the decision layer is only consulted for reads that are *routed
+/// through it*. A worker holding a real file descriptor bypasses it entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxReadEnforcement {
+    /// The OS backend refuses out-of-scope reads by itself.
+    OsEnforced,
+    /// Only the Legion decision layer refuses out-of-scope reads. A worker with
+    /// direct filesystem access is NOT contained by this.
+    BrokerOnly {
+        /// Why the backend does not enforce the read boundary.
+        caveat: String,
+    },
+}
+
+/// Reports, honestly, whether `backend` enforces read scope at the OS level.
+///
+/// Every backend currently returns [`SandboxReadEnforcement::BrokerOnly`], and
+/// each returns its own reason rather than a shared placeholder, so that the
+/// day a backend gains real read confinement only its arm changes:
+///
+/// * Seatbelt: the generated SBPL profile grants `(allow file-read* (subpath "/"))`.
+/// * bubblewrap + Landlock: the ruleset handles write access rights only.
+/// * Restricted token / AppContainer: the spawn path reports
+///   `filesystem_read_enforced: false`.
+///
+/// Callers must not paper over a `BrokerOnly` answer. It is the reason a worker
+/// that reads the filesystem directly cannot be admitted to a scoped run.
+pub fn os_read_enforcement(backend: &SandboxBackend) -> SandboxReadEnforcement {
+    let caveat = match backend {
+        SandboxBackend::Seatbelt => "seatbelt-profile-allows-file-read-subpath-root",
+        SandboxBackend::BubblewrapLandlock => "landlock-ruleset-handles-write-access-only",
+        SandboxBackend::RestrictedToken => "windows-restricted-token-does-not-scope-reads",
+        SandboxBackend::AppContainer => "windows-appcontainer-read-scoping-not-implemented",
+        SandboxBackend::DocumentedFallback { reason } => {
+            return SandboxReadEnforcement::BrokerOnly {
+                caveat: format!("documented-fallback-does-not-scope-reads: {reason}"),
+            };
+        }
+    };
+    SandboxReadEnforcement::BrokerOnly {
+        caveat: caveat.to_string(),
     }
 }
 
@@ -218,6 +303,65 @@ impl ActivatedSandbox {
             self.audit_log.push(decision.audit.clone());
             decision
         }
+    }
+
+    /// Evaluates a read attempt and fails closed outside the readable scope.
+    ///
+    /// Order is load-bearing: the denied-prefix check runs BEFORE the readable
+    /// roots check, so a path that a caller explicitly denied cannot be
+    /// re-admitted by also listing an enclosing readable root. Both the
+    /// candidate and every boundary are resolved through the same
+    /// symlink-following resolution used by [`Self::authorize_write`], so an
+    /// in-scope symlink pointing outside is measured at its real destination
+    /// rather than its lexical spelling.
+    pub fn authorize_read(&mut self, path: impl AsRef<Path>) -> SandboxDecision {
+        let path = path.as_ref();
+        let action = SandboxAction::Read {
+            path: path.to_path_buf(),
+        };
+
+        if self
+            .scope
+            .denied_read_paths
+            .iter()
+            .any(|denied| path_is_within_scope(path, denied))
+        {
+            let decision = SandboxDecision::deny(
+                self.platform,
+                self.backend.clone(),
+                action,
+                "read denied by an explicit denied-read prefix",
+            );
+            self.audit_log.push(decision.audit.clone());
+            return decision;
+        }
+
+        let readable = std::iter::once(&self.scope.workspace_root)
+            .chain(self.scope.readable_roots.iter())
+            .any(|root| path_is_within_scope(path, root));
+
+        let decision = if readable {
+            SandboxDecision::allow(
+                self.platform,
+                self.backend.clone(),
+                action,
+                "read stays inside readable scope",
+            )
+        } else {
+            SandboxDecision::deny(
+                self.platform,
+                self.backend.clone(),
+                action,
+                "read denied outside readable scope",
+            )
+        };
+        self.audit_log.push(decision.audit.clone());
+        decision
+    }
+
+    /// Reports whether the OS backend enforces the read boundary by itself.
+    pub fn os_read_enforcement(&self) -> SandboxReadEnforcement {
+        os_read_enforcement(&self.backend)
     }
 
     /// Evaluates a raw egress attempt and fails closed unless it is explicitly allowed.
@@ -391,6 +535,145 @@ mod tests {
         assert!(matches!(decision.audit.action, SandboxAction::Write { .. }));
         assert!(decision.audit.reason.contains("outside workspace scope"));
         assert_eq!(sandbox.audit_log().len(), 2);
+    }
+
+    /// The stop condition for a governed external-agent run is a READ escape,
+    /// so this is the first thing that must fail closed.
+    #[test]
+    fn read_outside_scope_fails_closed_and_audits() {
+        let scope = SandboxScope::workspace_only("/workspace/project");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        let decision = sandbox.authorize_read("/etc/shadow");
+
+        assert!(!decision.allowed);
+        assert!(matches!(decision.audit.action, SandboxAction::Read { .. }));
+        assert!(decision.audit.reason.contains("outside readable scope"));
+        assert_eq!(
+            sandbox.audit_log().len(),
+            2,
+            "a denied read must leave an audit row, not just a return value"
+        );
+    }
+
+    /// A sibling directory whose name merely starts with the scope's name is
+    /// outside the scope. A `String::starts_with` boundary check would let
+    /// `/workspace/project-secrets` through.
+    #[test]
+    fn read_of_a_name_prefixed_sibling_directory_is_refused() {
+        let scope = SandboxScope::workspace_only("/workspace/project");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        let decision = sandbox.authorize_read("/workspace/project-secrets/key.pem");
+
+        assert!(
+            !decision.allowed,
+            "a name-prefixed sibling is not inside the scope"
+        );
+    }
+
+    /// `..` in a read request must be measured after normalization, not
+    /// accepted because the spelling starts with the scope root.
+    #[test]
+    fn read_traversal_out_of_scope_is_refused() {
+        let scope = SandboxScope::workspace_only("/workspace/project");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        let decision = sandbox.authorize_read("/workspace/project/../secrets/key.pem");
+
+        assert!(!decision.allowed);
+    }
+
+    /// Deny beats allow: listing a readable root that encloses a denied prefix
+    /// must not re-open the denied prefix.
+    #[test]
+    fn denied_read_prefix_wins_over_an_enclosing_readable_root() {
+        let scope = SandboxScope::workspace_only("/workspace/project")
+            .with_readable_root("/workspace/project/vendor")
+            .deny_read_path("/workspace/project/vendor/.credentials");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        let decision = sandbox.authorize_read("/workspace/project/vendor/.credentials/token");
+
+        assert!(!decision.allowed);
+        assert!(decision.audit.reason.contains("denied-read prefix"));
+    }
+
+    #[test]
+    fn read_inside_scope_is_allowed_and_audited() {
+        let scope = SandboxScope::workspace_only("/workspace/project");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        let decision = sandbox.authorize_read("/workspace/project/src/lib.rs");
+
+        assert!(decision.allowed);
+        assert_eq!(sandbox.audit_log().len(), 2);
+    }
+
+    /// Widening the read surface must not widen the write surface.
+    #[test]
+    fn an_extra_readable_root_does_not_become_writable() {
+        let scope =
+            SandboxScope::workspace_only("/workspace/project").with_readable_root("/opt/toolchain");
+        let mut sandbox = ActivatedSandbox::activate(
+            SandboxPlatform::Linux,
+            SandboxBackend::BubblewrapLandlock,
+            scope,
+        );
+
+        assert!(sandbox.authorize_read("/opt/toolchain/bin/rustc").allowed);
+        assert!(
+            !sandbox.authorize_write("/opt/toolchain/bin/rustc").allowed,
+            "a readable root must stay read-only"
+        );
+    }
+
+    /// No backend confines reads at the OS level today. This asserts the honest
+    /// answer per backend so that a future backend that *does* confine reads
+    /// has to change this test deliberately rather than inherit a stale claim.
+    #[test]
+    fn no_backend_claims_os_level_read_enforcement() {
+        for backend in [
+            SandboxBackend::Seatbelt,
+            SandboxBackend::BubblewrapLandlock,
+            SandboxBackend::RestrictedToken,
+            SandboxBackend::AppContainer,
+            SandboxBackend::DocumentedFallback {
+                reason: "no supported backend".to_string(),
+            },
+        ] {
+            match os_read_enforcement(&backend) {
+                SandboxReadEnforcement::BrokerOnly { caveat } => {
+                    assert!(
+                        !caveat.trim().is_empty(),
+                        "{backend:?} must name why reads are unconfined"
+                    );
+                }
+                SandboxReadEnforcement::OsEnforced => panic!(
+                    "{backend:?} claims OS-level read enforcement that the spawn path does not implement"
+                ),
+            }
+        }
     }
 
     #[test]

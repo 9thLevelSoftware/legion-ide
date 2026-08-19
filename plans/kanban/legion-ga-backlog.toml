@@ -1883,7 +1883,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-sandbox"]
     acceptance = ["External agent completes a scoped task without bypassing Legion policy."]
     stop_condition = "Stop if the external agent can read outside the assigned scope."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F4.T3"
@@ -1895,7 +1896,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-app"]
     acceptance = ["Every external edit becomes a Legion proposal; every external log becomes an evidence row."]
     stop_condition = "Stop if an external edit can land in the main workspace without a proposal."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
 
 # ---------------------------------------------------------------------------
 # EPIC P7 — Plugin and extension runtime
