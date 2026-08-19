@@ -2,6 +2,9 @@
 
 #![warn(missing_docs)]
 
+/// Binds a remote session to the production transport state machine.
+pub mod transport;
+
 use std::collections::{HashMap, HashSet};
 
 use legion_protocol::{

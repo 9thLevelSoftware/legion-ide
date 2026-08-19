@@ -589,6 +589,13 @@ pub struct RemoteTransportStateMachine {
     last_sequence: EventSequence,
     last_checkpoint: Option<RemoteOperationLogCheckpointId>,
     resume_token_digest: Option<String>,
+    /// How many times this transport has been dropped and had to reconnect.
+    ///
+    /// A real running count, not a state flag. `health_summary` previously
+    /// computed this as `matches!(state, Reconnecting | Resuming) as u32`,
+    /// which could only ever be 0 or 1 and reported "1 attempt" for a session
+    /// that had dropped twenty times.
+    reconnect_attempts: u32,
     correlation_id: legion_protocol::CorrelationId,
     causality_id: CausalityId,
 }
@@ -609,9 +616,60 @@ impl RemoteTransportStateMachine {
             last_sequence: EventSequence(0),
             last_checkpoint: None,
             resume_token_digest: None,
+            reconnect_attempts: 0,
             correlation_id: legion_protocol::CorrelationId(1),
             causality_id: CausalityId(uuid_from_sequence(1)),
         }
+    }
+
+    /// Record that the network dropped, moving the transport to `Reconnecting`.
+    ///
+    /// This is the transition the state machine was missing. `Reconnecting` was
+    /// a declared lifecycle state that nothing ever entered: of the eight
+    /// transitions in this type, none represented losing the connection, so
+    /// `begin_resume` could be called on a session that had never been
+    /// disconnected and "reconnect" was a word with no code behind it.
+    ///
+    /// What survives a drop is deliberate. Accepted operations, the replay
+    /// window, the last checkpoint and the resume digest are all *kept*,
+    /// because they are what resuming replays against — dropping them would
+    /// make every reconnect a full resynchronisation. In-flight (unacked)
+    /// operations are cleared: they were on the wire when it went away, nobody
+    /// acknowledged them, and holding them would report queue depth that no
+    /// peer will ever drain.
+    pub fn mark_network_drop(
+        &mut self,
+        reason: impl Into<String>,
+    ) -> Result<RemoteTransportHealthSummary, RemoteTransportCoreError> {
+        self.ensure_enabled()?;
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(RemoteTransportCoreError::InvalidState {
+                reason: "network drop requires a reason".to_string(),
+            });
+        }
+        if !matches!(
+            self.state,
+            RemoteTransportLifecycleState::Active
+                | RemoteTransportLifecycleState::Backpressured
+                | RemoteTransportLifecycleState::Reconnecting
+        ) {
+            return Err(RemoteTransportCoreError::InvalidState {
+                reason: format!(
+                    "network drop requires an established transport, not {:?}",
+                    self.state
+                ),
+            });
+        }
+        self.inflight_operations.clear();
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        self.state = RemoteTransportLifecycleState::Reconnecting;
+        Ok(self.health_summary(RemoteNetworkHealthState::Offline))
+    }
+
+    /// How many drops this transport has recorded.
+    pub fn reconnect_attempts(&self) -> u32 {
+        self.reconnect_attempts
     }
 
     /// Return current transport lifecycle state.
@@ -847,12 +905,25 @@ impl RemoteTransportStateMachine {
     }
 
     /// Begin resume with a previously issued digest token.
+    ///
+    /// Requires a recorded drop. Resume is meaningful only as recovery from a
+    /// lost connection, and this used to accept from any state — so an `Active`
+    /// transport that had never disconnected could "resume", which is not a
+    /// recovery path but a second way to reach `Active` with weaker checks.
     pub fn begin_resume(
         &mut self,
         token: RemoteTransportResumeToken,
         now: TimestampMillis,
     ) -> Result<(), RemoteTransportCoreError> {
         self.ensure_enabled()?;
+        if self.state != RemoteTransportLifecycleState::Reconnecting {
+            return Err(RemoteTransportCoreError::InvalidState {
+                reason: format!(
+                    "resume requires a dropped transport in Reconnecting, not {:?}",
+                    self.state
+                ),
+            });
+        }
         if Some(token.session_id) != self.session_id
             || Some(token.checkpoint_id) != self.last_checkpoint
             || self.resume_token_digest.as_deref() != Some(token.token_digest.as_str())
@@ -961,11 +1032,7 @@ impl RemoteTransportStateMachine {
             health,
             last_operation_id: None,
             queued_frame_count: self.inflight_operations.len() as u32,
-            reconnect_attempts: matches!(
-                self.state,
-                RemoteTransportLifecycleState::Reconnecting
-                    | RemoteTransportLifecycleState::Resuming
-            ) as u32,
+            reconnect_attempts: self.reconnect_attempts,
             event_sequence: self.last_sequence,
             correlation_id: self.correlation_id,
             causality_id: self.causality_id,
@@ -1841,6 +1908,11 @@ mod tests {
         let token = machine
             .issue_resume_token("digest", TimestampMillis(10_000))
             .expect("token");
+        // Resume is recovery, so it needs something to recover from. Before the
+        // drop transition existed this test resumed straight out of `Active`.
+        machine
+            .mark_network_drop("forced drop for resume test")
+            .expect("drop an established transport");
         assert!(matches!(
             machine.begin_resume(
                 RemoteTransportResumeToken {

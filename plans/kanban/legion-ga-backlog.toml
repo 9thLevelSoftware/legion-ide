@@ -2448,13 +2448,12 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["ls plans/evidence/remote/"]
     acceptance = ["Reconnect and offline behaviors are recorded as evidence."]
     stop_condition = "Stop if reconnect logic is untested under a forced network drop."
-    # 2026-08-14 reconcile: legion-remote-transport is a frozen zero-fan-in
-    # crate under ADR-0046 clause 2 (product activation gated on PR-UI-001
-    # promotion). Do NOT start this task before that promotion or an ADR-0046
-    # amendment. ("blocked" status is reserved by the validator for external
-    # EXT-* blockers, so the internal freeze is encoded as todo + this note;
-    # prior "in-progress" status predated the freeze and was itself drift.)
-    status = "todo"
+    # 2026-08-14 reconcile: frozen under ADR-0046 clause 2/3.
+    # 2026-08-19: unfrozen by ADR-0046 Amendment 1 (owner decision) and done.
+    # The freeze note was correct to hold this: the transport state machine had
+    # no transition into Reconnecting at all, so "activate" meant building the
+    # reconnect path, not wiring an existing one.
+    status = "done"
     evidence = "plans/evidence/remote/P9-F3-T2-reconnect-offline-evidence.md"
 
     [[epics.features.tasks]]
