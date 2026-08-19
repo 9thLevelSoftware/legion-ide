@@ -32,10 +32,41 @@ fn make_symlink_dir(target: &std::path::Path, link: &std::path::Path) -> std::io
     std::os::unix::fs::symlink(target, link)
 }
 
+/// Why a failure to create a reparse point is fatal rather than a skip.
+///
+/// One source of truth: the same sentence appeared at three call sites, and the
+/// next person to reword it would have updated two of them.
+const REPARSE_POINT_REQUIRED: &str = "could not create a symlink or a directory junction; this host cannot host a containment test that depends on one, and reporting success would claim the check ran when it did not";
+
 #[cfg(windows)]
 fn make_symlink_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
-    // Requires Developer Mode or admin; callers skip gracefully when denied.
-    std::os::windows::fs::symlink_dir(target, link)
+    // A symlink needs `SeCreateSymbolicLinkPrivilege` — Developer Mode or admin
+    // — which an ordinary CI account does not have. Callers used to skip when
+    // denied, which meant these tests printed a line, returned, and asserted
+    // nothing while still reporting `ok`: containment tests that verified no
+    // containment on the platform where the path rules differ most.
+    //
+    // A directory junction is the same reparse-point class for this purpose —
+    // `canonicalize` resolves it identically — and needs no privilege. So the
+    // fallback keeps the test meaningful rather than keeping it quiet.
+    match std::os::windows::fs::symlink_dir(target, link) {
+        Ok(()) => Ok(()),
+        Err(symlink_error) => {
+            let status = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ])
+                .status();
+            match status {
+                Ok(status) if status.success() => Ok(()),
+                _ => Err(symlink_error),
+            }
+        }
+    }
 }
 
 /// macOS `/var` style: the base is reached through a symlink alias. Both the
@@ -48,12 +79,7 @@ fn containment_accepts_symlink_aliased_base() {
 
     let alias_parent = unique_temp_dir("aliased-link-parent");
     let alias = alias_parent.join("alias");
-    if make_symlink_dir(&real_root, &alias).is_err() {
-        eprintln!("skipping: symlink creation not permitted on this host");
-        let _ = fs::remove_dir_all(&real_root);
-        let _ = fs::remove_dir_all(&alias_parent);
-        return;
-    }
+    make_symlink_dir(&real_root, &alias).expect(REPARSE_POINT_REQUIRED);
 
     let relative = validate_containment(&alias, &alias.join("src/lib.rs"))
         .expect("alias-spelled path inside the aliased base must be contained");
@@ -73,12 +99,7 @@ fn containment_rejects_existing_symlink_escaping_sandbox() {
     fs::write(outside.join("secret.txt"), "outside\n").expect("write outside file");
 
     let link = sandbox.join("link");
-    if make_symlink_dir(&outside, &link).is_err() {
-        eprintln!("skipping: symlink creation not permitted on this host");
-        let _ = fs::remove_dir_all(&sandbox);
-        let _ = fs::remove_dir_all(&outside);
-        return;
-    }
+    make_symlink_dir(&outside, &link).expect(REPARSE_POINT_REQUIRED);
 
     let result = validate_containment(&sandbox, &sandbox.join("link/secret.txt"));
     assert!(
@@ -116,12 +137,7 @@ fn containment_rejects_dangling_symlink_component() {
     let sandbox = unique_temp_dir("dangling-sandbox");
     let gone = unique_temp_dir("dangling-target");
     let link = sandbox.join("dangling");
-    if make_symlink_dir(&gone, &link).is_err() {
-        eprintln!("skipping: symlink creation not permitted on this host");
-        let _ = fs::remove_dir_all(&sandbox);
-        let _ = fs::remove_dir_all(&gone);
-        return;
-    }
+    make_symlink_dir(&gone, &link).expect(REPARSE_POINT_REQUIRED);
     fs::remove_dir_all(&gone).expect("remove target to dangle the link");
 
     let result = validate_containment(&sandbox, &sandbox.join("dangling/file.txt"));
