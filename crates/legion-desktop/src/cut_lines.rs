@@ -45,8 +45,15 @@ pub const DEBUG_LIVE_BANNER: &str = "Debugger connected to a live adapter proces
 /// was true, and the second one contradicted the banner shown one click
 /// earlier. Which runtime answers is decided at launch, so that is what this
 /// says.
+/// Deliberately "no active session" rather than "idle". The banner renders
+/// directly above the status line, and a launch denied for an untrusted
+/// workspace -- or failed because `LEGION_DAP_MODE=live` could not resolve an
+/// adapter -- also leaves `active_session_id` as `None`. Calling that "idle"
+/// contradicts the `Denied` or `Failed` line underneath it and reads as though
+/// nothing had been attempted. The neutral phrasing is true in all three
+/// cases, so the status line is left to say which one happened.
 pub const DEBUG_NO_SESSION_BANNER: &str =
-    "Debugger idle (fixture or live adapter is chosen when a session launches)";
+    "No active debug session (fixture or live adapter is chosen when a session launches)";
 
 /// Prefix for plugin management rows that cannot execute WASM in product composition.
 pub const PLUGIN_EXECUTION_UNAVAILABLE: &str = "execution=not-available";
