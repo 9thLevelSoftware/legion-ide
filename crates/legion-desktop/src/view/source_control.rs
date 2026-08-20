@@ -104,6 +104,53 @@ const COMMIT_PALETTE_QUERY: &str = ">git commit ";
 /// buttons. The overflow is stated rather than silently dropped.
 const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 
+/// Whether the index holds anything to commit, read from porcelain status.
+///
+/// Deliberately not "is there a staged hunk". A staged binary modification, an
+/// empty-file addition, a mode-only change and a pure rename all appear in
+/// `changed_files` with a staged index column and produce no `@@` hunk at all,
+/// so a hunk-counting gate hides the panel's only Commit control while
+/// `git commit` would succeed. The same happens when unstaged hunks exhaust the
+/// projection's hunk limit before the staged ones are collected.
+///
+/// Porcelain status is two columns, `XY`: `X` is the index and `Y` the working
+/// tree. Anything in `X` other than a space is staged; `?` is the untracked
+/// marker (`??`), which is not.
+///
+/// Unmerged entries are excluded even though their index column qualifies.
+/// `DD`, `AU`, `UD`, `UA`, `DU`, `AA` and `UU` all mean an unresolved merge, and
+/// `git commit` refuses an unmerged index -- so counting them as committable
+/// offers a button whose only outcome is an error. That includes conflicts with
+/// no textual markers, such as binary or delete/modify, where nothing else on
+/// the panel would hint at why the commit failed.
+fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
+    snapshot
+        .git_projection
+        .changed_files
+        .iter()
+        .any(|file| status_is_committable(&file.status))
+}
+
+/// Whether a porcelain status pair represents something `git commit` can commit.
+fn status_is_committable(status: &str) -> bool {
+    let mut columns = status.chars();
+    let (Some(index), Some(worktree)) = (columns.next(), columns.next()) else {
+        return false;
+    };
+    if is_unmerged(index, worktree) {
+        return false;
+    }
+    index != ' ' && index != '?'
+}
+
+/// The seven porcelain pairs that mean an unresolved merge.
+fn is_unmerged(index: char, worktree: char) -> bool {
+    matches!(
+        (index, worktree),
+        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
+    )
+}
+
 /// Per-hunk stage and unstage controls.
 ///
 /// ## Why these had to exist at all
@@ -128,27 +175,6 @@ const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 /// frame's projection would stage the first and fail the rest with
 /// `git_hunk_missing`. Staging a hunk at a time is not a lesser affordance here;
 /// it is the only one the identity scheme supports.
-/// Whether the index holds anything to commit, read from porcelain status.
-///
-/// Deliberately not "is there a staged hunk". A staged binary modification, an
-/// empty-file addition, a mode-only change and a pure rename all appear in
-/// `changed_files` with a staged index column and produce no `@@` hunk at all,
-/// so a hunk-counting gate hides the panel's only Commit control while
-/// `git commit` would succeed. The same happens when unstaged hunks exhaust the
-/// projection's hunk limit before the staged ones are collected.
-///
-/// Porcelain status is two columns, `XY`: `X` is the index and `Y` the working
-/// tree. Anything in `X` other than a space is staged; `?` is the untracked
-/// marker (`??`), which is not.
-fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
-    snapshot.git_projection.changed_files.iter().any(|file| {
-        file.status
-            .chars()
-            .next()
-            .is_some_and(|index_column| index_column != ' ' && index_column != '?')
-    })
-}
-
 fn render_git_hunk_controls(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -158,7 +184,37 @@ fn render_git_hunk_controls(
     if hunks.is_empty() {
         return;
     }
-    for hunk in hunks.iter().take(GIT_HUNK_CONTROL_LIMIT) {
+    // Budgeted per stage, not as a combined prefix. The projection appends
+    // every unstaged hunk before any staged one, so a plain `take` over the
+    // combined list renders no Unstage control at all once twelve unstaged
+    // hunks exist -- forcing someone to stage unrelated changes before the hunk
+    // they wanted to unstage becomes reachable.
+    let half = GIT_HUNK_CONTROL_LIMIT / 2;
+    let staged_total = hunks
+        .iter()
+        .filter(|hunk| hunk.stage == GitHunkStageProjection::Staged)
+        .count();
+    let unstaged_total = hunks.len() - staged_total;
+    // An unused half is given back, so a repository with only one kind of hunk
+    // still fills the whole budget.
+    let staged_budget = half.max(GIT_HUNK_CONTROL_LIMIT.saturating_sub(unstaged_total));
+    let unstaged_budget = GIT_HUNK_CONTROL_LIMIT.saturating_sub(staged_budget.min(staged_total));
+    let mut staged_shown = 0usize;
+    let mut unstaged_shown = 0usize;
+    let visible: Vec<_> = hunks
+        .iter()
+        .filter(|hunk| match hunk.stage {
+            GitHunkStageProjection::Staged => {
+                staged_shown += 1;
+                staged_shown <= staged_budget
+            }
+            GitHunkStageProjection::Unstaged => {
+                unstaged_shown += 1;
+                unstaged_shown <= unstaged_budget
+            }
+        })
+        .collect();
+    for hunk in visible {
         ui.horizontal_wrapped(|ui| {
             let verb = match hunk.stage {
                 GitHunkStageProjection::Unstaged => "Stage",

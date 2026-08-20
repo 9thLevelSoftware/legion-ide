@@ -470,3 +470,99 @@ fn hunks_beyond_the_control_limit_are_reported_rather_than_dropped() {
          silently drawing a subset. Panel showed: {text}"
     );
 }
+
+/// An unresolved merge must not offer Commit.
+///
+/// Porcelain marks conflicts with pairs like `UU` and `AA`, whose index column
+/// is neither a space nor `?` — so an index-column gate counts them as
+/// committable while `git commit` refuses an unmerged index. The button's only
+/// possible outcome would be an error, and for a binary or delete/modify
+/// conflict nothing else on the panel hints at why.
+#[test]
+fn an_unresolved_merge_does_not_offer_commit() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_conflict");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    workspace.write("shared.txt", "base\n");
+    git(root, &["add", "shared.txt"]);
+    git(root, &["commit", "-m", "base"]);
+
+    git(root, &["checkout", "-b", "theirs"]);
+    workspace.write("shared.txt", "theirs\n");
+    git(root, &["commit", "-am", "theirs"]);
+
+    git(root, &["checkout", "trunk"]);
+    workspace.write("shared.txt", "ours\n");
+    git(root, &["commit", "-am", "ours"]);
+
+    // A conflicting merge: `git merge` exits non-zero, so it cannot go through
+    // the asserting `git` helper.
+    let merged = std::process::Command::new("git")
+        .args(["merge", "theirs"])
+        .current_dir(root)
+        .output()
+        .expect("git merge should run");
+    assert!(
+        !merged.status.success(),
+        "the fixture must actually conflict for this test to mean anything"
+    );
+    let status = git(root, &["status", "--porcelain"]);
+    assert!(
+        status.contains("UU") || status.contains("AA"),
+        "the fixture must leave an unmerged porcelain status, got {status:?}"
+    );
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    assert!(
+        clickable_center(&panel, "Commit…").is_none(),
+        "an unmerged index cannot be committed, so offering Commit gives a button whose only outcome is an error. Panel showed: {:?}",
+        rendered_text(&panel)
+    );
+}
+
+/// Staged hunks stay reachable when unstaged hunks fill the control budget.
+///
+/// The projection appends every unstaged hunk before any staged one, so taking
+/// a combined prefix rendered no Unstage control at all once twelve unstaged
+/// hunks existed — forcing someone to stage unrelated changes before the hunk
+/// they wanted to unstage became reachable.
+#[test]
+fn staged_hunks_remain_reachable_behind_many_unstaged_ones() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_budget");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    let mut seed = String::new();
+    for line in 0..1_000 {
+        seed.push_str(&format!("line {line}\n"));
+    }
+    std::fs::write(root.join("wide.txt"), &seed).expect("seed a long file");
+    std::fs::write(root.join("staged.txt"), "one\n").expect("seed a second file");
+    git(root, &["add", "wide.txt", "staged.txt"]);
+    git(root, &["commit", "-m", "seed"]);
+
+    // One staged hunk in its own file.
+    std::fs::write(root.join("staged.txt"), "one changed\n").expect("edit the staged file");
+    git(root, &["add", "staged.txt"]);
+
+    // Far more unstaged hunks than the control budget, in another file.
+    let mut edited = String::new();
+    for line in 0..1_000 {
+        if line % 40 == 0 && line > 0 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    std::fs::write(root.join("wide.txt"), &edited).expect("edit the wide file");
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    let text = rendered_text(&panel).join("\n");
+    assert!(
+        text.contains("Unstage staged.txt"),
+        "the staged hunk must stay reachable behind the unstaged ones. Panel showed: {text}"
+    );
+}
