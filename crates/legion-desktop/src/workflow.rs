@@ -2550,7 +2550,11 @@ impl DesktopRuntime {
                 DesktopWorkflowOutcome::Saved
             }
             AppCommandOutcome::Save(AppSaveOutcome::Rejected(response)) => {
-                let message = format!("Save rejected: {response:?}");
+                // Not `{response:?}`: that put ~1,500 characters of lifecycle
+                // ids, version preconditions, fingerprint hashes and the
+                // extended-length path on screen, and said nothing about what
+                // had happened or whether the edits survived.
+                let message = crate::save_rejection::save_rejection_message(&response);
                 self.set_status(StatusSeverity::Warning, message.clone());
                 DesktopWorkflowOutcome::SaveRejected(message)
             }
