@@ -5,7 +5,45 @@
 //! capability decision and the audit record must name the destination the
 //! buffer text really takes.
 
-use crate::{ProductAiLiveBackend, ProductAiProviderPreference, product_ai_selected_live_backend};
+use crate::{ProductAiLiveBackend, anthropic_base_url_from_env};
+
+/// The Anthropic endpoint this build will actually contact.
+///
+/// Parsed from the configured base URL so the authorized target, the audit
+/// record and the request all name one destination.
+fn anthropic_network_target() -> legion_protocol::NetworkTarget {
+    let base = anthropic_base_url_from_env();
+    let trimmed = base.trim();
+    let (scheme, rest) = match trimmed.strip_prefix("https://") {
+        Some(rest) => ("https", rest),
+        None => match trimmed.strip_prefix("http://") {
+            Some(rest) => ("http", rest),
+            None => ("https", trimmed),
+        },
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let mut parts = authority.rsplitn(2, ':');
+    let (host, port) = match (parts.next(), parts.next()) {
+        // `rsplitn` yields the tail first, so a parsed port means an explicit
+        // one; anything else is a bare host, including an IPv6 literal.
+        (Some(tail), Some(head)) if tail.parse::<u16>().is_ok() => {
+            (head.to_string(), tail.parse::<u16>().ok())
+        }
+        _ => (
+            authority.to_string(),
+            Some(if scheme == "http" { 80 } else { 443 }),
+        ),
+    };
+    legion_protocol::NetworkTarget {
+        scheme: scheme.to_string(),
+        host: if host.is_empty() {
+            "api.anthropic.com".to_string()
+        } else {
+            host
+        },
+        port,
+    }
+}
 
 /// The network target, health and cost labels for a chosen backend.
 ///
@@ -26,11 +64,14 @@ pub(crate) fn route_descriptor_for_backend(
 ) {
     match backend {
         Some(ProductAiLiveBackend::Anthropic) => (
-            legion_protocol::NetworkTarget {
-                scheme: "https".to_string(),
-                host: "api.anthropic.com".to_string(),
-                port: Some(443),
-            },
+            // Derived from the same base-URL configuration the client uses, not
+            // hard-coded. `LEGION_ANTHROPIC_BASE_URL` and its two aliases can
+            // point at a proxy or a self-hosted endpoint, and the buffer excerpt
+            // goes there -- so a descriptor naming `api.anthropic.com` would
+            // misstate the destination for exactly the deployments that care
+            // most, and would then have the broker allowlist a host the request
+            // never contacts.
+            anthropic_network_target(),
             "delegate.remote.anthropic",
             "remote.metered",
             // The buffer excerpt leaves the machine on this route, so the label
@@ -61,25 +102,6 @@ pub(crate) fn route_descriptor_for_backend(
     }
 }
 
-/// The route the bytes of a product chat turn will really take.
-///
-/// The Delegate chat route request used to hard-code `http://localhost:11434`
-/// with `delegate.local.deterministic` and `local.free`, and then hand the
-/// preferred provider up to 3,000 characters of buffer text -- so a turn
-/// answered by Anthropic was authorized, and audited, as local metadata-only
-/// traffic. The capability decision described one destination and the bytes went
-/// to another.
-pub(crate) fn product_ai_route_descriptor(
-    preference: ProductAiProviderPreference,
-) -> (
-    legion_protocol::NetworkTarget,
-    &'static str,
-    &'static str,
-    legion_protocol::ProposalPrivacyLabel,
-) {
-    route_descriptor_for_backend(product_ai_selected_live_backend(preference))
-}
-
 #[cfg(test)]
 mod delegate_chat_route_honesty_tests {
     use super::{ProductAiLiveBackend, route_descriptor_for_backend};
@@ -98,8 +120,16 @@ mod delegate_chat_route_honesty_tests {
     fn a_remote_backend_declares_external_egress_and_a_remote_cost() {
         let (target, health, cost, privacy) =
             route_descriptor_for_backend(Some(ProductAiLiveBackend::Anthropic));
-        assert_eq!(target.host, "api.anthropic.com");
-        assert_eq!(target.scheme, "https");
+        // Host is not asserted literally: it comes from the configured base
+        // URL, so pinning `api.anthropic.com` here would fail on any deployment
+        // pointing at a proxy -- and would re-introduce the hard-coding this
+        // parses away from. What must hold is that it is not the loopback.
+        assert!(
+            target.host != "localhost" && target.host != "127.0.0.1",
+            "the Anthropic route must not be described as loopback, got {}",
+            target.host
+        );
+        assert!(!target.host.is_empty());
         assert_eq!(
             privacy,
             ProposalPrivacyLabel::ExternalEgressMetadata,
@@ -110,6 +140,40 @@ mod delegate_chat_route_honesty_tests {
             "the exact cost label is part of the contract this file states; `is not local.free` would accept any other wrong string"
         );
         assert!(health.contains("remote"), "health label was {health}");
+    }
+
+    /// The authorized target follows the configured base URL.
+    ///
+    /// Set through the process environment, which is what the client reads, so
+    /// this exercises the same path a proxy deployment takes rather than a
+    /// parallel one. Serialised against the other env-reading test by running
+    /// the whole scenario inside one test.
+    #[test]
+    fn a_configured_base_url_becomes_the_authorized_target() {
+        // SAFETY: single-threaded within this test; no other test in this
+        // module reads these variables.
+        unsafe {
+            std::env::set_var(
+                "LEGION_ANTHROPIC_BASE_URL",
+                "https://proxy.internal:8443/v1",
+            );
+        }
+        let (target, _health, _cost, privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::Anthropic));
+        unsafe {
+            std::env::remove_var("LEGION_ANTHROPIC_BASE_URL");
+        }
+        assert_eq!(
+            target.host, "proxy.internal",
+            "host must follow the base URL"
+        );
+        assert_eq!(target.port, Some(8443), "an explicit port must be carried");
+        assert_eq!(target.scheme, "https");
+        assert_eq!(
+            privacy,
+            ProposalPrivacyLabel::ExternalEgressMetadata,
+            "a proxy is still off-machine"
+        );
     }
 
     /// Local backends stay local, and say so.

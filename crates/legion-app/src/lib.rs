@@ -27325,8 +27325,15 @@ impl AppComposition {
         let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
         // Resolved before the route request so the capability decision, the
         // audit record and the bytes all describe the same destination.
+        // The backend is resolved once and drives three things that have to
+        // agree: the route request, the broker policy, and the bytes. Naming
+        // Anthropic in the request while building the broker from
+        // `SecurityPolicy::default()` -- which is air-gapped, local-provider
+        // only, and allowlists localhost -- makes the router refuse the very
+        // route the audit describes, so an honest record buys a broken feature.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
         let (route_target, route_health, route_cost, route_privacy) =
-            crate::ai_route_descriptor::product_ai_route_descriptor(self.preferred_ai_provider);
+            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -27451,7 +27458,7 @@ impl AppComposition {
             schema_version: 1,
         };
         let broker = DenyByDefaultBroker::new(
-            SecurityPolicy::default(),
+            product_ai_security_policy(live_backend),
             CapabilityNamespace("app.delegate".to_string()),
         );
         let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
