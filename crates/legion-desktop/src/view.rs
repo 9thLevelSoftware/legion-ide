@@ -5107,12 +5107,31 @@ fn render_test_controls(
             });
         }
         if soft_button(ui, "Run cargo test").clicked() {
+            // Two actions, because launching is not running. `TerminalLaunch`
+            // spawns the shell and uses `command_label` for the status line and
+            // the audit record only — it never writes the command to the PTY.
+            // This button therefore opened a shell, reported "Terminal running:
+            // cargo test", and ran nothing.
+            //
+            // Sending the command as input is what runs it, and it goes through
+            // the `terminal.input` capability gate rather than inventing a new
+            // authority that writes to a PTY without one.
             actions.push(DesktopAction::TerminalLaunch {
-                command_label: "cargo test".to_string(),
+                command_label: RUN_TESTS_COMMAND.to_string(),
+            });
+            actions.push(DesktopAction::TerminalInput {
+                payload: format!("{RUN_TESTS_COMMAND}\r"),
             });
         }
     });
 }
+
+/// The command the Tests surface offers to run.
+///
+/// Named so the button label, the status line and the bytes sent to the PTY
+/// cannot drift apart -- which is exactly how the button came to claim it ran
+/// something it never sent.
+const RUN_TESTS_COMMAND: &str = "cargo test";
 
 fn render_git_controls(
     ui: &mut egui::Ui,
