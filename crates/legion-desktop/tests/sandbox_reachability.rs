@@ -43,6 +43,11 @@ fn open_app(root: &Path) -> DesktopEframeApp {
 /// `Task description` label through `labelled_by`, so it carries no label of
 /// its own and `clickable_center` cannot see it.
 fn task_draft_center(output: &egui::FullOutput) -> Option<egui::Pos2> {
+    // Found by name, not by role. This used to take the first
+    // `MultilineTextInput` on the frame, which was unambiguous only while the
+    // Delegate surface had exactly one. It now also carries a chat composer, and
+    // the first multiline field became the wrong one -- so the task description
+    // was typed into chat and the submit button never enabled.
     output
         .platform_output
         .accesskit_update
@@ -50,9 +55,10 @@ fn task_draft_center(output: &egui::FullOutput) -> Option<egui::Pos2> {
         .nodes
         .iter()
         .find_map(|(_id, node)| {
-            (node.role() == egui::accesskit::Role::MultilineTextInput)
-                .then(|| node.bounds())
-                .flatten()
+            (node.role() == egui::accesskit::Role::MultilineTextInput
+                && node.label() == Some("Task description"))
+            .then(|| node.bounds())
+            .flatten()
         })
         .map(|bounds| {
             egui::pos2(

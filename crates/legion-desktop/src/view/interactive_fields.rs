@@ -346,7 +346,15 @@ pub(crate) fn render_delegate_task_draft(
             ))
             .margin(egui::Margin::symmetric(4, 8)),
     );
+    let field_id = response.id;
     response.labelled_by(label.id);
+    // Named, not merely related. `labelled_by` records a relation and leaves the
+    // node anonymous, which was tolerable while this was the only multiline
+    // field on the surface; the Delegate chat composer is a second one, so an
+    // unnamed box is now ambiguous to a screen reader and to anything driving
+    // the accessibility tree.
+    ui.ctx()
+        .accesskit_node_builder(field_id, |node| node.set_label("Task description"));
     draft = bounded_delegate_task_draft(&draft).into_owned();
     let ready = canonical_scope_available && !draft.trim().is_empty();
     let submitted = ui
