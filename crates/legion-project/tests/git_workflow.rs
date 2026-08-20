@@ -1279,3 +1279,54 @@ fn staged_hunks_are_projected_when_unstaged_hunks_exceed_the_limit() {
         snapshot.hunks.len()
     );
 }
+
+/// A repository with exactly the allowance is not truncated.
+///
+/// `git_diff_hunks` stops at the limit it is given, so a vector of exactly
+/// `max_hunks` is ambiguous by length alone. The first version of the flag read
+/// that as truncation, so a caller asking for eight hunks from a repository with
+/// exactly eight was told hunks had been omitted when none had — which makes a
+/// public projection contract unreliable in the one direction that matters,
+/// since a surface trusting it will stop showing exact counts it could show.
+#[test]
+fn a_snapshot_holding_every_hunk_is_not_marked_truncated() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let mut seed = String::new();
+    for line in 0..40 {
+        seed.push_str(&format!("line {line}\n"));
+    }
+    repo.write("exact.txt", &seed);
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+
+    // Two widely separated edits: exactly two unstaged hunks, no staged ones.
+    let mut edited = String::new();
+    for line in 0..40 {
+        if line == 5 || line == 30 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    repo.write("exact.txt", &edited);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 2,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot should collect");
+
+    assert_eq!(
+        snapshot.hunks.len(),
+        2,
+        "the fixture must produce exactly the allowance"
+    );
+    assert!(
+        !snapshot.hunks_truncated,
+        "every hunk in the repository is present, so nothing was omitted"
+    );
+}

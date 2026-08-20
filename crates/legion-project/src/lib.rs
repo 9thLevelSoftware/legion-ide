@@ -990,9 +990,16 @@ pub fn collect_git_snapshot_with_backend(
     // and materialises the whole of `git diff` before applying its limit, so on
     // a large working tree that repeated the most expensive call in this
     // function on every refresh.
-    let unstaged_hunks =
-        git_diff_hunks(&repository_root, GitHunkStage::Unstaged, options.max_hunks)?;
-    let staged_hunks = git_diff_hunks(&repository_root, GitHunkStage::Staged, options.max_hunks)?;
+    // One past the allowance on each side, so "exactly full" can be told apart
+    // from "full and there is more". The extra hunk is discarded immediately;
+    // it exists only to answer that question.
+    let probe_limit = options.max_hunks.saturating_add(1);
+    let unstaged_probe = git_diff_hunks(&repository_root, GitHunkStage::Unstaged, probe_limit)?;
+    let staged_probe = git_diff_hunks(&repository_root, GitHunkStage::Staged, probe_limit)?;
+    let unstaged_overflowed = unstaged_probe.len() > options.max_hunks;
+    let staged_overflowed = staged_probe.len() > options.max_hunks;
+    let unstaged_hunks: Vec<_> = unstaged_probe.into_iter().take(options.max_hunks).collect();
+    let staged_hunks: Vec<_> = staged_probe.into_iter().take(options.max_hunks).collect();
     // Half each, with either side's unused share given to the other, so a
     // repository with only one kind still fills the allowance exactly as before.
     let staged_reserved = options.max_hunks / 2;
@@ -1002,10 +1009,16 @@ pub fn collect_git_snapshot_with_backend(
     let unstaged_take = unstaged_hunks
         .len()
         .min(options.max_hunks.saturating_sub(staged_take));
-    // True when either side was capped by its collection limit, or when the
-    // split dropped some of what was collected.
-    let hunks_truncated = unstaged_hunks.len() >= options.max_hunks
-        || staged_hunks.len() >= options.max_hunks
+    // True only when something was actually omitted: either a side had more
+    // than the allowance, or the split dropped part of what was collected.
+    //
+    // The overflow flags come from collecting one past the allowance, because
+    // `git_diff_hunks` stops at the limit it is given — so a vector of exactly
+    // `max_hunks` cannot be distinguished from a truncated one by its length
+    // alone, and a caller asking for eight hunks from a repository with exactly
+    // eight was told the snapshot was truncated when nothing had been omitted.
+    let hunks_truncated = unstaged_overflowed
+        || staged_overflowed
         || unstaged_take < unstaged_hunks.len()
         || staged_take < staged_hunks.len();
     let mut hunks: Vec<_> = unstaged_hunks.into_iter().take(unstaged_take).collect();
