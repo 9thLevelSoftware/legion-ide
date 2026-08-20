@@ -442,6 +442,18 @@ fn an_assist_rail_command_produces_a_real_proposal() {
         }
     }
 
+    // The row is only half the requirement. Checklist row 5 asks for a proposal
+    // to appear, and a proposal a person cannot act on has not appeared --
+    // `render_proposal_cards` was reachable only from the Workflows rail, so an
+    // Assist user could start one and had nowhere to approve or reject it.
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        clickable_center(&settled, "Approve").is_some()
+            && clickable_center(&settled, "Reject").is_some(),
+        "the proposal must be reviewable on the surface that created it; frame showed {:?}",
+        rendered_text(&settled)
+    );
+
     assert!(
         rows > before,
         "clicking a rail command produced no proposal (ledger stayed at {before} rows). The action reaches StartAiProposal through the bridge, so a click that changes nothing means the control never dispatched. Frame showed: {:?}",

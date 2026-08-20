@@ -5679,6 +5679,15 @@ fn render_assist_rail(
         model.product_ai_stream_in_flight,
         actions,
     );
+    // A proposal created here has to be reviewable here. `render_proposal_cards`
+    // is a complete Approve/Reject/Cancel surface and was called only from the
+    // Workflows rail, so an Assist user could start a proposal and had nowhere
+    // to act on it -- the checklist row asks for a proposal to *appear*, not
+    // merely to exist in a ledger.
+    if !snapshot.proposal_ledger_projection.rows.is_empty() {
+        components::section_header(ui, "Proposals", Some(theme::tokens().accent.green));
+        render_proposal_cards(ui, snapshot, actions);
+    }
     render_assisted_suggestion_panel(ui, snapshot, model, actions);
     ui.add_space(6.0);
     ui.label(theme::muted(

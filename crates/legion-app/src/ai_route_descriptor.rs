@@ -1,9 +1,9 @@
 //! Where a product AI chat turn's bytes actually go, and what the audit says.
 //!
-//! Extracted from `lib.rs` because that file is a chokepoint with a line budget,
-//! and because this mapping is the whole of a security property: the route
-//! request, the capability decision and the audit record must name the
-//! destination the buffer text really takes.
+//! New in its own module: `lib.rs` is a chokepoint with a line budget, and this
+//! mapping is the whole of a security property -- the route request, the
+//! capability decision and the audit record must name the destination the
+//! buffer text really takes.
 
 use crate::{ProductAiLiveBackend, ProductAiProviderPreference, product_ai_selected_live_backend};
 
@@ -105,7 +105,10 @@ mod delegate_chat_route_honesty_tests {
             ProposalPrivacyLabel::ExternalEgressMetadata,
             "a route that carries buffer text off the machine must say so"
         );
-        assert_ne!(cost, "local.free", "off-machine traffic is not local.free");
+        assert_eq!(
+            cost, "remote.metered",
+            "the exact cost label is part of the contract this file states; `is not local.free` would accept any other wrong string"
+        );
         assert!(health.contains("remote"), "health label was {health}");
     }
 

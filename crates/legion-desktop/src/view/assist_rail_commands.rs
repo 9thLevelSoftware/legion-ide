@@ -3,12 +3,28 @@
 //! New in its own module rather than added to `view.rs`, which is a chokepoint
 //! file with a line budget. A self-contained region -- a command list, a gate on
 //! having a buffer, and a row of buttons -- so it has no reason to live there.
+//!
+//! ## Builds that cannot propose
+//!
+//! `--no-default-features --features offline` is a supported, CI-checked
+//! configuration in which `legion-app` uses `offline_ai::ProviderRouter`, whose
+//! `route_completion` always refuses. Every command here would complete through
+//! the metadata-only path with `proposal_id: None`: a button that runs, reports
+//! nothing wrong, and produces no proposal. The controls are disabled in that
+//! build with the reason stated, because "nothing happened and nobody said why"
+//! is the defect this module exists to remove.
 
 use legion_protocol::AssistantRailCommand;
 use legion_ui::ShellProjectionSnapshot;
 
 use super::theme;
 use crate::bridge::DesktopAction;
+
+/// Whether this build can produce a proposal at all.
+///
+/// The `offline` feature swaps in a router that always refuses, so the commands
+/// would dispatch, succeed, and create nothing.
+const PROPOSALS_AVAILABLE: bool = !cfg!(feature = "offline");
 
 /// The assistant rail commands, in the order the panel offers them.
 ///
@@ -61,7 +77,11 @@ pub(crate) fn render_assist_rail_commands(
         // Disabled while the shared product-AI lane is busy. `start_ai_proposal`
         // rejects a second request outright, so a live button during a stream
         // is a button whose only outcome is an error toast.
-        if stream_in_flight {
+        if !PROPOSALS_AVAILABLE {
+            ui.label(theme::muted(
+                "This build routes AI offline, which cannot produce proposals.",
+            ));
+        } else if stream_in_flight {
             ui.label(theme::muted("Waiting for the current run to finish…"));
         }
         ui.horizontal_wrapped(|ui| {
@@ -70,7 +90,7 @@ pub(crate) fn render_assist_rail_commands(
                     ui,
                     label,
                     theme::tokens().accent.orange,
-                    !stream_in_flight,
+                    PROPOSALS_AVAILABLE && !stream_in_flight,
                 )
                 .clicked()
                 {
