@@ -18,6 +18,8 @@ mod tab_strip;
 use call_hierarchy::call_hierarchy_rows;
 use tab_strip::render_tab_strip;
 
+use proposal_cards::render_proposal_cards;
+
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
@@ -36,6 +38,8 @@ pub(crate) mod interactive_fields;
 pub mod manifest_panel;
 /// Editable plan editor projection.
 pub mod plan_editor;
+/// The proposal ledger rendered as Approve / Review / Reject cards.
+pub mod proposal_cards;
 /// Proposal review and checkpoint timeline view models.
 pub mod proposal_review;
 /// Risk strip view model and row projections for proposal review surfaces.
@@ -94,10 +98,10 @@ use legion_protocol::{
     DelegatedTaskToolPermissionDecision, FileId, LanguageInlayHintProjection,
     LanguageLocationProjection, LanguageProblemProjection, LegionToolKind, LineWrappingPolicy,
     PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    PrivacyInspectorRedactionState, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
-    ProposalRejectionReason, ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange,
-    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll,
-    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    PrivacyInspectorRedactionState, ProposalId, ProposalLifecycleState, ProposalRejectionReason,
+    ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
@@ -6253,91 +6257,6 @@ fn user_facing_protocol_label(raw: &str) -> String {
         first.make_ascii_uppercase();
     }
     label
-}
-
-fn render_proposal_cards(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let ledger = &snapshot.proposal_ledger_projection;
-    if ledger.rows.is_empty() {
-        ui.label(theme::muted("No pending proposals"));
-        return;
-    }
-    const PROPOSAL_CARD_LIMIT: usize = 4;
-    for row in ledger.rows.iter().take(PROPOSAL_CARD_LIMIT) {
-        // Only proposals still awaiting a decision should expose Approve/Reject;
-        // terminal/applied/denied proposals render the controls disabled so a
-        // dropped click cannot re-trigger a lifecycle action.
-        let actionable = matches!(
-            row.lifecycle.state,
-            ProposalLifecycleState::Created
-                | ProposalLifecycleState::Validated
-                | ProposalLifecycleState::Previewed
-        );
-        let cancellable = matches!(
-            row.lifecycle.state,
-            ProposalLifecycleState::Created
-                | ProposalLifecycleState::Validated
-                | ProposalLifecycleState::Previewed
-                | ProposalLifecycleState::Approved
-        );
-        theme::card_frame_tinted(
-            theme::tokens().bg.card,
-            theme::dim(theme::tokens().accent.orange, 48),
-        )
-        .show(ui, |ui| {
-            ui.label(theme::body_strong(&row.title));
-            ui.horizontal(|ui| {
-                ui.label(theme::muted(format!("{:?}", row.payload_kind)));
-                ui.separator();
-                ui.label(theme::accent(
-                    format!("Risk: {}", proposal_risk_label(row.risk_label)),
-                    risk_color(row.risk_label),
-                ));
-            });
-            // Surface the lifecycle state so terminal proposals are legible.
-            ui.label(theme::muted(format!("status: {}", row.lifecycle.label)));
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(actionable, |ui| {
-                    if primary_button(ui, "Approve", theme::tokens().accent.green).clicked()
-                        && actionable
-                    {
-                        actions.push(DesktopAction::ApproveProposal {
-                            proposal_id: row.proposal_id,
-                        });
-                    }
-                });
-                if soft_button(ui, "Review").clicked() {
-                    actions.push(DesktopAction::OpenProposalDetails {
-                        proposal_id: row.proposal_id,
-                    });
-                }
-                ui.add_enabled_ui(actionable, |ui| {
-                    if soft_button(ui, "Reject").clicked() && actionable {
-                        actions.push(DesktopAction::RejectProposal {
-                            proposal_id: row.proposal_id,
-                            reason: ProposalRejectionReason::UserRejected,
-                        });
-                    }
-                });
-                ui.add_enabled_ui(cancellable, |ui| {
-                    if soft_button(ui, "Cancel proposal").clicked() && cancellable {
-                        actions.push(DesktopAction::CancelProposal {
-                            proposal_id: row.proposal_id,
-                            reason: ProposalCancellationReason::UserCancelled,
-                        });
-                    }
-                });
-            });
-        });
-    }
-    let hidden =
-        ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT) + ledger.omitted_row_count as usize;
-    if hidden > 0 {
-        ui.label(theme::muted(format!("{hidden} more proposals")));
-    }
 }
 
 fn render_delegated_hunk_review_controls(
