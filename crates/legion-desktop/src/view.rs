@@ -5935,7 +5935,12 @@ fn render_delegation_console(
     section_label(ui, "Permission budget", Some(theme::tokens().accent.orange));
     render_delegate_permission_budget(ui, snapshot);
     section_label(ui, "Sandbox", Some(theme::tokens().accent.blue));
-    render_compact_rows(ui, &model.sandbox_rows, "Sandbox is preparing", 5);
+    render_compact_rows(
+        ui,
+        &model.sandbox_rows,
+        "Sandbox is preparing",
+        sandbox_panel::PANEL_VISIBLE_ROW_LIMIT,
+    );
 }
 
 fn render_delegate_permission_budget(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
@@ -7279,13 +7284,20 @@ fn render_problem_rows(
     }
 }
 
+/// Longest a compact row may be before its middle is replaced by an ellipsis.
+///
+/// Named so callers that must keep a line readable end to end — the sandbox
+/// panel's platform-limitation row, for one — can hold themselves to the same
+/// budget in a test instead of guessing at it.
+pub(crate) const COMPACT_ROW_CHAR_BUDGET: usize = 110;
+
 fn render_compact_rows(ui: &mut egui::Ui, rows: &[String], empty: &str, limit: usize) {
     if rows.is_empty() {
         ui.label(theme::muted(empty));
         return;
     }
     for row in rows.iter().take(limit) {
-        ui.label(theme::body(trim_middle(row, 110)));
+        ui.label(theme::body(trim_middle(row, COMPACT_ROW_CHAR_BUDGET)));
     }
     if rows.len() > limit {
         ui.label(theme::muted(format!("{} more rows", rows.len() - limit)));
@@ -10898,9 +10910,16 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !debug.diagnostics.is_empty()
     {
         // Dual-mode honesty: live adapter vs simulated fixture (WS-A-D B3).
+        //
+        // Three states, not two. `live_adapter` is a property of the running
+        // session, so with no session it answers a question nobody asked and
+        // the old two-way branch turned its `false` into a claim about the
+        // build. See `cut_lines::DEBUG_NO_SESSION_BANNER`.
         rows.push(format!(
             "debug: {}",
-            if debug.live_adapter {
+            if debug.active_session_id.is_none() {
+                crate::cut_lines::DEBUG_NO_SESSION_BANNER
+            } else if debug.live_adapter {
                 crate::cut_lines::DEBUG_LIVE_BANNER
             } else {
                 crate::cut_lines::DEBUG_SIMULATED_BANNER

@@ -246,18 +246,47 @@ impl RendererSmokeReport {
 }
 
 /// Run timed native-window smoke and write evidence.
+///
+/// The evidence file is written before the status is turned into an exit code,
+/// so a failed or blocked run still leaves a readable report behind.
 pub fn run_smoke(config: DesktopLaunchConfig, smoke: RendererSmokeConfig) -> Result<()> {
     let command = smoke_command(&config, &smoke);
     match run_smoke_window(config.clone(), smoke.clone(), command.clone()) {
-        Ok(report) => {
-            report.write_evidence(&smoke.evidence_path)?;
-            Ok(())
-        }
+        Ok(report) => finish_smoke(&report, &smoke.evidence_path),
         Err(error) => {
             let report = RendererSmokeReport::blocked(command, &config, &smoke, error.to_string());
             report.write_evidence(&smoke.evidence_path)?;
             Err(error)
         }
+    }
+}
+
+/// Write the evidence file, then turn the report's status into a process result.
+///
+/// Evidence first, exit code second: the report is what a person reads after a
+/// smoke run, so it must exist even when the run failed. Until this function
+/// existed `run_smoke` wrote the evidence and returned `Ok(())` whatever the
+/// status said, so `--smoke` exited 0 over a report reading `status: failed`:
+/// a green tick on top of a failed gate, which is the one outcome a smoke run
+/// exists to prevent.
+///
+/// `Blocked` is non-zero too. A smoke that could not run has not passed, and a
+/// caller that treats "no window available" as success is running a gate that
+/// can never fail.
+pub fn finish_smoke(report: &RendererSmokeReport, evidence_path: &Path) -> Result<()> {
+    report.write_evidence(evidence_path)?;
+    match report.status {
+        RendererSmokeStatus::Passed => Ok(()),
+        RendererSmokeStatus::Failed => Err(anyhow!(
+            "renderer smoke failed ({} error(s)); see {}",
+            report.errors.len(),
+            evidence_path.display()
+        )),
+        RendererSmokeStatus::Blocked => Err(anyhow!(
+            "renderer smoke blocked ({} error(s)); see {}",
+            report.errors.len(),
+            evidence_path.display()
+        )),
     }
 }
 
