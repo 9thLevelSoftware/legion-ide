@@ -317,6 +317,41 @@ pub fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
 /// cannot be used to ask it. Callers that require the control write
 /// `.unwrap_or_else(|| panic!(...))` at the call site, where the message can say
 /// what the test was doing.
+/// The centre of a control that is both clickable **and** enabled.
+///
+/// `clickable_center` matches on `Action::Click`, which egui reports for
+/// disabled widgets too: `add_enabled_ui(false, ..)` sets `is_disabled` on the
+/// accessibility node and leaves the click action in place. So a test asserting
+/// a control is reachable through `clickable_center` alone also passes when the
+/// control is greyed out and pressing it does nothing -- which is the exact
+/// failure those tests exist to catch.
+///
+/// Kept separate rather than folded into `clickable_center` because the
+/// existing callers use that function to find a control to click, and a
+/// deliberately-disabled control they never click is not a reason for them to
+/// fail. Use this one when "enabled" is the property being asserted.
+pub fn enabled_clickable_center(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label)
+                && node.supports_action(egui::accesskit::Action::Click)
+                && !node.is_disabled())
+            .then(|| node.bounds())
+            .flatten()
+        })
+        .map(|bounds| {
+            egui::pos2(
+                ((bounds.x0 + bounds.x1) * 0.5) as f32,
+                ((bounds.y0 + bounds.y1) * 0.5) as f32,
+            )
+        })
+}
+
 pub fn clickable_center(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
     output
         .platform_output

@@ -37,7 +37,10 @@ use std::time::{Duration, Instant};
 const STREAMING_PLACEHOLDER: &str = "Streaming response";
 
 mod common;
-use common::{TempWorkspace, click_at, clickable_center, full_frame_input, rendered_text};
+use common::{
+    TempWorkspace, click_at, clickable_center, enabled_clickable_center, full_frame_input,
+    rendered_text,
+};
 
 use legion_desktop::{
     bridge::DesktopAction,
@@ -458,5 +461,114 @@ fn an_assist_rail_command_produces_a_real_proposal() {
         rows > before,
         "clicking a rail command produced no proposal (ledger stayed at {before} rows). The action reaches StartAiProposal through the bridge, so a click that changes nothing means the control never dispatched. Frame showed: {:?}",
         rendered_text(&after)
+    );
+}
+
+/// The proposal a person just made must be the one Assist makes reviewable.
+///
+/// `render_proposal_cards` drew `rows.iter().take(4)` and
+/// `proposal_ledger_projection` sorts oldest-first, so on a ledger that already
+/// held four, the proposal just created fell into the "N more proposals" line --
+/// static text carrying no Approve, Review or Reject. The Assist rail therefore
+/// still had the defect it was changed to fix: somewhere to start a proposal
+/// and nowhere to act on the one you started.
+///
+/// Every card carries the same title on the deterministic route, so the rows
+/// cannot be told apart by their text. They are told apart by state instead:
+/// the four older proposals are put through Approve first, which leaves them in
+/// a terminal state whose card renders its lifecycle controls disabled. An
+/// *enabled* `Approve` in the final frame can then only belong to the fifth,
+/// newest, still-pending proposal.
+#[test]
+fn the_newest_proposal_stays_reviewable_once_the_ledger_is_full() {
+    /// `render_proposal_cards` draws this many cards; the ledger has to exceed
+    /// it or the ordering under test never applies.
+    const CARD_LIMIT: usize = 4;
+
+    let workspace = fixture("legion_desktop_assist_newest_proposal");
+    let mut runtime = runtime_with_open_file(workspace.path());
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
+    let mut app = DesktopEframeApp::new(runtime);
+    switch_mode(&mut app, "Assist");
+
+    // Fill the ledger one proposal past the card limit, through the real rail
+    // control. The click is retried rather than issued a fixed number of times:
+    // the rail disables itself while the shared product-AI lane is busy, so a
+    // click sent too early lands on a dead button and the ledger silently stays
+    // where it was.
+    let wanted = CARD_LIMIT + 1;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+    while rows < wanted && Instant::now() < deadline {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        if let Some(explain) = enabled_clickable_center(&frame, "Explain") {
+            let _ = click_at(&mut app, explain);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+    }
+    assert_eq!(
+        rows, wanted,
+        "the fixture needs {wanted} proposals to exercise a full card list, got {rows}"
+    );
+
+    // Oldest-first ordering makes the last row the newest, which is also the row
+    // the ledger selects by default.
+    let ledger = app.runtime_snapshot().proposal_ledger_projection;
+    let newest = ledger
+        .rows
+        .last()
+        .expect("the ledger was just filled")
+        .proposal_id;
+    assert_eq!(
+        ledger.selected_proposal_id,
+        Some(newest),
+        "the ledger selects the newest proposal, and the renderer follows that selection"
+    );
+    for row in ledger.rows.iter().filter(|row| row.proposal_id != newest) {
+        app.handle_action(DesktopAction::ApproveProposal {
+            proposal_id: row.proposal_id,
+        })
+        .expect("approving an existing pending proposal must be handled");
+    }
+
+    // Non-vacuity, in both directions. The four older proposals must really
+    // render Approve as disabled, or "an enabled Approve means the newest is on
+    // screen" is not an inference this test is entitled to draw -- and the
+    // frame must still carry four Approve controls, or the assertion below
+    // could be satisfied by a ledger that simply emptied.
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let approve_controls = settled
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter(|(_id, node)| node.label() == Some("Approve"))
+                .count()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        approve_controls,
+        CARD_LIMIT,
+        "the panel should still be drawing a full set of {CARD_LIMIT} cards; frame showed {:?}",
+        rendered_text(&settled)
+    );
+    assert!(
+        clickable_center(&settled, "Approve").is_some(),
+        "sanity: disabled Approve controls are still present as nodes"
+    );
+
+    assert!(
+        enabled_clickable_center(&settled, "Approve").is_some(),
+        "with the four older proposals already put through Approve, the only \
+         card that can offer a live Approve is the newest one -- so this frame \
+         rendered the four oldest and hid the proposal the person just created. \
+         Frame showed {:?}",
+        rendered_text(&settled)
     );
 }

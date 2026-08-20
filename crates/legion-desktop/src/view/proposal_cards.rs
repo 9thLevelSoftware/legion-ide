@@ -26,7 +26,32 @@ pub(crate) fn render_proposal_cards(
         return;
     }
     const PROPOSAL_CARD_LIMIT: usize = 4;
-    for row in ledger.rows.iter().take(PROPOSAL_CARD_LIMIT) {
+    // Newest first, with the ledger's selected proposal pinned to the front.
+    //
+    // Rows arrive oldest-first, so `take(PROPOSAL_CARD_LIMIT)` on a ledger of
+    // five rendered the four *oldest* and pushed the proposal just created into
+    // the "N more proposals" line -- static text carrying no Approve, Review or
+    // Reject. That defeats the reason this is drawn in Assist at all: a proposal
+    // created here has to be actionable here, and the one just created is the
+    // newest row, not the oldest. The ledger already records which row is
+    // current and defaults it to the newest, so that is the row that leads.
+    let selected = ledger.selected_proposal_id;
+    let mut ordered: Vec<&legion_protocol::ProposalLedgerRow> =
+        Vec::with_capacity(ledger.rows.len());
+    ordered.extend(
+        ledger
+            .rows
+            .iter()
+            .filter(|row| Some(row.proposal_id) == selected),
+    );
+    ordered.extend(
+        ledger
+            .rows
+            .iter()
+            .rev()
+            .filter(|row| Some(row.proposal_id) != selected),
+    );
+    for row in ordered.into_iter().take(PROPOSAL_CARD_LIMIT) {
         // Only proposals still awaiting a decision should expose Approve/Reject;
         // terminal/applied/denied proposals render the controls disabled so a
         // dropped click cannot re-trigger a lifecycle action.

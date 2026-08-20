@@ -50,12 +50,16 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
     legion_editor::TextPosition::new(line, column)
 }
 
-/// Outcome construction, extracted from this file for the chokepoint budget.
-/// App-owned extension catalog: verification, permission review, install (P7.F2).
+/// Where a product AI chat turn's bytes actually go, and what the audit says.
 pub mod ai_route_descriptor;
+
+/// Cloud-lane egress manifest and acknowledgement, with a content digest.
 pub mod cloud_lane_egress;
+
+/// App-owned extension catalog: verification, permission review, install (P7.F2).
 pub mod extension_management;
 
+/// Outcome construction, extracted from this file for the chokepoint budget.
 mod command_outcome;
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
@@ -1687,24 +1691,31 @@ fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMes
     AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
 }
 
+/// Resolve the configured Ollama base URL (custom port / self-hosted).
+///
+/// Not gated on the `ai` feature: it reads only the environment, and the route
+/// descriptor names a destination in every build.
+pub(crate) fn ollama_base_url_from_env() -> String {
+    std::env::var("OLLAMA_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:11434".to_string())
+}
+
 /// Fast TCP probe for Ollama loopback so CI/offline does not pay HTTP timeouts.
 #[cfg(feature = "ai")]
 fn ollama_loopback_reachable() -> bool {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let base =
-        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-    let trimmed = base
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/');
-    let host_port = if trimmed.contains(':') {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}:11434")
-    };
+    // Through the shared route descriptor, so the probe, the authorized target
+    // and the provider client all resolve one endpoint from one configuration.
+    // This used to default to `127.0.0.1` while `OllamaProvider::default` used
+    // `localhost`, and to append `:11434` to a bare host the client would have
+    // reached on port 80 -- so a configured deployment could be probed at an
+    // address the request never used.
+    let target = crate::ai_route_descriptor::ollama_network_target();
+    let host_port = format!("{}:{}", target.host, target.port.unwrap_or(11434));
     let Ok(mut addrs) = host_port.to_socket_addrs() else {
         return false;
     };
@@ -2124,24 +2135,10 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
 }
 
 fn anthropic_route_host() -> String {
-    #[cfg(feature = "ai")]
-    {
-        let base = anthropic_base_url_from_env();
-        base.trim()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .split(':')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .to_string()
-    }
-    #[cfg(not(feature = "ai"))]
-    {
-        "api.anthropic.com".to_string()
-    }
+    // The host the broker allowlists must come from the same parse as the host
+    // the route request names, or a configured proxy is authorized under one
+    // spelling and contacted under another.
+    crate::ai_route_descriptor::anthropic_network_target().host
 }
 
 /// Provider route metadata that matches the backend that will receive workspace text.
@@ -2161,11 +2158,7 @@ fn product_ai_route_fields(
             "ollama".to_string(),
             ollama_model_label_offline_safe(),
             AssistedAiProviderClass::LocalLoopback,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            Some(crate::ai_route_descriptor::ollama_network_target()),
             vec!["local.ollama".to_string()],
             vec!["local.free".to_string()],
             legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
@@ -2174,11 +2167,7 @@ fn product_ai_route_fields(
             "anthropic".to_string(),
             "claude-sonnet-4-20250514".to_string(),
             AssistedAiProviderClass::ByokRemote,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "https".to_string(),
-                host: anthropic_route_host(),
-                port: Some(443),
-            }),
+            Some(crate::ai_route_descriptor::anthropic_network_target()),
             vec!["byok.anthropic".to_string()],
             vec!["remote.byok".to_string()],
             // Buffer excerpts leave the machine under BYOK remote.
