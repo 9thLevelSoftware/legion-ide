@@ -27,10 +27,9 @@ const WINDOWS_LIMITATION: &str =
     "Windows Job Object only: process lifetime enforced; filesystem and network are not";
 
 const MACOS_LIMITATION: &str =
-    "Seatbelt enforces filesystem and network scope for the sandboxed process";
+    "Seatbelt enforces filesystem writes and network scope; filesystem READS are not restricted";
 
-const LINUX_LIMITATION: &str =
-    "Landlock enforces filesystem writes; network deny-all only when bwrap is present";
+const LINUX_LIMITATION: &str = "Landlock enforces filesystem writes; READS are not restricted; network deny-all only with bwrap";
 
 const UNKNOWN_TARGET_LIMITATION: &str =
     "no sandbox backend on this target: nothing is enforced by the OS";
@@ -609,5 +608,63 @@ mod tests {
             !all_output.contains("descriptor-only"),
             "rows() output must not contain 'descriptor-only' after PKT-SANDBOX landed, got: {all_output}",
         );
+    }
+}
+
+#[cfg(test)]
+mod limitation_accuracy_tests {
+    use super::{
+        LINUX_LIMITATION, MACOS_LIMITATION, UNKNOWN_TARGET_LIMITATION, WINDOWS_LIMITATION,
+    };
+
+    /// No backend restricts filesystem *reads*, so no limitation line may imply
+    /// it does.
+    ///
+    /// `docs/SECURITY.md` records read isolation as "Not enforced" on all three
+    /// platforms — Seatbelt's generated profile contains
+    /// `(allow file-read* (subpath "/"))`, and the backend identifier is
+    /// literally `seatbelt-profile-allows-file-read-subpath-root`. The macOS
+    /// line nonetheless said "enforces filesystem and network scope", which a
+    /// reader deciding whether to delegate a task would take as read
+    /// containment. That is the same overstatement the Windows row made by
+    /// hiding its caveat, arriving by a different route: wording rather than
+    /// truncation.
+    ///
+    /// The rule targets the *claim*, not the mention. A line may say the
+    /// filesystem is not enforced at all — Windows does, correctly, and that
+    /// already covers reads. What it may not do is claim filesystem
+    /// enforcement without scoping that claim to writes.
+    #[test]
+    fn a_line_claiming_filesystem_enforcement_must_scope_it_to_writes() {
+        for line in [
+            WINDOWS_LIMITATION,
+            MACOS_LIMITATION,
+            LINUX_LIMITATION,
+            UNKNOWN_TARGET_LIMITATION,
+        ] {
+            let lower = line.to_lowercase();
+            if lower.contains("enforces filesystem") || lower.contains("filesystem scope") {
+                assert!(
+                    lower.contains("write"),
+                    "`{line}` claims filesystem enforcement without scoping it to writes. Reads are unrestricted on every supported backend, so an unscoped claim reads as full containment to someone deciding whether to delegate a task."
+                );
+            }
+        }
+    }
+
+    /// The unqualified phrasing that caused this, pinned so it cannot return.
+    #[test]
+    fn no_limitation_claims_bare_filesystem_scope() {
+        for line in [
+            WINDOWS_LIMITATION,
+            MACOS_LIMITATION,
+            LINUX_LIMITATION,
+            UNKNOWN_TARGET_LIMITATION,
+        ] {
+            assert!(
+                !line.to_lowercase().contains("filesystem and network scope"),
+                "`{line}` claims filesystem scope without qualification; reads are unrestricted on every supported backend"
+            );
+        }
     }
 }
