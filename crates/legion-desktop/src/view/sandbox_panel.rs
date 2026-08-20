@@ -29,7 +29,8 @@ const WINDOWS_LIMITATION: &str =
 const MACOS_LIMITATION: &str =
     "Seatbelt enforces filesystem writes and network scope; filesystem READS are not restricted";
 
-const LINUX_LIMITATION: &str = "Landlock enforces filesystem writes; READS are not restricted; network deny-all only with bwrap";
+const LINUX_LIMITATION: &str =
+    "Landlock enforces filesystem writes; reads unrestricted; network deny-all only with bwrap";
 
 const UNKNOWN_TARGET_LIMITATION: &str =
     "no sandbox backend on this target: nothing is enforced by the OS";
