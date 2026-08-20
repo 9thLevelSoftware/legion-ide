@@ -67,7 +67,6 @@ pub struct CloudLaneEgressRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudLaneEgressManifestView {
     task_id: LegionCloudLaneTaskId,
-    manifest_id: String,
     rows: Vec<CloudLaneEgressRow>,
     total_upload_bytes: u64,
     estimated_cost_cents: u32,
@@ -102,7 +101,6 @@ impl CloudLaneEgressManifestView {
         let digest = manifest_digest(request, &rows);
         Self {
             task_id: request.task_id.clone(),
-            manifest_id: request.upload_manifest.manifest_id.clone(),
             rows,
             total_upload_bytes: request.upload_manifest.total_upload_bytes,
             estimated_cost_cents: request.budget.estimated_cost_cents,
@@ -116,11 +114,6 @@ impl CloudLaneEgressManifestView {
     /// Task this manifest belongs to.
     pub fn task_id(&self) -> &LegionCloudLaneTaskId {
         &self.task_id
-    }
-
-    /// Manifest id.
-    pub fn manifest_id(&self) -> &str {
-        &self.manifest_id
     }
 
     /// Every scope, uploaded and withheld, in render order.
