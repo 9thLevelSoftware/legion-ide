@@ -89,7 +89,7 @@ function Read-MsiProductVersion([string]$Path) {
             $database = $windowsInstaller.OpenDatabase($Path, 0)
             $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''
             $view = $database.OpenView($query)
-            $view.Execute()
+            [void]$view.Execute()
             $record = $view.Fetch()
         } catch {
             Fail "Unable to query MSI Property table for ProductVersion via WindowsInstaller.Installer: $($_.Exception.Message)"
@@ -97,10 +97,24 @@ function Read-MsiProductVersion([string]$Path) {
         if ($null -eq $record) {
             Fail "MSI Property table does not contain ProductVersion"
         }
-        return $record.StringData(1)
+        # Cast and trim so this function returns exactly one string.
+        #
+        # It used to return an *array*. A PowerShell function emits every
+        # uncaptured value in its body, and the COM `Execute()` / `Close()`
+        # calls above and below emit theirs, so the caller received
+        # @('', '0.0.2', '') and string-interpolated it space-joined. The
+        # release then failed with "expected 0.0.2, found  0.0.2" -- two
+        # identical versions, two spaces, and a verifier insisting they
+        # differed. Every release was blocked by it.
+        #
+        # The `[void]` casts on those calls are the actual fix; this cast and
+        # trim keep the contract single-valued even if a future COM call starts
+        # emitting, because the failure mode is silent and reads as a real
+        # version mismatch.
+        return ([string]$record.StringData(1)).Trim()
     } finally {
         if ($null -ne $view) {
-            try { $view.Close() } catch {}
+            try { [void]$view.Close() } catch {}
         }
         foreach ($comObject in @($record, $view, $database, $windowsInstaller)) {
             if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
@@ -165,7 +179,9 @@ try {
     # version defect is reported cheaply and deterministically.
     $productVersion = Read-MsiProductVersion $msiPath
     if ($productVersion -cne $ReleaseVersion) {
-        Fail "MSI ProductVersion mismatch: expected $ReleaseVersion, found $productVersion"
+        # Quoted on both sides so the next whitespace-shaped defect is legible
+        # in the log instead of reading as "expected X, found X".
+        Fail "MSI ProductVersion mismatch: expected '$ReleaseVersion', found '$productVersion'"
     }
     $packageVersionStatus = "passed"
     Add-Content -LiteralPath $evidencePath -Value "package_version=passed version=$productVersion"
