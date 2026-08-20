@@ -277,3 +277,109 @@ impl Drop for TempWorkspace {
         }
     }
 }
+
+// --- Rendered-UI driving ---------------------------------------------------
+//
+// Tests that assert on rendering and hit-testing need to click real controls at
+// real coordinates, which projection tests cannot do by construction. These
+// four helpers are the whole rig, and they live here because three test files
+// had grown near-identical copies — two of which disagreed about what happens
+// when the control is missing.
+//
+// `shell_affordances.rs` deliberately keeps its own. Its `clickable_center`
+// asserts there is *exactly one* match inside a screen region, which catches a
+// label that appears in both the tab strip and an explorer row; that is a
+// stronger contract than "find the first one", not a copy of it, and its
+// viewport differs too. Folding it in here would weaken the check it exists to
+// make.
+
+/// A full-frame raw input at a fixed 1440x900 viewport.
+///
+/// Fixed rather than parameterised so a control's coordinates are reproducible
+/// across suites; a test that needs a different viewport should say so by
+/// building its own.
+pub fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
+    egui::RawInput {
+        focused: true,
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_440.0, 900.0),
+        )),
+        events,
+        ..egui::RawInput::default()
+    }
+}
+
+/// Centre of the clickable accessibility node carrying `label`, if one exists.
+///
+/// Returns `Option` rather than panicking: "is this control present at all" is
+/// a question some tests exist to answer, and a helper that dies on absence
+/// cannot be used to ask it. Callers that require the control write
+/// `.unwrap_or_else(|| panic!(...))` at the call site, where the message can say
+/// what the test was doing.
+pub fn clickable_center(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find_map(|(_id, node)| {
+            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
+                .then(|| node.bounds())
+                .flatten()
+        })
+        .map(|bounds| {
+            egui::pos2(
+                ((bounds.x0 + bounds.x1) * 0.5) as f32,
+                ((bounds.y0 + bounds.y1) * 0.5) as f32,
+            )
+        })
+}
+
+/// Every piece of text a frame exposes to assistive technology.
+///
+/// Reads `label` **or** `value`. egui puts a control's explicit label in the
+/// first and static text in the second, so a label-only reader sees buttons and
+/// misses every heading, hint and empty state.
+pub fn rendered_text(output: &egui::FullOutput) -> Vec<String> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter_map(|(_id, node)| {
+                    node.label()
+                        .map(str::to_string)
+                        .or_else(|| node.value().map(str::to_string))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Click at `pos` and settle: press, release, then one frame for the action.
+///
+/// Three frames because the action a click queues is applied on the frame after
+/// it is dispatched; asserting on the release frame reads the state before the
+/// click took effect.
+pub fn click_at(
+    app: &mut legion_desktop::workflow::DesktopEframeApp,
+    pos: egui::Pos2,
+) -> egui::FullOutput {
+    for pressed in [true, false] {
+        let _ = app.run_headless_full_frame(full_frame_input(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]));
+    }
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}

@@ -7016,6 +7016,7 @@ impl ActiveDocumentController {
                 .active_workspace_trust
                 .clone()
                 .ok_or(AppCompositionError::WorkspaceNotOpen)?,
+            root_path: self.workspace_root_path.clone(),
         })
     }
 
@@ -7050,6 +7051,9 @@ struct ActiveWorkspaceContext {
     workspace_generation: WorkspaceGeneration,
     principal: PrincipalId,
     trust: WorkspaceTrustState,
+    /// Absolute workspace root, so a terminal can spawn inside the open
+    /// project rather than wherever the process happened to start.
+    root_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -7989,10 +7993,15 @@ impl TerminalWorkflow {
             .env_policy
             .effective_env()
             .expect("effective_env always returns Some");
+        // `cwd_policy` above says "workspace-root" and, until this field
+        // existed, nothing made that true: the PTY inherited the process
+        // working directory, so a terminal opened against a project could start
+        // in an unrelated tree and `cargo test` would run there.
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
             args,
+            cwd: context.root_path.as_ref().map(std::path::PathBuf::from),
             env: Some(pty_env),
         }) {
             Ok(outcome) => {
@@ -26861,6 +26870,7 @@ impl AppComposition {
                 },
                 command,
                 args,
+                cwd: None,
                 env: None,
             })
             .map_err(|err| AppCompositionError::Terminal(format!("raw launch failed: {err}")))
