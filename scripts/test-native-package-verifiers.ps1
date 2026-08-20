@@ -192,6 +192,44 @@ function New-EmptyPropertyTableMsi([string]$Path) {
     }
 }
 
+function New-ProductVersionMsi([string]$Path, [string]$Value) {
+    # A real Windows Installer database whose Property table carries
+    # ProductVersion with the exact bytes given -- including padding, which is
+    # the point of the regression this builds a fixture for.
+    $installer = $null
+    $database = $null
+    $view = $null
+    # Declared out here so the finally block can release it. Leaving the insert
+    # view out of that list held the database file open, and the next read of
+    # the .msi failed with "being used by another process" -- which looks like
+    # a flaky test rather than a leaked COM handle.
+    $insert = $null
+    try {
+        try {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+        } catch {
+            throw "SKIP: WindowsInstaller.Installer COM is unavailable: $($_.Exception.Message)"
+        }
+        $database = $installer.OpenDatabase($Path, 3) # msiOpenDatabaseModeCreateDirect
+        $sql = 'CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(0) NOT NULL LOCALIZABLE PRIMARY KEY `Property`)'
+        $view = $database.OpenView($sql)
+        [void]$view.Execute()
+        [void]$view.Close()
+        $insert = $database.OpenView("INSERT INTO ``Property`` (``Property``, ``Value``) VALUES ('ProductVersion', '$Value')")
+        [void]$insert.Execute()
+        [void]$insert.Close()
+        $database.Commit()
+    } finally {
+        foreach ($comObject in @($insert, $view, $database, $installer)) {
+            if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
+            }
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+    }
+}
+
 function Write-RealChecksumFile([string]$ArtifactPath) {
     $hash = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
     [System.IO.File]::WriteAllText(
@@ -374,6 +412,55 @@ Invoke-Test "ps verifier rejects an MSI whose sha256 does not match" {
     Assert-True ($run.Output -match 'result=failed') "evidence report was not printed before exit: $($run.Output)"
     $summaryText = Get-Content -LiteralPath (Join-Path $packageDir "VALIDATION-SUMMARY.toml") -Raw
     Assert-True ($summaryText -match 'checksum = "not-run"') "summary must not report checksum as passed"
+}
+
+# --- Windows version reader: padded ProductVersion is not a mismatch ---
+
+Invoke-Test "ps verifier accepts a ProductVersion carrying surrounding whitespace" {
+    if (-not $isWindowsHost) {
+        throw "SKIP: Windows Installer Automation requires a Windows host"
+    }
+    # Regression: the COM StringData accessor returns the Property value with
+    # padding, and the comparison is ordinal, so every release failed with
+    # "expected 0.0.2, found  0.0.2" -- two identical versions and a verifier
+    # insisting they differed. The whole release pipeline was blocked by it.
+    $packageDir = New-FixtureDir "msi-padded-product-version"
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath " 0.0.1 "
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $run = Invoke-PsVerifier @(
+        "-PackageDir", $packageDir,
+        "-ReleaseVersion", "0.0.1",
+        "-SourceSha", $testSha,
+        "-WorkspaceRoot", $workspace
+    )
+    # The fixture is not a real installable package, so the verifier still
+    # fails later at extraction. What must not appear is the version mismatch.
+    Assert-True ($run.Output -notmatch 'ProductVersion mismatch') `
+        "padded ProductVersion was reported as a mismatch: $($run.Output)"
+}
+
+Invoke-Test "ps verifier still rejects a genuinely different ProductVersion" {
+    if (-not $isWindowsHost) {
+        throw "SKIP: Windows Installer Automation requires a Windows host"
+    }
+    # The other half of the trim: narrowing the comparison must not stop it
+    # catching a real mismatch.
+    $packageDir = New-FixtureDir "msi-wrong-product-version"
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath "0.0.9"
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $run = Invoke-PsVerifier @(
+        "-PackageDir", $packageDir,
+        "-ReleaseVersion", "0.0.1",
+        "-SourceSha", $testSha,
+        "-WorkspaceRoot", $workspace
+    )
+    Assert-True ($run.ExitCode -ne 0) "verifier unexpectedly passed: $($run.Output)"
+    Assert-True ($run.Output -match 'ProductVersion mismatch') `
+        "a real version mismatch was not reported: $($run.Output)"
 }
 
 # --- Windows version reader: missing ProductVersion is an actionable error ---
