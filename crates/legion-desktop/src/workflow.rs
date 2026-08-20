@@ -1501,6 +1501,22 @@ impl DesktopRuntime {
             .expect("debug live fake projection refresh should succeed");
     }
 
+    /// Pin debug launches to the simulated fixture, without touching process
+    /// environment (parallel-safe).
+    ///
+    /// Note what this does *not* do: it never sets `runtime_enabled`, so a test
+    /// that calls it still exercises the product path that enables the debug
+    /// runtime on an approved launch.
+    ///
+    /// Tests that assert on fixture-versus-live behaviour need it, because
+    /// `LEGION_DAP_MODE` defaults to `auto`: on any machine with `lldb-dap` or
+    /// `codelldb` on `PATH`, a test written to describe the fixture path would
+    /// silently take the live one and assert about the wrong runtime.
+    pub fn force_debug_fixture_mode_for_tests(&mut self) {
+        self.app
+            .set_debug_dap_mode_for_tests(legion_app::DapMode::Fixture);
+    }
+
     /// Seed delegated task plan contracts for projection-only command-center harnesses.
     pub fn seed_delegated_task_plan_contracts(
         &mut self,

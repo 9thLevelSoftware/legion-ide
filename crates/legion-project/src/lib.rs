@@ -968,18 +968,40 @@ pub fn collect_git_snapshot_with_backend(
     };
     let unstaged_numstat = git_numstat(&repository_root, false)?;
     let staged_numstat = git_numstat(&repository_root, true)?;
-    let mut hunks = Vec::new();
-    hunks.extend(git_diff_hunks(
-        &repository_root,
-        GitHunkStage::Unstaged,
-        options.max_hunks,
-    )?);
+    // Staged hunks get reserved capacity rather than the leftovers.
+    //
+    // Unstaged used to consume the whole `max_hunks` allowance before staged
+    // was asked for at all, so a working tree with more unstaged hunks than the
+    // limit projected *no staged hunks whatsoever* -- and every surface reading
+    // this projection then had no way to show, or unstage, work that was already
+    // in the index. The reservation is a half each, with whatever one side does
+    // not use handed to the other, so a repository with only one kind still
+    // fills the allowance exactly as before.
+    let staged_reserved = options.max_hunks / 2;
+    let unstaged_budget = options.max_hunks.saturating_sub(staged_reserved);
+    let mut hunks = git_diff_hunks(&repository_root, GitHunkStage::Unstaged, unstaged_budget)?;
+    let unstaged_taken = hunks.len();
     if hunks.len() < options.max_hunks {
         hunks.extend(git_diff_hunks(
             &repository_root,
             GitHunkStage::Staged,
-            options.max_hunks - hunks.len(),
+            options.max_hunks - unstaged_taken,
         )?);
+    }
+    // Hand back any half the staged side did not use.
+    if hunks.len() < options.max_hunks && unstaged_taken == unstaged_budget {
+        let remaining = options.max_hunks - hunks.len();
+        let mut extra = git_diff_hunks(
+            &repository_root,
+            GitHunkStage::Unstaged,
+            unstaged_taken + remaining,
+        )?;
+        if extra.len() > unstaged_taken {
+            let staged: Vec<_> = hunks.split_off(unstaged_taken);
+            extra.truncate(unstaged_taken + remaining);
+            hunks = extra;
+            hunks.extend(staged);
+        }
     }
 
     let conflicts = git_conflicts(&repository_root, status_entries.keys())?;

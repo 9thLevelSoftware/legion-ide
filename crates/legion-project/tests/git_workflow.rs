@@ -1215,3 +1215,67 @@ fn git_snapshot_projects_agent_worktrees_as_agent_kind() {
 
     let _ = std::fs::remove_dir_all(&agent_worktree);
 }
+
+/// Staged hunks survive a working tree that exceeds the projection limit.
+///
+/// Unstaged hunks used to consume the whole `max_hunks` allowance before staged
+/// hunks were requested at all, so a tree with more unstaged hunks than the
+/// limit projected none of the index's work. No surface reading this projection
+/// could show it, let alone unstage it, and a renderer cannot fix that by
+/// partitioning what it receives: by then the staged hunks are already gone.
+#[test]
+fn staged_hunks_are_projected_when_unstaged_hunks_exceed_the_limit() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let mut seed = String::new();
+    for line in 0..400 {
+        seed.push_str(&format!("line {line}\n"));
+    }
+    repo.write("wide.txt", &seed);
+    repo.write("staged.txt", "one\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+
+    repo.write("staged.txt", "one changed\n");
+    run_git(root, ["add", "staged.txt"]);
+
+    let mut edited = String::new();
+    for line in 0..400 {
+        if line % 4 == 0 && line > 0 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    repo.write("wide.txt", &edited);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 8,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot should collect");
+
+    let staged = snapshot
+        .hunks
+        .iter()
+        .filter(|hunk| hunk.stage == GitHunkStage::Staged)
+        .count();
+    let unstaged = snapshot.hunks.len() - staged;
+    assert!(
+        unstaged > 0,
+        "the fixture must produce unstaged hunks for this test to mean anything"
+    );
+    assert!(
+        staged > 0,
+        "staged hunks must reach the projection even when unstaged hunks alone would fill it; got {} hunks, all unstaged",
+        snapshot.hunks.len()
+    );
+    assert!(
+        snapshot.hunks.len() <= 8,
+        "the limit must still hold, got {}",
+        snapshot.hunks.len()
+    );
+}

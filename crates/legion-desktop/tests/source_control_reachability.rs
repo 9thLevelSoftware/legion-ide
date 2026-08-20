@@ -566,3 +566,54 @@ fn staged_hunks_remain_reachable_behind_many_unstaged_ones() {
         "the staged hunk must stay reachable behind the unstaged ones. Panel showed: {text}"
     );
 }
+
+/// A conflict blocks Commit even when something else is independently staged.
+///
+/// The first version of this guard tested each entry, so a repository mid-merge
+/// that also held a staged file answered "yes, something is committable" and
+/// offered Commit again — for exactly the case the guard was added to prevent.
+/// `git commit` refuses while *any* path is unmerged, so the veto is on the
+/// projection, not the entry.
+#[test]
+fn a_conflict_blocks_commit_even_with_another_file_staged() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_conflict_mixed");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    workspace.write("shared.txt", "base\n");
+    workspace.write("other.txt", "base\n");
+    git(root, &["add", "shared.txt", "other.txt"]);
+    git(root, &["commit", "-m", "base"]);
+
+    git(root, &["checkout", "-b", "theirs"]);
+    workspace.write("shared.txt", "theirs\n");
+    git(root, &["commit", "-am", "theirs"]);
+
+    git(root, &["checkout", "trunk"]);
+    workspace.write("shared.txt", "ours\n");
+    git(root, &["commit", "-am", "ours"]);
+
+    let merged = std::process::Command::new("git")
+        .args(["merge", "theirs"])
+        .current_dir(root)
+        .output()
+        .expect("git merge should run");
+    assert!(!merged.status.success(), "the fixture must conflict");
+
+    // An unrelated file, staged cleanly, alongside the conflict.
+    workspace.write("other.txt", "independently staged\n");
+    git(root, &["add", "other.txt"]);
+    let status = git(root, &["status", "--porcelain"]);
+    assert!(
+        (status.contains("UU") || status.contains("AA")) && status.contains("M  other.txt"),
+        "the fixture needs both an unmerged path and a cleanly staged one, got {status:?}"
+    );
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    assert!(
+        clickable_center(&panel, "Commit…").is_none(),
+        "git refuses every commit while any path is unmerged, so a cleanly staged file alongside a conflict must not re-enable Commit. Panel showed: {:?}",
+        rendered_text(&panel)
+    );
+}

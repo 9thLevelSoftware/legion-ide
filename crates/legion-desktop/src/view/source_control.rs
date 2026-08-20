@@ -124,17 +124,33 @@ const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 /// no textual markers, such as binary or delete/modify, where nothing else on
 /// the panel would hint at why the commit failed.
 fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
-    snapshot
-        .git_projection
-        .changed_files
+    let files = &snapshot.git_projection.changed_files;
+    // One unmerged path vetoes the whole commit, so this cannot be a per-entry
+    // test. `git commit` refuses while *any* entry is unmerged, and a repository
+    // mid-merge can easily also hold an independently staged file -- which made
+    // the per-entry version offer Commit again for exactly the case it was
+    // added to prevent.
+    if files
         .iter()
-        .any(|file| status_is_committable(&file.status))
+        .any(|file| status_pair(&file.status).is_some_and(|(x, y)| is_unmerged(x, y)))
+    {
+        return false;
+    }
+    files.iter().any(|file| status_is_committable(&file.status))
+}
+
+/// The two porcelain columns, when the status is well formed.
+fn status_pair(status: &str) -> Option<(char, char)> {
+    let mut columns = status.chars();
+    match (columns.next(), columns.next()) {
+        (Some(index), Some(worktree)) => Some((index, worktree)),
+        _ => None,
+    }
 }
 
 /// Whether a porcelain status pair represents something `git commit` can commit.
 fn status_is_committable(status: &str) -> bool {
-    let mut columns = status.chars();
-    let (Some(index), Some(worktree)) = (columns.next(), columns.next()) else {
+    let Some((index, worktree)) = status_pair(status) else {
         return false;
     };
     if is_unmerged(index, worktree) {

@@ -42,7 +42,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
 | 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
-| 13 | Sandbox panel: Windows caveats visible if Job Object-only | | |
+| 13 | Sandbox panel: Windows caveats visible if Job Object-only | | See note below |
 
 > **Why 1a is called out separately.** Until 2026-08-17 this checklist went
 > straight from "expand nested dirs" to "edit a file", and never named the step
@@ -71,6 +71,36 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > stage control: staging applies a projected hunk, `git diff` emits none for a
 > file git has never seen, and there is no path-level `git add` authority to
 > reach for. The panel says so rather than showing a row with no button.
+
+> **Why rows 9-12 were never passable.** Until 2026-08-20 the shipped app could
+> not start a debug session at all. `DebugWorkflow::runtime_enabled` was set by
+> exactly two callers — `enable_debug_fixture_for_tests` and
+> `enable_debug_live_fake_for_tests` — and both are test seams, so every Launch
+> from the toolbar, from `F5`, or from `:debug-launch` returned
+> `Denied: Debug runtime is disabled`. Four debug suites were green throughout,
+> because each of them called a seam in its first three lines. The runtime now
+> enables itself on an explicit launch the broker has approved, the same lazy
+> trust-gated shape the terminal uses
+> (`crates/legion-app/src/debug_workflow.rs`), and rows 9-12 are guarded from
+> the rendered UI by `crates/legion-desktop/tests/debug_reachability.rs`, which
+> uses no debug seam on the fixture path. Two smaller repairs came with it: the
+> dual-mode banner claimed "Debugger is simulated in this build" whenever no
+> session was running — including immediately after disconnecting from a live
+> adapter — and `F9` stamped `Idle` over the status of a session that was still
+> paused.
+
+> **What row 13 caught.** Driven through the rendered UI for the first time on
+> 2026-08-20. The Sandbox panel exists and is reachable — Delegate mode,
+> confirm, submit a task — but it draws only the first five of its rows and
+> collapses the rest behind "N more rows". On Windows the line saying the
+> sandbox enforces process lifetime and *nothing else* was the ninth, so what a
+> reader actually saw was `RestrictedToken`, "profile compiled fail-closed", and
+> "filesystem scope limited to workspace root" — the last of which is false on a
+> Job-Object-only host, as `docs/SECURITY.md` records. The panel now states its
+> platform limits in the third row, where they cannot be truncated away, and no
+> longer repeats requested-scope wording as if it were enforcement. Guarded by
+> `crates/legion-desktop/tests/sandbox_reachability.rs` (rendered) and the unit
+> tests in `crates/legion-desktop/src/view/sandbox_panel.rs`.
 
 ## Commands / keys (debug)
 
