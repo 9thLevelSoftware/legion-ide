@@ -408,7 +408,16 @@ fn delegate_chat_without_a_buffer_says_so_instead_of_offering_a_dead_send() {
 #[test]
 fn an_assist_rail_command_produces_a_real_proposal() {
     let workspace = fixture("legion_desktop_assist_rail_proposal");
-    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
+    let mut runtime = runtime_with_open_file(workspace.path());
+    // Pin the deterministic route. `ProductAiProviderPreference::from_env`
+    // honours `LEGION_AI_PROVIDER` in test builds too, so on a machine with a
+    // reachable Ollama this "deterministic" test would start a real background
+    // request -- making a standing workspace gate environment-dependent and
+    // issuing a provider call nobody asked for.
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
+    let mut app = DesktopEframeApp::new(runtime);
     switch_mode(&mut app, "Assist");
 
     let opened = app.run_headless_full_frame(full_frame_input(Vec::new()));
@@ -418,15 +427,19 @@ fn an_assist_rail_command_produces_a_real_proposal() {
         .expect("the Assist rail must offer a proposal command, not only Predict");
     let after = click_at(&mut app, explain);
 
-    // Deterministic route, so the proposal is available within a few frames;
-    // poll rather than assume a fixed number.
+    // Bounded by wall clock, not by frame count. A frame-counted loop with no
+    // sleep spins in microseconds, so it would never give a worker thread time
+    // to run -- and "the deterministic route is fast" describes the route's
+    // latency, not this test's bound. If the proposal pipeline ever grows a
+    // worker, a frame count would flake on slow CI or pass by luck.
     let mut rows = before;
-    for _ in 0..40 {
-        rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
-        if rows > before {
-            break;
-        }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && rows <= before {
         let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+        if rows <= before {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     assert!(

@@ -1,13 +1,13 @@
 //! Assist rail commands: the controls that dispatch a proposal-only AI run.
 //!
-//! Extracted from `view.rs` rather than added to it. The chokepoint rule wants
-//! the region moved before it is changed, and this is a self-contained region:
-//! a command list, a gate on having a buffer, and a row of buttons.
+//! New in its own module rather than added to `view.rs`, which is a chokepoint
+//! file with a line budget. A self-contained region -- a command list, a gate on
+//! having a buffer, and a row of buttons -- so it has no reason to live there.
 
 use legion_protocol::AssistantRailCommand;
 use legion_ui::ShellProjectionSnapshot;
 
-use super::{soft_button, theme};
+use super::theme;
 use crate::bridge::DesktopAction;
 
 /// The assistant rail commands, in the order the panel offers them.
@@ -37,6 +37,7 @@ const ASSIST_RAIL_COMMANDS: [(AssistantRailCommand, &str); 5] = [
 pub(crate) fn render_assist_rail_commands(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    stream_in_flight: bool,
     actions: &mut Vec<DesktopAction>,
 ) {
     // Every command needs a buffer to act on; without one they would dispatch
@@ -57,9 +58,22 @@ pub(crate) fn render_assist_rail_commands(
         ui.label(theme::muted(
             "Runs proposal-only: nothing is written to the buffer without review.",
         ));
+        // Disabled while the shared product-AI lane is busy. `start_ai_proposal`
+        // rejects a second request outright, so a live button during a stream
+        // is a button whose only outcome is an error toast.
+        if stream_in_flight {
+            ui.label(theme::muted("Waiting for the current run to finish…"));
+        }
         ui.horizontal_wrapped(|ui| {
             for (command, label) in ASSIST_RAIL_COMMANDS {
-                if soft_button(ui, label).clicked() {
+                if super::primary_button_enabled(
+                    ui,
+                    label,
+                    theme::tokens().accent.orange,
+                    !stream_in_flight,
+                )
+                .clicked()
+                {
                     actions.push(DesktopAction::ExecuteRailCommand {
                         command,
                         selection: None,

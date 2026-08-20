@@ -5673,7 +5673,12 @@ fn render_assist_rail(
         });
         return;
     }
-    assist_rail_commands::render_assist_rail_commands(ui, snapshot, actions);
+    assist_rail_commands::render_assist_rail_commands(
+        ui,
+        snapshot,
+        model.product_ai_stream_in_flight,
+        actions,
+    );
     render_assisted_suggestion_panel(ui, snapshot, model, actions);
     ui.add_space(6.0);
     ui.label(theme::muted(
