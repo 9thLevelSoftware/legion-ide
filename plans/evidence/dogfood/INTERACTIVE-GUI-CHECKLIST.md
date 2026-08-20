@@ -42,7 +42,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
 | 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
-| 13 | Sandbox panel: Windows caveats visible if Job Object-only | | |
+| 13 | Sandbox panel: Windows caveats visible if Job Object-only | | See note below |
 
 > **Why 1a is called out separately.** Until 2026-08-17 this checklist went
 > straight from "expand nested dirs" to "edit a file", and never named the step
@@ -53,6 +53,19 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > in `crates/legion-desktop/src/workflow.rs` (`ActivateExplorerFile`) and
 > guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
 > row: an affordance that is never checked is an affordance that can rot back.
+
+> **What row 13 caught.** Driven through the rendered UI for the first time on
+> 2026-08-20. The Sandbox panel exists and is reachable — Delegate mode,
+> confirm, submit a task — but it draws only the first five of its rows and
+> collapses the rest behind "N more rows". On Windows the line saying the
+> sandbox enforces process lifetime and *nothing else* was the ninth, so what a
+> reader actually saw was `RestrictedToken`, "profile compiled fail-closed", and
+> "filesystem scope limited to workspace root" — the last of which is false on a
+> Job-Object-only host, as `docs/SECURITY.md` records. The panel now states its
+> platform limits in the third row, where they cannot be truncated away, and no
+> longer repeats requested-scope wording as if it were enforcement. Guarded by
+> `crates/legion-desktop/tests/sandbox_reachability.rs` (rendered) and the unit
+> tests in `crates/legion-desktop/src/view/sandbox_panel.rs`.
 
 ## Commands / keys (debug)
 
