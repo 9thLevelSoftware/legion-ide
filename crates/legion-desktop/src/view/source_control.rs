@@ -65,13 +65,7 @@ pub(super) fn render_git_controls(
         // field, the `git-commit` command, and the operand parser, so the button
         // hands the user to the flow that exists rather than inventing a second
         // one.
-        if snapshot
-            .git_projection
-            .hunks
-            .iter()
-            .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
-            && soft_button(ui, "Commit…").clicked()
-        {
+        if index_has_staged_changes(snapshot) && soft_button(ui, "Commit…").clicked() {
             actions.push(DesktopAction::OpenPalette {
                 mode: PaletteMode::Command,
                 query: COMMIT_PALETTE_QUERY.to_string(),
@@ -134,6 +128,27 @@ const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 /// frame's projection would stage the first and fail the rest with
 /// `git_hunk_missing`. Staging a hunk at a time is not a lesser affordance here;
 /// it is the only one the identity scheme supports.
+/// Whether the index holds anything to commit, read from porcelain status.
+///
+/// Deliberately not "is there a staged hunk". A staged binary modification, an
+/// empty-file addition, a mode-only change and a pure rename all appear in
+/// `changed_files` with a staged index column and produce no `@@` hunk at all,
+/// so a hunk-counting gate hides the panel's only Commit control while
+/// `git commit` would succeed. The same happens when unstaged hunks exhaust the
+/// projection's hunk limit before the staged ones are collected.
+///
+/// Porcelain status is two columns, `XY`: `X` is the index and `Y` the working
+/// tree. Anything in `X` other than a space is staged; `?` is the untracked
+/// marker (`??`), which is not.
+fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
+    snapshot.git_projection.changed_files.iter().any(|file| {
+        file.status
+            .chars()
+            .next()
+            .is_some_and(|index_column| index_column != ' ' && index_column != '?')
+    })
+}
+
 fn render_git_hunk_controls(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,

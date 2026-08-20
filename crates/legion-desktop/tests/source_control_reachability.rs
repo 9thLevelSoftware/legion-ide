@@ -394,3 +394,79 @@ fn committing_from_the_panel_creates_a_real_commit() {
         staged_paths(&root)
     );
 }
+
+/// A staged change with no `@@` hunk must still offer Commit.
+///
+/// The gate used to count staged hunks. A staged binary modification, an
+/// empty-file addition, a mode-only change and a pure rename all appear in
+/// porcelain status with a staged index column and produce no hunk at all, so
+/// the panel's only Commit control disappeared while `git commit` would have
+/// succeeded. Binary is the cleanest of those to build deterministically.
+#[test]
+fn commit_is_offered_for_a_staged_change_that_has_no_hunks() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_binary");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    // A byte sequence git treats as binary: a NUL inside the first 8000 bytes.
+    std::fs::write(root.join("blob.bin"), [0u8, 1, 2, 3, 0, 255, 7, 9])
+        .expect("write a binary file");
+    git(root, &["add", "blob.bin"]);
+
+    let staged = git(root, &["diff", "--cached", "--stat"]);
+    assert!(
+        staged.contains("blob.bin"),
+        "the fixture must actually stage the binary, got: {staged:?}"
+    );
+    let hunks = git(root, &["diff", "--cached", "-U0"]);
+    assert!(
+        !hunks.contains("@@"),
+        "the fixture is only meaningful if git emits no hunk for it, got: {hunks:?}"
+    );
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    assert!(
+        clickable_center(&panel, "Commit…").is_some(),
+        "a staged binary produces no hunk, so a hunk-counting gate hides Commit \
+         even though the commit would succeed. Panel showed: {:?}",
+        rendered_text(&panel)
+    );
+}
+
+/// The overflow note is a branch too, and it was the only one untested.
+#[test]
+fn hunks_beyond_the_control_limit_are_reported_rather_than_dropped() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_overflow");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    // Widely separated single-line edits so git cannot coalesce them: each
+    // becomes its own hunk. 40 lines apart, 20 edits, against a 12-row budget.
+    let mut original = String::new();
+    for line in 0..1_000 {
+        original.push_str(&format!("line {line}\n"));
+    }
+    std::fs::write(root.join("wide.txt"), &original).expect("seed a long file");
+    git(root, &["add", "wide.txt"]);
+    git(root, &["commit", "-m", "seed wide"]);
+
+    let mut edited = String::new();
+    for line in 0..1_000 {
+        if line % 40 == 0 && line > 0 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    std::fs::write(root.join("wide.txt"), &edited).expect("edit the long file");
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    let text = rendered_text(&panel).join("\n");
+    assert!(
+        text.contains("more hunks not shown"),
+        "a diff with more hunks than the control budget must say so rather than \
+         silently drawing a subset. Panel showed: {text}"
+    );
+}
