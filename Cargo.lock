@@ -4199,6 +4199,7 @@ name = "legion-remote"
 version = "0.1.0"
 dependencies = [
  "legion-protocol",
+ "legion-remote-transport",
  "reqwest",
  "rustls",
  "serde",

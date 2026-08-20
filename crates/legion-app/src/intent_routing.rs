@@ -642,6 +642,15 @@ impl CommandDispatcher {
                     granted,
                 },
             )),
+            CommandDispatchIntent::CancelCloudLaneTask {
+                task_id,
+                reason_label,
+            } => Ok(AppCommandRequest::CloudLane(
+                crate::cloud_lane_egress::CloudLaneRequest::CancelTask {
+                    task_id: legion_protocol::LegionCloudLaneTaskId(task_id),
+                    reason_label,
+                },
+            )),
             CommandDispatchIntent::InstallExtension { manifest_id } => {
                 Ok(AppCommandRequest::ExtensionCatalog(
                     ExtensionCatalogRequest::Install { manifest_id },

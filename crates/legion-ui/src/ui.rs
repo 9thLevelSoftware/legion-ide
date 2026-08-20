@@ -9,17 +9,17 @@ use legion_protocol::{
     DebugSessionId, DebugSessionState, DelegatedTaskProjection,
     DelegatedTaskProposalHunkDisposition, DelegatedTaskRuntimeActivationState,
     DelegatedTaskToolPermissionDecision, ExtensionCatalogEntry, FileFingerprint, FileId,
-    LanguageToolingProjection, LegionWorkflowConflictId, LegionWorkflowProjection,
-    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowVerificationGateId,
-    LineWrappingPolicy, PermissionBudgetProjection, PluginContributionProjection, PluginId,
-    PrivacyInspectorProjection, ProductMode, ProductRuntimeSurface,
-    ProposalApprovalChecklistProjection, ProposalCancellationReason, ProposalId,
-    ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason, ProposalRiskLabel,
-    ProposalRollbackReason, ProtocolTextRange, RedactionHint, RemoteGuiProjection, SnapshotId,
-    SystemGraphProjection, TerminalPanelProjection, TerminalSessionId, TextCoordinate,
-    TimestampMillis, Utf16Range, VerificationRunProjection, ViewportLineTruncationState,
-    ViewportScroll, WorkbenchFontFallbackDiagnostic, WorkbenchTelemetryConsent, WorkspaceId,
-    product_mode_allows_runtime_surface,
+    LanguageToolingProjection, LegionCloudLaneProjection, LegionWorkflowConflictId,
+    LegionWorkflowProjection, LegionWorkflowSessionId, LegionWorkflowSignOffId,
+    LegionWorkflowVerificationGateId, LineWrappingPolicy, PermissionBudgetProjection,
+    PluginContributionProjection, PluginId, PrivacyInspectorProjection, ProductMode,
+    ProductRuntimeSurface, ProposalApprovalChecklistProjection, ProposalCancellationReason,
+    ProposalId, ProposalLedgerProjection, ProposalPrivacyLabel, ProposalRejectionReason,
+    ProposalRiskLabel, ProposalRollbackReason, ProtocolTextRange, RedactionHint,
+    RemoteGuiProjection, SnapshotId, SystemGraphProjection, TerminalPanelProjection,
+    TerminalSessionId, TextCoordinate, TimestampMillis, Utf16Range, VerificationRunProjection,
+    ViewportLineTruncationState, ViewportScroll, WorkbenchFontFallbackDiagnostic,
+    WorkbenchTelemetryConsent, WorkspaceId, product_mode_allows_runtime_surface,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -3642,6 +3642,13 @@ pub enum CommandDispatchIntent {
         /// Whether the user granted that one capability.
         granted: bool,
     },
+    /// Cancel an in-flight Cloud Lane task through app authority (P9.F3.T3).
+    CancelCloudLaneTask {
+        /// Task id selected from Cloud Lane projection data.
+        task_id: String,
+        /// Display-safe reason recorded with the cancellation.
+        reason_label: String,
+    },
     /// Install a signed extension through app-owned extension authority (P7.F2.T1).
     InstallExtension {
         /// Manifest id selected from catalog projection data.
@@ -4001,6 +4008,8 @@ pub struct ShellProjectionSnapshot {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Extension catalog entries supplied by the application layer (P7.F2).
     pub extension_catalog: Vec<ExtensionCatalogEntry>,
+    /// Cloud Lane task projection supplied by the application layer (P9.F3.T3).
+    pub legion_cloud_lane: LegionCloudLaneProjection,
     /// Collaboration presence projections supplied by the application layer.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Collaboration GUI summary projection supplied by the application layer.
@@ -4110,6 +4119,8 @@ pub struct Shell {
     pub plugin_contribution_projections: Vec<PluginContributionProjection>,
     /// Static extension catalog entries (P7.F2).
     pub extension_catalog: Vec<ExtensionCatalogEntry>,
+    /// Static Cloud Lane task projection (P9.F3.T3).
+    pub legion_cloud_lane: LegionCloudLaneProjection,
     /// Static collaboration presence projections.
     pub collaboration_presence_projections: Vec<CollaborationPresenceProjection>,
     /// Static collaboration GUI summary projection.
@@ -4171,6 +4182,7 @@ impl Shell {
             legion_workflow_budget_rows: snapshot.legion_workflow_budget_rows,
             plugin_contribution_projections: snapshot.plugin_contribution_projections,
             extension_catalog: snapshot.extension_catalog,
+            legion_cloud_lane: snapshot.legion_cloud_lane,
             collaboration_presence_projections: snapshot.collaboration_presence_projections,
             collaboration_gui_projection: snapshot.collaboration_gui_projection,
             remote_gui_projection: snapshot.remote_gui_projection,
@@ -4221,6 +4233,7 @@ impl Shell {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -4269,6 +4282,7 @@ impl Shell {
             legion_workflow_budget_rows: self.legion_workflow_budget_rows.clone(),
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             extension_catalog: self.extension_catalog.clone(),
+            legion_cloud_lane: self.legion_cloud_lane.clone(),
             collaboration_presence_projections: self.collaboration_presence_projections.clone(),
             collaboration_gui_projection: self.collaboration_gui_projection.clone(),
             remote_gui_projection: self.remote_gui_projection.clone(),
@@ -6157,6 +6171,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6278,6 +6293,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6458,6 +6474,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6538,6 +6555,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6612,6 +6630,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6857,6 +6876,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -6956,6 +6976,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7090,6 +7111,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7186,6 +7208,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7346,6 +7369,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),
@@ -7454,6 +7478,7 @@ mod tests {
             legion_workflow_budget_rows: Vec::new(),
             plugin_contribution_projections: Vec::new(),
             extension_catalog: Vec::new(),
+            legion_cloud_lane: LegionCloudLaneProjection::disabled(),
             collaboration_presence_projections: Vec::new(),
             collaboration_gui_projection: CollaborationGuiProjection::disabled(),
             remote_gui_projection: RemoteGuiProjection::disabled(),

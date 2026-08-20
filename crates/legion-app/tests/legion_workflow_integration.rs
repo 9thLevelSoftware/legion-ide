@@ -1252,8 +1252,11 @@ fn legion_cloud_lane_app_submit_enforces_policy_and_projects_status() {
         .expect("enable cloud lane");
 
     let request = cloud_lane_task_request(opened.workspace_id);
+    // The manifest must be built and shown before a submit is allowed; the
+    // acknowledgement is the proof, and it is bound to the manifest contents.
+    let acknowledgement = AppComposition::legion_cloud_lane_egress_manifest(&request).acknowledge();
     let status = app
-        .submit_legion_cloud_lane_task(request.clone())
+        .submit_legion_cloud_lane_task(request.clone(), &acknowledgement)
         .expect("submit cloud lane task");
     assert_eq!(status.state, LegionCloudLaneTaskState::Submitted);
 
@@ -1270,8 +1273,10 @@ fn legion_cloud_lane_app_submit_enforces_policy_and_projects_status() {
     let mut unsafe_request = request;
     unsafe_request.task_id = LegionCloudLaneTaskId("cloud-task:app:unsafe".to_string());
     unsafe_request.upload_manifest.contains_forbidden_material = true;
+    let unsafe_acknowledgement =
+        AppComposition::legion_cloud_lane_egress_manifest(&unsafe_request).acknowledge();
     let error = app
-        .submit_legion_cloud_lane_task(unsafe_request)
+        .submit_legion_cloud_lane_task(unsafe_request, &unsafe_acknowledgement)
         .expect_err("unsafe upload scope must fail closed");
     assert!(
         error

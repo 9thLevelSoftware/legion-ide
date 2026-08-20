@@ -491,6 +491,13 @@ pub enum DesktopAction {
         /// Whether the user granted that one capability.
         granted: bool,
     },
+    /// Cancel an in-flight Cloud Lane upload (P9.F3.T3).
+    CancelCloudLaneTask {
+        /// Task id selected from Cloud Lane projection data.
+        task_id: String,
+        /// Display-safe reason recorded with the cancellation.
+        reason_label: String,
+    },
     /// Install a signed extension through app-owned extension authority (P7.F2.T1).
     InstallExtension {
         /// Manifest identifier selected from catalog projection data.
@@ -1312,6 +1319,20 @@ pub enum DesktopBridgeError {
         /// Unknown plugin id.
         plugin_id: PluginId,
     },
+    /// Task id was not present in the current Cloud Lane projection.
+    #[error("unknown cloud lane task: {task_id}")]
+    UnknownCloudLaneTask {
+        /// Unknown task id.
+        task_id: String,
+    },
+    /// The task exists but has already reached a terminal state.
+    #[error("cloud lane task {task_id} is {state} and cannot be cancelled")]
+    CloudLaneTaskNotCancellable {
+        /// Task the cancel targeted.
+        task_id: String,
+        /// Terminal state it was already in.
+        state: String,
+    },
     /// Manifest id was not present in the current extension catalog projection.
     #[error("unknown extension: {manifest_id}")]
     UnknownExtension {
@@ -2022,6 +2043,10 @@ impl DesktopCommandBridge {
                 capability,
                 granted,
             ),
+            DesktopAction::CancelCloudLaneTask {
+                task_id,
+                reason_label,
+            } => Self::with_cancellable_cloud_lane_task(snapshot, task_id, reason_label),
             DesktopAction::InstallExtension { manifest_id } => {
                 Self::with_offered_extension_operation(snapshot, manifest_id, "installed")
             }
@@ -2834,6 +2859,44 @@ impl DesktopCommandBridge {
     /// The projection's `can_install` already requires a verified signature and
     /// every permission row individually granted, so an unsigned or tampered
     /// artifact is refused here as well as in app authority.
+    /// Refuse a cancel unless the projection shows a task that can still be cancelled.
+    ///
+    /// The guard lives here rather than in the painter because the bridge is
+    /// what the tests drive, and because a cancel synthesised by any other
+    /// caller -- a keybinding, a command palette entry -- has to meet the same
+    /// bar as the button.
+    fn with_cancellable_cloud_lane_task(
+        snapshot: &ShellProjectionSnapshot,
+        task_id: String,
+        reason_label: String,
+    ) -> DesktopBridgeOutput {
+        let Some(row) = snapshot
+            .legion_cloud_lane
+            .rows
+            .iter()
+            .find(|row| row.task_id.0 == task_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownCloudLaneTask {
+                task_id,
+            });
+        };
+        if matches!(
+            row.state,
+            legion_protocol::LegionCloudLaneTaskState::Completed
+                | legion_protocol::LegionCloudLaneTaskState::Failed
+                | legion_protocol::LegionCloudLaneTaskState::Cancelled
+        ) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::CloudLaneTaskNotCancellable {
+                task_id,
+                state: format!("{:?}", row.state),
+            });
+        }
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelCloudLaneTask {
+            task_id,
+            reason_label,
+        })
+    }
+
     fn with_offered_extension_operation(
         snapshot: &ShellProjectionSnapshot,
         manifest_id: String,
