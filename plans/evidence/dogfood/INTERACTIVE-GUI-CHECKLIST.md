@@ -44,6 +44,22 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 12 | Debug: F9 toggle BP; Step Over (`F10`); Stop (`Shift+F5`) | | B11/B14/B15 |
 | 13 | Sandbox panel: Windows caveats visible if Job Object-only | | |
 
+> **Why rows 5–7 were unreachable, not merely unexercised.** Until 2026-08-20
+> nobody had driven Assist or Delegate from a rendered frame, and both were
+> broken from the outside while every projection test passed. Assist's rail
+> blocked on `assisted_ai_projection.providers` being non-empty and offered
+> **Settings** as the fix — but that projection describes a Phase-4 assisted-AI
+> *run*, is populated only by one, no rendered control starts one, and choosing
+> a preferred provider in Settings never adds a row to it. The block could not
+> be cleared from inside the app, so Assist mode showed one dead-end card
+> forever, hiding a `Predict` control that works with zero configuration through
+> the always-registered deterministic local provider. Delegate chat was worse:
+> `send_delegate_chat` has been implemented since Phase 5 — retrieval-backed,
+> citation-carrying, able to stream a live reply — and had **no rendered control
+> at all**, so row 7 could not be exercised even in principle. Both are fixed in
+> `crates/legion-desktop/src/view.rs` and guarded by
+> `crates/legion-desktop/tests/assist_delegate_reachability.rs`.
+
 > **Why 1a is called out separately.** Until 2026-08-17 this checklist went
 > straight from "expand nested dirs" to "edit a file", and never named the step
 > in between. Clicking a file row selected it and opened nothing — quick-open

@@ -126,6 +126,8 @@ pub const DELEGATE_TASK_DRAFT_MAX_CHARS: usize = 4_096;
 /// Four bytes per scalar keeps this consistent with [`DELEGATE_TASK_DRAFT_MAX_CHARS`]
 /// while making the dispatch boundary explicit.
 pub const DELEGATE_TASK_DRAFT_MAX_BYTES: usize = DELEGATE_TASK_DRAFT_MAX_CHARS * 4;
+/// Chat turns kept visible in the Delegate rail before older ones are counted.
+const DELEGATE_CHAT_VISIBLE_TURNS: usize = 8;
 
 /// Action emitted by the top-bar `Command` control.
 pub fn command_palette_control_action() -> DesktopAction {
@@ -860,25 +862,23 @@ impl ModeSurfaceModel {
                 inspector: SurfaceAvailability::Hidden,
                 delegate_lifecycle: None,
             },
+            // Assist's inspector is the inline-prediction panel, and inline
+            // prediction routes through the always-registered deterministic
+            // local provider: it needs a buffer and nothing else.
+            //
+            // This arm used to block on `assisted_ai_projection.providers`
+            // being empty, with the resolution "Settings". That projection
+            // describes a *Phase-4 assisted-AI run* and is populated only as a
+            // side effect of one, so in the shipped app it is empty until a run
+            // happens — and no rendered control starts a run. Worse, the
+            // resolution it named could not clear it: setting a preferred AI
+            // provider in Settings never touches that list. Assist mode was
+            // therefore blocked forever behind a card telling the user to do
+            // something that would not help, while `Predict` — which works with
+            // zero configuration — sat behind the block. The panel names the
+            // provider that actually answered, so the honest gate is the buffer.
             DesktopProductMode::Assist => {
-                let inspector = if snapshot.assisted_ai_projection.providers.is_empty() {
-                    SurfaceAvailability::Blocked {
-                        reason: "Choose an AI provider to enable predictions.".to_string(),
-                        resolution: "Settings".to_string(),
-                    }
-                } else if !snapshot
-                    .assisted_ai_projection
-                    .providers
-                    .iter()
-                    .any(|provider| {
-                        provider.availability == AssistedAiProviderAvailabilityState::Available
-                    })
-                {
-                    SurfaceAvailability::Blocked {
-                        reason: "No AI provider is ready for predictions.".to_string(),
-                        resolution: "Settings".to_string(),
-                    }
-                } else if snapshot.active_buffer_projection.buffer_id.is_none() {
+                let inspector = if snapshot.active_buffer_projection.buffer_id.is_none() {
                     SurfaceAvailability::Blocked {
                         reason: "Open a file to enable predictions.".to_string(),
                         resolution: "Open file".to_string(),
@@ -5656,23 +5656,18 @@ fn render_assist_rail(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Assist", DesktopProductMode::Assist);
+    // The one thing Assist can be blocked on is having no buffer to predict
+    // into, and its resolution opens the file palette. Nothing else here is a
+    // prerequisite, so nothing else is offered as one.
     if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
         surface_card(ui, |ui| {
             ui.label(theme::body_strong(reason));
             if soft_button(ui, resolution).clicked() {
-                if resolution == "Open file" {
-                    actions.push(DesktopAction::OpenPalette {
-                        mode: PaletteMode::File,
-                        query: String::new(),
-                        scope: SearchScopeProjection::Workspace,
-                    });
-                } else {
-                    actions.push(DesktopAction::OpenSettings);
-                    view.utility_surface = Some(UtilitySurface::Settings);
-                    view.settings_section = SettingsSection::AiProviders;
-                    view.utility_overlay_needs_focus = true;
-                    view.utility_overlay_focus_bounds = None;
-                }
+                actions.push(DesktopAction::OpenPalette {
+                    mode: PaletteMode::File,
+                    query: String::new(),
+                    scope: SearchScopeProjection::Workspace,
+                });
             }
         });
         return;
@@ -5682,6 +5677,22 @@ fn render_assist_rail(
     ui.label(theme::muted(
         "Assist never writes to the workspace until you accept a suggestion.",
     ));
+    // Route discoverability, without blocking on it. Predictions always work
+    // through the local deterministic route; a remote provider is an upgrade,
+    // not a prerequisite, and this line is the only place Assist says so.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::muted(format!(
+            "Route: {}. A local deterministic route always answers.",
+            model.preferred_ai_provider
+        )));
+        if soft_button(ui, "AI provider settings").clicked() {
+            actions.push(DesktopAction::OpenSettings);
+            view.utility_surface = Some(UtilitySurface::Settings);
+            view.settings_section = SettingsSection::AiProviders;
+            view.utility_overlay_needs_focus = true;
+            view.utility_overlay_focus_bounds = None;
+        }
+    });
 }
 
 fn render_delegate_prerequisite_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
@@ -5712,6 +5723,8 @@ fn render_delegate_draft_rail(
     {
         actions.push(action);
     }
+
+    render_delegate_chat_section(ui, snapshot, model, actions);
 
     section_label(ui, "Readiness", Some(theme::tokens().accent.green));
     match &model.mode_surface.inspector {
@@ -5754,6 +5767,74 @@ fn render_delegate_draft_rail(
     ui.label(theme::muted("Sandbox starts after the task is submitted."));
 }
 
+/// Delegate's chat transcript and composer.
+///
+/// `send_delegate_chat` — retrieval-backed, citation-carrying, and able to
+/// stream a live reply — has been implemented in the app since Phase 5 and had
+/// no rendered control: `DesktopAction::SendDelegateChat` was pushed by exactly
+/// nothing, so the only way to reach it was the `:delegate-chat` shell verb,
+/// which the desktop command palette does not offer either. The transcript was
+/// equally invisible; chat messages reached the projection and were rendered
+/// only as a debug row. Checklist row 7 ("Delegate chat: Streaming… then
+/// reply") could not be exercised because there was nowhere to type.
+///
+/// The composer is shown by both Delegate rails, because chat is useful before
+/// a task is submitted as well as during one.
+fn render_delegate_chat_section(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    section_label(ui, "Chat", Some(theme::tokens().accent.cyan));
+    let messages = &snapshot.delegated_task_projection.chat_messages;
+    if messages.is_empty() {
+        ui.label(theme::muted("No chat turns yet."));
+    } else {
+        theme::small_card_frame().show(ui, |ui| {
+            let skip = messages.len().saturating_sub(DELEGATE_CHAT_VISIBLE_TURNS);
+            for message in messages.iter().skip(skip) {
+                let (who, color) = match message.role {
+                    legion_protocol::DelegatedTaskChatRole::User => {
+                        ("You", theme::tokens().accent.blue)
+                    }
+                    legion_protocol::DelegatedTaskChatRole::Assistant => {
+                        ("Delegate", theme::tokens().accent.cyan)
+                    }
+                    legion_protocol::DelegatedTaskChatRole::System => {
+                        ("System", theme::tokens().accent.violet)
+                    }
+                };
+                ui.label(theme::accent(who, color));
+                ui.label(theme::muted(&message.content_label));
+                ui.add_space(4.0);
+            }
+            if skip > 0 {
+                ui.label(theme::muted(format!("+{skip} earlier turns")));
+            }
+        });
+    }
+    // The app requires an active buffer to build chat context, so say that
+    // instead of offering a Send that would only return an error.
+    let has_buffer = snapshot.active_buffer_projection.buffer_id.is_some();
+    if model.product_ai_stream_in_flight {
+        ui.label(theme::accent("Streaming…", theme::tokens().accent.amber));
+    }
+    if let Some(prompt) = interactive_fields::render_delegate_chat_draft(
+        ui,
+        has_buffer && !model.product_ai_stream_in_flight,
+    ) {
+        actions.push(DesktopAction::SendDelegateChat {
+            prompt_label: prompt,
+        });
+    }
+    if !has_buffer {
+        ui.label(theme::muted(
+            "Open a file to give Delegate something to talk about.",
+        ));
+    }
+}
+
 fn render_delegation_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -5777,6 +5858,7 @@ fn render_delegation_console(
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
     });
+    render_delegate_chat_section(ui, snapshot, model, actions);
     section_label(ui, "Readiness", Some(theme::tokens().accent.green));
     let (readiness, detail, ready) = match lifecycle {
         DelegateLifecycle::Draft => (

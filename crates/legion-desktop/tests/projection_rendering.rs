@@ -823,18 +823,19 @@ fn state_matrix_case(
                 description: "Unsaved changes",
             }
         }
+        // Assist's one prerequisite is a buffer to predict into: inline
+        // prediction routes through the always-registered deterministic local
+        // provider, so no provider setup appears in any of these cases. The
+        // Blocked row asserts the resolution control the empty row only names.
         (DockMode::Assist, UiStateMatrixState::Empty) => {
-            snapshot.assisted_ai_projection.provider_count = 1;
-            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
             UiStateMatrixExpectation::Text("Open a file to enable predictions.")
         }
         (DockMode::Assist, UiStateMatrixState::Blocked) => {
-            UiStateMatrixExpectation::Text("Choose an AI provider to enable predictions.")
+            snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(1));
+            UiStateMatrixExpectation::Clickable("Open file")
         }
         (DockMode::Assist, UiStateMatrixState::Ready) => {
             state_matrix_active_buffer(&mut snapshot, false);
-            snapshot.assisted_ai_projection.provider_count = 1;
-            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
             UiStateMatrixExpectation::Clickable("Predict")
         }
         (DockMode::Assist, UiStateMatrixState::Active) => {
@@ -4210,31 +4211,58 @@ fn projection_rendering_primary_shell_controls_meet_28px_semantic_target() {
     }
 }
 
+/// Assist's prerequisite is a buffer, and it says so.
+///
+/// This test used to assert the opposite: that an Assist rail with no projected
+/// AI providers reads "Choose an AI provider to enable predictions." and offers
+/// Settings. Both halves of that were wrong in the shipped app.
+/// `assisted_ai_projection.providers` describes a Phase-4 assisted-AI *run* and
+/// is populated only by one, no rendered control starts one, and choosing a
+/// preferred provider in Settings never adds a row to it — so the block could
+/// never clear and Assist mode was unusable with a mouse. Meanwhile `Predict`,
+/// which the block was hiding, works with zero configuration through the
+/// always-registered deterministic local provider.
 #[test]
-fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
+fn projection_rendering_assist_requires_only_a_buffer_not_a_configured_provider() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let mut snapshot = Shell::empty("Provider prerequisite").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
+    assert!(
+        snapshot.assisted_ai_projection.providers.is_empty(),
+        "this test is about the no-projected-provider case; the fixture must have none"
+    );
 
     let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
+    // With no buffer the rail names the one thing that is actually missing,
+    // and offers the control that fixes it.
     assert_eq!(
-        accesskit_label_count(&full, "Choose an AI provider to enable predictions."),
+        accesskit_label_count(&full, "Open a file to enable predictions."),
         1
     );
-    assert!(accesskit_has_clickable_label(&full, "Settings"));
+    assert!(accesskit_has_clickable_label(&full, "Open file"));
+    assert!(!accesskit_has_label(
+        &full,
+        "Choose an AI provider to enable predictions."
+    ));
     assert!(!accesskit_has_label(&full, "Assist workbench"));
-    assert!(!accesskit_has_label(&full, "Inline prediction"));
     assert!(!accesskit_has_label(&full, "Context Chips"));
     assert!(!accesskit_has_label(&full, "Model Picker"));
     assert!(!accesskit_has_label(&full, "Anthropic BYOK"));
 
-    let (opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
-    assert_eq!(opened.actions, vec![DesktopAction::OpenSettings]);
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(&full, "AI Providers"));
+    // With a buffer — and still no projected provider — the prediction surface
+    // is present and requestable.
+    state_matrix_active_buffer(&mut snapshot, false);
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(
+        accesskit_has_clickable_label(&full, "Predict"),
+        "Assist must offer Predict without a projected provider; predictions \
+         route through the deterministic local provider, so requiring one is a \
+         block the user cannot clear"
+    );
 }
 
 #[test]

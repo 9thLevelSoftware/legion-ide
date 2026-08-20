@@ -367,6 +367,60 @@ pub(crate) fn render_delegate_task_draft(
     task
 }
 
+/// Render the adapter-local, unsent Delegate chat prompt.
+///
+/// Returns the trimmed prompt only when the user activates Send with a
+/// non-empty draft and the surface is ready to accept one. Bounded by the same
+/// draft budget as the task description, because both end up in a display-safe
+/// projected label.
+pub(crate) fn render_delegate_chat_draft(ui: &mut egui::Ui, ready: bool) -> Option<String> {
+    let draft_id = egui::Id::new("legion-delegate-chat-draft-value");
+    let mut draft = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
+    draft = bounded_delegate_task_draft(&draft).into_owned();
+    let label = ui
+        .push_id("legion-delegate-chat-label", |ui| {
+            ui.label(theme::label("Ask Delegate"))
+        })
+        .inner;
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut draft)
+            .id_source("legion-delegate-chat-draft")
+            .char_limit(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
+            .desired_rows(2)
+            .desired_width(ui.available_width())
+            .hint_text("Ask about the open file")
+            .min_size(egui::vec2(
+                f32::from(theme::tokens().control_height.compact),
+                f32::from(theme::tokens().control_height.compact),
+            ))
+            .margin(egui::Margin::symmetric(4, 8)),
+    );
+    let field_id = response.id;
+    response.labelled_by(label.id);
+    // `labelled_by` records a relation; it does not name the node. Without an
+    // explicit name the field reaches assistive technology — and any test that
+    // drives one — as an anonymous text box next to some text.
+    ui.ctx()
+        .accesskit_node_builder(field_id, |node| node.set_label("Ask Delegate"));
+    draft = bounded_delegate_task_draft(&draft).into_owned();
+    let sendable = ready && !draft.trim().is_empty();
+    let submitted = ui
+        .push_id("legion-delegate-chat-send", |ui| {
+            super::primary_button_enabled(ui, "Send", theme::tokens().accent.blue, sendable)
+                .on_hover_text("Send a Delegate chat turn with workspace context")
+                .clicked()
+        })
+        .inner;
+    let prompt = (submitted && sendable).then(|| draft.trim().to_string());
+    if prompt.is_some() {
+        draft.clear();
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
+    prompt
+}
+
 /// Return the longest valid UTF-8 prefix inside both Delegate draft budgets.
 ///
 /// This boundary is applied before retaining an adapter-local draft and again
