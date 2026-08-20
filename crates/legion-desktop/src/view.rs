@@ -21,6 +21,7 @@ use tab_strip::render_tab_strip;
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
+pub mod assist_rail_commands;
 pub mod cloud_lane;
 pub mod extensions_panel;
 /// Projection-backed Legion workflow board.
@@ -5672,6 +5673,7 @@ fn render_assist_rail(
         });
         return;
     }
+    assist_rail_commands::render_assist_rail_commands(ui, snapshot, actions);
     render_assisted_suggestion_panel(ui, snapshot, model, actions);
     ui.add_space(6.0);
     ui.label(theme::muted(

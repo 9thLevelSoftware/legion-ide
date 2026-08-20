@@ -33,6 +33,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// The placeholder `send_delegate_chat` inserts before the worker replies.
+const STREAMING_PLACEHOLDER: &str = "Streaming response";
+
 mod common;
 use common::{TempWorkspace, click_at, clickable_center, full_frame_input, rendered_text};
 
@@ -334,13 +337,36 @@ fn a_delegate_chat_turn_can_be_typed_and_sent_from_the_rendered_ui() {
             .map(|message| message.content_label.as_str())
             .collect::<Vec<_>>()
     );
-    let reply = messages
-        .iter()
-        .find(|message| message.role == legion_protocol::DelegatedTaskChatRole::Assistant)
-        .expect("a sent turn must produce a reply, not just echo the prompt");
+    // `send_delegate_chat` inserts "Streaming response…" immediately and only
+    // replaces it once `poll_product_ai_stream` merges the worker result. A
+    // non-empty assistant message therefore proves nothing on its own: the
+    // placeholder is non-empty, so this assertion passed even if streaming
+    // never completed. Poll until the placeholder is gone.
+    let mut reply_label = String::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        reply_label = app
+            .runtime_snapshot()
+            .delegated_task_projection
+            .chat_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == legion_protocol::DelegatedTaskChatRole::Assistant)
+            .map(|message| message.content_label.clone())
+            .unwrap_or_default();
+        if !reply_label.trim().is_empty() && !reply_label.contains(STREAMING_PLACEHOLDER) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
-        !reply.content_label.trim().is_empty(),
+        !reply_label.trim().is_empty(),
         "an empty reply is a chat surface claiming a capability it does not have"
+    );
+    assert!(
+        !reply_label.contains(STREAMING_PLACEHOLDER),
+        "the reply never advanced past the streaming placeholder in 20s, so this asserts only that a placeholder was inserted. Final label was {reply_label:?}"
     );
 
     let text = rendered_text(&after);
@@ -369,5 +395,43 @@ fn delegate_chat_without_a_buffer_says_so_instead_of_offering_a_dead_send() {
         clickable_center(&frame, "Send").is_none(),
         "a Send that can only return `active buffer is not open` should not be \
          clickable in the first place"
+    );
+}
+
+/// Checklist row 5 asks for a deterministic **proposal**, not ghost text.
+///
+/// `DesktopAction::ExecuteRailCommand` and its `StartAiProposal` translation
+/// have existed since PKT-RAIL, and until this suite no renderer pushed either
+/// one — so the proposal pipeline was unreachable from the UI. Inline
+/// prediction was the only assist feature with a button, and it is a different
+/// feature: ghost text at the cursor, not a reviewable proposal.
+#[test]
+fn an_assist_rail_command_produces_a_real_proposal() {
+    let workspace = fixture("legion_desktop_assist_rail_proposal");
+    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
+    switch_mode(&mut app, "Assist");
+
+    let opened = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let before = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+
+    let explain = clickable_center(&opened, "Explain")
+        .expect("the Assist rail must offer a proposal command, not only Predict");
+    let after = click_at(&mut app, explain);
+
+    // Deterministic route, so the proposal is available within a few frames;
+    // poll rather than assume a fixed number.
+    let mut rows = before;
+    for _ in 0..40 {
+        rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+        if rows > before {
+            break;
+        }
+        let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    }
+
+    assert!(
+        rows > before,
+        "clicking a rail command produced no proposal (ledger stayed at {before} rows). The action reaches StartAiProposal through the bridge, so a click that changes nothing means the control never dispatched. Frame showed: {:?}",
+        rendered_text(&after)
     );
 }
