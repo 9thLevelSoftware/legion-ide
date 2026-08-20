@@ -78,6 +78,13 @@ The current package-and-support path is intentionally explicit so release notes 
 - GUI beta dry-run: `sh scripts/gui-smoke.sh --beta --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - GUI Phase 8 dry-run: `sh scripts/gui-smoke.sh --phase-8 --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun`
 
+A live `--smoke` run exits non-zero when the report it writes says `failed` or
+`blocked`, and zero only on `passed`. The evidence markdown is written first in
+every case, so a non-zero exit still leaves a readable report at the `--evidence`
+path. Until 2026-08-20 the run exited 0 regardless of status, which meant
+`scripts/gui-smoke.sh` (run under `set -e`) and any operator reading the exit
+code were told a failed smoke had passed.
+
 ### Native installer release (manual)
 
 The installed `legion-release.yml` is a manual-only native-release workflow with a required `mode` input. An authorized maintainer starts it from the intended source branch with:
