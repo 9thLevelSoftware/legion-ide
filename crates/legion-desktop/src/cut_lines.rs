@@ -34,6 +34,20 @@ pub const DEBUG_SIMULATED_BANNER: &str = "Debugger is simulated in this build";
 /// Banner when a live DAP adapter process is connected (B3 dual-mode honesty).
 pub const DEBUG_LIVE_BANNER: &str = "Debugger connected to a live adapter process";
 
+/// Banner while no debug session is running.
+///
+/// The dual-mode banner reports which runtime the *current session* is using,
+/// and there is no session to report on before a launch or after a stop. It
+/// used to fall through to [`DEBUG_SIMULATED_BANNER`] in that state, so a build
+/// with `LEGION_DAP_ADAPTER` set to a real `lldb-dap` read "Debugger is
+/// simulated in this build" while idle — and read it again immediately after
+/// disconnecting from the live adapter it had just been driving. Neither claim
+/// was true, and the second one contradicted the banner shown one click
+/// earlier. Which runtime answers is decided at launch, so that is what this
+/// says.
+pub const DEBUG_NO_SESSION_BANNER: &str =
+    "Debugger idle (fixture or live adapter is chosen when a session launches)";
+
 /// Prefix for plugin management rows that cannot execute WASM in product composition.
 pub const PLUGIN_EXECUTION_UNAVAILABLE: &str = "execution=not-available";
 

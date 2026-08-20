@@ -54,6 +54,23 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
 > row: an affordance that is never checked is an affordance that can rot back.
 
+> **Why rows 9-12 were never passable.** Until 2026-08-20 the shipped app could
+> not start a debug session at all. `DebugWorkflow::runtime_enabled` was set by
+> exactly two callers — `enable_debug_fixture_for_tests` and
+> `enable_debug_live_fake_for_tests` — and both are test seams, so every Launch
+> from the toolbar, from `F5`, or from `:debug-launch` returned
+> `Denied: Debug runtime is disabled`. Four debug suites were green throughout,
+> because each of them called a seam in its first three lines. The runtime now
+> enables itself on an explicit launch the broker has approved, the same lazy
+> trust-gated shape the terminal uses
+> (`crates/legion-app/src/debug_workflow.rs`), and rows 9-12 are guarded from
+> the rendered UI by `crates/legion-desktop/tests/debug_reachability.rs`, which
+> uses no debug seam on the fixture path. Two smaller repairs came with it: the
+> dual-mode banner claimed "Debugger is simulated in this build" whenever no
+> session was running — including immediately after disconnecting from a live
+> adapter — and `F9` stamped `Idle` over the status of a session that was still
+> paused.
+
 ## Commands / keys (debug)
 
 | Action | UI | Key | Shell |

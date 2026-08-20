@@ -97,6 +97,10 @@ use debug_workflow::{DebugBreakpointToggleInput, DebugWorkflow};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use debug_workflow::{live_dap_should_prebuild, run_live_dap_prebuild};
 
+/// Re-export because `set_debug_dap_mode_for_tests` takes this type and
+/// `legion-desktop` carries `legion-debug` only as a dev-dependency: without
+/// this its runtime cannot name the argument its own seam forwards.
+pub use legion_debug::DapMode;
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
 pub use legion_storage::checkpoint::DurableCheckpointSummary;
 /// Re-export so `legion-desktop`'s view layer can access this without reaching into the
