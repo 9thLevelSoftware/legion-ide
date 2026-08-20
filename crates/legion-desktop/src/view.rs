@@ -21,6 +21,7 @@ use tab_strip::render_tab_strip;
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
+pub mod cloud_lane;
 pub mod extensions_panel;
 /// Projection-backed Legion workflow board.
 pub mod fleet_board;
@@ -1025,6 +1026,8 @@ pub struct DesktopProjectionViewModel {
     pub plugin_rows: Vec<String>,
     /// Extension catalog panel model (P7.F2).
     pub extensions_panel: extensions_panel::DesktopExtensionsPanelViewModel,
+    /// Cloud Lane tasks and their cancel controls (P9.F3.T3).
+    pub cloud_lane: cloud_lane::DesktopCloudLanePanelViewModel,
     /// Collaboration presence rows.
     pub collaboration_rows: Vec<String>,
     /// Remote workspace manager rows.
@@ -1205,6 +1208,7 @@ impl DesktopProjectionViewModel {
             operational_health_rows: operational_health_rows(snapshot),
             manual_control_rows: manual_control_rows(snapshot),
             plugin_rows: plugin_rows(snapshot),
+            cloud_lane: cloud_lane::DesktopCloudLanePanelViewModel::from_snapshot(snapshot),
             extensions_panel: extensions_panel::DesktopExtensionsPanelViewModel::from_snapshot(
                 snapshot,
             ),
@@ -5913,10 +5917,19 @@ fn proposal_risk_label(risk: ProposalRiskLabel) -> &'static str {
 fn render_fleet_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    _model: &DesktopProjectionViewModel,
+    model: &DesktopProjectionViewModel,
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Legion Workflows", DesktopProductMode::LegionWorkflows);
+    // Cloud Lane rides here rather than in its own dock panel: cloud
+    // submission requires Automate mode in app authority, and this rail is
+    // only reached in that mode. Manual renders nothing in the right dock at
+    // all, which is the ban ADR-0046 and the Manual capability suite both want.
+    if model.cloud_lane.runtime_enabled || !model.cloud_lane.is_empty() {
+        components::section_header(ui, "Cloud Lane", Some(theme::tokens().accent.orange));
+        cloud_lane::render_cloud_lane_panel(ui, &model.cloud_lane, actions);
+        ui.separator();
+    }
     let workflows = &snapshot.legion_workflow_projection;
     if workflows.rows.is_empty() {
         ui.add_space(32.0);

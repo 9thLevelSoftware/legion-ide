@@ -52,6 +52,7 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 
 /// Outcome construction, extracted from this file for the chokepoint budget.
 /// App-owned extension catalog: verification, permission review, install (P7.F2).
+pub mod cloud_lane_egress;
 pub mod extension_management;
 
 mod command_outcome;
@@ -76,6 +77,7 @@ pub mod git_policy;
 mod git_remote;
 pub mod test_explorer;
 
+use crate::cloud_lane_egress::{CloudLaneEgressAcknowledgement, CloudLaneEgressManifestView};
 /// Re-exported from the `search` submodule so the crate-root path callers
 /// already use (`legion_app::SearchQueryOptions`) keeps working after the
 /// search pipeline moved out of `lib.rs`.
@@ -185,16 +187,16 @@ use legion_protocol::{
     LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
     LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
     LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
-    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
-    LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult, LegionWorkflowConflictId,
-    LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
-    LegionWorkflowDecisionKind, LegionWorkflowDependencyState, LegionWorkflowKillSwitch,
-    LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval,
-    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState, LegionWorkflowProjection,
-    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
-    LegionWorkflowRiskMonitorState, LegionWorkflowSession, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
-    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LegionCloudLaneTaskId, LegionCloudLaneTaskRequest, LegionCloudLaneTaskState,
+    LegionCloudLaneTaskStatus, LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult,
+    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
+    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
+    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
+    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
+    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
+    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
+    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
     LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
     McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
@@ -9855,6 +9857,8 @@ pub enum AppCommandRequest {
     Noop,
     /// Command requested shell termination.
     Quit,
+    /// A Cloud Lane operation (P9.F3.T3).
+    CloudLane(cloud_lane_egress::CloudLaneRequest),
     /// Set the app-owned product mode.
     SetProductMode {
         /// Target product mode.
@@ -10894,6 +10898,7 @@ impl CommandExecutionService {
             | AppCommandRequest::InspectAiRun { .. }
             | AppCommandRequest::InvokePluginCommand { .. }
             | AppCommandRequest::ExtensionCatalog(_)
+            | AppCommandRequest::CloudLane(_)
             | AppCommandRequest::JoinCollaborationSession { .. }
             | AppCommandRequest::LeaveCollaborationSession { .. }
             | AppCommandRequest::PublishCollaborationPresence { .. }
@@ -13029,6 +13034,8 @@ pub struct AppClipboardUpdate {
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
+    /// A Cloud Lane task was cancelled mid-flight (P9.F3.T3).
+    CloudLaneTaskCancelled(Box<LegionCloudLaneTaskStatus>),
     /// Vim modal editing state changed; carries the mode to display, or
     /// `None` when modal editing is off.
     VimModeChanged(Option<legion_ui::EditorInputMode>),
@@ -14536,6 +14543,58 @@ impl LegionCloudLaneComposition {
             evidence_count: 0,
         });
         Ok(status)
+    }
+
+    fn cancel_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        reason_label: &str,
+        event_sequence: EventSequence,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        if !self.runtime_enabled {
+            return Err(AppCompositionError::Remote(
+                "cloud lane runtime disabled by app policy".to_string(),
+            ));
+        }
+        if reason_label.trim().is_empty() {
+            return Err(AppCompositionError::Remote(
+                "cloud lane cancellation reason must be non-empty".to_string(),
+            ));
+        }
+        let Some(row) = self.rows.iter_mut().find(|row| row.task_id == *task_id) else {
+            return Err(AppCompositionError::Remote(format!(
+                "cloud lane task {} is not tracked",
+                task_id.0
+            )));
+        };
+        // Terminal states are not cancellable, and saying so is the point: a
+        // cancel that silently "succeeds" against a finished upload tells the
+        // user their data was withheld when it has already left.
+        if matches!(
+            row.state,
+            LegionCloudLaneTaskState::Completed
+                | LegionCloudLaneTaskState::Failed
+                | LegionCloudLaneTaskState::Cancelled
+        ) {
+            return Err(AppCompositionError::Remote(format!(
+                "cloud lane task {} is already {:?} and cannot be cancelled",
+                task_id.0, row.state
+            )));
+        }
+        row.state = LegionCloudLaneTaskState::Cancelled;
+        row.status_label = format!("cancelled: {reason_label}");
+        Ok(LegionCloudLaneTaskStatus {
+            task_id: task_id.clone(),
+            state: LegionCloudLaneTaskState::Cancelled,
+            status_label: row.status_label.clone(),
+            estimated_cost_cents: row.estimated_cost_cents,
+            billed_cost_cents: row.billed_cost_cents,
+            queue_position: None,
+            event_sequence,
+            generated_at: TimestampMillis::now(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        })
     }
 
     fn projection(&self, generated_at: TimestampMillis) -> LegionCloudLaneProjection {
@@ -19432,6 +19491,12 @@ impl AppComposition {
             AppCommandRequest::ExtensionCatalog(request) => Ok(
                 AppCommandOutcome::ExtensionCatalogChanged(self.apply_extension_request(request)?),
             ),
+            AppCommandRequest::CloudLane(cloud_lane_egress::CloudLaneRequest::CancelTask {
+                task_id,
+                reason_label,
+            }) => Ok(AppCommandOutcome::CloudLaneTaskCancelled(Box::new(
+                self.cancel_legion_cloud_lane_task(&task_id, &reason_label)?,
+            ))),
             AppCommandRequest::JoinCollaborationSession { session_id } => {
                 self.join_collaboration_session(session_id)?;
                 Ok(AppCommandOutcome::CollaborationSessionJoined(session_id))
@@ -19906,9 +19971,16 @@ impl AppComposition {
     }
 
     /// Submit a metadata-only Legion Cloud Lane task and project its status.
+    ///
+    /// Requires a [`CloudLaneEgressAcknowledgement`], which only a rendered
+    /// [`CloudLaneEgressManifestView`] can produce, and which is bound to the
+    /// manifest's contents rather than its id. `scope_visible_to_user` on the
+    /// manifest is a claim by the caller; this is the part that costs
+    /// something.
     pub fn submit_legion_cloud_lane_task(
         &mut self,
         request: LegionCloudLaneTaskRequest,
+        acknowledgement: &CloudLaneEgressAcknowledgement,
     ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
         self.require_automate_mode()?;
         let context = self.active_documents.require_workspace_context()?;
@@ -19917,9 +19989,37 @@ impl AppComposition {
                 "cloud lane task workspace does not match active workspace".to_string(),
             ));
         }
+        if !acknowledgement.covers(&request) {
+            return Err(AppCompositionError::Remote(
+                "cloud lane egress manifest was not surfaced for this exact upload".to_string(),
+            ));
+        }
         let event_sequence = self.event_sequence_generator.next();
         self.legion_cloud_lane
             .submit_task(request, &context, event_sequence)
+    }
+
+    /// Build the egress manifest a renderer must show before submitting.
+    pub fn legion_cloud_lane_egress_manifest(
+        request: &LegionCloudLaneTaskRequest,
+    ) -> CloudLaneEgressManifestView {
+        CloudLaneEgressManifestView::from_request(request)
+    }
+
+    /// Cancel an in-flight Legion Cloud Lane task.
+    ///
+    /// The client transport has had `cancel_task` since the substrate landed;
+    /// nothing in the product could reach it, so "cancellable mid-flight" was
+    /// true of the transport and false of the application.
+    pub fn cancel_legion_cloud_lane_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        reason_label: &str,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        self.require_automate_mode()?;
+        let event_sequence = self.event_sequence_generator.next();
+        self.legion_cloud_lane
+            .cancel_task(task_id, reason_label, event_sequence)
     }
 
     /// Return the current metadata-only Legion Cloud Lane projection.
@@ -29218,6 +29318,7 @@ impl AppComposition {
             legion_workflow_budget_rows,
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
             extension_catalog: self.extension_catalog.projection(),
+            legion_cloud_lane: self.legion_cloud_lane_projection(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
             remote_gui_projection,

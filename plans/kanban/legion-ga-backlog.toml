@@ -2466,7 +2466,11 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-cloud", "cargo test -p legion-desktop"]
     acceptance = ["Every Cloud Lane upload is paired with a visible egress manifest and is cancellable mid-flight."]
     stop_condition = "Stop if a Cloud Lane upload can complete without surfacing its manifest."
-    status = "todo"
+    # 2026-08-19: unfrozen by ADR-0046 Amendment 1 (owner decision) and done.
+    # Built inside legion-app/legion-desktop; the amendment's narrow exception
+    # for a new `legion-cloud` crate went unused, so clause 1 stands intact.
+    status = "done"
+    evidence = "plans/evidence/production/PR-ENT-002/P9-F3-T3-cloud-lane-egress-and-cancellation.md"
 
     [[epics.features.tasks]]
     id = "P9.F3.T4"

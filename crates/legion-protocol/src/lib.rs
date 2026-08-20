@@ -25016,6 +25016,25 @@ pub struct LegionCloudLaneProjection {
     pub schema_version: u16,
 }
 
+impl LegionCloudLaneProjection {
+    /// The projection a shell shows when no Cloud Lane runtime is enabled.
+    ///
+    /// Deliberately not `Default`: an empty projection and a *disabled* one
+    /// look identical in their rows and mean opposite things to a reader, so
+    /// the disabled case says so in its status label.
+    pub fn disabled() -> Self {
+        Self {
+            projection_id: "legion-cloud-lane:disabled".to_string(),
+            runtime_enabled: false,
+            rows: Vec::new(),
+            status_label: "Legion Cloud Lane runtime disabled by policy".to_string(),
+            generated_at: TimestampMillis(0),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
+}
+
 /// Workflow lifecycle state for Legion orchestration metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegionWorkflowState {

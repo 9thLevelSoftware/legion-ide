@@ -73,11 +73,13 @@ would leave a future reader believing the accessibility evidence exists.
 P9.F3.T3. `PR-VSC-002` and `PR-ENT-001` stay deferred; nothing here touches
 them.
 
-**Clause 1 gets one narrow exception**, for `legion-cloud` only. P9.F3.T3 names
-`crates/legion-cloud/src/lib.rs` as its home and the crate does not exist, so
-building it requires either a new workspace member or relocating the work. The
-exception is deliberately not a general re-opening: any *other* new crate still
-needs its own amendment.
+**Clause 1 gets one narrow exception**, for `legion-cloud` only — which in
+the event went **unused**: P9.F3.T3 was built inside `legion-app` and
+`legion-desktop`, where the Cloud Lane substrate already lived, so no new
+workspace crate was added and clause 1 stands intact. The exception is recorded
+rather than deleted because it was granted; a future reader should know it is
+available and that nothing has spent it. The exception is deliberately not a general
+re-opening: any *other* new crate still needs its own amendment.
 
 **What has not changed.** Clause 4 already permitted maintenance on existing
 crates and still does. The remaining frozen surfaces stay frozen. And the

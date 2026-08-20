@@ -2847,6 +2847,19 @@ impl DesktopRuntime {
             }
             // P7.F2: the extension catalog changed. The status line is the
             // renderer-visible confirmation that the app really acted.
+            AppCommandOutcome::CloudLaneTaskCancelled(status) => {
+                // The status label carries the reason the user gave, so the
+                // status line says what was cancelled and why rather than
+                // acknowledging an action with no subject.
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!(
+                        "Cloud Lane task {}: {}",
+                        status.task_id.0, status.status_label
+                    ),
+                );
+                DesktopWorkflowOutcome::Noop
+            }
             AppCommandOutcome::ExtensionCatalogChanged(change) => {
                 self.set_status(StatusSeverity::Info, change.status_message());
                 DesktopWorkflowOutcome::Noop
