@@ -5844,7 +5844,12 @@ fn render_delegation_console(
     section_label(ui, "Permission budget", Some(theme::tokens().accent.orange));
     render_delegate_permission_budget(ui, snapshot);
     section_label(ui, "Sandbox", Some(theme::tokens().accent.blue));
-    render_compact_rows(ui, &model.sandbox_rows, "Sandbox is preparing", 5);
+    render_compact_rows(
+        ui,
+        &model.sandbox_rows,
+        "Sandbox is preparing",
+        sandbox_panel::PANEL_VISIBLE_ROW_LIMIT,
+    );
 }
 
 fn render_delegate_permission_budget(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
@@ -7188,13 +7193,20 @@ fn render_problem_rows(
     }
 }
 
+/// Longest a compact row may be before its middle is replaced by an ellipsis.
+///
+/// Named so callers that must keep a line readable end to end — the sandbox
+/// panel's platform-limitation row, for one — can hold themselves to the same
+/// budget in a test instead of guessing at it.
+pub(crate) const COMPACT_ROW_CHAR_BUDGET: usize = 110;
+
 fn render_compact_rows(ui: &mut egui::Ui, rows: &[String], empty: &str, limit: usize) {
     if rows.is_empty() {
         ui.label(theme::muted(empty));
         return;
     }
     for row in rows.iter().take(limit) {
-        ui.label(theme::body(trim_middle(row, 110)));
+        ui.label(theme::body(trim_middle(row, COMPACT_ROW_CHAR_BUDGET)));
     }
     if rows.len() > limit {
         ui.label(theme::muted(format!("{} more rows", rows.len() - limit)));
