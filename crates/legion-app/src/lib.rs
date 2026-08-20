@@ -14788,7 +14788,6 @@ pub struct LspDebounceEvent {
     pub kind: LspDebounceKind,
 }
 
-/// Root application composition.
 /// Maximum characters of a Delegate chat prompt that reach app authority.
 ///
 /// Exported so the renderer's composer caps at the same number; the two used to
@@ -14796,6 +14795,7 @@ pub struct LspDebounceEvent {
 /// word.
 pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
 
+/// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
     editor: EditorEngine,
