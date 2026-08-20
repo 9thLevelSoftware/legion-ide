@@ -52,6 +52,7 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 
 /// Outcome construction, extracted from this file for the chokepoint budget.
 /// App-owned extension catalog: verification, permission review, install (P7.F2).
+pub mod ai_route_descriptor;
 pub mod cloud_lane_egress;
 pub mod extension_management;
 
@@ -27322,6 +27323,10 @@ impl AppComposition {
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
+        // Resolved before the route request so the capability decision, the
+        // audit record and the bytes all describe the same destination.
+        let (route_target, route_health, route_cost, route_privacy) =
+            crate::ai_route_descriptor::product_ai_route_descriptor(self.preferred_ai_provider);
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -27421,7 +27426,7 @@ impl AppComposition {
                 },
                 required_capability: CapabilityId("ai.provider.invoke".to_string()),
                 risk_label: ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                privacy_label: route_privacy,
                 labels: vec![
                     "delegate.chat.provider_route".to_string(),
                     format!("delegate.prompt:{}", prompt_fingerprint.value),
@@ -27433,14 +27438,10 @@ impl AppComposition {
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            network_target: Some(route_target),
             cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: vec!["delegate.local.deterministic".to_string()],
-            cost_labels: vec!["local.free".to_string()],
+            health_labels: vec![route_health.to_string()],
+            cost_labels: vec![route_cost.to_string()],
             principal_id: input.principal.clone(),
             workspace_trust_state: context.trust.clone(),
             correlation_id: event_context.correlation_id,
