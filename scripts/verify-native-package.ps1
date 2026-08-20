@@ -97,21 +97,12 @@ function Read-MsiProductVersion([string]$Path) {
         if ($null -eq $record) {
             Fail "MSI Property table does not contain ProductVersion"
         }
-        # Cast and trim so this function returns exactly one string.
-        #
-        # It used to return an *array*. A PowerShell function emits every
-        # uncaptured value in its body, and the COM `Execute()` / `Close()`
-        # calls above and below emit theirs, so the caller received
-        # @('', '0.0.2', '') and string-interpolated it space-joined. The
-        # release then failed with "expected 0.0.2, found  0.0.2" -- two
-        # identical versions, two spaces, and a verifier insisting they
-        # differed. Every release was blocked by it.
-        #
-        # The `[void]` casts on those calls are the actual fix; this cast and
-        # trim keep the contract single-valued even if a future COM call starts
-        # emitting, because the failure mode is silent and reads as a real
-        # version mismatch.
-        return ([string]$record.StringData(1)).Trim()
+        # PowerShell emits every uncaptured value in a function body, so an
+        # uncaptured COM call here turns this return into an array that the
+        # caller interpolates space-joined ("expected 0.0.2, found  0.0.2").
+        # The `[void]` casts above and below prevent that; the trim normalises
+        # whitespace in the Property value itself.
+        return $record.StringData(1).Trim()
     } finally {
         if ($null -ne $view) {
             try { [void]$view.Close() } catch {}
