@@ -10819,9 +10819,16 @@ fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !debug.diagnostics.is_empty()
     {
         // Dual-mode honesty: live adapter vs simulated fixture (WS-A-D B3).
+        //
+        // Three states, not two. `live_adapter` is a property of the running
+        // session, so with no session it answers a question nobody asked and
+        // the old two-way branch turned its `false` into a claim about the
+        // build. See `cut_lines::DEBUG_NO_SESSION_BANNER`.
         rows.push(format!(
             "debug: {}",
-            if debug.live_adapter {
+            if debug.active_session_id.is_none() {
+                crate::cut_lines::DEBUG_NO_SESSION_BANNER
+            } else if debug.live_adapter {
                 crate::cut_lines::DEBUG_LIVE_BANNER
             } else {
                 crate::cut_lines::DEBUG_SIMULATED_BANNER

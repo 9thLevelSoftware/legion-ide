@@ -119,6 +119,17 @@ impl DebugWorkflow {
         self.projection.generated_at = TimestampMillis::now();
     }
 
+    /// Enable the DAP runtime for a product launch. Idempotent.
+    ///
+    /// Deliberately *not* called on workspace open: enabling on first explicit
+    /// launch keeps the adapter runtime out of the way of anyone who never asks
+    /// to debug, and leaves the trust decision in front of it.
+    pub(crate) fn ensure_product_enabled(&mut self) {
+        if !self.runtime_enabled {
+            self.enable_runtime();
+        }
+    }
+
     pub(crate) fn enable_live_fake_for_tests(&mut self) {
         self.enable_runtime();
         self.prefer_live_fake_for_tests = true;
@@ -203,7 +214,7 @@ impl DebugWorkflow {
             .collect();
         self.sync_breakpoint_projection();
         self.projection.status = DebugStatusProjection {
-            kind: DebugStatusKindProjection::Idle,
+            kind: self.non_lifecycle_status_kind(),
             message: format!(
                 "Debug configurations refreshed: {}",
                 self.projection.configurations.len()
@@ -211,6 +222,22 @@ impl DebugWorkflow {
         };
         self.projection.generated_at = TimestampMillis::now();
         Ok(self.projection())
+    }
+
+    /// Status kind to report for an action that does not change session state.
+    ///
+    /// Toggling a breakpoint and refreshing the configuration list are not
+    /// lifecycle events. Reporting `Idle` for them while a session is active
+    /// told the panel to render `status=Idle session=Some(…) state=Paused` —
+    /// three fields, two of which contradict the first. On the live path it is
+    /// worse than untidy: `F9` during a running program announced that the
+    /// debugger had stopped while the adapter process was still executing it.
+    pub(crate) fn non_lifecycle_status_kind(&self) -> DebugStatusKindProjection {
+        if self.projection.active_session_id.is_some() {
+            self.projection.status.kind
+        } else {
+            DebugStatusKindProjection::Idle
+        }
     }
 
     pub(crate) fn toggle_breakpoint(
@@ -230,7 +257,7 @@ impl DebugWorkflow {
             self.pending_breakpoint_deletes
                 .push((removed.workspace_id, removed.breakpoint_id));
             self.projection.status = DebugStatusProjection {
-                kind: DebugStatusKindProjection::Idle,
+                kind: self.non_lifecycle_status_kind(),
                 message: "Debug breakpoint removed".to_string(),
             };
         } else {
@@ -266,7 +293,7 @@ impl DebugWorkflow {
                 schema_version: 1,
             });
             self.projection.status = DebugStatusProjection {
-                kind: DebugStatusKindProjection::Idle,
+                kind: self.non_lifecycle_status_kind(),
                 message: "Debug breakpoint added".to_string(),
             };
         }
@@ -296,9 +323,18 @@ impl DebugWorkflow {
                     .unwrap_or_else(|| "requires a trusted workspace".to_string())
             ));
         }
-        if !self.runtime_enabled {
-            return self.deny("Debug runtime is disabled".to_string());
-        }
+        // Product gate: the broker above has already decided this workspace may
+        // launch an adapter, so an explicit launch enables the runtime here —
+        // the same lazy, trust-gated shape `TerminalWorkflow` uses.
+        //
+        // Until this line existed, `runtime_enabled` was set by exactly two
+        // callers, `enable_debug_fixture_for_tests` and
+        // `enable_debug_live_fake_for_tests`, both test seams. The shipped app
+        // therefore had no path that could ever set it, so every Launch — from
+        // the toolbar button, from `F5`, from `:debug-launch` — returned
+        // `Denied: Debug runtime is disabled`. Checklist rows 9-12 were not
+        // merely unexercised; they were unreachable.
+        self.ensure_product_enabled();
         let Some(config) = self
             .configurations
             .iter()

@@ -361,6 +361,36 @@ pub fn rendered_text(output: &egui::FullOutput) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A full-frame raw input carrying one key press.
+///
+/// `modifiers` is set on the event **and** on the frame. egui reads held
+/// modifiers from `RawInput::modifiers`, not from the event they arrive with,
+/// so a helper that sets only the event's copy sends `Shift+F5` and has it
+/// dispatch as a plain `F5`. That failure is silent in exactly the case that
+/// matters: `F5` (continue) and `Shift+F5` (stop) both move the session, so the
+/// test sees state change and calls the wrong binding a pass.
+pub fn key_press_input(key: egui::Key, modifiers: egui::Modifiers) -> egui::RawInput {
+    let mut input = full_frame_input(vec![egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }]);
+    input.modifiers = modifiers;
+    input
+}
+
+/// Press `key` and settle: the key frame, then one frame for the queued action.
+pub fn press_key(
+    app: &mut legion_desktop::workflow::DesktopEframeApp,
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> egui::FullOutput {
+    let _ = app.run_headless_full_frame(key_press_input(key, modifiers));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
 /// Click at `pos` and settle: press, release, then one frame for the action.
 ///
 /// Three frames because the action a click queues is applied on the frame after
