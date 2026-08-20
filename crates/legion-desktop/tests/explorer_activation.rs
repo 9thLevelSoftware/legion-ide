@@ -17,7 +17,7 @@
 use std::path::Path;
 
 mod common;
-use common::TempWorkspace;
+use common::{TempWorkspace, clickable_center, full_frame_input};
 
 use legion_desktop::{
     bridge::DesktopAction,
@@ -217,7 +217,8 @@ fn clicking_a_rendered_explorer_row_opens_the_file() {
 
     // One priming frame so the accessibility tree exists to be searched.
     let primed = app.run_headless_full_frame(full_frame_input(Vec::new()));
-    let pos = accessible_clickable_center(&primed, "clickable.txt");
+    let pos = clickable_center(&primed, "clickable.txt")
+        .expect("rendered `clickable.txt` row should be clickable");
 
     let _ = app.run_headless_full_frame(full_frame_input(vec![
         egui::Event::PointerMoved(pos),
@@ -254,36 +255,4 @@ fn clicking_a_rendered_explorer_row_opens_the_file() {
         "the clicked row should be the file that opened, got {:?}",
         snapshot.active_buffer_projection.file_path
     );
-}
-
-fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
-    egui::RawInput {
-        focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
-        events,
-        ..egui::RawInput::default()
-    }
-}
-
-fn accessible_clickable_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
-    let bounds = output
-        .platform_output
-        .accesskit_update
-        .as_ref()
-        .expect("full headless frames should expose the accessibility tree")
-        .nodes
-        .iter()
-        .find_map(|(_id, node)| {
-            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
-                .then(|| node.bounds())
-                .flatten()
-        })
-        .unwrap_or_else(|| panic!("rendered `{label}` row should be clickable"));
-    egui::pos2(
-        ((bounds.x0 + bounds.x1) * 0.5) as f32,
-        ((bounds.y0 + bounds.y1) * 0.5) as f32,
-    )
 }

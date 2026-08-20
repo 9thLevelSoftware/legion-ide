@@ -15,7 +15,7 @@
 use std::path::Path;
 
 mod common;
-use common::TempWorkspace;
+use common::{TempWorkspace, click_at, clickable_center, full_frame_input, rendered_text};
 
 use legion_desktop::workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime};
 
@@ -23,84 +23,6 @@ fn open_app(root: &Path) -> DesktopEframeApp {
     let runtime = DesktopRuntime::open(DesktopLaunchConfig::new(root.to_path_buf(), None))
         .expect("desktop runtime should open workspace");
     DesktopEframeApp::new(runtime)
-}
-
-fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
-    egui::RawInput {
-        focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
-        events,
-        ..egui::RawInput::default()
-    }
-}
-
-/// Every piece of text the rendered frame exposes to assistive technology.
-///
-/// Reads `label` **or** `value`. egui puts a control's explicit label in the
-/// first and static text in the second, so a label-only reader sees buttons and
-/// misses every heading, hint and empty state — which made the command palette
-/// look like it rendered nothing at all when it renders sixteen nodes.
-fn rendered_text(output: &egui::FullOutput) -> Vec<String> {
-    output
-        .platform_output
-        .accesskit_update
-        .as_ref()
-        .expect("full headless frames should expose the accessibility tree")
-        .nodes
-        .iter()
-        .filter_map(|(_id, node)| {
-            node.label()
-                .map(str::to_string)
-                .or_else(|| node.value().map(str::to_string))
-        })
-        .collect()
-}
-
-/// Centre of the clickable control carrying `label`.
-fn clickable_center(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {
-    output
-        .platform_output
-        .accesskit_update
-        .as_ref()?
-        .nodes
-        .iter()
-        .find_map(|(_id, node)| {
-            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
-                .then(|| node.bounds())
-                .flatten()
-        })
-        .map(|bounds| {
-            egui::pos2(
-                ((bounds.x0 + bounds.x1) * 0.5) as f32,
-                ((bounds.y0 + bounds.y1) * 0.5) as f32,
-            )
-        })
-}
-
-/// Click at `pos` and settle: press, release, then one frame for the action.
-fn click_at(app: &mut DesktopEframeApp, pos: egui::Pos2) -> egui::FullOutput {
-    let _ = app.run_headless_full_frame(full_frame_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]));
-    let _ = app.run_headless_full_frame(full_frame_input(vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::default(),
-        },
-    ]));
-    app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
 /// The six activity surfaces the rail offers, by their accessibility labels.

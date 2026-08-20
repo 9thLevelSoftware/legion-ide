@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod common;
-use common::TempWorkspace;
+use common::{TempWorkspace, click_at, clickable_center, full_frame_input};
 
 use legion_desktop::{
     bridge::DesktopAction,
@@ -148,7 +148,7 @@ fn a_launched_command_actually_runs_in_the_terminal() {
     let status = terminal_status(&runtime);
     assert!(
         occurrences >= 2,
-        "the launched command was not executed: `{marker}` appeared {occurrences}          time(s) in 20s (1 = echoed by the shell but never run), while the panel          reports `{status}`. A control that reports running a command it never          ran is worse than one that does nothing, because the status line is          what a user checks."
+        "the launched command was not executed: `{marker}` appeared {occurrences} time(s) in 20s (1 = echoed by the shell but never run), while the panel reports `{status}`. A control that reports running a command it never ran is worse than one that does nothing, because the status line is what a user checks."
     );
 }
 
@@ -176,9 +176,11 @@ fn clicking_run_cargo_test_sends_the_command_to_the_terminal() {
     let mut app = DesktopEframeApp::new(runtime);
 
     let primed = app.run_headless_full_frame(full_frame_input(Vec::new()));
-    let tests = clickable_center(&primed, "Tests");
+    let tests = clickable_center(&primed, "Tests")
+        .expect("the Tests rail control must exist to reach the run button");
     let on_tests = click_at(&mut app, tests);
-    let run = clickable_center(&on_tests, "Run cargo test");
+    let run = clickable_center(&on_tests, "Run cargo test")
+        .expect("the Tests surface must offer a `Run cargo test` control");
     let _ = click_at(&mut app, run);
 
     // The fixture has no Cargo.toml, so a cargo that really ran says so. That
@@ -205,57 +207,8 @@ fn clicking_run_cargo_test_sends_the_command_to_the_terminal() {
 
     assert!(
         ran,
-        "clicking `Run cargo test` never sent the command in 30s. The terminal          transcript was: {transcript:?}"
+        "clicking `Run cargo test` never sent the command in 30s. The terminal transcript was: {transcript:?}"
     );
-}
-
-fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
-    egui::RawInput {
-        focused: true,
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1_440.0, 900.0),
-        )),
-        events,
-        ..egui::RawInput::default()
-    }
-}
-
-fn clickable_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
-    output
-        .platform_output
-        .accesskit_update
-        .as_ref()
-        .expect("full headless frames should expose the accessibility tree")
-        .nodes
-        .iter()
-        .find_map(|(_id, node)| {
-            (node.label() == Some(label) && node.supports_action(egui::accesskit::Action::Click))
-                .then(|| node.bounds())
-                .flatten()
-        })
-        .map(|bounds| {
-            egui::pos2(
-                ((bounds.x0 + bounds.x1) * 0.5) as f32,
-                ((bounds.y0 + bounds.y1) * 0.5) as f32,
-            )
-        })
-        .unwrap_or_else(|| panic!("no clickable control labelled `{label}`"))
-}
-
-fn click_at(app: &mut DesktopEframeApp, pos: egui::Pos2) -> egui::FullOutput {
-    for pressed in [true, false] {
-        let _ = app.run_headless_full_frame(full_frame_input(vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::default(),
-            },
-        ]));
-    }
-    app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
 /// A terminal opened against a project starts *in* that project.
