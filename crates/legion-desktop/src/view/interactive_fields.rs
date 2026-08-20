@@ -378,7 +378,6 @@ pub(crate) fn render_delegate_chat_draft(ui: &mut egui::Ui, ready: bool) -> Opti
     let mut draft = ui
         .ctx()
         .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
-    draft = bounded_delegate_task_draft(&draft).into_owned();
     let label = ui
         .push_id("legion-delegate-chat-label", |ui| {
             ui.label(theme::label("Ask Delegate"))
@@ -409,7 +408,6 @@ pub(crate) fn render_delegate_chat_draft(ui: &mut egui::Ui, ready: bool) -> Opti
     // drives one — as an anonymous text box next to some text.
     ui.ctx()
         .accesskit_node_builder(field_id, |node| node.set_label("Ask Delegate"));
-    draft = bounded_delegate_task_draft(&draft).into_owned();
     let sendable = ready && !draft.trim().is_empty();
     let submitted = ui
         .push_id("legion-delegate-chat-send", |ui| {

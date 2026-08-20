@@ -5677,12 +5677,14 @@ fn render_assist_rail(
     ui.label(theme::muted(
         "Assist never writes to the workspace until you accept a suggestion.",
     ));
-    // Route discoverability, without blocking on it. Predictions always work
-    // through the local deterministic route; a remote provider is an upgrade,
-    // not a prerequisite, and this line is the only place Assist says so.
+    // Route discoverability, without blocking on it. A remote provider is an
+    // upgrade, not a prerequisite, and this line is the only place Assist says
+    // so. It names the fallback rather than claiming the local route always
+    // answers: with a reachable Ollama the preferred route answers, and a
+    // sentence saying otherwise would contradict the route named beside it.
     ui.horizontal_wrapped(|ui| {
         ui.label(theme::muted(format!(
-            "Route: {}. A local deterministic route always answers.",
+            "Route: {}. Falls back to a local deterministic route if that is unavailable.",
             model.preferred_ai_provider
         )));
         if soft_button(ui, "AI provider settings").clicked() {
