@@ -262,10 +262,20 @@ fn render_git_hunk_controls(
             )));
         });
     }
-    if hunks.len() > GIT_HUNK_CONTROL_LIMIT {
+    // The count is stated only when it is knowable. The projection caps what it
+    // collects, so a panel subtracting what it drew from what it received would
+    // report "116 more" for a repository with sixteen thousand -- a precise
+    // number that is precisely wrong. When the projection says it truncated,
+    // the panel says there are more without pretending to know how many.
+    let shown = staged_shown.min(staged_budget) + unstaged_shown.min(unstaged_budget);
+    if snapshot.git_projection.hunks_truncated {
+        ui.label(theme::muted(
+            "More hunks than can be listed; refine the change set to review the rest",
+        ));
+    } else if hunks.len() > shown {
         ui.label(theme::muted(format!(
             "{} more hunks not shown",
-            hunks.len() - GIT_HUNK_CONTROL_LIMIT
+            hunks.len() - shown
         )));
     }
 }

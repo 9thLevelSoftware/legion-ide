@@ -1822,6 +1822,12 @@ pub struct GitProjection {
     pub changed_files: Vec<GitFileProjection>,
     /// Staged and unstaged hunks.
     pub hunks: Vec<GitHunkProjection>,
+    /// Whether `hunks` omits hunks the repository actually has.
+    ///
+    /// A surface counting what it received cannot tell "twelve of fourteen"
+    /// from "twelve of thousands", so a panel that states an exact number of
+    /// hidden hunks from a truncated list states a wrong one.
+    pub hunks_truncated: bool,
     /// Inline blame rows for the active file.
     pub blame_lines: Vec<GitBlameLineProjection>,
     /// Commit graph/history rows.
@@ -1865,6 +1871,7 @@ impl GitProjection {
             remote_default_branch: None,
             changed_files: Vec::new(),
             hunks: Vec::new(),
+            hunks_truncated: false,
             blame_lines: Vec::new(),
             commits: Vec::new(),
             conflicts: Vec::new(),

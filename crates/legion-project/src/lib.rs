@@ -910,6 +910,13 @@ pub struct ProjectGitSnapshot {
     pub changed_files: Vec<ProjectGitChangedFile>,
     /// Staged and unstaged hunks.
     pub hunks: Vec<ProjectGitHunk>,
+    /// Whether `hunks` omits hunks the repository actually has.
+    ///
+    /// The collector caps each side at `max_hunks`, so a surface counting what
+    /// it received cannot tell "twelve of fourteen" from "twelve of thousands".
+    /// A reader that states an exact number of hidden hunks from a truncated
+    /// list states a wrong one.
+    pub hunks_truncated: bool,
     /// Inline blame lines for the active file.
     pub blame_lines: Vec<ProjectGitBlameLine>,
     /// Commit graph/history rows.
@@ -970,39 +977,39 @@ pub fn collect_git_snapshot_with_backend(
     let staged_numstat = git_numstat(&repository_root, true)?;
     // Staged hunks get reserved capacity rather than the leftovers.
     //
-    // Unstaged used to consume the whole `max_hunks` allowance before staged
-    // was asked for at all, so a working tree with more unstaged hunks than the
+    // Unstaged used to consume the whole `max_hunks` allowance before staged was
+    // asked for at all, so a working tree with more unstaged hunks than the
     // limit projected *no staged hunks whatsoever* -- and every surface reading
-    // this projection then had no way to show, or unstage, work that was already
-    // in the index. The reservation is a half each, with whatever one side does
-    // not use handed to the other, so a repository with only one kind still
-    // fills the allowance exactly as before.
+    // this projection then had no way to show, or unstage, work already in the
+    // index. A renderer cannot repair that by partitioning what it receives,
+    // because by then the staged hunks are gone.
+    //
+    // Both sides are collected once, at the full allowance, and the split is
+    // decided in memory. An earlier version re-ran the unstaged diff to hand
+    // back capacity the staged side had not used; `git_diff_hunks` shells out
+    // and materialises the whole of `git diff` before applying its limit, so on
+    // a large working tree that repeated the most expensive call in this
+    // function on every refresh.
+    let unstaged_hunks =
+        git_diff_hunks(&repository_root, GitHunkStage::Unstaged, options.max_hunks)?;
+    let staged_hunks = git_diff_hunks(&repository_root, GitHunkStage::Staged, options.max_hunks)?;
+    // Half each, with either side's unused share given to the other, so a
+    // repository with only one kind still fills the allowance exactly as before.
     let staged_reserved = options.max_hunks / 2;
-    let unstaged_budget = options.max_hunks.saturating_sub(staged_reserved);
-    let mut hunks = git_diff_hunks(&repository_root, GitHunkStage::Unstaged, unstaged_budget)?;
-    let unstaged_taken = hunks.len();
-    if hunks.len() < options.max_hunks {
-        hunks.extend(git_diff_hunks(
-            &repository_root,
-            GitHunkStage::Staged,
-            options.max_hunks - unstaged_taken,
-        )?);
-    }
-    // Hand back any half the staged side did not use.
-    if hunks.len() < options.max_hunks && unstaged_taken == unstaged_budget {
-        let remaining = options.max_hunks - hunks.len();
-        let mut extra = git_diff_hunks(
-            &repository_root,
-            GitHunkStage::Unstaged,
-            unstaged_taken + remaining,
-        )?;
-        if extra.len() > unstaged_taken {
-            let staged: Vec<_> = hunks.split_off(unstaged_taken);
-            extra.truncate(unstaged_taken + remaining);
-            hunks = extra;
-            hunks.extend(staged);
-        }
-    }
+    let staged_take = staged_hunks
+        .len()
+        .min(staged_reserved.max(options.max_hunks.saturating_sub(unstaged_hunks.len())));
+    let unstaged_take = unstaged_hunks
+        .len()
+        .min(options.max_hunks.saturating_sub(staged_take));
+    // True when either side was capped by its collection limit, or when the
+    // split dropped some of what was collected.
+    let hunks_truncated = unstaged_hunks.len() >= options.max_hunks
+        || staged_hunks.len() >= options.max_hunks
+        || unstaged_take < unstaged_hunks.len()
+        || staged_take < staged_hunks.len();
+    let mut hunks: Vec<_> = unstaged_hunks.into_iter().take(unstaged_take).collect();
+    hunks.extend(staged_hunks.into_iter().take(staged_take));
 
     let conflicts = git_conflicts(&repository_root, status_entries.keys())?;
     let worktrees = git_worktrees(&repository_root)?;
@@ -1038,6 +1045,7 @@ pub fn collect_git_snapshot_with_backend(
         remote_default_branch,
         changed_files,
         hunks,
+        hunks_truncated,
         blame_lines,
         commits,
         conflicts,

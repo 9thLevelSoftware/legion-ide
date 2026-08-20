@@ -2573,8 +2573,19 @@ fn render_activity_sidebar(
         }
         ActivitySurface::SourceControl => {
             sidebar_header(ui, "SOURCE CONTROL", model.layout_title.clone());
-            render_git_controls(ui, snapshot, actions);
-            render_compact_rows(ui, &model.git_rows, "No source-control status", 12);
+            // Scrolled, because this surface is the tallest in the rail: up to
+            // twelve hunk controls, then the untracked note, then conflict
+            // actions, then twelve status rows. In a plain vertical `Ui` the
+            // lower ones are simply clipped on a short window or at high
+            // display zoom -- and conflict resolution is among them, which is
+            // the control a person needs most and can least afford to lose.
+            egui::ScrollArea::vertical()
+                .id_salt("legion_desktop_source_control_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    render_git_controls(ui, snapshot, actions);
+                    render_compact_rows(ui, &model.git_rows, "No source-control status", 12);
+                });
         }
         ActivitySurface::Tests => {
             sidebar_header(ui, "TESTS", model.layout_title.clone());
