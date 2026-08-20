@@ -24,6 +24,10 @@ use legion_desktop::workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRun
 /// A key-shaped string that is not a real credential.
 const FAKE_KEY: &str = "sk-ant-notarealkey-0123456789";
 
+/// The prefix any Anthropic key carries, and the shape a leak takes even when
+/// only part of the key escapes.
+const KEY_PREFIX: &str = "sk-ant-";
+
 fn open_app(root: &Path) -> DesktopEframeApp {
     let runtime = DesktopRuntime::open(DesktopLaunchConfig::new(root.to_path_buf(), None))
         .expect("desktop runtime should open workspace");
@@ -116,10 +120,6 @@ fn typing_an_api_key_never_reaches_the_open_buffer() {
         "typing into the BYOK field changed the open buffer. Every character of \
          an API key would be inserted into the file, saved, and committed."
     );
-    assert!(
-        !after.contains("sk-ant"),
-        "the buffer contains an API key prefix after typing into the key field"
-    );
 }
 
 #[test]
@@ -138,9 +138,13 @@ fn a_typed_api_key_is_not_exposed_as_readable_text() {
     // The field is a password field, so the accessibility tree must not carry
     // the secret in clear text. A screen reader reading it aloud, or a
     // diagnostics dump capturing it, is the same leak by a different route.
+    // Matched on the key *prefix*, not the whole key. A leak does not have to
+    // be complete to be a leak: a field that exposed the first twenty
+    // characters would pass a whole-key check and still put a credential in
+    // front of a screen reader. This catches truncated exposure too.
     let exposed: Vec<String> = rendered_text(&output)
         .into_iter()
-        .filter(|text| text.contains(FAKE_KEY) || text.contains("sk-ant-notarealkey"))
+        .filter(|text| text.contains(KEY_PREFIX))
         .collect();
     assert!(
         exposed.is_empty(),
