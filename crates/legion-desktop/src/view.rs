@@ -2475,6 +2475,22 @@ fn render_activity_rail(
         });
         if response.clicked() {
             view.selected_activity = surface;
+            // Source Control has no content until something asks the app for
+            // it: the git projection is populated *only* by an explicit
+            // `RefreshGit` command, and nothing issued one on workspace open or
+            // on selecting the surface. Opening the panel in a repository with
+            // uncommitted work therefore read "No source-control status", and
+            // the remote verbs (gated on a projected branch label) rendered as
+            // an empty row -- a panel that says a dirty repository is clean,
+            // which is the worst thing a source-control view can say.
+            //
+            // Refreshing on the click is the same contract the Search and
+            // Symbols entries already have in this table: selecting the surface
+            // dispatches the action that gives it something to show. It is one
+            // action per click, not per frame, so it cannot spin.
+            if surface == ActivitySurface::SourceControl {
+                actions.push(DesktopAction::RefreshGit);
+            }
             if let Some((mode, query)) = palette {
                 let query = if mode == PaletteMode::Search
                     && !snapshot.search_projection.query_label.trim().is_empty()

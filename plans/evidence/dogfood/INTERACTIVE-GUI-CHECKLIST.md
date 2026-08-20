@@ -37,7 +37,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 5 | Assist: Deterministic proposal appears | | |
 | 6 | Assist Auto with Ollama (if installed): streaming status then proposal | | |
 | 7 | Delegate chat: Streaming… then reply | | |
-| 8 | Git panel opens / status rows | | |
+| 8 | Git panel opens / status rows; stage a hunk, then commit it | | See note below |
 | 9 | Debug: refresh configs; Launch (`F5` idle+configs, toolbar, or `:debug-launch`) | | B17 |
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
@@ -53,6 +53,24 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > in `crates/legion-desktop/src/workflow.rs` (`ActivateExplorerFile`) and
 > guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
 > row: an affordance that is never checked is an affordance that can rot back.
+
+> **Why row 8 now names staging and committing.** The row used to stop at
+> "status rows", and against a real repository neither half of it held.
+> `GitProjection` is populated only by an explicit `RefreshGit`, and nothing
+> issued one on workspace open or on selecting the surface — so opening Source
+> Control over a tree with three changed files rendered "No source-control
+> status", and the remote verbs (gated on a projected branch label) were absent
+> with it. Underneath that, the panel had no stage, unstage or commit control at
+> all: `StageGitHunk` and `UnstageGitHunk` reached `git apply --cached` through
+> app authority and no rendered control ever pushed either, so Push was the only
+> write the panel could perform and it could only push what some other tool had
+> staged. Fixed in `crates/legion-desktop/src/view/source_control.rs` and the
+> activity rail in `crates/legion-desktop/src/view.rs`, guarded by
+> `crates/legion-desktop/tests/source_control_reachability.rs`, which asks git —
+> not the projection — whether the index changed. Untracked files still have no
+> stage control: staging applies a projected hunk, `git diff` emits none for a
+> file git has never seen, and there is no path-level `git add` authority to
+> reach for. The panel says so rather than showing a row with no button.
 
 ## Commands / keys (debug)
 

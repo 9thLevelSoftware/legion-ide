@@ -1,18 +1,20 @@
 //! Source-control panel rendering for the desktop adapter.
 //!
-//! Extracted from `view.rs` as a pure move so the Source Control surface can be
-//! changed without growing the shell's single largest file. Everything here was
-//! already written; nothing in this commit changes behaviour.
+//! Extracted from `view.rs` so the Source Control surface can be changed
+//! without growing the shell's single largest file.
 //!
 //! The module covers three things that all read the same `GitProjection`: the
 //! panel's controls, the status rows the sidebar lists, and the helpers the code
 //! canvas uses to draw hunk markers and inline blame in the gutter.
 
 use legion_protocol::TextCoordinate;
-use legion_ui::{GitBlameLineProjection, GitHunkProjection, ShellProjectionSnapshot};
+use legion_ui::{
+    GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, PaletteMode,
+    ShellProjectionSnapshot,
+};
 
 use super::components::soft_button;
-use super::{bounded_join, trim_middle};
+use super::{bounded_join, theme, trim_middle};
 use crate::bridge::DesktopAction;
 
 pub(super) fn render_git_controls(
@@ -54,7 +56,31 @@ pub(super) fn render_git_controls(
         {
             actions.push(DesktopAction::GrantDeniedGitRemoteHost);
         }
+        // Commit is offered only while something is staged. `commit_git_changes`
+        // fails on an empty index, so a Commit button that is always live is a
+        // button whose usual outcome is an error toast.
+        //
+        // It routes through the palette because a commit needs a message and
+        // this renderer owns no text state: the palette already has the input
+        // field, the `git-commit` command, and the operand parser, so the button
+        // hands the user to the flow that exists rather than inventing a second
+        // one.
+        if snapshot
+            .git_projection
+            .hunks
+            .iter()
+            .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
+            && soft_button(ui, "Commit…").clicked()
+        {
+            actions.push(DesktopAction::OpenPalette {
+                mode: PaletteMode::Command,
+                query: COMMIT_PALETTE_QUERY.to_string(),
+                scope: snapshot.search_projection.scope,
+            });
+        }
     });
+    render_git_hunk_controls(ui, snapshot, actions);
+    render_untracked_note(ui, snapshot);
     if let Some(conflict) = snapshot.git_projection.conflicts.first() {
         ui.horizontal_wrapped(|ui| {
             if soft_button(ui, "Use Current").clicked() {
@@ -69,6 +95,117 @@ pub(super) fn render_git_controls(
             }
         });
     }
+}
+
+/// The palette query that opens the commit flow with its operand ready.
+///
+/// `>` selects command mode and `git commit ` is the prefix
+/// `parse_palette_command_operands` strips before treating the rest as the
+/// message, so the user lands with the cursor where the message goes.
+const COMMIT_PALETTE_QUERY: &str = ">git commit ";
+
+/// How many hunks get their own stage/unstage control.
+///
+/// The sidebar is a column, not a diff viewer; past this the panel is a wall of
+/// buttons. The overflow is stated rather than silently dropped.
+const GIT_HUNK_CONTROL_LIMIT: usize = 12;
+
+/// Per-hunk stage and unstage controls.
+///
+/// ## Why these had to exist at all
+///
+/// `DesktopAction::StageGitHunk` and `UnstageGitHunk` have been wired from the
+/// bridge through `AppCommandRequest` to `git apply --cached` for as long as the
+/// panel has existed, and nothing in the renderer ever pushed either one. The
+/// Source Control surface offered Fetch, Pull, Push and Open PR — every verb
+/// that talks to a *remote* — and no way to put a single line into the index or
+/// to commit it. Push was the only write the panel could perform, and it could
+/// only ever push what some other tool had staged.
+///
+/// The comment on the commit-validation rows in [`git_rows`] said those errors
+/// are "shown near the commit action". There was no commit action.
+///
+/// ## Why one hunk per click, and no "Stage All"
+///
+/// A hunk's identity is `hash(stage:path:header:index)`, and `header` carries
+/// the line numbers of the diff it came from. Staging one hunk rewrites the
+/// index, so every remaining hunk in that file is re-derived against new line
+/// numbers and gets a *new* id. A "Stage All" that queued N actions from one
+/// frame's projection would stage the first and fail the rest with
+/// `git_hunk_missing`. Staging a hunk at a time is not a lesser affordance here;
+/// it is the only one the identity scheme supports.
+fn render_git_hunk_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let hunks = &snapshot.git_projection.hunks;
+    if hunks.is_empty() {
+        return;
+    }
+    for hunk in hunks.iter().take(GIT_HUNK_CONTROL_LIMIT) {
+        ui.horizontal_wrapped(|ui| {
+            let verb = match hunk.stage {
+                GitHunkStageProjection::Unstaged => "Stage",
+                GitHunkStageProjection::Staged => "Unstage",
+            };
+            let response = soft_button(ui, verb);
+            // The visible label is the verb; the accessible label names the hunk
+            // it acts on. Twelve buttons all called "Stage" are unusable with a
+            // screen reader and untestable from the accessibility tree, because
+            // nothing distinguishes the one that was clicked from the eleven
+            // that were not.
+            let accessible = format!("{verb} {} {}", hunk.path, hunk.header);
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_label(accessible.clone());
+            });
+            if response.clicked() {
+                actions.push(match hunk.stage {
+                    GitHunkStageProjection::Unstaged => DesktopAction::StageGitHunk {
+                        hunk_id: hunk.hunk_id.clone(),
+                    },
+                    GitHunkStageProjection::Staged => DesktopAction::UnstageGitHunk {
+                        hunk_id: hunk.hunk_id.clone(),
+                    },
+                });
+            }
+            ui.label(theme::muted(format!(
+                "{} +{} -{}",
+                hunk.path, hunk.added_lines, hunk.deleted_lines
+            )));
+        });
+    }
+    if hunks.len() > GIT_HUNK_CONTROL_LIMIT {
+        ui.label(theme::muted(format!(
+            "{} more hunks not shown",
+            hunks.len() - GIT_HUNK_CONTROL_LIMIT
+        )));
+    }
+}
+
+/// Say why untracked files have no stage control, instead of leaving a row that
+/// silently has no button next to rows that do.
+///
+/// Staging goes through `git apply --cached` on a projected hunk, and `git diff`
+/// emits no hunks for a file git has never seen — so an untracked file projects
+/// with `stageable: false` and cannot be staged from here. Adding one to the
+/// index needs a path-level `git add`, which is authority the app layer does not
+/// have; it is a gap, not a rendering bug, and the panel should say so rather
+/// than look broken.
+fn render_untracked_note(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
+    let untracked = snapshot
+        .git_projection
+        .changed_files
+        .iter()
+        .filter(|file| file.status.trim() == "??")
+        .count();
+    if untracked == 0 {
+        return;
+    }
+    let noun = if untracked == 1 { "file" } else { "files" };
+    ui.label(theme::muted(format!(
+        "{untracked} untracked {noun}: add with git before staging here"
+    )));
 }
 
 pub(super) fn git_relative_path(
