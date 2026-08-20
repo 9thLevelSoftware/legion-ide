@@ -282,9 +282,16 @@ impl Drop for TempWorkspace {
 //
 // Tests that assert on rendering and hit-testing need to click real controls at
 // real coordinates, which projection tests cannot do by construction. These
-// three helpers are the whole rig, and they live here because four test files
-// had grown their own copies — two of which disagreed about what happens when
-// the control is missing.
+// four helpers are the whole rig, and they live here because three test files
+// had grown near-identical copies — two of which disagreed about what happens
+// when the control is missing.
+//
+// `shell_affordances.rs` deliberately keeps its own. Its `clickable_center`
+// asserts there is *exactly one* match inside a screen region, which catches a
+// label that appears in both the tab strip and an explorer row; that is a
+// stronger contract than "find the first one", not a copy of it, and its
+// viewport differs too. Folding it in here would weaken the check it exists to
+// make.
 
 /// A full-frame raw input at a fixed 1440x900 viewport.
 ///

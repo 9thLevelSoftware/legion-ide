@@ -107,48 +107,64 @@ fn terminal_output_reaches_the_projection_a_person_reads() {
 /// the PTY, so the one control in the UI that offers to run a command opens a
 /// shell instead — while the status bar reads "Terminal running: cargo test",
 /// which is a statement the product cannot support.
+///
+/// ## Why the command's *output* has to differ from its *text*
+///
+/// The first version of this test sent `echo <marker>` and required the marker
+/// twice: once echoed by the shell, once produced by running it. That passed on
+/// Windows and failed on macOS, because a POSIX PTY does not echo the line back
+/// the way cmd.exe does — one occurrence there means the command ran, and the
+/// test called it a failure. The count was measuring the shell's echo
+/// behaviour, not execution.
+///
+/// So the command is one whose output cannot appear in its own text. `ver` and
+/// `uname` name the operating system; neither string is in the command that
+/// produced it, so finding it is proof of execution on any shell.
 #[test]
 fn a_launched_command_actually_runs_in_the_terminal() {
     let workspace = TempWorkspace::new("legion_desktop_terminal_command");
     let mut runtime = open_runtime(workspace.path());
 
-    // `echo` rather than `cargo`: it is present on every supported platform,
-    // returns instantly, and its output is unmistakable in the scrollback.
-    let marker = "legion-terminal-marker-9f3c";
+    let (command, expected) = if cfg!(windows) {
+        ("ver", "Windows")
+    } else if cfg!(target_os = "macos") {
+        ("uname", "Darwin")
+    } else {
+        ("uname", "Linux")
+    };
+
     // The pair the Tests button now pushes: launch opens the shell, input runs
     // the command. Launch alone leaves a prompt sitting there.
     let _ = runtime.handle_action(DesktopAction::TerminalLaunch {
-        command_label: format!("echo {marker}"),
+        command_label: command.to_string(),
     });
     let _ = runtime.handle_action(DesktopAction::TerminalInput {
-        payload: format!("echo {marker}\r"),
+        payload: format!("{command}\r"),
     });
 
-    // Counted, not merely found. The shell echoes the line it was sent, so a
-    // marker appearing *once* proves only that the text reached the PTY. It
-    // appears a second time when the shell actually executes `echo`, and that
-    // second occurrence is the only evidence that the command ran rather than
-    // being typed into a prompt and left there.
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut occurrences = 0;
-    while Instant::now() < deadline && occurrences < 2 {
+    let mut transcript = String::new();
+    let mut executed = false;
+    while Instant::now() < deadline && !executed {
         let _ = runtime.handle_action(DesktopAction::TerminalOutputPoll);
-        occurrences = runtime
+        transcript = runtime
             .projection_snapshot()
             .terminal_panel_projection
             .output_rows
             .iter()
-            .map(|row| row.redacted_payload.matches(marker).count())
-            .sum();
-        if occurrences < 2 {
+            .map(|row| row.redacted_payload.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        executed = transcript.contains(expected);
+        if !executed {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
 
     let status = terminal_status(&runtime);
     assert!(
-        occurrences >= 2,
-        "the launched command was not executed: `{marker}` appeared {occurrences} time(s) in 20s (1 = echoed by the shell but never run), while the panel reports `{status}`. A control that reports running a command it never ran is worse than one that does nothing, because the status line is what a user checks."
+        executed,
+        "the launched command was not executed: `{command}` never produced `{expected}` in 20s, while the panel reports `{status}`. A control that reports running a command it never ran is worse than one that does nothing, because the status line is what a user checks. Transcript: {transcript:?}"
     );
 }
 
