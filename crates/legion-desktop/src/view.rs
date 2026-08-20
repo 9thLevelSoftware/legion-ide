@@ -5848,6 +5848,11 @@ fn render_delegation_console(
             ui.label(theme::body_strong(reason));
             ui.label(theme::muted(resolution));
         });
+        // Chat survives the block. `send_delegate_chat` needs Delegate mode and
+        // an open buffer, neither of which a blocked *task* affects -- so the
+        // early return took away the one surface that still worked, exactly
+        // when a user asking "why is this blocked?" would reach for it.
+        render_delegate_chat_section(ui, snapshot, model, actions);
         return;
     }
     let lifecycle = model

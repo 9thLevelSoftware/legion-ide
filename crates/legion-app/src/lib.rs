@@ -14789,6 +14789,13 @@ pub struct LspDebounceEvent {
 }
 
 /// Root application composition.
+/// Maximum characters of a Delegate chat prompt that reach app authority.
+///
+/// Exported so the renderer's composer caps at the same number; the two used to
+/// disagree (4096 in the field, 240 here) and the difference vanished without a
+/// word.
+pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
+
 pub struct AppComposition {
     workspace: WorkspaceActor,
     editor: EditorEngine,
@@ -27281,12 +27288,18 @@ impl AppComposition {
     }
 
     /// Send a Delegate chat turn using local, metadata-only codebase retrieval citations.
+    ///
+    /// The prompt is bounded to [`DELEGATE_CHAT_PROMPT_MAX_CHARS`]. That bound is
+    /// deliberate -- what crosses this boundary is a *label*, not raw prompt
+    /// text -- so any composer feeding it must cap at the same number. A field
+    /// that accepted more would discard the remainder here, silently, after
+    /// clearing the draft the user typed.
     pub fn send_delegate_chat(
         &mut self,
         prompt_label: impl Into<String>,
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
-        let prompt_label = bounded_label(prompt_label.into(), 240);
+        let prompt_label = bounded_label(prompt_label.into(), DELEGATE_CHAT_PROMPT_MAX_CHARS);
         let lane_reservation = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
             "delegate.chat",

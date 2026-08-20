@@ -387,7 +387,12 @@ pub(crate) fn render_delegate_chat_draft(ui: &mut egui::Ui, ready: bool) -> Opti
     let response = ui.add(
         egui::TextEdit::multiline(&mut draft)
             .id_source("legion-delegate-chat-draft")
-            .char_limit(super::DELEGATE_TASK_DRAFT_MAX_CHARS)
+            // The chat prompt limit, not the task-draft limit. This field used
+            // to accept 4096 characters while `send_delegate_chat` bounds the
+            // prompt to 240 and then the composer cleared the whole draft, so
+            // everything past 240 was lost without a word. Capping here means
+            // the field cannot accept text the request will not carry.
+            .char_limit(legion_app::DELEGATE_CHAT_PROMPT_MAX_CHARS)
             .desired_rows(2)
             .desired_width(ui.available_width())
             .hint_text("Ask about the open file")
