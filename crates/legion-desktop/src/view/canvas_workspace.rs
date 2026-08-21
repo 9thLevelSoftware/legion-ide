@@ -139,8 +139,7 @@ pub(crate) fn nodes_for_sections(
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     sections
         .iter()
-        .enumerate()
-        .filter_map(|(section_index, section)| {
+        .filter_map(|section| {
             let path = section.file_path.clone()?;
             if !seen.insert(path.0.clone()) {
                 return None;
@@ -168,7 +167,6 @@ pub(crate) fn nodes_for_sections(
                 .take(MAX_NODE_LINES)
                 .map(|line| line.visible_text.clone())
                 .collect();
-            let _ = section_index;
             Some(CanvasNode {
                 path,
                 placed,

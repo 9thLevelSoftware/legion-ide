@@ -1900,10 +1900,6 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     status = "done"
     evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
 
-# ---------------------------------------------------------------------------
-# EPIC P7 — Plugin and extension runtime
-# Readiness rows: PR-VSC-001, PR-VSC-002 deferred.
-# ---------------------------------------------------------------------------
   [[epics.features]]
   id = "P6.F5"
   title = "Canvas workspace"
@@ -1921,6 +1917,11 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     status = "done"
     evidence = "docs/ui/canvas-workspace-direction.md"
 
+
+# ---------------------------------------------------------------------------
+# EPIC P7 — Plugin and extension runtime
+# Readiness rows: PR-VSC-001, PR-VSC-002 deferred.
+# ---------------------------------------------------------------------------
 [[epics]]
 id = "P7"
 title = "Plugin and extension runtime"

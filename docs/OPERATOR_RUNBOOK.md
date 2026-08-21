@@ -62,7 +62,7 @@ Two properties are worth knowing:
 - **Two conditions, and the artifacts are the scarce one.** All three surfaces
   already have their own ADRs — remote has four — so having an ADR was never
   what held them. Promotion still also waits on PR-UI-001 reaching "product
-  workflow validated"; that precondition survived ADR-0046'''s retirement on
+  workflow validated"; that precondition survived ADR-0046's retirement on
   purpose, because retiring a rule against *new* surfaces says nothing about
   whether these three are ready.
 - **Deleting a row is not a way out.** A configured surface with no ledger row
