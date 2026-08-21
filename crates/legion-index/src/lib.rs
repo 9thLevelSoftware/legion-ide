@@ -6856,11 +6856,15 @@ fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
     message.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut h = H0;
-    for chunk in message.chunks_exact(64) {
+    // `as_chunks` rather than `chunks_exact`: both sizes are constants, so
+    // they belong in the type. The word split then yields `[u8; 4]`, which
+    // `from_be_bytes` takes directly instead of being rebuilt element by
+    // element from a slice -- and sixteen of them, by the type, so the loop
+    // needs no bound of its own.
+    for chunk in message.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (word_index, word_bytes) in chunk.chunks_exact(4).take(16).enumerate() {
-            w[word_index] =
-                u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
+        for (word_index, word_bytes) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[word_index] = u32::from_be_bytes(*word_bytes);
         }
         for word_index in 16..64 {
             let s0 = w[word_index - 15].rotate_right(7)
@@ -7414,5 +7418,69 @@ mod tree_sitter_multi_language_tests {
         assert!(!tree_sitter_language_is_bundled(&LanguageId(
             "haskell".to_string()
         )));
+    }
+}
+
+/// The file fingerprint this crate computes for itself.
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::sha256_hex;
+
+    /// This crate hashes file contents with its own SHA-256, and nothing
+    /// checked it against a known answer.
+    ///
+    /// The digest is a file fingerprint: the index decides a file is unchanged
+    /// by comparing it. A wrong-but-deterministic hash would keep every
+    /// fingerprint self-consistent and every test passing while producing
+    /// values that no other tool agrees with -- and the failure only shows up
+    /// where it is expensive, in stale index entries or a fingerprint that will
+    /// not match one written by any other implementation.
+    #[test]
+    fn sha256_matches_the_published_vectors() {
+        // Ground truth from an independent implementation (Python `hashlib`),
+        // not from this crate's own output, so the table cannot drift with the
+        // code it checks.
+        //
+        // The block boundaries are the point. Both existing vectors here are
+        // shorter than one 64-byte block, so nothing in this suite ever ran the
+        // compression loop twice -- and a defect in how the message is split
+        // into blocks is invisible on a message that has only one. 55 bytes is
+        // the largest message that still fits a single block; 56 is the
+        // smallest that needs two; 64 lands exactly on the boundary, where the
+        // padding rules are easiest to get wrong.
+        const VECTORS: [(&str, &str); 6] = [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            (
+                "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+                "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+        ];
+        for (message, expected) in VECTORS {
+            assert_eq!(
+                sha256_hex(message.as_bytes()),
+                expected,
+                "sha256 of a {}-byte message",
+                message.len()
+            );
+        }
     }
 }

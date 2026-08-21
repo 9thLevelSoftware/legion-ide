@@ -1923,7 +1923,11 @@ fn sha256_digest(message: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    // `as_chunks` rather than `chunks_exact`: the block size is a
+    // constant, so the compiler can carry it in the type and every index
+    // below is bounds-checked once against `[u8; 64]` instead of on each
+    // access against a slice of unknown length.
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for (i, word) in w.iter_mut().enumerate().take(16) {
             let base = i * 4;
@@ -3390,5 +3394,59 @@ mod tests {
             proposal_applied_event(&proposal, &applied_transition, EventSequence(0)).unwrap_err(),
             ObservabilityError::InvalidSequence
         );
+    }
+
+    /// The existing vectors are both shorter than one block.
+    ///
+    /// `metadata_hash_is_stable_cryptographic_sha256` pins the empty string and
+    /// `"abc"`, so the compression loop never ran more than once in this suite
+    /// and any defect in how a message is split into blocks went unseen.
+    #[test]
+    fn sha256_matches_the_published_vectors_across_block_boundaries() {
+        // Ground truth from an independent implementation (Python `hashlib`),
+        // not from this crate's own output, so the table cannot drift with the
+        // code it checks.
+        //
+        // The block boundaries are the point. Both existing vectors here are
+        // shorter than one 64-byte block, so nothing in this suite ever ran the
+        // compression loop twice -- and a defect in how the message is split
+        // into blocks is invisible on a message that has only one. 55 bytes is
+        // the largest message that still fits a single block; 56 is the
+        // smallest that needs two; 64 lands exactly on the boundary, where the
+        // padding rules are easiest to get wrong.
+        const VECTORS: [(&str, &str); 6] = [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            (
+                "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+                "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+        ];
+        for (message, expected) in VECTORS {
+            assert_eq!(
+                sha256_hex(message.as_bytes()),
+                expected,
+                "sha256 of a {}-byte message",
+                message.len()
+            );
+        }
     }
 }
