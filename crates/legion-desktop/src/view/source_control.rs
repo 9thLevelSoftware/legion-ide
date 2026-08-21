@@ -104,6 +104,15 @@ const COMMIT_PALETTE_QUERY: &str = ">git commit ";
 /// buttons. The overflow is stated rather than silently dropped.
 const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 
+/// Renderer-memory keys for how far each stage's window has been advanced.
+const HUNK_STAGED_WINDOW: &str = "legion.source-control.window.hunks.staged";
+/// See [`HUNK_STAGED_WINDOW`].
+const HUNK_UNSTAGED_WINDOW: &str = "legion.source-control.window.hunks.unstaged";
+/// See [`HUNK_STAGED_WINDOW`].
+const PATH_STAGED_WINDOW: &str = "legion.source-control.window.paths.staged";
+/// See [`HUNK_STAGED_WINDOW`].
+const PATH_UNSTAGED_WINDOW: &str = "legion.source-control.window.paths.unstaged";
+
 /// Whether the index holds anything to commit, read from porcelain status.
 ///
 /// Deliberately not "is there a staged hunk". A staged binary modification, an
@@ -191,7 +200,130 @@ fn is_unmerged(index: char, worktree: char) -> bool {
 /// Per-hunk stage and unstage controls.
 ///
 /// ## Why these had to exist at all
+/// A page of a list that mixes staged and unstaged items.
+pub(crate) struct StageWindow<'a, T> {
+    /// The items to draw, in projection order.
+    pub(crate) visible: Vec<&'a T>,
+    /// Staged items this page does not show.
+    pub(crate) staged_hidden: usize,
+    /// Unstaged items this page does not show.
+    pub(crate) unstaged_hidden: usize,
+    /// How far a stage's offset advances when someone asks for the next page.
+    pub(crate) staged_budget: usize,
+    /// How far the unstaged offset advances.
+    pub(crate) unstaged_budget: usize,
+}
+
+/// One page of a two-stage list, budgeted per stage and offset within each.
 ///
+/// Written once for both callers. The hunk controls and the path controls had
+/// structurally identical copies of this 17 lines, 173 apart, differing only in
+/// how they asked whether an item was staged -- two copies of a formula that the
+/// next person to tighten it would have found only one of.
+///
+/// Budgeted per stage rather than as a prefix over the combined list, because
+/// the projection appends every unstaged item before any staged one: a plain
+/// `take` renders no Unstage control at all once the limit is filled with
+/// unstaged items, forcing someone to stage unrelated changes before the item
+/// they wanted to unstage is reachable. Either side's unused share goes to the
+/// other, so a list of only one kind still fills the whole budget.
+///
+/// Offset, because a budget alone leaves the tail permanently out of reach.
+/// Thirteen staged hunks and nothing unstaged showed the first twelve; unstaging
+/// a visible one made it 12 staged and 1 unstaged, whose budgets show eleven
+/// staged -- so the thirteenth stayed hidden, and restaging returned to the
+/// start. No sequence of the controls on screen could reach it. The offset is
+/// what the "show the rest" control moves, and it wraps, so every item is
+/// reachable in a bounded number of clicks and the way back is the same control.
+pub(crate) fn stage_window<'a, T>(
+    items: &'a [T],
+    limit: usize,
+    staged_offset: usize,
+    unstaged_offset: usize,
+    is_staged: impl Fn(&T) -> bool,
+) -> StageWindow<'a, T> {
+    let staged_total = items.iter().filter(|item| is_staged(item)).count();
+    let unstaged_total = items.len() - staged_total;
+    let half = limit / 2;
+    let staged_budget = half.max(limit.saturating_sub(unstaged_total));
+    let unstaged_budget = limit.saturating_sub(staged_budget.min(staged_total));
+
+    // An offset at or past the end shows the first page rather than an empty
+    // one. A control that can leave the list blank is a control that can lose
+    // the list.
+    let staged_offset = if staged_offset >= staged_total {
+        0
+    } else {
+        staged_offset
+    };
+    let unstaged_offset = if unstaged_offset >= unstaged_total {
+        0
+    } else {
+        unstaged_offset
+    };
+
+    let mut staged_seen = 0usize;
+    let mut unstaged_seen = 0usize;
+    let mut staged_shown = 0usize;
+    let mut unstaged_shown = 0usize;
+    let mut visible: Vec<&'a T> = Vec::new();
+    for item in items {
+        if is_staged(item) {
+            let index = staged_seen;
+            staged_seen += 1;
+            if index >= staged_offset && staged_shown < staged_budget {
+                staged_shown += 1;
+                visible.push(item);
+            }
+        } else {
+            let index = unstaged_seen;
+            unstaged_seen += 1;
+            if index >= unstaged_offset && unstaged_shown < unstaged_budget {
+                unstaged_shown += 1;
+                visible.push(item);
+            }
+        }
+    }
+
+    StageWindow {
+        visible,
+        staged_hidden: staged_total - staged_shown,
+        unstaged_hidden: unstaged_total - unstaged_shown,
+        staged_budget,
+        unstaged_budget,
+    }
+}
+
+/// Read a stage's window offset out of renderer memory.
+///
+/// Adapter-local view state, in the same category as explorer expansion: which
+/// page of a list somebody is looking at is not something the app decides, and
+/// it does not belong in a session record.
+fn window_offset(ui: &egui::Ui, key: &'static str) -> usize {
+    ui.ctx()
+        .data_mut(|data| data.get_temp::<usize>(egui::Id::new(key)))
+        .unwrap_or(0)
+}
+
+/// Draw the control that moves a stage's window, when anything is behind it.
+fn render_window_advance(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    hidden: usize,
+    budget: usize,
+    noun: &str,
+) {
+    if hidden == 0 || budget == 0 {
+        return;
+    }
+    let offset = window_offset(ui, key);
+    let label = format!("Show the other {hidden} {noun}");
+    if ui.button(&label).clicked() {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new(key), offset + budget));
+    }
+}
+
 /// `DesktopAction::StageGitHunk` and `UnstageGitHunk` have been wired from the
 /// bridge through `AppCommandRequest` to `git apply --cached` for as long as the
 /// panel has existed, and nothing in the renderer ever pushed either one. The
@@ -226,32 +358,14 @@ fn render_git_hunk_controls(
     // combined list renders no Unstage control at all once twelve unstaged
     // hunks exist -- forcing someone to stage unrelated changes before the hunk
     // they wanted to unstage becomes reachable.
-    let half = GIT_HUNK_CONTROL_LIMIT / 2;
-    let staged_total = hunks
-        .iter()
-        .filter(|hunk| hunk.stage == GitHunkStageProjection::Staged)
-        .count();
-    let unstaged_total = hunks.len() - staged_total;
-    // An unused half is given back, so a repository with only one kind of hunk
-    // still fills the whole budget.
-    let staged_budget = half.max(GIT_HUNK_CONTROL_LIMIT.saturating_sub(unstaged_total));
-    let unstaged_budget = GIT_HUNK_CONTROL_LIMIT.saturating_sub(staged_budget.min(staged_total));
-    let mut staged_shown = 0usize;
-    let mut unstaged_shown = 0usize;
-    let visible: Vec<_> = hunks
-        .iter()
-        .filter(|hunk| match hunk.stage {
-            GitHunkStageProjection::Staged => {
-                staged_shown += 1;
-                staged_shown <= staged_budget
-            }
-            GitHunkStageProjection::Unstaged => {
-                unstaged_shown += 1;
-                unstaged_shown <= unstaged_budget
-            }
-        })
-        .collect();
-    for hunk in visible {
+    let window = stage_window(
+        hunks,
+        GIT_HUNK_CONTROL_LIMIT,
+        window_offset(ui, HUNK_STAGED_WINDOW),
+        window_offset(ui, HUNK_UNSTAGED_WINDOW),
+        |hunk| hunk.stage == GitHunkStageProjection::Staged,
+    );
+    for hunk in &window.visible {
         ui.horizontal_wrapped(|ui| {
             let verb = match hunk.stage {
                 GitHunkStageProjection::Unstaged => "Stage",
@@ -288,16 +402,33 @@ fn render_git_hunk_controls(
     // report "116 more" for a repository with sixteen thousand -- a precise
     // number that is precisely wrong. When the projection says it truncated,
     // the panel says there are more without pretending to know how many.
-    let shown = staged_shown.min(staged_budget) + unstaged_shown.min(unstaged_budget);
+    // The controls that move the window, so a hunk off this page is a click
+    // away rather than out of reach. Without them the tail of a long staged list
+    // could not be got to at all: no sequence of Stage and Unstage on the hunks
+    // that *were* shown ever brought the last one into view.
+    render_window_advance(
+        ui,
+        HUNK_STAGED_WINDOW,
+        window.staged_hidden,
+        window.staged_budget,
+        "staged hunks",
+    );
+    render_window_advance(
+        ui,
+        HUNK_UNSTAGED_WINDOW,
+        window.unstaged_hidden,
+        window.unstaged_budget,
+        "unstaged hunks",
+    );
+    // The count is stated only when it is knowable. The projection caps what it
+    // collects, so a panel subtracting what it drew from what it received would
+    // report "116 more" for a repository with sixteen thousand -- a precise
+    // number that is precisely wrong. When the projection says it truncated,
+    // the panel says there are more without pretending to know how many.
     if snapshot.git_projection.hunks_truncated {
         ui.label(theme::muted(
             "More hunks than can be listed; refine the change set to review the rest",
         ));
-    } else if hunks.len() > shown {
-        ui.label(theme::muted(format!(
-            "{} more hunks not shown",
-            hunks.len() - shown
-        )));
     }
 }
 
@@ -399,32 +530,16 @@ fn render_path_stage_controls(
     if candidates.is_empty() && withheld.is_empty() {
         return;
     }
-    // Half each, with either side's unused share given to the other, so a list
-    // of only one kind still fills the whole budget.
-    let staged_total = candidates
-        .iter()
-        .filter(|file| status_is_committable(&file.status))
-        .count();
-    let unstaged_total = candidates.len() - staged_total;
-    let half = GIT_HUNK_CONTROL_LIMIT / 2;
-    let staged_budget = half.max(GIT_HUNK_CONTROL_LIMIT.saturating_sub(unstaged_total));
-    let unstaged_budget = GIT_HUNK_CONTROL_LIMIT.saturating_sub(staged_budget.min(staged_total));
-    let mut staged_shown = 0usize;
-    let mut unstaged_shown = 0usize;
-    let visible: Vec<&legion_ui::GitFileProjection> = candidates
-        .iter()
-        .copied()
-        .filter(|file| {
-            if status_is_committable(&file.status) {
-                staged_shown += 1;
-                staged_shown <= staged_budget
-            } else {
-                unstaged_shown += 1;
-                unstaged_shown <= unstaged_budget
-            }
-        })
-        .collect();
-    let hidden = candidates.len() - visible.len();
+    let window = stage_window(
+        &candidates,
+        GIT_HUNK_CONTROL_LIMIT,
+        window_offset(ui, PATH_STAGED_WINDOW),
+        window_offset(ui, PATH_UNSTAGED_WINDOW),
+        |file| status_is_committable(&file.status),
+    );
+    let hidden = window.staged_hidden + window.unstaged_hidden;
+    let visible: Vec<&legion_ui::GitFileProjection> =
+        window.visible.iter().copied().copied().collect();
     let candidates = &visible[..];
 
     // Only when something is under it. With every eligible file withheld -- a
@@ -464,6 +579,25 @@ fn render_path_stage_controls(
     if hidden > 0 {
         ui.label(theme::muted(format!("{hidden} more file(s) not shown")));
     }
+    // And a way to get to them. Saying a thirteenth file exists while offering
+    // no route to it is a more honest version of the same defect, not a fix:
+    // with thirteen staged files and nothing unstaged, unstaging a visible one
+    // only rebalanced the budgets and the thirteenth stayed hidden, so the note
+    // named a file the panel could never show.
+    render_window_advance(
+        ui,
+        PATH_STAGED_WINDOW,
+        window.staged_hidden,
+        window.staged_budget,
+        "staged files",
+    );
+    render_window_advance(
+        ui,
+        PATH_UNSTAGED_WINDOW,
+        window.unstaged_hidden,
+        window.unstaged_budget,
+        "unstaged files",
+    );
     if !withheld.is_empty() {
         // Named rather than omitted. A row that quietly has no button beside
         // rows that do reads as the panel being broken -- the same reason the
@@ -771,5 +905,140 @@ mod path_control_safety {
                 "{status} projects the source name; unstaging with it leaves the destination staged as an addition"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stage_window_rules {
+    use super::{GIT_HUNK_CONTROL_LIMIT, stage_window};
+
+    /// `(id, staged)` — the least a windowed item has to be.
+    fn items(staged: usize, unstaged: usize) -> Vec<(usize, bool)> {
+        // Unstaged first, the order the projection produces and the order that
+        // made a plain prefix hide every Unstage control.
+        (0..unstaged)
+            .map(|index| (index, false))
+            .chain((0..staged).map(|index| (index + unstaged, true)))
+            .collect()
+    }
+
+    /// Advancing the window reaches every item, one page at a time.
+    ///
+    /// The property the cap alone could not provide. Thirteen staged items and
+    /// nothing unstaged showed the first twelve, and no sequence of the controls
+    /// on screen brought the thirteenth into view: unstaging a visible one made
+    /// it twelve staged and one unstaged, whose budgets show eleven staged, so
+    /// the last one stayed hidden and restaging returned to the start.
+    #[test]
+    fn every_item_is_reachable_by_advancing_the_window() {
+        for (staged, unstaged) in [(13, 0), (0, 13), (13, 13), (25, 1), (1, 25)] {
+            let items = items(staged, unstaged);
+            let mut seen: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+            let mut staged_offset = 0usize;
+            let mut unstaged_offset = 0usize;
+
+            // Bounded: if the window does not cover the list in this many
+            // advances it is not converging, and looping forever would hide
+            // that as a hang rather than report it as a failure.
+            for _ in 0..(items.len() + 2) {
+                let window = stage_window(
+                    &items,
+                    GIT_HUNK_CONTROL_LIMIT,
+                    staged_offset,
+                    unstaged_offset,
+                    |item: &(usize, bool)| item.1,
+                );
+                for item in &window.visible {
+                    seen.insert(item.0);
+                }
+                if window.staged_hidden == 0 && window.unstaged_hidden == 0 {
+                    break;
+                }
+                if window.staged_hidden > 0 {
+                    staged_offset += window.staged_budget;
+                }
+                if window.unstaged_hidden > 0 {
+                    unstaged_offset += window.unstaged_budget;
+                }
+            }
+
+            let missing: Vec<usize> = items
+                .iter()
+                .map(|item| item.0)
+                .filter(|id| !seen.contains(id))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "with {staged} staged and {unstaged} unstaged, advancing the window never \
+                 showed {missing:?} — those items have controls that cannot be reached at all"
+            );
+        }
+    }
+
+    /// A page never exceeds the limit, however far it has been advanced.
+    #[test]
+    fn a_page_never_exceeds_the_control_limit() {
+        for (staged, unstaged) in [(13, 0), (0, 13), (13, 13), (40, 40)] {
+            let items = items(staged, unstaged);
+            for offset in 0..items.len() {
+                let window = stage_window(
+                    &items,
+                    GIT_HUNK_CONTROL_LIMIT,
+                    offset,
+                    offset,
+                    |item: &(usize, bool)| item.1,
+                );
+                assert!(
+                    window.visible.len() <= GIT_HUNK_CONTROL_LIMIT,
+                    "{} controls drawn at offset {offset} with {staged}/{unstaged}, over a \
+                     limit of {GIT_HUNK_CONTROL_LIMIT}",
+                    window.visible.len()
+                );
+            }
+        }
+    }
+
+    /// Both kinds get controls when both exist.
+    ///
+    /// The reason the budget is split per stage rather than taken as a prefix:
+    /// the projection lists every unstaged item first, so a prefix renders no
+    /// Unstage control at all once the limit fills with unstaged ones.
+    #[test]
+    fn each_stage_gets_controls_when_both_are_present() {
+        let items = items(5, 20);
+        let window = stage_window(
+            &items,
+            GIT_HUNK_CONTROL_LIMIT,
+            0,
+            0,
+            |item: &(usize, bool)| item.1,
+        );
+        assert!(
+            window.visible.iter().any(|item| item.1),
+            "twenty unstaged items filled the budget and the five staged ones got no controls"
+        );
+        assert!(
+            window.visible.iter().any(|item| !item.1),
+            "the unstaged items got no controls"
+        );
+    }
+
+    /// An offset past the end shows the first page, not an empty one.
+    #[test]
+    fn an_offset_past_the_end_returns_to_the_start() {
+        let items = items(3, 0);
+        let window = stage_window(
+            &items,
+            GIT_HUNK_CONTROL_LIMIT,
+            99,
+            99,
+            |item: &(usize, bool)| item.1,
+        );
+        assert_eq!(
+            window.visible.len(),
+            3,
+            "advancing past the end emptied the list, so the control that moves the window \
+             can lose the window"
+        );
     }
 }

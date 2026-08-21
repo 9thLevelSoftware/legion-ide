@@ -2239,10 +2239,89 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
 /// `core.quotePath=false`, so a non-ASCII name arrives as raw bytes instead of
 /// as an escaped `"b/cafÃ©.txt"` this parser would have to decode.
 fn parse_diff_plus_path(line: &str) -> Option<String> {
-    line.strip_prefix("+++ ")
-        .map(|rest| rest.split('\t').next().unwrap_or(rest))
-        .map(strip_git_side_prefix)
-        .filter(|path| path != "/dev/null")
+    let rest = line.strip_prefix("+++ ")?;
+    // A quoted header is quoted whatever `core.quotePath` says.
+    //
+    // Turning that setting off stops git escaping *high* bytes, and the earlier
+    // fix took that for the whole story. It is not: `quote_c_style` always
+    // escapes a double quote, a backslash and every control character, so a
+    // filename containing a tab still arrives as `+++ "b/tab\tname.txt"` while
+    // porcelain `-z` reports the raw bytes. The two then disagree about the same
+    // file, its hunks match no status row, and it is treated as hunkless --
+    // which offers whole-path staging beside its own hunk controls, one click
+    // from staging every hunk in a file somebody meant to stage one hunk of.
+    //
+    // The tab split has to come after this, not before: the metadata git appends
+    // after a tab is outside the quotes, and splitting first would cut a quoted
+    // path in half at the first escaped tab inside it.
+    let path = if rest.starts_with('"') {
+        decode_c_quoted(rest)?
+    } else {
+        rest.split('\t').next().unwrap_or(rest).to_string()
+    };
+    let path = strip_git_side_prefix(&path);
+    (path != "/dev/null").then_some(path)
+}
+
+/// The filename inside a C-quoted git path, with git's escapes undone.
+///
+/// `None` when the text is not a well-formed quoted string, or decodes to bytes
+/// that are not UTF-8 -- both of which mean the caller cannot match this hunk to
+/// a status row, and a caller that knows it cannot match is in a far better
+/// position than one holding a mangled path it believes.
+fn decode_c_quoted(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => return String::from_utf8(decoded).ok(),
+            b'\\' => {
+                index += 1;
+                let escape = *bytes.get(index)?;
+                match escape {
+                    b'a' => decoded.push(0x07),
+                    b'b' => decoded.push(0x08),
+                    b't' => decoded.push(b'\t'),
+                    b'n' => decoded.push(b'\n'),
+                    b'v' => decoded.push(0x0b),
+                    b'f' => decoded.push(0x0c),
+                    b'r' => decoded.push(b'\r'),
+                    b'"' => decoded.push(b'"'),
+                    b'\\' => decoded.push(b'\\'),
+                    // Three octal digits: the form git falls back to for any
+                    // other byte, and how a non-ASCII name arrives if
+                    // `core.quotePath` is ever on.
+                    b'0'..=b'7' => {
+                        let mut value = u32::from(escape - b'0');
+                        let mut digits = 1usize;
+                        while digits < 3 {
+                            match bytes.get(index + 1) {
+                                Some(digit) if (b'0'..=b'7').contains(digit) => {
+                                    value = value * 8 + u32::from(digit - b'0');
+                                    index += 1;
+                                    digits += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        decoded.push(u8::try_from(value).ok()?);
+                    }
+                    _ => return None,
+                }
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    // Ran off the end without a closing quote.
+    None
 }
 
 fn strip_git_side_prefix(path: &str) -> String {
@@ -7866,6 +7945,59 @@ impl legion_protocol::ProjectInfoPort for WorkspaceActor {
 
 #[cfg(test)]
 mod tests {
+    /// The header forms git emits, decoded back to filenames.
+    ///
+    /// `core.quotePath=false` covers high bytes and nothing else: a double
+    /// quote, a backslash and every control character are escaped whatever it
+    /// is set to. These are the cases the flag cannot reach, and most of them
+    /// name files no filesystem this test could run on will hold -- NTFS
+    /// rejects a tab outright, and a double quote is illegal in a Windows
+    /// filename -- so the parser is the only place they can be exercised.
+    #[test]
+    fn a_quoted_diff_header_decodes_to_its_real_filename() {
+        for (header, expected) in [
+            (r#"+++ "b/tab\tname.txt""#, "tab\tname.txt"),
+            (r#"+++ "b/quo\"te.txt""#, r#"quo"te.txt"#),
+            (r#"+++ "b/back\\slash.txt""#, r#"back\slash.txt"#),
+            (r#"+++ "b/caf\303\251.txt""#, "caf\u{e9}.txt"),
+            (r#"+++ "b/new\nline.txt""#, "new\nline.txt"),
+        ] {
+            assert_eq!(
+                super::parse_diff_plus_path(header).as_deref(),
+                Some(expected),
+                "the header {header} must name the file git is describing; a path that does \
+                 not match its status row makes the file look hunkless, and a hunkless file \
+                 is offered whole-path staging beside its own hunk controls"
+            );
+        }
+    }
+
+    /// An unquoted header still drops the metadata git appends after a tab.
+    #[test]
+    fn an_unquoted_header_keeps_its_spaces_and_drops_its_metadata() {
+        assert_eq!(
+            super::parse_diff_plus_path("+++ b/sp ace.txt\t").as_deref(),
+            Some("sp ace.txt"),
+            "a space is an ordinary filename character and git does not quote for it"
+        );
+    }
+
+    /// A header that cannot be decoded yields nothing rather than a guess.
+    ///
+    /// A caller that knows it could not read the path withholds the whole-path
+    /// controls. A caller holding a mangled path believes it, matches it against
+    /// no status row, and offers exactly the control that should be withheld.
+    #[test]
+    fn an_undecodable_header_is_not_guessed_at() {
+        for header in [r#"+++ "b/unterminated.txt"#, r#"+++ "b/bad\zescape.txt""#] {
+            assert_eq!(
+                super::parse_diff_plus_path(header),
+                None,
+                "{header} is not a well-formed quoted path and must not produce one"
+            );
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 

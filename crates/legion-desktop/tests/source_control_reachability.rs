@@ -451,9 +451,16 @@ fn commit_is_offered_for_a_staged_change_that_has_no_hunks() {
     );
 }
 
-/// The overflow note is a branch too, and it was the only one untested.
+/// Hunks past the control budget are reachable, not merely announced.
+///
+/// This used to assert the panel said "N more hunks not shown". It did say it,
+/// and the sentence was true, and there was no way to see them: no sequence of
+/// Stage and Unstage on the hunks that *were* drawn ever brought the rest into
+/// view. A note naming what you cannot reach is a more honest version of the
+/// same defect, not a fix — so the assertion is now that the panel offers a
+/// route and that taking it shows hunks the first page did not.
 #[test]
-fn hunks_beyond_the_control_limit_are_reported_rather_than_dropped() {
+fn hunks_beyond_the_control_limit_are_reachable_rather_than_dropped() {
     let workspace = TempWorkspace::new("legion_desktop_source_control_overflow");
     init_repo(&workspace);
     let root = workspace.path();
@@ -480,11 +487,38 @@ fn hunks_beyond_the_control_limit_are_reported_rather_than_dropped() {
 
     let mut app = open_app(root);
     let panel = open_source_control(&mut app);
-    let text = rendered_text(&panel).join("\n");
+
+    /// The hunk headers a frame is showing.
+    fn hunk_headers(frame: &egui::FullOutput) -> std::collections::BTreeSet<String> {
+        rendered_text(frame)
+            .into_iter()
+            .filter(|line| line.contains("@@"))
+            .collect()
+    }
+
+    let first_page = hunk_headers(&panel);
     assert!(
-        text.contains("more hunks not shown"),
-        "a diff with more hunks than the control budget must say so rather than \
-         silently drawing a subset. Panel showed: {text}"
+        first_page.len() >= 2,
+        "the fixture must produce a full page of hunks, got {first_page:?}"
+    );
+
+    let advance = rendered_text(&panel)
+        .into_iter()
+        .find(|line| line.starts_with("Show the other") && line.contains("hunks"))
+        .expect(
+            "with more hunks than the budget, the panel must offer a way to reach the rest; \
+             without one they cannot be staged from this surface at all",
+        );
+    let control = clickable_center(&panel, &advance)
+        .expect("the control naming the hidden hunks must be clickable");
+    let advanced = click_at(&mut app, control);
+    let second_page = hunk_headers(&advanced);
+
+    let newly_visible: Vec<&String> = second_page.difference(&first_page).collect();
+    assert!(
+        !newly_visible.is_empty(),
+        "advancing the window showed no hunk that was not already on screen, so the control \
+         announces hunks it cannot actually reach. First page {first_page:?}, after {second_page:?}"
     );
 }
 
