@@ -637,6 +637,16 @@ pub struct ProjectGitHunk {
     pub added_lines: u32,
     /// Deleted line count in this hunk.
     pub deleted_lines: u32,
+    /// Whether this hunk only reports a submodule with a dirty worktree.
+    ///
+    /// Git synthesises a hunk for a gitlink whose recorded commit has not
+    /// changed but whose worktree has: the removed and added lines name the
+    /// same commit, the added one with a `-dirty` suffix. There is nothing in
+    /// the parent repository to stage -- `git apply --cached` exits successfully
+    /// without touching the index -- so a control offered for it reports a
+    /// success that changed nothing and comes straight back on the next
+    /// refresh. The submodule has to be committed first.
+    pub submodule_dirty_only: bool,
     /// Optional function or scope context from the hunk header.
     pub context: Option<String>,
     /// Patch payload scoped to this single hunk for git-apply hunk staging.
@@ -910,6 +920,32 @@ pub struct ProjectGitSnapshot {
     pub changed_files: Vec<ProjectGitChangedFile>,
     /// Staged and unstaged hunks.
     pub hunks: Vec<ProjectGitHunk>,
+    /// Whether `hunks` omits hunks the repository actually has.
+    ///
+    /// The collector caps each side at `max_hunks`, so a surface counting what
+    /// it received cannot tell "twelve of fourteen" from "twelve of thousands".
+    /// A reader that states an exact number of hidden hunks from a truncated
+    /// list states a wrong one.
+    pub hunks_truncated: bool,
+    /// Whether a merge is underway that a bare `git commit` would conclude.
+    ///
+    /// True while `MERGE_HEAD` exists. In that state `git commit` succeeds and
+    /// finishes the merge *even with an index identical to `HEAD`* -- which is
+    /// exactly what resolving the last conflict in favour of the current side
+    /// produces. Porcelain status then reports no entries at all, so anything
+    /// deciding whether to offer Commit from changed files alone withdraws it at
+    /// the one moment it is needed, and leaves the repository mid-merge with no
+    /// way out of the panel.
+    ///
+    /// **Merges only.** An earlier version of this generalised to
+    /// `CHERRY_PICK_HEAD` and `REVERT_HEAD` on the assumption that they behave
+    /// the same way. They do not: with an index identical to `HEAD`, `git
+    /// commit` refuses a cherry-pick with "The previous cherry-pick is now
+    /// empty" and exits non-zero, requiring an explicit `--allow-empty`. Treating
+    /// them alike would offer a Commit control whose only outcome is an error --
+    /// the defect this flag exists to prevent, reintroduced by one generalisation
+    /// too many. Verified against git, not assumed.
+    pub merge_awaiting_commit: bool,
     /// Inline blame lines for the active file.
     pub blame_lines: Vec<ProjectGitBlameLine>,
     /// Commit graph/history rows.
@@ -968,19 +1004,54 @@ pub fn collect_git_snapshot_with_backend(
     };
     let unstaged_numstat = git_numstat(&repository_root, false)?;
     let staged_numstat = git_numstat(&repository_root, true)?;
-    let mut hunks = Vec::new();
-    hunks.extend(git_diff_hunks(
-        &repository_root,
-        GitHunkStage::Unstaged,
-        options.max_hunks,
-    )?);
-    if hunks.len() < options.max_hunks {
-        hunks.extend(git_diff_hunks(
-            &repository_root,
-            GitHunkStage::Staged,
-            options.max_hunks - hunks.len(),
-        )?);
-    }
+    // Staged hunks get reserved capacity rather than the leftovers.
+    //
+    // Unstaged used to consume the whole `max_hunks` allowance before staged was
+    // asked for at all, so a working tree with more unstaged hunks than the
+    // limit projected *no staged hunks whatsoever* -- and every surface reading
+    // this projection then had no way to show, or unstage, work already in the
+    // index. A renderer cannot repair that by partitioning what it receives,
+    // because by then the staged hunks are gone.
+    //
+    // Both sides are collected once, at the full allowance, and the split is
+    // decided in memory. An earlier version re-ran the unstaged diff to hand
+    // back capacity the staged side had not used; `git_diff_hunks` shells out
+    // and materialises the whole of `git diff` before applying its limit, so on
+    // a large working tree that repeated the most expensive call in this
+    // function on every refresh.
+    // One past the allowance on each side, so "exactly full" can be told apart
+    // from "full and there is more". The extra hunk is discarded immediately;
+    // it exists only to answer that question.
+    let probe_limit = options.max_hunks.saturating_add(1);
+    let unstaged_probe = git_diff_hunks(&repository_root, GitHunkStage::Unstaged, probe_limit)?;
+    let staged_probe = git_diff_hunks(&repository_root, GitHunkStage::Staged, probe_limit)?;
+    let unstaged_overflowed = unstaged_probe.len() > options.max_hunks;
+    let staged_overflowed = staged_probe.len() > options.max_hunks;
+    let unstaged_hunks: Vec<_> = unstaged_probe.into_iter().take(options.max_hunks).collect();
+    let staged_hunks: Vec<_> = staged_probe.into_iter().take(options.max_hunks).collect();
+    // Half each, with either side's unused share given to the other, so a
+    // repository with only one kind still fills the allowance exactly as before.
+    let staged_reserved = options.max_hunks / 2;
+    let staged_take = staged_hunks
+        .len()
+        .min(staged_reserved.max(options.max_hunks.saturating_sub(unstaged_hunks.len())));
+    let unstaged_take = unstaged_hunks
+        .len()
+        .min(options.max_hunks.saturating_sub(staged_take));
+    // True only when something was actually omitted: either a side had more
+    // than the allowance, or the split dropped part of what was collected.
+    //
+    // The overflow flags come from collecting one past the allowance, because
+    // `git_diff_hunks` stops at the limit it is given — so a vector of exactly
+    // `max_hunks` cannot be distinguished from a truncated one by its length
+    // alone, and a caller asking for eight hunks from a repository with exactly
+    // eight was told the snapshot was truncated when nothing had been omitted.
+    let hunks_truncated = unstaged_overflowed
+        || staged_overflowed
+        || unstaged_take < unstaged_hunks.len()
+        || staged_take < staged_hunks.len();
+    let mut hunks: Vec<_> = unstaged_hunks.into_iter().take(unstaged_take).collect();
+    hunks.extend(staged_hunks.into_iter().take(staged_take));
 
     let conflicts = git_conflicts(&repository_root, status_entries.keys())?;
     let worktrees = git_worktrees(&repository_root)?;
@@ -1007,6 +1078,7 @@ pub fn collect_git_snapshot_with_backend(
         None => Vec::new(),
     };
     let commits = git_commits(&repository_root, options.max_commits)?;
+    let merge_awaiting_commit = merge_awaiting_commit(&repository_root);
 
     Ok(ProjectGitSnapshot {
         root: CanonicalPath(repository_root.to_string_lossy().into_owned()),
@@ -1016,6 +1088,8 @@ pub fn collect_git_snapshot_with_backend(
         remote_default_branch,
         changed_files,
         hunks,
+        hunks_truncated,
+        merge_awaiting_commit,
         blame_lines,
         commits,
         conflicts,
@@ -1221,6 +1295,61 @@ pub fn stage_git_hunk(
         Some(hunk.patch.as_bytes()),
     )
     .map(|_| ())
+}
+
+/// Stage every change to one path, whether or not it has a textual hunk.
+///
+/// `git add -- <path>`, which is what hunk staging cannot express. A modified
+/// binary file, a mode-only change and a pure rename all appear in status with a
+/// staged-able index column and produce no `@@` hunk at all, so a panel offering
+/// only hunk controls leaves them unstageable — and therefore leaves the commit
+/// flow unusable for them without dropping to a terminal.
+///
+/// Paths are passed after `--` so one beginning with a dash cannot be read as an
+/// option.
+pub fn stage_git_path(
+    root: impl AsRef<Path>,
+    relative_path: &str,
+) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["add", "--", relative_path], None).map(|_| ())
+}
+
+/// Unstage every change to one path.
+///
+/// `git restore --staged`, which resets the index entry to `HEAD` without
+/// touching the working tree — the exact inverse of [`stage_git_path`]. `git
+/// reset` would do the same thing for a tracked file but also moves `HEAD` if
+/// the arguments are ever wrong, which is a much worse failure for a button.
+pub fn unstage_git_path(
+    root: impl AsRef<Path>,
+    relative_path: &str,
+) -> Result<(), GitInspectionError> {
+    let root = root.as_ref();
+    match git_stdout(root, &["restore", "--staged", "--", relative_path], None) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            // Before the first commit there is no `HEAD` to restore from, and
+            // `git restore --staged` exits with `could not resolve HEAD` while
+            // leaving the entry staged. That is reachable: staging a hunkless
+            // path in a fresh repository is exactly what the new control does,
+            // and Unstage beside it would then be a button that only errors.
+            //
+            // `git rm --cached` is the operation `restore` performs in that
+            // state -- drop the index entry, leave the working tree alone -- and
+            // is only attempted when `HEAD` really is unresolvable, so a genuine
+            // failure is still reported rather than retried into a delete.
+            if git_stdout(root, &["rev-parse", "--verify", "HEAD"], None).is_err() {
+                git_stdout(
+                    root,
+                    &["rm", "--cached", "--force", "--", relative_path],
+                    None,
+                )
+                .map(|_| ())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Unstage one projected staged git hunk.
@@ -1765,6 +1894,30 @@ fn is_conflict_end(line: &str, expected_len: usize) -> bool {
     prefix_len == expected_len && line.as_bytes().get(prefix_len).copied() == Some(b' ')
 }
 
+/// Whether a merge is underway that a bare `git commit` would conclude.
+///
+/// Read from the marker file rather than from porcelain text, because the
+/// porcelain output that names the state is exactly the output that goes empty
+/// once the last conflict is resolved.
+///
+/// `--git-dir` rather than `<root>/.git`, so this still answers correctly in a
+/// linked worktree or a submodule, where `.git` is a file pointing elsewhere.
+///
+/// `MERGE_HEAD` alone. See the field docs for why cherry-pick and revert do not
+/// belong here.
+fn merge_awaiting_commit(repository_root: &Path) -> bool {
+    let Ok(git_dir) = git_stdout(repository_root, &["rev-parse", "--git-dir"], None) else {
+        return false;
+    };
+    let git_dir = PathBuf::from(git_dir.trim());
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        repository_root.join(git_dir)
+    };
+    git_dir.join("MERGE_HEAD").exists()
+}
+
 fn git_stdout(
     root: &Path,
     args: &[&str],
@@ -1772,7 +1925,27 @@ fn git_stdout(
 ) -> Result<String, GitInspectionError> {
     let command_label = args.join(" ");
     let mut command = Command::new("git");
-    command.current_dir(root).args(args);
+    // Two global flags on every invocation, both closing a gap between what a
+    // path *is* and what git will do with it.
+    //
+    // `--literal-pathspecs`: a path is a filename here, never a pattern. `--`
+    // stops option parsing and does nothing about pathspec magic, so a tracked
+    // file genuinely named `:(glob)*.txt` turned one Stage click into
+    // `git add` over every matching file -- staging things the row never named,
+    // which is the exact outcome the app-layer "path must be in the projection"
+    // check exists to prevent.
+    //
+    // `core.quotePath=false`: by default git renders non-ASCII bytes in a
+    // filename as C-style escapes inside quotes (`"caf\303\251.txt"`) in diff
+    // headers, while porcelain `-z` reports the raw bytes. The two then disagree
+    // about the same file, and a file whose hunks cannot be matched to its
+    // status row is treated as hunkless -- which offers whole-path staging
+    // beside its own hunk controls.
+    command
+        .current_dir(root)
+        .arg("--literal-pathspecs")
+        .args(["-c", "core.quotePath=false"])
+        .args(args);
     let output = if let Some(input) = input {
         let mut child = command
             .stdin(Stdio::piped())
@@ -1836,8 +2009,16 @@ fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspect
 /// path -> two-character status-code map.
 ///
 /// For rename (`R`) and copy (`C`) records the porcelain `-z` format splits the
-/// path into two NUL-delimited fields; the trailing field is consumed and used
-/// as the map key (preserving the long-standing CLI parser behavior).
+/// path into two NUL-delimited fields: the record carries the destination and
+/// the field after it carries the source. **Both** are keyed with the rename
+/// code.
+///
+/// Keying only the trailing field -- the source -- left the destination with no
+/// status at all, and a path with no status defaults to `??`. That is a
+/// synthesized status on a real path, and `??` is not `R`, so every rule that
+/// withholds a control for a rename let this one through: the panel refused
+/// whole-path staging for the source it had a status for, and offered it for
+/// the destination it did not.
 fn parse_git_porcelain_status(output: &str) -> HashMap<String, String> {
     let entries = output
         .split('\0')
@@ -1849,10 +2030,14 @@ fn parse_git_porcelain_status(output: &str) -> HashMap<String, String> {
         let entry = entries[index];
         if entry.len() >= 4 {
             let code = entry[0..2].to_string();
-            let mut path = entry[3..].to_string();
+            let path = entry[3..].to_string();
             if matches!(code.as_bytes().first(), Some(b'R' | b'C')) && index + 1 < entries.len() {
                 index += 1;
-                path = entries[index].to_string();
+                let source = entries[index].to_string();
+                // The source as well as the destination. Both paths belong to
+                // the same rename, and a caller deciding whether to offer a
+                // control has to see that for either of them.
+                status.insert(source, code.clone());
             }
             status.insert(path, code);
         }
@@ -1882,18 +2067,55 @@ fn git_numstat(
     root: &Path,
     staged: bool,
 ) -> Result<HashMap<String, (u32, u32)>, GitInspectionError> {
+    // `-z`, which answers two different problems with one flag.
+    //
+    // Without it a rename is reported in a *display* form -- `dir/{old.txt =>
+    // new.txt}` -- which is not a path and names no file. Inserted as a key it
+    // fabricated a second changed-file row carrying a synthesized `??` status:
+    // the renderer withheld the genuine `R` row and offered Stage for the
+    // invention, where clicking it failed because no such file exists.
+    //
+    // And without it a path containing a tab, a quote or a backslash arrives
+    // C-quoted, since `core.quotePath` governs high bytes only. Keyed under the
+    // quoted form the real status row read zero inserted and zero deleted --
+    // "no textual changes" -- which is exactly what authorizes whole-path
+    // staging beside that file's own hidden hunks.
+    //
+    // `-z` emits raw paths and gives a rename its own records, so neither shape
+    // has to be recognised after the fact. It also retires the undecodable-path
+    // sentinel that used to live here, which was worse than the gap it covered:
+    // it materialised a phantom changed-file row of its own.
     let output = if staged {
-        git_stdout(root, &["diff", "--cached", "--numstat", "--"], None)?
+        git_stdout(root, &["diff", "--cached", "--numstat", "-z", "--"], None)?
     } else {
-        git_stdout(root, &["diff", "--numstat", "--"], None)?
+        git_stdout(root, &["diff", "--numstat", "-z", "--"], None)?
     };
+    let records: Vec<&str> = output.split('\0').collect();
     let mut stats = HashMap::new();
-    for line in output.lines() {
-        let mut parts = line.split('\t');
-        let inserted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
-        let deleted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
-        if let Some(path) = parts.next() {
-            stats.insert(path.to_string(), (inserted, deleted));
+    let mut index = 0usize;
+    while index < records.len() {
+        let record = records[index];
+        index += 1;
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(3, '\t');
+        let inserted = fields.next().and_then(parse_numstat_count).unwrap_or(0);
+        let deleted = fields.next().and_then(parse_numstat_count).unwrap_or(0);
+        match fields.next() {
+            // A rename or copy: the record carries no path, and the source and
+            // destination follow as records of their own. The counts belong to
+            // the destination, which is the path status reports.
+            Some("") | None => {
+                let destination = records.get(index + 1).copied().unwrap_or_default();
+                index += 2;
+                if !destination.is_empty() {
+                    stats.insert(destination.to_string(), (inserted, deleted));
+                }
+            }
+            Some(path) => {
+                stats.insert(path.to_string(), (inserted, deleted));
+            }
         }
     }
     Ok(stats)
@@ -1938,7 +2160,20 @@ fn parse_diff_hunks(
     let mut current_path = String::new();
     let mut hunk_lines = Vec::<String>::new();
 
-    for line in patch.lines() {
+    // `split_inclusive('\n')` with the newline trimmed back off, rather than
+    // `lines()`.
+    //
+    // `lines()` strips a trailing `\r` as well as the `\n`, so a repository
+    // storing CRLF content (`core.autocrlf=false`, or a `-text` attribute) had
+    // every content line silently converted to LF when the patch was rebuilt.
+    // `git apply --cached` then compared LF deletion lines against CRLF file
+    // content and refused with "patch does not apply" -- so hunk staging did
+    // not work at all in such a repository, which this PR made reachable
+    // rather than caused.
+    for line in patch
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+    {
         if line.starts_with("diff --git ") {
             flush_git_hunk(
                 &mut hunks,
@@ -2018,6 +2253,7 @@ fn flush_git_hunk(
         patch.push_str(line);
         patch.push('\n');
     }
+    let submodule_dirty_only = hunk_is_dirty_submodule_only(hunk_lines);
     let hunk_id = format!(
         "git-hunk:{:032x}",
         stable_hash(&format!("{stage:?}:{path}:{header}:{}", hunks.len()))
@@ -2033,11 +2269,51 @@ fn flush_git_hunk(
         new_lines,
         added_lines,
         deleted_lines,
+        submodule_dirty_only,
         context,
         patch,
     });
     hunk_lines.clear();
     Ok(())
+}
+
+/// Whether a hunk says only that a submodule's worktree is dirty.
+///
+/// The shape git produces is exact and worth matching exactly rather than
+/// loosely: one removed and one added `Subproject commit` line naming the *same*
+/// commit, the added one suffixed `-dirty`. A submodule whose recorded commit
+/// genuinely moved produces two different commits and no suffix, and that one
+/// stages perfectly well -- so a looser test would withhold a control that
+/// works.
+pub(crate) fn hunk_is_dirty_submodule_only(hunk_lines: &[String]) -> bool {
+    const PREFIX: &str = "Subproject commit ";
+    let mut removed: Option<&str> = None;
+    let mut added: Option<&str> = None;
+    for line in hunk_lines.iter().skip(1) {
+        let (sign, rest) = match line.split_at_checked(1) {
+            Some(("-", rest)) => ('-', rest),
+            Some(("+", rest)) => ('+', rest),
+            // A context line, or anything else, means this is an ordinary diff.
+            _ => return false,
+        };
+        let Some(commit) = rest.strip_prefix(PREFIX) else {
+            return false;
+        };
+        let slot = if sign == '-' {
+            &mut removed
+        } else {
+            &mut added
+        };
+        if slot.is_some() {
+            // More than one line per side is not the shape git emits here.
+            return false;
+        }
+        *slot = Some(commit);
+    }
+    match (removed, added) {
+        (Some(before), Some(after)) => after.strip_suffix("-dirty") == Some(before),
+        _ => false,
+    }
 }
 
 fn parse_diff_git_path(line: &str) -> Option<String> {
@@ -2047,10 +2323,119 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
         .filter(|path| path != "/dev/null")
 }
 
+/// The path from a `+++` diff header.
+///
+/// Git appends metadata after a tab when the filename needs it: a name
+/// containing spaces produces `+++ b/foo bar.txt<TAB>`. Keeping that separator
+/// in the path made the hunk disagree with the path porcelain status reports, so
+/// a file with spaces in its name looked like it had no hunks at all -- and the
+/// panel then offered a whole-path Stage *beside* its hunk controls, where one
+/// click stages every hunk instead of the selected one.
+///
+/// Split at the tab rather than trimming after it: a filename can legitimately
+/// end in a space, and trimming would corrupt it.
+///
+/// Quoting is handled upstream rather than here — `git_stdout` passes
+/// `core.quotePath=false`, so a non-ASCII name arrives as raw bytes instead of
+/// as an escaped `"b/cafÃ©.txt"` this parser would have to decode.
 fn parse_diff_plus_path(line: &str) -> Option<String> {
-    line.strip_prefix("+++ ")
-        .map(strip_git_side_prefix)
-        .filter(|path| path != "/dev/null")
+    let rest = line.strip_prefix("+++ ")?;
+    // A quoted header is quoted whatever `core.quotePath` says.
+    //
+    // Turning that setting off stops git escaping *high* bytes, and the earlier
+    // fix took that for the whole story. It is not: `quote_c_style` always
+    // escapes a double quote, a backslash and every control character, so a
+    // filename containing a tab still arrives as `+++ "b/tab\tname.txt"` while
+    // porcelain `-z` reports the raw bytes. The two then disagree about the same
+    // file, its hunks match no status row, and it is treated as hunkless --
+    // which offers whole-path staging beside its own hunk controls, one click
+    // from staging every hunk in a file somebody meant to stage one hunk of.
+    //
+    // The tab split has to come after this, not before: the metadata git appends
+    // after a tab is outside the quotes, and splitting first would cut a quoted
+    // path in half at the first escaped tab inside it.
+    let path = if rest.starts_with('"') {
+        decode_c_quoted(rest)?
+    } else {
+        rest.split('\t').next().unwrap_or(rest).to_string()
+    };
+    let path = strip_git_side_prefix(&path);
+    (path != "/dev/null").then_some(path)
+}
+
+/// The filename inside a C-quoted git path, with git's escapes undone.
+///
+/// `None` only when the text is not a well-formed quoted string -- an unbalanced
+/// quote or an escape git does not emit. A caller that knows it could not read
+/// the path is in a far better position than one holding a mangled path it
+/// believes, so this refuses rather than guessing.
+///
+/// Bytes that are not UTF-8 are *not* a failure here: they are converted the
+/// same lossy way `git_stdout` converts everything else, so the result still
+/// equals the path the status row is holding.
+fn decode_c_quoted(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            // Lossy, because the other side of the comparison is lossy.
+            //
+            // `git_stdout` reads every invocation through `from_utf8_lossy`, so
+            // a filename that is not UTF-8 -- a latin-1 name on Linux, which is
+            // an ordinary thing to find -- reaches the status row with
+            // replacement characters in it. Decoding these bytes strictly would
+            // reject the very path the status row is holding, and the file would
+            // look hunkless for the one reason that has nothing to do with it
+            // having no hunks. Mangled identically on both sides, the two still
+            // name the same file.
+            b'"' => return Some(String::from_utf8_lossy(&decoded).into_owned()),
+            b'\\' => {
+                index += 1;
+                let escape = *bytes.get(index)?;
+                match escape {
+                    b'a' => decoded.push(0x07),
+                    b'b' => decoded.push(0x08),
+                    b't' => decoded.push(b'\t'),
+                    b'n' => decoded.push(b'\n'),
+                    b'v' => decoded.push(0x0b),
+                    b'f' => decoded.push(0x0c),
+                    b'r' => decoded.push(b'\r'),
+                    b'"' => decoded.push(b'"'),
+                    b'\\' => decoded.push(b'\\'),
+                    // Three octal digits: the form git falls back to for any
+                    // other byte, and how a non-ASCII name arrives if
+                    // `core.quotePath` is ever on.
+                    b'0'..=b'7' => {
+                        let mut value = u32::from(escape - b'0');
+                        let mut digits = 1usize;
+                        while digits < 3 {
+                            match bytes.get(index + 1) {
+                                Some(digit) if (b'0'..=b'7').contains(digit) => {
+                                    value = value * 8 + u32::from(digit - b'0');
+                                    index += 1;
+                                    digits += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        decoded.push(u8::try_from(value).ok()?);
+                    }
+                    _ => return None,
+                }
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    // Ran off the end without a closing quote.
+    None
 }
 
 fn strip_git_side_prefix(path: &str) -> String {
@@ -7674,6 +8059,145 @@ impl legion_protocol::ProjectInfoPort for WorkspaceActor {
 
 #[cfg(test)]
 mod tests {
+    /// The header forms git emits, decoded back to filenames.
+    ///
+    /// `core.quotePath=false` covers high bytes and nothing else: a double
+    /// quote, a backslash and every control character are escaped whatever it
+    /// is set to. These are the cases the flag cannot reach, and most of them
+    /// name files no filesystem this test could run on will hold -- NTFS
+    /// rejects a tab outright, and a double quote is illegal in a Windows
+    /// filename -- so the parser is the only place they can be exercised.
+    #[test]
+    fn a_quoted_diff_header_decodes_to_its_real_filename() {
+        for (header, expected) in [
+            (r#"+++ "b/tab\tname.txt""#, "tab\tname.txt"),
+            (r#"+++ "b/quo\"te.txt""#, r#"quo"te.txt"#),
+            (r#"+++ "b/back\\slash.txt""#, r#"back\slash.txt"#),
+            (r#"+++ "b/caf\303\251.txt""#, "caf\u{e9}.txt"),
+            (r#"+++ "b/new\nline.txt""#, "new\nline.txt"),
+        ] {
+            assert_eq!(
+                super::parse_diff_plus_path(header).as_deref(),
+                Some(expected),
+                "the header {header} must name the file git is describing; a path that does \
+                 not match its status row makes the file look hunkless, and a hunkless file \
+                 is offered whole-path staging beside its own hunk controls"
+            );
+        }
+    }
+
+    /// A gitlink hunk that says only "the submodule worktree is dirty".
+    ///
+    /// The exact shape git produces, taken from a real dirty submodule:
+    ///
+    /// ```text
+    /// @@ -1 +1 @@
+    /// -Subproject commit 66a27e3f…
+    /// +Subproject commit 66a27e3f…-dirty
+    /// ```
+    ///
+    /// There is nothing in the parent repository to stage from it. `git apply
+    /// --cached` accepts it, succeeds, and leaves the index alone, so a control
+    /// offered for it reported a success that changed nothing and came straight
+    /// back on the next refresh.
+    #[test]
+    fn a_dirty_submodule_hunk_is_recognised_as_unstageable() {
+        let lines = |body: &[&str]| {
+            std::iter::once("@@ -1 +1 @@".to_string())
+                .chain(body.iter().map(|line| (*line).to_string()))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            super::hunk_is_dirty_submodule_only(&lines(&[
+                "-Subproject commit 66a27e3fb4c65ebd4478b878c74c3efd4dbb8540",
+                "+Subproject commit 66a27e3fb4c65ebd4478b878c74c3efd4dbb8540-dirty",
+            ])),
+            "the same commit with a -dirty suffix is the dirty-worktree shape"
+        );
+
+        // A submodule whose recorded commit genuinely moved stages perfectly
+        // well, so a looser test here would withhold a control that works.
+        assert!(
+            !super::hunk_is_dirty_submodule_only(&lines(&[
+                "-Subproject commit 66a27e3fb4c65ebd4478b878c74c3efd4dbb8540",
+                "+Subproject commit 0000000000000000000000000000000000000000",
+            ])),
+            "a moved submodule commit is stageable and must keep its control"
+        );
+
+        // Both at once: the commit moved *and* the worktree is dirty. The
+        // recorded commit did change, so there is something to stage.
+        assert!(
+            !super::hunk_is_dirty_submodule_only(&lines(&[
+                "-Subproject commit 66a27e3fb4c65ebd4478b878c74c3efd4dbb8540",
+                "+Subproject commit 0000000000000000000000000000000000000000-dirty",
+            ])),
+            "a moved-and-dirty submodule still has a commit change to stage"
+        );
+
+        // And an ordinary diff is never mistaken for one.
+        assert!(
+            !super::hunk_is_dirty_submodule_only(&lines(&["-let value = 1;", "+let value = 2;",])),
+            "ordinary content lines are not a gitlink"
+        );
+        assert!(
+            !super::hunk_is_dirty_submodule_only(&lines(&[
+                " context",
+                "-Subproject commit abc",
+                "+Subproject commit abc-dirty",
+            ])),
+            "a hunk carrying context lines is not the synthetic gitlink shape"
+        );
+    }
+
+    /// A filename that is not UTF-8 decodes the way the status row read it.
+    ///
+    /// `git_stdout` reads every invocation through `from_utf8_lossy`, so a
+    /// latin-1 name reaches the status row with replacement characters in it.
+    /// Decoding a diff header strictly would reject the very path the status
+    /// row is holding, and the file would look hunkless for a reason that has
+    /// nothing to do with whether it has hunks. Mangled identically on both
+    /// sides, the two still name the same file.
+    #[test]
+    fn a_non_utf8_header_decodes_the_way_the_status_row_did() {
+        let raw_bytes = [b'c', b'a', b'f', 0xE9, b'.', b't', b'x', b't'];
+        let as_status_reports_it = String::from_utf8_lossy(&raw_bytes).into_owned();
+
+        assert_eq!(
+            super::parse_diff_plus_path(r#"+++ "b/caf\351.txt""#).as_deref(),
+            Some(as_status_reports_it.as_str()),
+            "the header decoder and the status reader must agree about a name neither can \
+             represent exactly"
+        );
+    }
+
+    /// An unquoted header still drops the metadata git appends after a tab.
+    #[test]
+    fn an_unquoted_header_keeps_its_spaces_and_drops_its_metadata() {
+        assert_eq!(
+            super::parse_diff_plus_path("+++ b/sp ace.txt\t").as_deref(),
+            Some("sp ace.txt"),
+            "a space is an ordinary filename character and git does not quote for it"
+        );
+    }
+
+    /// A header that cannot be decoded yields nothing rather than a guess.
+    ///
+    /// A caller that knows it could not read the path withholds the whole-path
+    /// controls. A caller holding a mangled path believes it, matches it against
+    /// no status row, and offers exactly the control that should be withheld.
+    #[test]
+    fn an_undecodable_header_is_not_guessed_at() {
+        for header in [r#"+++ "b/unterminated.txt"#, r#"+++ "b/bad\zescape.txt""#] {
+            assert_eq!(
+                super::parse_diff_plus_path(header),
+                None,
+                "{header} is not a well-formed quoted path and must not produce one"
+            );
+        }
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7712,8 +8236,9 @@ mod tests {
 
     #[test]
     fn git_porcelain_status_parses_rename_copy_delete_untracked() {
-        // `-z` payload: code+space+space+path, NUL-separated; rename/copy carry a
-        // trailing source-path field.
+        // `-z` payload: code+space+space+path, NUL-separated. A rename or copy
+        // carries the destination in the record and the source in the field
+        // after it.
         let payload = concat!(
             " M src/modified.rs\0",
             "?? src/new.rs\0",
@@ -7729,19 +8254,34 @@ mod tests {
         );
         assert_eq!(status.get("src/new.rs").map(String::as_str), Some("??"));
         assert_eq!(status.get("src/gone.rs").map(String::as_str), Some(" D"));
-        // Rename/copy key on the trailing (source) path; the source field must
-        // not leak in as a standalone entry.
-        assert_eq!(
-            status.get("src/renamed_from.rs").map(String::as_str),
-            Some("R ")
-        );
-        assert_eq!(
-            status.get("src/copied_from.rs").map(String::as_str),
-            Some("C ")
-        );
-        assert!(!status.contains_key("src/renamed_to.rs"));
-        assert!(!status.contains_key("src/copied_to.rs"));
-        assert_eq!(status.len(), 5);
+        // Both sides of a rename or copy carry the code.
+        //
+        // This used to assert the destination was *absent*, on the reasoning
+        // that it should not leak in as a standalone entry. The cost of that
+        // was invisible until another source contributed the same path:
+        // `git diff --numstat -z` reports a rename's counts against the
+        // destination, so the destination arrived with no status, defaulted to
+        // `??`, and every rule that withholds a control for a rename let it
+        // through -- the panel refused whole-path staging for the source it had
+        // a status for and offered it for the destination it did not.
+        //
+        // A path that is half of a rename is not untracked, and saying so is
+        // the parser's job.
+        for path in ["src/renamed_from.rs", "src/renamed_to.rs"] {
+            assert_eq!(
+                status.get(path).map(String::as_str),
+                Some("R "),
+                "{path} is part of a rename and must be reported as one"
+            );
+        }
+        for path in ["src/copied_from.rs", "src/copied_to.rs"] {
+            assert_eq!(
+                status.get(path).map(String::as_str),
+                Some("C "),
+                "{path} is part of a copy and must be reported as one"
+            );
+        }
+        assert_eq!(status.len(), 7);
     }
 
     #[test]

@@ -4852,7 +4852,14 @@ fn projection_rendering_activity_surfaces_keep_explorer_workspace_only_and_actio
 
     let (source_control, full) =
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "Source Control");
-    assert!(source_control.actions.is_empty());
+    // This used to assert the selection emitted *no* action, and that claim was
+    // the bug: `GitProjection` is filled in only by an explicit `RefreshGit`,
+    // and nothing issued one on workspace open or on selecting the surface, so
+    // opening Source Control against a real repository showed the empty state
+    // "No source-control status" over a tree full of changes. Selecting the
+    // surface now asks for the status it is about to display, the same way the
+    // Search and Symbols rail entries dispatch the palette that fills them.
+    assert_eq!(source_control.actions, vec![DesktopAction::RefreshGit]);
     assert!(accesskit_has_label(&full, "SOURCE CONTROL"));
     assert!(!accesskit_has_label(&full, "EXPLORER ·"));
     let (git, full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Refresh Git");
