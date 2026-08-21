@@ -308,7 +308,15 @@ fn conflict_message(
     let detail = diagnostic_detail(&conflict.diagnostics)
         .or_else(|| diagnostic_detail(&transition.diagnostics));
     match detail {
-        Some(detail) => format!("Save rejected: {name} — {detail}. {EDITS_INTACT}"),
+        // The word "conflict" stays in the sentence. This module already
+        // documents that `view::save_rejection_status_marker` classifies these
+        // rows by substring, and that dropping the condition word silently
+        // reclassifies them -- and then this branch dropped it, so every real
+        // conflict (which always carries a diagnostic) was filed as a generic
+        // rejection. Named before the detail, so it still reads as prose.
+        Some(detail) => {
+            format!("Save rejected: {name} has a conflict — {detail}. {EDITS_INTACT}")
+        }
         None => {
             format!("Save rejected: {name} has a conflict with the copy on disk. {EDITS_INTACT}")
         }
@@ -638,6 +646,12 @@ mod save_message_tests {
         assert!(
             !message.contains("copy on disk"),
             "the message claims a conflict with a copy that no longer exists: {message}"
+        );
+        // `view::save_rejection_status_marker` reads these rows by substring, so
+        // the condition word is part of the contract, not decoration.
+        assert!(
+            message.to_ascii_lowercase().contains("conflict"),
+            "the condition word must survive for status classification: {message}"
         );
     }
 
