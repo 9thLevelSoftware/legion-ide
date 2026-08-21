@@ -15,6 +15,20 @@ use super::components::{primary_button, soft_button};
 use super::{proposal_risk_label, risk_color, theme};
 use crate::bridge::DesktopAction;
 
+/// Whether a proposal may be applied.
+///
+/// Only an approved one. Applying a proposal that has not been reviewed would
+/// route around the approval this panel exists to collect, which is the whole
+/// safety property of a proposal surface.
+///
+/// A function rather than an inline `matches!` because the rendered test cannot
+/// reach `Approved` on the deterministic route -- approving there currently
+/// lands the proposal in a terminal state instead, which is a separate recorded
+/// defect. Inline, weakening this predicate produced no failure anywhere.
+pub(crate) fn proposal_is_applicable(state: ProposalLifecycleState) -> bool {
+    matches!(state, ProposalLifecycleState::Approved)
+}
+
 pub(crate) fn render_proposal_cards(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -61,6 +75,7 @@ pub(crate) fn render_proposal_cards(
                 | ProposalLifecycleState::Validated
                 | ProposalLifecycleState::Previewed
         );
+        let applicable = proposal_is_applicable(row.lifecycle.state);
         let cancellable = matches!(
             row.lifecycle.state,
             ProposalLifecycleState::Created
@@ -84,12 +99,32 @@ pub(crate) fn render_proposal_cards(
             });
             // Surface the lifecycle state so terminal proposals are legible.
             ui.label(theme::muted(format!("status: {}", row.lifecycle.label)));
-            ui.horizontal(|ui| {
+            // Wrapped, not a fixed row. Five controls side by side force the
+            // inspector wider than its 288px minimum, which the panel-tiling
+            // gate catches -- and in a narrow inspector a row that cannot fit is
+            // a row with controls off the edge.
+            ui.horizontal_wrapped(|ui| {
                 ui.add_enabled_ui(actionable, |ui| {
                     if primary_button(ui, "Approve", theme::tokens().accent.green).clicked()
                         && actionable
                     {
                         actions.push(DesktopAction::ApproveProposal {
+                            proposal_id: row.proposal_id,
+                        });
+                    }
+                });
+                // Approving is not applying. An approved proposal has passed
+                // review and changed nothing on disk, and until now the only
+                // rendered Apply control lived in the Delegate-owned canvas,
+                // which excludes Assist proposals -- so an Assist user could
+                // approve an edit and then had no surface anywhere that could
+                // carry it out. Approve going grey with nothing taking its place
+                // reads as the work having been done.
+                ui.add_enabled_ui(applicable, |ui| {
+                    if primary_button(ui, "Apply", theme::tokens().accent.green).clicked()
+                        && applicable
+                    {
+                        actions.push(DesktopAction::ApplyProposal {
                             proposal_id: row.proposal_id,
                         });
                     }
@@ -122,5 +157,35 @@ pub(crate) fn render_proposal_cards(
         ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT) + ledger.omitted_row_count as usize;
     if hidden > 0 {
         ui.label(theme::muted(format!("{hidden} more proposals")));
+    }
+}
+
+#[cfg(test)]
+mod proposal_card_rules {
+    use super::proposal_is_applicable;
+    use legion_protocol::ProposalLifecycleState;
+
+    /// Apply is offered for exactly one state, and never before review.
+    #[test]
+    fn only_an_approved_proposal_is_applicable() {
+        assert!(
+            proposal_is_applicable(ProposalLifecycleState::Approved),
+            "an approved proposal must be applicable, or approving it is a dead end"
+        );
+        for state in [
+            ProposalLifecycleState::Created,
+            ProposalLifecycleState::Validated,
+            ProposalLifecycleState::Previewed,
+            ProposalLifecycleState::Rejected,
+            ProposalLifecycleState::Cancelled,
+            ProposalLifecycleState::Applied,
+            ProposalLifecycleState::Failed,
+            ProposalLifecycleState::Stale,
+        ] {
+            assert!(
+                !proposal_is_applicable(state),
+                "{state:?} must not offer Apply; applying an unreviewed or terminal                  proposal routes around the approval this surface exists to collect"
+            );
+        }
     }
 }

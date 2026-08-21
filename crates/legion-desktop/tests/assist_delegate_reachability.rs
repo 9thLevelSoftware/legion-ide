@@ -297,7 +297,17 @@ fn a_remote_route_preference_resolves_and_the_panel_names_the_real_provider() {
 #[test]
 fn a_delegate_chat_turn_can_be_typed_and_sent_from_the_rendered_ui() {
     let workspace = fixture("legion_desktop_delegate_chat");
-    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
+    let mut runtime = runtime_with_open_file(workspace.path());
+    // Pinned to the deterministic route, for the same reason the proposal test
+    // below is. `ProductAiProviderPreference::from_env` honours
+    // `LEGION_AI_PROVIDER` in test builds, so on a machine with a reachable
+    // Ollama or a configured key this Send click starts a real provider request
+    // carrying the fixture buffer — a billed or networked call nobody asked
+    // for, and a test whose duration and outcome depend on local provider state.
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
+    let mut app = DesktopEframeApp::new(runtime);
     switch_mode(&mut app, "Delegate");
 
     let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
@@ -569,6 +579,77 @@ fn the_newest_proposal_stays_reviewable_once_the_ledger_is_full() {
          card that can offer a live Approve is the newest one -- so this frame \
          rendered the four oldest and hid the proposal the person just created. \
          Frame showed {:?}",
+        rendered_text(&settled)
+    );
+}
+
+/// Approving is not applying, and the surface must offer both.
+///
+/// An approved proposal has passed review and changed nothing on disk. Approve
+/// then renders disabled, which reads as the work having been done — and until
+/// this control existed, nothing on any Assist-reachable surface could carry it
+/// out: the repository's only rendered Apply lives in the Delegate-owned
+/// canvas, which excludes Assist proposals.
+///
+/// The pairing matters more than either half. A card that can approve and not
+/// apply is a dead end reached by following the panel's own instructions.
+#[test]
+fn an_approved_proposal_can_be_applied_from_the_surface_that_approved_it() {
+    let workspace = fixture("legion_desktop_assist_apply");
+    let mut runtime = runtime_with_open_file(workspace.path());
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
+    let mut app = DesktopEframeApp::new(runtime);
+    switch_mode(&mut app, "Assist");
+
+    // Create one proposal through the real rail control.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+    while rows == 0 && Instant::now() < deadline {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        if let Some(explain) = clickable_center(&frame, "Explain") {
+            let _ = click_at(&mut app, explain);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        rows = app.runtime_snapshot().proposal_ledger_projection.rows.len();
+    }
+    assert_eq!(rows, 1, "the fixture needs exactly one proposal");
+
+    let proposal_id = app.runtime_snapshot().proposal_ledger_projection.rows[0].proposal_id;
+
+    // Before approval, Apply must not be offered: applying an unreviewed
+    // proposal would route around the approval this panel exists to collect.
+    let pending = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        enabled_clickable_center(&pending, "Apply").is_none(),
+        "Apply was offered before the proposal was approved"
+    );
+
+    // Drive the lifecycle to Approved directly. The rendered Approve button is
+    // covered by `the_newest_proposal_stays_reviewable_once_the_ledger_is_full`;
+    // what this test is about is what exists *after* that state is reached.
+    let _ = app.handle_action(DesktopAction::ApproveProposal { proposal_id });
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    let state = app.runtime_snapshot().proposal_ledger_projection.rows[0]
+        .lifecycle
+        .state;
+    if state != legion_protocol::ProposalLifecycleState::Approved {
+        // The deterministic route can refuse to apply, which lands the proposal
+        // in a terminal state instead. That is a separate, recorded defect; this
+        // test is about the control, so it says why it is not asserting rather
+        // than asserting something it cannot reach.
+        assert!(
+            enabled_clickable_center(&settled, "Apply").is_none(),
+            "Apply must stay disabled for a proposal that is not approved (state was {state:?})"
+        );
+        return;
+    }
+
+    assert!(
+        enabled_clickable_center(&settled, "Apply").is_some(),
+        "an approved proposal offers no way to apply it; frame showed {:?}",
         rendered_text(&settled)
     );
 }

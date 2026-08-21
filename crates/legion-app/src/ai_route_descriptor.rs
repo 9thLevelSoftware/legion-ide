@@ -66,12 +66,49 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
     }
 }
 
+/// Whether a host is a loopback address, and therefore never leaves the machine.
+///
+/// Textual rather than resolved on purpose: this decides whether plaintext is
+/// acceptable, and a DNS lookup that can be repointed is not a basis for that
+/// decision. `localhost` is included because every platform this ships on
+/// resolves it to loopback, and excluding it would reject the ordinary Ollama
+/// configuration.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// The Anthropic endpoint this build will actually contact.
 ///
 /// Parsed from the configured base URL so the authorized target, the audit
 /// record and the request all name one destination.
+///
+/// **Plaintext is refused off-machine.** A base URL of `http://proxy.internal`
+/// would otherwise produce an HTTP target that `product_ai_security_policy`
+/// allowlists and the generic `ai.provider.invoke` policy accepts, putting the
+/// BYOK credential and the raw buffer excerpt on the wire in clear. A
+/// configured endpoint that cannot be reached safely is upgraded to `https`
+/// rather than silently honoured: if the proxy does not speak TLS the request
+/// fails visibly, which is the correct outcome for a credential-bearing call.
+///
+/// Loopback keeps `http`, because it never leaves the machine and demanding TLS
+/// there would break local proxies for no gain.
 pub(crate) fn anthropic_network_target() -> legion_protocol::NetworkTarget {
-    network_target_from_base_url(&anthropic_base_url(), "api.anthropic.com")
+    let mut target = network_target_from_base_url(&anthropic_base_url(), "api.anthropic.com");
+    if target.scheme == "http" && !is_loopback_host(&target.host) {
+        target.scheme = "https".to_string();
+        // The port came from the URL or from HTTP's default. A default of 80
+        // was chosen for a scheme that is no longer in use, so it moves with it;
+        // an explicitly configured port is what the operator asked for and stays.
+        if target.port == Some(80) {
+            target.port = Some(443);
+        }
+    }
+    target
 }
 
 /// The Ollama endpoint this build will actually contact.
@@ -343,6 +380,95 @@ mod delegate_chat_route_honesty_tests {
             Some(11434),
             "the deterministic route sends nothing, so it must not adopt a configured Ollama endpoint"
         );
+    }
+
+    /// A non-loopback Anthropic endpoint is never contacted over plaintext.
+    ///
+    /// `http://proxy.internal` would otherwise produce an HTTP target that
+    /// `product_ai_security_policy` allowlists and the generic
+    /// `ai.provider.invoke` policy accepts — putting the BYOK credential and the
+    /// raw buffer excerpt on the wire in clear. Upgraded rather than silently
+    /// honoured: if the proxy does not speak TLS the request fails visibly,
+    /// which is the right outcome for a credential-bearing call.
+    #[test]
+    fn a_non_loopback_anthropic_endpoint_is_forced_to_https() {
+        let env = RouteEnv::cleared();
+        env.set("LEGION_ANTHROPIC_BASE_URL", "http://proxy.internal/v1");
+        let (target, _health, _cost, _privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::Anthropic));
+
+        assert_eq!(
+            target.scheme, "https",
+            "a remote Anthropic endpoint must not be contacted over plaintext"
+        );
+        assert_eq!(
+            target.port,
+            Some(443),
+            "the port must move with the scheme when it was HTTP's default"
+        );
+        assert_eq!(target.host, "proxy.internal");
+    }
+
+    /// An explicitly configured port survives the scheme upgrade.
+    #[test]
+    fn forcing_https_keeps_a_configured_port() {
+        let env = RouteEnv::cleared();
+        env.set("LEGION_ANTHROPIC_BASE_URL", "http://proxy.internal:8443/v1");
+        let (target, _health, _cost, _privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::Anthropic));
+
+        assert_eq!(target.scheme, "https");
+        assert_eq!(
+            target.port,
+            Some(8443),
+            "an operator's explicit port is what they asked for and must be kept"
+        );
+    }
+
+    /// A loopback Anthropic proxy keeps plaintext, and is a supported setup.
+    ///
+    /// The first version of the remote test asserted that an Anthropic route is
+    /// never loopback, which rejected exactly this configuration — a standing
+    /// gate refusing a deployment the product supports.
+    #[test]
+    fn a_loopback_anthropic_proxy_is_allowed_over_http() {
+        let env = RouteEnv::cleared();
+        env.set("LEGION_ANTHROPIC_BASE_URL", "http://localhost:8080/v1");
+        let (target, _health, _cost, privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::Anthropic));
+
+        assert_eq!(
+            (target.scheme.as_str(), target.host.as_str(), target.port),
+            ("http", "localhost", Some(8080)),
+            "a loopback proxy never leaves the machine, so TLS is not required of it"
+        );
+        // Still an egress route as far as the label is concerned: what the
+        // proxy does with the excerpt afterwards is not something this can see.
+        assert_eq!(privacy, ProposalPrivacyLabel::ExternalEgressMetadata);
+    }
+
+    /// Loopback recognition covers the forms a person actually configures.
+    #[test]
+    fn loopback_hosts_are_recognised_by_form_not_by_lookup() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.0.0.53",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(
+                super::is_loopback_host(host),
+                "{host} should be recognised as loopback"
+            );
+        }
+        for host in ["proxy.internal", "api.anthropic.com", "10.0.0.5", "0.0.0.0"] {
+            assert!(
+                !super::is_loopback_host(host),
+                "{host} is not loopback and must not be treated as one"
+            );
+        }
     }
 
     /// The parser, without the process environment.

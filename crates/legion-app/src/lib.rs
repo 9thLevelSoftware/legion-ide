@@ -1716,19 +1716,35 @@ fn ollama_loopback_reachable() -> bool {
     // address the request never used.
     let target = crate::ai_route_descriptor::ollama_network_target();
     let host_port = format!("{}:{}", target.host, target.port.unwrap_or(11434));
-    let Ok(mut addrs) = host_port.to_socket_addrs() else {
+    let Ok(addrs) = host_port.to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    // Guard against accidental remote probes in product auto mode.
-    match addr {
-        SocketAddr::V4(v4) if v4.ip().is_loopback() => {}
-        SocketAddr::V6(v6) if v6.ip().is_loopback() => {}
-        _ => return false,
-    }
-    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+
+    // Every resolved address, not just the first.
+    //
+    // On a dual-stack host `localhost` commonly resolves to `::1` before
+    // `127.0.0.1`. Ollama listens on IPv4 by default, so probing only the first
+    // address reported it unreachable while the provider client -- which tries
+    // them in turn -- could talk to it. `Auto` then fell through to Anthropic or
+    // to the deterministic fixture with a working local model right there.
+    //
+    // The budget stays bounded: the same 150ms applies to each candidate and at
+    // most four are tried, so the worst case is 600ms rather than one timeout
+    // multiplied by however many addresses a resolver returns.
+    const PER_ADDRESS_TIMEOUT: Duration = Duration::from_millis(150);
+    const MAX_CANDIDATES: usize = 4;
+
+    addrs
+        // Guard against accidental remote probes in product auto mode. Applied
+        // per address rather than to the first one only: a hostname can resolve
+        // to a mix, and a non-loopback entry appearing first must not decide the
+        // answer for the loopback entries behind it.
+        .filter(|addr| match addr {
+            SocketAddr::V4(v4) => v4.ip().is_loopback(),
+            SocketAddr::V6(v6) => v6.ip().is_loopback(),
+        })
+        .take(MAX_CANDIDATES)
+        .any(|addr| TcpStream::connect_timeout(&addr, PER_ADDRESS_TIMEOUT).is_ok())
 }
 
 #[cfg(feature = "ai")]
@@ -1764,7 +1780,7 @@ struct ProductChatCompletion {
 /// chunks arrive). Ollama remains a single-chunk completion.
 #[cfg(feature = "ai")]
 fn complete_product_chat(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     system: &str,
     user: &str,
     max_tokens: u32,
@@ -1774,7 +1790,11 @@ fn complete_product_chat(
     use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
     use legion_ai_providers::OllamaProvider;
 
-    let backend = product_ai_selected_live_backend(preference)?;
+    // The backend is passed in, already resolved and already authorized. This
+    // used to take the preference and resolve it again, which is a second answer
+    // to a question the broker had already been asked -- and on `Auto` the two
+    // answers can differ.
+    let backend = backend?;
 
     match backend {
         ProductAiLiveBackend::Ollama => {
@@ -1939,7 +1959,14 @@ no markdown fences, no explanation.";
     let user = format!(
         "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
     );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
+    match complete_product_chat(
+        product_ai_selected_live_backend(preference),
+        system,
+        &user,
+        512,
+        0.2,
+        on_delta,
+    ) {
         Some(completion) => {
             let mut text = completion.text.clone();
             if !text.ends_with('\n') {
@@ -1987,7 +2014,7 @@ fn resolve_assisted_edit_proposal_text(
 #[cfg(feature = "ai")]
 #[allow(clippy::too_many_arguments)]
 fn resolve_delegate_chat_reply(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     prompt_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -2002,16 +2029,20 @@ Do not invent file paths. Keep the reply under ~800 characters.";
     let user = format!(
         "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
     );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
+    match complete_product_chat(backend, system, &user, 512, 0.2, on_delta) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "delegate.chat");
             (bounded_label(completion.text, 1_200), Some(stream))
         }
         None => (
             format!(
-                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (preference={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
+                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
                 route_labels.join(","),
-                preference.as_str()
+                match backend {
+                    Some(ProductAiLiveBackend::Ollama) => "ollama",
+                    Some(ProductAiLiveBackend::Anthropic) => "anthropic",
+                    None => "none",
+                }
             ),
             None,
         ),
@@ -2021,7 +2052,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
 #[cfg(not(feature = "ai"))]
 #[allow(clippy::too_many_arguments)]
 fn resolve_delegate_chat_reply(
-    _preference: ProductAiProviderPreference,
+    _backend: Option<ProductAiLiveBackend>,
     _prompt_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -2112,6 +2143,25 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
             policy.network_policy.air_gap = true;
             policy.ai_provider_policy.allow_local_provider = true;
             policy.ai_provider_policy.allow_remote_provider = false;
+            // The default allowlist holds `localhost` only, so a configured
+            // `OLLAMA_BASE_URL` of `http://127.0.0.1:11500` produced a route the
+            // probe selected and the broker then denied -- Assist proposals and
+            // Delegate chat silently never reaching a server that was running.
+            //
+            // Only a loopback host is added. The air gap above is what keeps
+            // this local; adding a resolved host without checking it would let
+            // one environment variable turn a local-only policy into an
+            // allowlist entry for anywhere.
+            let host = crate::ai_route_descriptor::ollama_network_target().host;
+            if crate::ai_route_descriptor::is_loopback_host(&host)
+                && !policy
+                    .network_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry == &host)
+            {
+                policy.network_policy.allowlist.push(host);
+            }
         }
         Some(ProductAiLiveBackend::Anthropic) => {
             // Trusted-workspace BYOK: allow the configured Anthropic host only.
@@ -2436,7 +2486,7 @@ fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
 /// the ghost-text result shape. Falls back to `None` for deterministic offline.
 #[cfg(feature = "ai")]
 fn try_live_product_inline_prediction(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     metadata: &InlinePredictionRequestMetadata,
     buffer_excerpt: &str,
 ) -> Option<InlinePredictionResult> {
@@ -2451,7 +2501,11 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
         "Language: {}\nCursor line {} character {}\nBuffer excerpt:\n{buffer_excerpt}",
         metadata.language_id.0, metadata.cursor.line, metadata.cursor.character
     );
-    let completion = complete_product_chat(preference, &system, &user, 128, 0.1, None)?;
+    // The already-authorized backend, not the preference. Resolving again here
+    // would repeat the delegate-chat defect: the caller has just authorized one
+    // destination through the broker, and a second resolution can answer
+    // differently and send the excerpt somewhere never approved.
+    let completion = complete_product_chat(backend, &system, &user, 128, 0.1, None)?;
     let text = bound_inline_prediction_text(completion.text.trim(), max_bytes);
     if text.is_empty() {
         return None;
@@ -27320,9 +27374,25 @@ impl AppComposition {
         // `SecurityPolicy::default()` -- which is air-gapped, local-provider
         // only, and allowlists localhost -- makes the router refuse the very
         // route the audit describes, so an honest record buys a broken feature.
+        // Resolved **once**, here, and used for every decision downstream.
+        //
+        // `product_ai_selected_live_backend` probes the host -- is Ollama
+        // listening, is there a key -- so calling it again later can answer
+        // differently. It did: the worker re-resolved from the preference, so an
+        // `Auto` run that authorized Ollama could find it gone by the time the
+        // request was sent and hand the buffer excerpt to Anthropic instead --
+        // a destination the broker never approved. One resolution, threaded
+        // through, is the only version of this that cannot drift.
         let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
         let (route_target, route_health, route_cost, route_privacy) =
             crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
+        // Identity from the same backend as the destination. These were
+        // hard-coded to the deterministic provider while the target followed the
+        // live one, so provider-allowlist policy was evaluated against
+        // `deterministic-local` and the audit recorded a local call for traffic
+        // going to Anthropic.
+        let (route_provider_id, route_model_label, route_provider_class, ..) =
+            product_ai_route_fields(live_backend);
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -27391,9 +27461,9 @@ impl AppComposition {
                 input.workspace_id.0,
                 self.event_sequence_generator.next().0
             ),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-            model_label: "deterministic-local-delegate".to_string(),
-            provider_class: AssistedAiProviderClass::Local,
+            provider_id: route_provider_id,
+            model_label: route_model_label,
+            provider_class: route_provider_class,
             operation_class: AssistedAiOperationClass::Explain,
             context_manifest: context_reference,
             privacy_inspector: privacy_reference,
@@ -27458,8 +27528,7 @@ impl AppComposition {
         let route_completed = provider_route_response.invocation_state
             == AssistedAiProviderInvocationState::Completed;
         #[cfg(feature = "ai")]
-        let use_background_live =
-            route_completed && product_ai_will_attempt_live(self.preferred_ai_provider);
+        let use_background_live = route_completed && live_backend.is_some();
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
         let user_message_id = self
@@ -27501,7 +27570,10 @@ impl AppComposition {
         } else if use_background_live {
             // Non-blocking path: stream on a worker thread; poll_product_ai_stream
             // finalizes the assistant message when generation completes.
-            let preference = self.preferred_ai_provider;
+            // The worker captures `live_backend`, not the preference. That is
+            // the structural half of the fix: with no preference in scope there
+            // is nothing for it to re-resolve, so the destination it contacts is
+            // the one the broker approved above and cannot become another.
             let file_path = input.metadata.identity.canonical_path.0.clone();
             let route_id = provider_route_response.route_id.clone();
             let route_labels = provider_route_response.output_labels.clone();
@@ -27515,7 +27587,7 @@ impl AppComposition {
                 .spawn(move || {
                     let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
                     let (label, stream) = resolve_delegate_chat_reply(
-                        preference,
+                        live_backend,
                         &prompt_for_worker,
                         &excerpt_for_worker,
                         &file_path,
@@ -27551,7 +27623,7 @@ impl AppComposition {
             let sink_delta = lane_reservation.sink();
             let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
             let (label, stream) = resolve_delegate_chat_reply(
-                self.preferred_ai_provider,
+                live_backend,
                 &prompt_label,
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,
@@ -28007,11 +28079,9 @@ impl AppComposition {
                     .chars()
                     .take(2_000)
                     .collect::<String>();
-                if let Some(live) = try_live_product_inline_prediction(
-                    self.preferred_ai_provider,
-                    &metadata,
-                    &buffer_excerpt,
-                ) {
+                if let Some(live) =
+                    try_live_product_inline_prediction(Some(backend), &metadata, &buffer_excerpt)
+                {
                     return Ok(live);
                 }
             }
