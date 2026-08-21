@@ -65,26 +65,75 @@ fn subject(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> String {
 /// `main.rs`: access denied" — still actionable, and still about a file the
 /// person can see.
 fn redact_paths(message: &str) -> String {
-    message
-        .split_whitespace()
-        .map(|token| {
-            // A token is path-like if it carries a separator at all. Trailing
-            // punctuation is kept so the sentence still reads.
-            let trimmed = token.trim_matches(|c: char| "\"'`(),.:;".contains(c));
-            if !trimmed.contains('/') && !trimmed.contains('\\') {
-                return token.to_string();
+    // Quoted runs first, then bare tokens.
+    //
+    // Splitting on whitespace alone treated `"C:\work\my project\main.rs"` as
+    // three tokens, so only the fragment holding the last separator shrank and
+    // `C:\work\my` stayed on screen -- a redaction that reported success while
+    // leaving most of the path visible. A quoted run is one path however many
+    // spaces it contains, which is why the quoting is there.
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(open) = rest.find('"') {
+        out.push_str(&redact_bare_tokens(&rest[..open]));
+        let after = &rest[open + 1..];
+        match after.find('"') {
+            Some(close) => {
+                out.push('"');
+                out.push_str(&shorten_path(&after[..close]));
+                out.push('"');
+                rest = &after[close + 1..];
             }
-            let name = trimmed
-                .rsplit(['/', '\\'])
-                .find(|segment| !segment.is_empty())
-                .unwrap_or(trimmed);
-            if name == trimmed {
-                return token.to_string();
+            // An unbalanced quote: treat the remainder as ordinary text rather
+            // than swallowing it.
+            None => {
+                out.push('"');
+                rest = after;
             }
-            token.replace(trimmed, name)
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+    }
+    out.push_str(&redact_bare_tokens(rest));
+    out
+}
+
+/// Shrink whitespace-separated tokens that look like paths.
+fn redact_bare_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            out.push_str(&shorten_token(&text[last..index]));
+            out.push(character);
+            last = index + character.len_utf8();
+        }
+    }
+    out.push_str(&shorten_token(&text[last..]));
+    out
+}
+
+/// One token, with any surrounding punctuation preserved.
+fn shorten_token(token: &str) -> String {
+    let trimmed = token.trim_matches(|c: char| "'`(),.:;".contains(c));
+    if trimmed.is_empty() || (!trimmed.contains('/') && !trimmed.contains('\\')) {
+        return token.to_string();
+    }
+    let shortened = shorten_path(trimmed);
+    if shortened == trimmed {
+        token.to_string()
+    } else {
+        token.replace(trimmed, &shortened)
+    }
+}
+
+/// The last segment of a path, or the input when it is not one.
+fn shorten_path(path: &str) -> String {
+    if !path.contains('/') && !path.contains('\\') {
+        return path.to_string();
+    }
+    path.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// What the app itself said went wrong, when it said something specific.
@@ -636,6 +685,42 @@ mod save_message_tests {
         // A message with no path is left exactly as written.
         let plain = "write of 900000 bytes exceeds the 524288 byte limit";
         assert_eq!(super::redact_paths(plain), plain);
+    }
+
+    /// A quoted path with spaces is redacted as one path.
+    ///
+    /// Splitting on whitespace treated `"C:\\work\\my project\\main.rs"` as three
+    /// tokens, so only the fragment holding the last separator shrank and
+    /// `C:\\work\\my` stayed on screen — a redaction that reported success
+    /// while leaving most of the path visible. A quoted run is one path however
+    /// many spaces it contains, which is why the quoting is there.
+    #[test]
+    fn a_quoted_path_with_spaces_is_redacted_whole() {
+        let redacted =
+            super::redact_paths(r#"failed to replace "C:\work\my project\main.rs": access denied"#);
+
+        assert!(
+            redacted.contains("access denied"),
+            "the cause must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("main.rs"),
+            "the file must stay identifiable: {redacted}"
+        );
+        for leak in [r"C:\work", "my project"] {
+            assert!(
+                !redacted.contains(leak),
+                "part of the quoted path is still on screen ({leak:?}): {redacted}"
+            );
+        }
+        // The exact result, because "no leak" is satisfied by mangling too.
+        // A whitespace-split redaction leaves "my main.rs" -- two fragments
+        // of two different segments, naming no file that exists and reading
+        // as corruption rather than as redaction.
+        assert_eq!(
+            redacted, r#"failed to replace "main.rs": access denied"#,
+            "a quoted path must reduce to exactly its file name"
+        );
     }
 
     /// The redaction is reached by the message, not only by its own test.
