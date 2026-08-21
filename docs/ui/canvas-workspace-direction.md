@@ -1,9 +1,12 @@
 # Canvas workspace — UI direction
 
-Date: 2026-08-17, updated 2026-08-20
+Date: 2026-08-17, updated 2026-08-21
 Status: **Arrangement surface built and reachable. The rest of this document is
-still direction, not commitment.** No ADR, no backlog task, no product-readiness
-ledger row.
+still direction, not commitment.** Backlog: `P6.F5.T1` in
+`plans/kanban/legion-ga-backlog.toml`, covering the built slice only. No ADR.
+No product-readiness ledger row: `PR-UI-001` is Manual mode's evidence and this
+surface is not part of it, so nothing here is claimed as readiness evidence and
+the canvas is not on any promotion path yet.
 Source: Claude Design project `Application UI review and redesign`
 (`b0839227-4e52-4aee-b1a2-8a56a825ff57`), file `Legion Canvas Workspace.dc.html`.
 
@@ -12,10 +15,11 @@ that tool. It records the concept, a spec precise enough to rebuild the layout
 without the mock, and — the part worth more than the spec — what is actually
 true in this codebase today that would have to change first.
 
-## What is built, as of 2026-08-20
+## What is built, as of 2026-08-21
 
 The owner directed a pivot to this direction, so section 3's "would have to be
-true first" is no longer hypothetical for the first slice. What exists in
+true first" is no longer hypothetical for the first slice, which `P6.F5.T1`
+records. What exists in
 `crates/legion-desktop/src/view/canvas_workspace.rs`, reachable from a `Canvas`
 control on the activity rail:
 

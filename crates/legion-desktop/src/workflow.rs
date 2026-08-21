@@ -833,6 +833,28 @@ impl DesktopRuntime {
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
             }
+            DesktopAction::PlaceCanvasNodes { placements } => {
+                // The whole set, then one save. Emitting a settled
+                // `MoveCanvasNode` per card made the cost of opening the canvas
+                // proportional to the number of open files, all of it on the
+                // renderer thread and all of it before the first frame landed.
+                let placed_any = !placements.is_empty();
+                for placement in placements {
+                    self.canvas_nodes.insert(
+                        placement.path.0.clone(),
+                        (placement.x.get(), placement.y.get()),
+                    );
+                }
+                if placed_any {
+                    self.persist_session_if_configured();
+                    // Same reason the settled move refreshes: a save that failed
+                    // wrote a warning into `last_status`, and without a rebuild
+                    // nobody would see it.
+                    self.refresh_projection()?;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
             DesktopAction::ConnectCanvasNodes { from_path, to_path } => {
                 // A node is not connected to itself, and the check lives here
                 // rather than only in the renderer so the invariant holds for

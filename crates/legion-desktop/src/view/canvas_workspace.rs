@@ -97,6 +97,39 @@ pub(crate) struct CanvasNode {
     pub position: egui::Pos2,
 }
 
+/// The world-space corner of a numbered grid slot.
+fn slot_position(slot: usize) -> egui::Pos2 {
+    egui::pos2(
+        (slot % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+        (slot / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+    )
+}
+
+/// The first grid slot at or after `from` that no saved card is sitting on.
+///
+/// A slot is taken when a saved position falls inside its cell -- strictly
+/// within one stride on both axes -- because a card placed there would be drawn
+/// over the top of one already on screen, and the one underneath is unreachable
+/// without moving the new one off it first.
+///
+/// The search is bounded: each saved card can block at most four cells, so a
+/// free one always exists within `4 * positions.len() + 1` of the start, and the
+/// bound is a guard rather than a limit anybody can reach.
+fn first_free_slot(from: usize, positions: &BTreeMap<String, egui::Pos2>) -> usize {
+    let limit = from
+        .saturating_add(positions.len().saturating_mul(4))
+        .saturating_add(1);
+    (from..=limit)
+        .find(|slot| {
+            let candidate = slot_position(*slot);
+            !positions.values().any(|saved| {
+                (saved.x - candidate.x).abs() < DEFAULT_STRIDE
+                    && (saved.y - candidate.y).abs() < DEFAULT_STRIDE
+            })
+        })
+        .unwrap_or(limit)
+}
+
 /// The nodes a snapshot implies, positioned from saved layout where it exists.
 ///
 /// A file with no saved position is laid out on a grid rather than at the
@@ -128,6 +161,19 @@ pub(crate) fn nodes_for_sections(
     // `render_canvas_workspace`), so this numbering only has to be free of
     // collisions within a single frame -- by the next one, every card has a
     // saved position and none of them can move again.
+    // Where to start looking, then step over whatever the saved cards cover.
+    //
+    // The count has to stay: it is what keeps an unplaced card still when some
+    // *other* card is moved. Starting the search at zero instead let every
+    // unplaced card slide left into the vacancy a moved card left behind, so
+    // dragging one card rearranged the ones nobody had touched -- the defect
+    // this counter was introduced to fix.
+    //
+    // The count alone is not an answer either, because it assumes a placed card
+    // still sits in the slot it started in, which moving it is exactly what
+    // stops being true. Move the only card onto slot 1 and the count still says
+    // 1, so the next file opened is handed slot 1 as well and lands on top of
+    // it. Count first, then skip what is actually occupied.
     let mut next_slot = positions.len();
     // One card per path.
     //
@@ -152,12 +198,9 @@ pub(crate) fn nodes_for_sections(
             // three made the other two jump, possibly onto the card just moved.
             // A person's arrangement must not rearrange itself around them.
             let position = saved.unwrap_or_else(|| {
-                let slot = next_slot;
-                next_slot += 1;
-                egui::pos2(
-                    (slot % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
-                    (slot / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
-                )
+                let free = first_free_slot(next_slot, positions);
+                next_slot = free + 1;
+                slot_position(free)
             });
             let placed = saved.is_some();
             let available = section.lines.len();
@@ -317,19 +360,29 @@ pub(crate) fn render_canvas_workspace(
                 );
             }
 
+            // A default slot is written down the first time it is used, so the
+            // card keeps it when the tab list changes underneath. Until it is
+            // saved, its position depends on which slots are free, and that
+            // changes as cards move.
+            //
+            // All of them in one action. A settled `MoveCanvasNode` each meant
+            // the first canvas frame ran one validate, one `sync_all`, one
+            // atomic replace and one projection rebuild per open file, on the
+            // renderer thread, before anything appeared.
+            let placements: Vec<crate::bridge::CanvasPlacement> = nodes
+                .iter()
+                .filter(|node| !node.placed)
+                .map(|node| crate::bridge::CanvasPlacement {
+                    path: node.path.clone(),
+                    x: crate::bridge::WorldCoord::new(node.position.x),
+                    y: crate::bridge::WorldCoord::new(node.position.y),
+                })
+                .collect();
+            if !placements.is_empty() {
+                actions.push(DesktopAction::PlaceCanvasNodes { placements });
+            }
+
             for node in &nodes {
-                // A default slot is written down the first time it is used, so
-                // the card keeps it when the tab list changes underneath. Until
-                // it is saved, its position is derived from how many cards are
-                // placed, and that number moves.
-                if !node.placed {
-                    actions.push(DesktopAction::MoveCanvasNode {
-                        path: node.path.clone(),
-                        x: crate::bridge::WorldCoord::new(node.position.x),
-                        y: crate::bridge::WorldCoord::new(node.position.y),
-                        settled: true,
-                    });
-                }
                 render_node(ui, node, actions);
             }
 
@@ -410,17 +463,50 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     let header = ui.interact(header_rect, header_id, egui::Sense::click_and_drag());
     let header_bounds = global_rect(ui, header_rect);
 
-    // `drag_delta` is already divided by the layer's scaling inside a `Scene`,
-    // so this is world units and needs no zoom correction of its own.
-    // The release frame can carry a delta too. egui reports `drag_stopped` on
-    // the frame the button comes up, and if the pointer also moved on that frame
-    // the delta is non-zero -- a fast flick does exactly this. Computing the
-    // settled position from `node.position` alone would then persist the
-    // second-to-last position and drop the final movement, leaving the card one
-    // frame behind where it was let go.
-    let delta = header.drag_delta();
-    let settled_position = node.position + delta;
-    if delta != egui::Vec2::ZERO {
+    // The card follows the pointer, rather than accumulating deltas.
+    //
+    // `drag_delta` cannot answer on the frame that matters: egui 0.34.2 returns
+    // `Vec2::ZERO` from it unless `dragged()` is true, and the frame a drag
+    // stops is documented as one where the widget "will not be found in
+    // `dragged`" (`interaction.rs`). So a release that carries movement -- the
+    // end of any fast flick -- reported no delta at all, and a settled position
+    // built from `node.position + delta` was the previous frame's position
+    // however the arithmetic was arranged. That was the defect the delta was
+    // added to fix, still present after adding it.
+    //
+    // `interact_pointer_pos` is populated on precisely that frame: the response
+    // sets it when `drag_stopped()` holds, already mapped out of global space
+    // into this layer, which inside a `Scene` is world space. Recording where in
+    // the card the pointer took hold lets every frame -- including the last --
+    // place the card from the pointer alone.
+    let grab_id = header_id.with("grab-offset");
+    // Captured when the button goes down, not when the drag starts.
+    //
+    // egui does not call it a drag until the pointer has moved: `drag_started`
+    // is reported on the frame that carries the movement, by which point the
+    // pointer is already somewhere else. Taking the offset there measured the
+    // grab from the position the card was being dragged *to*, which cancels out
+    // exactly -- the card computed its own position as its own position and sat
+    // still for the whole gesture.
+    //
+    // `interact_pointer_pos` is answered a frame earlier than that, on the press
+    // itself, because the button is down on this widget. That is the frame the
+    // hand actually took hold.
+    let stored: Option<egui::Vec2> = ui.ctx().data_mut(|data| data.get_temp(grab_id));
+    let grab_offset = match (stored, header.interact_pointer_pos()) {
+        (Some(offset), _) => Some(offset),
+        (None, Some(pointer)) if header.is_pointer_button_down_on() => {
+            let offset = pointer - node.position;
+            ui.ctx().data_mut(|data| data.insert_temp(grab_id, offset));
+            Some(offset)
+        }
+        _ => None,
+    };
+    let settled_position = match (grab_offset, header.interact_pointer_pos()) {
+        (Some(offset), Some(pointer)) => pointer - offset,
+        _ => node.position,
+    };
+    if header.dragged() && settled_position != node.position {
         actions.push(DesktopAction::MoveCanvasNode {
             path: node.path.clone(),
             x: crate::bridge::WorldCoord::new(settled_position.x),
@@ -434,14 +520,18 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         });
     }
     if header.drag_stopped() {
-        // The drag ended: this is the position worth keeping, including any
-        // movement that arrived on this same frame.
+        // The drag ended: this is the position worth keeping, including the
+        // movement that arrived on this same frame, which is why it comes from
+        // the pointer rather than from a delta that is zero here by definition.
         actions.push(DesktopAction::MoveCanvasNode {
             path: node.path.clone(),
             x: crate::bridge::WorldCoord::new(settled_position.x),
             y: crate::bridge::WorldCoord::new(settled_position.y),
             settled: true,
         });
+    }
+    if !header.is_pointer_button_down_on() {
+        ui.ctx().data_mut(|data| data.remove::<egui::Vec2>(grab_id));
     }
     if header.clicked()
         && let Some(buffer_id) = node.buffer_id
@@ -485,6 +575,15 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     );
 
     let body_top = rect.top() + HEADER_HEIGHT + 6.0;
+    // Clipped to the card. The excerpt viewport upstream is requested at 800
+    // units against a 320-unit card, so a line wider than the card is ordinary
+    // rather than exotic -- and the scene-wide painter drew the whole of it,
+    // straight across whatever cards and connections lay to the right.
+    let body_clip = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), body_top),
+        egui::pos2(rect.right(), rect.bottom()),
+    );
+    let painter = painter.with_clip_rect(painter.clip_rect().intersect(body_clip));
     let mut y = body_top;
     for line in &node.lines {
         painter.text(
@@ -530,7 +629,29 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     }
 }
 
-/// The connection ports, and the drag between them that makes an edge.
+/// The action drawing `from` to `to` implies, given the edges that already exist.
+///
+/// Repeating a connection removes it. `DisconnectCanvasNodes` existed with no
+/// gesture that could emit it, so an edge drawn by accident was permanent --
+/// the state had an undo and the surface did not.
+pub(crate) fn edge_action(
+    from: &str,
+    to: &CanonicalPath,
+    existing_edges: &[(String, String)],
+) -> DesktopAction {
+    let already = existing_edges
+        .iter()
+        .any(|(edge_from, edge_to)| edge_from == from && edge_to == &to.0);
+    let from_path = CanonicalPath(from.to_string());
+    let to_path = to.clone();
+    if already {
+        DesktopAction::DisconnectCanvasNodes { from_path, to_path }
+    } else {
+        DesktopAction::ConnectCanvasNodes { from_path, to_path }
+    }
+}
+
+/// The connection ports, and the gestures between them that make an edge.
 ///
 /// Drawn after every card so a port is never buried under a neighbouring node's
 /// body, and interacted with after every card so the port wins the hit test over
@@ -544,6 +665,9 @@ fn render_ports(
 ) {
     let tokens = theme::tokens();
     let ctx = ui.ctx().clone();
+    // Which port, if any, was activated this frame rather than dragged.
+    let mut activated_source: Option<String> = None;
+    let mut activated_target: Option<CanonicalPath> = None;
 
     for node in nodes {
         let out_pos = output_port(node);
@@ -564,6 +688,9 @@ fn render_ports(
                 data.insert_temp(egui::Id::new(PENDING_EDGE_ID), node.path.0.clone())
             });
         }
+        if out.clicked() {
+            activated_source = Some(node.path.0.clone());
+        }
 
         let in_pos = input_port(node);
         let in_rect = egui::Rect::from_center_size(in_pos, egui::Vec2::splat(PORT_RADIUS * 2.0));
@@ -580,10 +707,51 @@ fn render_ports(
             builder.set_label(format!("Connect to {}", node.title));
             set_bounds(builder, in_bounds);
         });
+        if input.clicked() {
+            activated_target = Some(node.path.clone());
+        }
+    }
+
+    // Activation, not dragging alone.
+    //
+    // Both ports publish as `Button`, and a button is answered with Space, Enter
+    // or an AccessKit click -- all of which set `clicked()` and none of which set
+    // `drag_started()`. Every connection gesture ran through drag start and
+    // pointer release, so the two controls a screen reader can find and press
+    // did nothing whatsoever when pressed. Publishing a control that cannot be
+    // operated is worse than not publishing it: it is a promise the surface does
+    // not keep.
+    //
+    // The activation flow is the same edge in two steps -- choose the source,
+    // then choose the target -- and the rubber band already drawn to the cursor
+    // shows that the first step took. Both steps go through `edge_action`, so an
+    // edge made by keyboard toggles exactly like one made by pointer.
+    let mut consumed_activation = false;
+    if let Some(to) = activated_target {
+        let pending: Option<String> =
+            ctx.data_mut(|data| data.get_temp::<String>(egui::Id::new(PENDING_EDGE_ID)));
+        if let Some(from) = pending
+            && from != to.0
+            && by_path.contains_key(from.as_str())
+        {
+            actions.push(edge_action(&from, &to, existing_edges));
+            ctx.data_mut(|data| data.remove::<String>(egui::Id::new(PENDING_EDGE_ID)));
+            consumed_activation = true;
+        }
+    }
+    if !consumed_activation && let Some(from) = activated_source {
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new(PENDING_EDGE_ID), from));
+        consumed_activation = true;
     }
 
     // A drag that ended: connect if it ended over some node's input port.
-    if ctx.input(|i| i.pointer.any_released()) {
+    //
+    // Skipped on a frame an activation answered. A click *is* a pointer release,
+    // so this block would otherwise run in the same frame that a click on an
+    // output port armed the source and clear it again before anyone could reach
+    // the second step -- leaving the keyboard flow looking like it did nothing,
+    // which is the defect being fixed.
+    if !consumed_activation && ctx.input(|i| i.pointer.any_released()) {
         let pending: Option<String> =
             ctx.data_mut(|data| data.get_temp::<String>(egui::Id::new(PENDING_EDGE_ID)));
         if let Some(from) = pending {
@@ -596,28 +764,7 @@ fn render_ports(
                         && node.path.0 != from
                         && by_path.contains_key(from.as_str())
                     {
-                        // Drawing a connection that already exists removes it.
-                        //
-                        // `DisconnectCanvasNodes` existed with no gesture that
-                        // could emit it, so an edge drawn by accident was
-                        // permanent -- the state had an undo and the surface did
-                        // not. Repeating the gesture is the smallest thing that
-                        // could work and needs no second control on a card that
-                        // already carries five.
-                        let already = existing_edges.iter().any(|(edge_from, edge_to)| {
-                            edge_from == &from && edge_to == &node.path.0
-                        });
-                        actions.push(if already {
-                            DesktopAction::DisconnectCanvasNodes {
-                                from_path: CanonicalPath(from.clone()),
-                                to_path: node.path.clone(),
-                            }
-                        } else {
-                            DesktopAction::ConnectCanvasNodes {
-                                from_path: CanonicalPath(from.clone()),
-                                to_path: node.path.clone(),
-                            }
-                        });
+                        actions.push(edge_action(&from, &node.path, existing_edges));
                         break;
                     }
                 }
@@ -722,6 +869,65 @@ mod canvas_layout_rules {
     /// Default slots used to come from a running count of *unplaced* cards, so
     /// one card gaining a position stopped the counter and moved every later
     /// card a slot to the left -- possibly onto the one just placed.
+    #[test]
+    fn a_new_card_never_lands_on_one_already_placed() {
+        // Numbering the next slot by how many cards are saved assumes a placed
+        // card still sits in the slot it started in -- which moving it is
+        // precisely what stops being true. Move the only card to slot 1 and the
+        // count still says 1, so the next file opened is handed slot 1 as well
+        // and lands on top of it. The card underneath cannot be reached without
+        // first moving the one covering it.
+        let mut positions = BTreeMap::new();
+        positions.insert("alpha.rs".to_string(), egui::pos2(DEFAULT_STRIDE, 0.0));
+
+        let nodes = nodes_for_sections(&[section("alpha.rs"), section("beta.rs")], &positions);
+
+        let alpha = nodes
+            .iter()
+            .find(|node| node.path.0 == "alpha.rs")
+            .expect("the saved card must still be drawn");
+        let beta = nodes
+            .iter()
+            .find(|node| node.path.0 == "beta.rs")
+            .expect("the new card must be drawn");
+        assert_ne!(
+            alpha.position, beta.position,
+            "a newly opened file was placed exactly on top of a card already there"
+        );
+        assert_eq!(
+            beta.position,
+            egui::pos2(2.0 * DEFAULT_STRIDE, 0.0),
+            "one card is saved, so the search starts at slot 1 -- and slot 1 is where that \
+             card was moved to, so the new card belongs on the next slot after it"
+        );
+    }
+
+    #[test]
+    fn a_new_card_skips_every_slot_a_saved_card_covers() {
+        // Two saved cards sitting on slots 0 and 1: the next card belongs on 2,
+        // and the count agrees only by coincidence here. What it must not do is
+        // stop at the first free-looking number without checking the second.
+        let mut positions = BTreeMap::new();
+        positions.insert("alpha.rs".to_string(), egui::pos2(0.0, 0.0));
+        positions.insert("beta.rs".to_string(), egui::pos2(DEFAULT_STRIDE, 0.0));
+
+        let nodes = nodes_for_sections(
+            &[section("alpha.rs"), section("beta.rs"), section("gamma.rs")],
+            &positions,
+        );
+
+        let gamma = nodes
+            .iter()
+            .find(|node| node.path.0 == "gamma.rs")
+            .expect("the new card must be drawn");
+        for placed in [egui::pos2(0.0, 0.0), egui::pos2(DEFAULT_STRIDE, 0.0)] {
+            assert_ne!(
+                gamma.position, placed,
+                "the new card was placed on a slot a saved card is sitting on"
+            );
+        }
+    }
+
     #[test]
     fn a_saved_position_does_not_reshuffle_the_unplaced_cards() {
         let sections = vec![section("a.rs"), section("b.rs"), section("c.rs")];

@@ -96,6 +96,20 @@ impl PartialEq for WorldCoord {
 
 impl Eq for WorldCoord {}
 
+/// One card's first recorded position on the canvas.
+///
+/// Paired with [`DesktopAction::PlaceCanvasNodes`] so a whole set of defaults
+/// travels as one action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasPlacement {
+    /// Canonical path of the card being placed.
+    pub path: legion_protocol::CanonicalPath,
+    /// World-space x.
+    pub x: WorldCoord,
+    /// World-space y.
+    pub y: WorldCoord,
+}
+
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAction {
@@ -147,6 +161,18 @@ pub enum DesktopAction {
         /// one gesture. The arrangement updates every frame; only the last one
         /// reaches disk.
         settled: bool,
+    },
+    /// Record where cards drawn for the first time were laid out.
+    ///
+    /// One action for the whole set rather than one [`Self::MoveCanvasNode`]
+    /// each. Opening the canvas places every unplaced card in a single frame,
+    /// and a settled move persists and rebuilds the projection on its own --
+    /// so N open files meant N validates, N `sync_all`s, N atomic replaces and
+    /// N projection rebuilds on the renderer thread before the first canvas
+    /// frame finished. The work does not grow with the tab count now.
+    PlaceCanvasNodes {
+        /// Where each newly drawn card was laid out.
+        placements: Vec<CanvasPlacement>,
     },
     /// Record a connection the person drew between two canvas nodes.
     ///
@@ -1743,6 +1769,7 @@ impl DesktopCommandBridge {
             // no app command corresponds to moving a card.
             DesktopAction::SetCenterSurface { .. }
             | DesktopAction::MoveCanvasNode { .. }
+            | DesktopAction::PlaceCanvasNodes { .. }
             | DesktopAction::ConnectCanvasNodes { .. }
             | DesktopAction::DisconnectCanvasNodes { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,

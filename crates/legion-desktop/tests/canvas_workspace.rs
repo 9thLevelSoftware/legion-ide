@@ -106,6 +106,83 @@ fn drag(app: &mut DesktopEframeApp, from: egui::Pos2, to: egui::Pos2) -> egui::F
     app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
+/// The accessibility node carrying a label, by id.
+///
+/// The pointer helpers above answer "where is this control"; this answers "which
+/// node is it", which is what an assistive technology addresses instead of a
+/// coordinate.
+fn accesskit_id(output: &egui::FullOutput, label: &str) -> Option<egui::accesskit::NodeId> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .and_then(|update| {
+            update
+                .nodes
+                .iter()
+                .find_map(|(id, node)| (node.label() == Some(label)).then_some(*id))
+        })
+}
+
+/// Activate a control the way a screen reader does — no pointer at all.
+///
+/// egui turns an AccessKit `Click` on a click-sensing widget into the same
+/// `clicked()` that Space and Enter produce (`context.rs`, `FAKE_PRIMARY_CLICKED`).
+/// No pointer button is pressed and none is released, so anything that only
+/// watches for drags or for `any_released` sees nothing happen.
+fn activate(app: &mut DesktopEframeApp, target: egui::accesskit::NodeId) -> egui::FullOutput {
+    let request = egui::accesskit::ActionRequest {
+        action: egui::accesskit::Action::Click,
+        target_tree: egui::accesskit::TreeId::ROOT,
+        target_node: target,
+        data: None,
+    };
+    let _ =
+        app.run_headless_full_frame(full_frame_input(vec![egui::Event::AccessKitActionRequest(
+            request,
+        )]));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
+/// A flick: press on one frame, then move and release together on the next.
+///
+/// This is not a slower drag with the same ending — it is the case egui reports
+/// differently. `drag_stopped` is set on a frame where the widget is no longer
+/// in `dragged`, and `Response::drag_delta` returns `Vec2::ZERO` unless
+/// `dragged()` holds, so the movement that arrived with the release is invisible
+/// to a delta. Any handler that builds its final position by accumulating deltas
+/// drops it, and the card settles a frame behind the hand.
+fn flick(app: &mut DesktopEframeApp, from: egui::Pos2, to: egui::Pos2) -> egui::FullOutput {
+    let press = vec![
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        },
+    ];
+    let _ = app.run_headless_full_frame(full_frame_input(press));
+    // One ordinary drag frame, so a drag is genuinely under way. egui does not
+    // call a press a drag until the pointer has moved, and a press whose very
+    // next frame both moves and releases never becomes one at all -- a different
+    // case, and not the one being tested here.
+    let midpoint = from + (to - from) * 0.5;
+    let _ =
+        app.run_headless_full_frame(full_frame_input(vec![egui::Event::PointerMoved(midpoint)]));
+    let move_and_release = vec![
+        egui::Event::PointerMoved(to),
+        egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        },
+    ];
+    let _ = app.run_headless_full_frame(full_frame_input(move_and_release));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
 #[test]
 fn the_canvas_is_reachable_and_shows_every_open_file() {
     let workspace = workspace_with_files("legion_desktop_canvas_reach");
@@ -534,4 +611,137 @@ fn drawing_the_same_connection_again_removes_it() {
         0,
         "repeating the gesture should remove the connection, not duplicate or keep it"
     );
+}
+
+#[test]
+fn connection_ports_answer_activation_and_not_only_dragging() {
+    // Both ports publish as `Button` with bounds and a name, so a screen reader
+    // finds them, announces them as pressable, and offers them. Pressing them
+    // did nothing: the source was recorded on `drag_started` and the edge was
+    // completed on pointer release, and an activation is neither. The controls
+    // were a promise the surface did not keep.
+    let workspace = workspace_with_files("legion_desktop_canvas_activate");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let source = accesskit_id(&canvas, "Connect from alpha.rs")
+        .expect("each card must publish an outgoing connection port");
+    let armed = activate(&mut app, source);
+
+    let target = accesskit_id(&armed, "Connect to beta.rs")
+        .expect("each card must publish an incoming connection port");
+    let _ = activate(&mut app, target);
+
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+    assert!(
+        record
+            .canvas_edges
+            .iter()
+            .any(|edge| edge.from_path.0.ends_with("alpha.rs")
+                && edge.to_path.0.ends_with("beta.rs")),
+        "activating one card's outgoing port and then another's incoming port recorded no \
+         connection, so the ports are pointer-only despite being published as buttons; edges \
+         were {:?}",
+        record
+            .canvas_edges
+            .iter()
+            .map(|edge| (&edge.from_path.0, &edge.to_path.0))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn activating_the_same_connection_again_removes_it() {
+    // The pointer gesture toggles; the activation flow must agree, or an edge
+    // made by keyboard could never be undone by keyboard.
+    let workspace = workspace_with_files("legion_desktop_canvas_activate_toggle");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let _ = show_canvas(&mut app);
+
+    for _ in 0..2 {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        let source = accesskit_id(&frame, "Connect from alpha.rs")
+            .expect("the outgoing port must stay published");
+        let armed = activate(&mut app, source);
+        let target = accesskit_id(&armed, "Connect to beta.rs")
+            .expect("the incoming port must stay published");
+        let _ = activate(&mut app, target);
+    }
+
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+    assert!(
+        !record
+            .canvas_edges
+            .iter()
+            .any(|edge| edge.from_path.0.ends_with("alpha.rs")
+                && edge.to_path.0.ends_with("beta.rs")),
+        "repeating the activation left the edge in place, so a connection made without a \
+         pointer cannot be removed without one; edges were {:?}",
+        record
+            .canvas_edges
+            .iter()
+            .map(|edge| (&edge.from_path.0, &edge.to_path.0))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_card_settles_where_it_was_released_not_where_it_was_the_frame_before() {
+    let workspace = workspace_with_files("legion_desktop_canvas_flick");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let grabbed = clickable_center(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let released = grabbed + egui::vec2(140.0, 110.0);
+    let settled = flick(&mut app, grabbed, released);
+
+    let landed = clickable_center(&settled, "Card alpha.rs")
+        .expect("the card must still be on the canvas after a flick");
+    // Grabbed at the header's centre and released at a point, so the header's
+    // centre is that point. Anything else is the card lagging the hand.
+    let drift = (landed - released).length();
+    assert!(
+        drift <= 1.0,
+        "a card released at {released:?} settled at {landed:?}, {drift} away — the movement \
+         that arrived with the release was dropped, which is precisely what a delta cannot \
+         see on that frame"
+    );
+}
+
+#[test]
+fn every_card_is_placed_before_the_canvas_finishes_its_first_frame() {
+    // The defaults travel as one action rather than one per card. What is
+    // observable from here is the outcome that batching must not break: after
+    // the first canvas frame every card has a durable position, not just the
+    // last one to be handled.
+    let workspace = workspace_with_files("legion_desktop_canvas_batch");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let _ = show_canvas(&mut app);
+
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+    for name in ["alpha.rs", "beta.rs", "gamma.rs"] {
+        assert!(
+            record
+                .canvas_nodes
+                .iter()
+                .any(|node| node.path.0.ends_with(name)),
+            "{name} has no recorded position after the canvas drew it, so its default slot was \
+             never kept and it will move the next time the tab list changes; recorded {:?}",
+            record
+                .canvas_nodes
+                .iter()
+                .map(|node| &node.path.0)
+                .collect::<Vec<_>>()
+        );
+    }
 }
