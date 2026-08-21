@@ -65,29 +65,30 @@ fn subject(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> String {
 /// `main.rs`: access denied" — still actionable, and still about a file the
 /// person can see.
 fn redact_paths(message: &str) -> String {
-    // Quoted runs first, then bare tokens.
+    // Delimited runs first, in both delimiters the tree actually uses.
     //
-    // Splitting on whitespace alone treated `"C:\work\my project\main.rs"` as
-    // three tokens, so only the fragment holding the last separator shrank and
-    // `C:\work\my` stayed on screen -- a redaction that reported success while
-    // leaving most of the path visible. A quoted run is one path however many
-    // spaces it contains, which is why the quoting is there.
+    // `PlatformError` formats every path in backticks (`I/O error for `{path}`
+    // while ...`), and an earlier fix handled only double quotes -- so the one
+    // format this module is most likely to receive fell through to whitespace
+    // tokenisation. A delimited run is one path however many spaces it contains,
+    // which is the whole reason it is delimited.
     let mut out = String::with_capacity(message.len());
     let mut rest = message;
-    while let Some(open) = rest.find('"') {
+    while let Some(open) = rest.find(['"', '`']) {
+        let delimiter = rest[open..].chars().next().unwrap_or('"');
         out.push_str(&redact_bare_tokens(&rest[..open]));
-        let after = &rest[open + 1..];
-        match after.find('"') {
+        let after = &rest[open + delimiter.len_utf8()..];
+        match after.find(delimiter) {
             Some(close) => {
-                out.push('"');
+                out.push(delimiter);
                 out.push_str(&shorten_path(&after[..close]));
-                out.push('"');
-                rest = &after[close + 1..];
+                out.push(delimiter);
+                rest = &after[close + delimiter.len_utf8()..];
             }
-            // An unbalanced quote: treat the remainder as ordinary text rather
-            // than swallowing it.
+            // An unbalanced delimiter: treat the remainder as ordinary text
+            // rather than swallowing it.
             None => {
-                out.push('"');
+                out.push(delimiter);
                 rest = after;
             }
         }
@@ -96,7 +97,7 @@ fn redact_paths(message: &str) -> String {
     out
 }
 
-/// Shrink whitespace-separated tokens that look like paths.
+/// Shrink whitespace-separated tokens that are unmistakably paths.
 fn redact_bare_tokens(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
@@ -111,10 +112,31 @@ fn redact_bare_tokens(text: &str) -> String {
     out
 }
 
+/// Whether a bare token is certainly a path rather than prose with a slash in it.
+///
+/// Only absolute forms qualify. Any-token-with-a-separator was the first rule
+/// and it corrupted the diagnostics it was meant to protect: `I/O` contains a
+/// slash, so "I/O error for ..." was published as "O error for ...", destroying
+/// the actionable cause while claiming to redact. A relative path in an
+/// undelimited diagnostic is left alone, which is the safer failure -- it
+/// discloses a fragment rather than mangling the sentence.
+fn is_absolute_path_token(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with(BACKSLASH)
+        || token.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+            && token
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// The character Windows separates path segments with.
+const BACKSLASH: char = '\\';
+
 /// One token, with any surrounding punctuation preserved.
 fn shorten_token(token: &str) -> String {
-    let trimmed = token.trim_matches(|c: char| "'`(),.:;".contains(c));
-    if trimmed.is_empty() || (!trimmed.contains('/') && !trimmed.contains('\\')) {
+    let trimmed = token.trim_matches(|c: char| "'(),.:;".contains(c));
+    if trimmed.is_empty() || !is_absolute_path_token(trimmed) {
         return token.to_string();
     }
     let shortened = shorten_path(trimmed);
@@ -125,12 +147,12 @@ fn shorten_token(token: &str) -> String {
     }
 }
 
-/// The last segment of a path, or the input when it is not one.
+/// The last segment of a path, or the input when it has no segments.
 fn shorten_path(path: &str) -> String {
-    if !path.contains('/') && !path.contains('\\') {
+    if !path.contains('/') && !path.contains(BACKSLASH) {
         return path.to_string();
     }
-    path.rsplit(['/', '\\'])
+    path.rsplit(['/', BACKSLASH])
         .find(|segment| !segment.is_empty())
         .unwrap_or(path)
         .to_string()
@@ -685,6 +707,46 @@ mod save_message_tests {
         // A message with no path is left exactly as written.
         let plain = "write of 900000 bytes exceeds the 524288 byte limit";
         assert_eq!(super::redact_paths(plain), plain);
+    }
+
+    /// The format `PlatformError` actually produces.
+    ///
+    /// Every path in `legion-platform` is formatted in backticks, not double
+    /// quotes — `I/O error for `{path}` while {operation}: {source}` — so the
+    /// one format this module is most likely to receive was the one it did not
+    /// recognise, and it fell through to whitespace tokenisation.
+    ///
+    /// That path also carried a second defect worth naming: the bare-token rule
+    /// shortened anything containing a separator, and `I/O` contains one. The
+    /// actionable cause was published as `O error`, destroyed by the code meant
+    /// to protect it.
+    #[test]
+    fn a_backtick_quoted_path_is_redacted_and_the_cause_survives() {
+        let redacted = super::redact_paths(
+            "I/O error for `/home/jane doe/project/main.rs` while replacing: denied",
+        );
+
+        assert_eq!(
+            redacted, "I/O error for `main.rs` while replacing: denied",
+            "a backtick-delimited path must reduce to its file name, and nothing else \
+             in the sentence may change"
+        );
+    }
+
+    /// Prose containing a slash is not a path.
+    #[test]
+    fn a_relative_looking_token_is_left_alone() {
+        for message in [
+            "I/O error while replacing",
+            "read/write conflict detected",
+            "and/or the file changed",
+        ] {
+            assert_eq!(
+                super::redact_paths(message),
+                message,
+                "prose was rewritten as if it were a path"
+            );
+        }
     }
 
     /// A quoted path with spaces is redacted as one path.
