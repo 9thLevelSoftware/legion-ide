@@ -836,3 +836,85 @@ fn a_binary_change_can_be_staged_and_committed_from_the_panel() {
         "Commit was not offered after staging a binary change"
     );
 }
+
+/// A submodule with a dirty worktree offers no Stage control, and says why.
+///
+/// Git synthesises a hunk for a gitlink whose recorded commit has not changed
+/// but whose worktree has:
+///
+/// ```text
+/// -Subproject commit 66a27e3f…
+/// +Subproject commit 66a27e3f…-dirty
+/// ```
+///
+/// `git apply --cached` accepts that patch, exits successfully, and leaves the
+/// parent index alone — so the control reported a success that changed nothing
+/// and the identical row came back on the next refresh. The row itself stays,
+/// because the change is real and hiding it would be its own lie; what it
+/// carries now is the reason and the next step.
+#[test]
+fn a_dirty_submodule_offers_no_stage_control_and_names_the_reason() {
+    let inner = TempWorkspace::new("legion_desktop_submodule_inner");
+    let inner_root = inner.path();
+    git(inner_root, &["init"]);
+    git(
+        inner_root,
+        &["config", "user.email", "dogfood@example.invalid"],
+    );
+    git(inner_root, &["config", "user.name", "Dogfood Tester"]);
+    git(inner_root, &["config", "commit.gpgsign", "false"]);
+    inner.write("inner.txt", "one\n");
+    git(inner_root, &["add", "."]);
+    git(inner_root, &["commit", "-m", "seed submodule"]);
+
+    let workspace = TempWorkspace::new("legion_desktop_submodule_outer");
+    init_repo(&workspace);
+    let root = workspace.path();
+
+    // `protocol.file.allow=always`: git refuses a local-path submodule by
+    // default since 2.38, and this fixture is exactly the case that policy
+    // exists to stop from being done accidentally over a network.
+    let inner_url = inner_root.to_string_lossy().replace('\\', "/");
+    git(
+        root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &inner_url,
+            "sub",
+        ],
+    );
+    git(root, &["commit", "-m", "add submodule"]);
+
+    // Dirty the submodule's worktree without moving its recorded commit.
+    std::fs::write(root.join("sub").join("inner.txt"), "one\ntwo\n")
+        .expect("the submodule worktree must be writable");
+
+    let status = git(root, &["status", "--porcelain"]);
+    assert!(
+        status.contains("sub"),
+        "the fixture must leave the submodule dirty, got {status:?}"
+    );
+
+    let mut app = open_app(root);
+    let panel = open_source_control(&mut app);
+    let text = rendered_text(&panel);
+
+    let stage_controls: Vec<&String> = text
+        .iter()
+        .filter(|line| line.starts_with("Stage ") && line.contains("sub"))
+        .collect();
+    assert!(
+        stage_controls.is_empty(),
+        "a dirty submodule was offered a Stage control that cannot change the index; \
+         controls were {stage_controls:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|line| line.contains("submodule has uncommitted changes")),
+        "the panel must say why the control is absent, or a missing button reads as the \
+         panel being broken; frame was {text:?}"
+    );
+}

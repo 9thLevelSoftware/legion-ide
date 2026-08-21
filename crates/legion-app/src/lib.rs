@@ -13520,6 +13520,7 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
                 new_lines: hunk.new_lines,
                 added_lines: hunk.added_lines,
                 deleted_lines: hunk.deleted_lines,
+                submodule_dirty_only: hunk.submodule_dirty_only,
                 context: hunk.context,
             })
             .collect(),

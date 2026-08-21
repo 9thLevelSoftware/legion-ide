@@ -1711,3 +1711,70 @@ fn filenames_git_must_quote_match_their_own_hunks() {
         }
     }
 }
+
+/// A staged rename does not invent a changed file that is not there.
+///
+/// `git diff --cached --numstat` reports a rename in a display form --
+/// `dir/{old.txt => new.txt}` -- which is not a path and names no file. Keyed
+/// as one it produced a second changed-file row with a synthesized `??` status:
+/// the panel withheld the genuine `R` row, as it should, and offered Stage for
+/// the invention, where clicking it failed because there is no such file. Read
+/// through `-z` the rename arrives as its own records and the counts land on
+/// the destination, which is the path status reports.
+#[test]
+fn a_staged_rename_does_not_fabricate_a_changed_file() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("dir/old.txt", "one\ntwo\nthree\nfour\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    run_git(root, ["mv", "dir/old.txt", "dir/new.txt"]);
+    run_git(root, ["add", "."]);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let paths: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    for path in &paths {
+        assert!(
+            !path.contains("=>") && !path.contains('{'),
+            "a numstat display form reached the projection as a file path: {path:?}"
+        );
+    }
+    // The fixture has to actually be a rename, or this asserts nothing.
+    assert!(
+        snapshot
+            .changed_files
+            .iter()
+            .any(|file| file.status.starts_with('R')),
+        "the fixture must produce a rename status, got {:?}",
+        snapshot
+            .changed_files
+            .iter()
+            .map(|file| (&file.path, &file.status))
+            .collect::<Vec<_>>()
+    );
+    // Every row a rename produces must carry the rename status, so the panel
+    // withholds whole-path staging for all of them. The defect was not the row
+    // count -- porcelain reports both sides of a rename -- but a row invented
+    // from a display string, which arrived with a synthesized `??` and was
+    // offered a Stage control that named no file.
+    for file in &snapshot.changed_files {
+        assert!(
+            file.status.starts_with('R'),
+            "{:?} carries {:?}, not a rename status; a synthesized status is how a fabricated              row gets a Stage control the genuine row is denied",
+            file.path,
+            file.status
+        );
+    }
+}

@@ -1683,6 +1683,13 @@ pub struct GitHunkProjection {
     pub added_lines: u32,
     /// Deleted line count.
     pub deleted_lines: u32,
+    /// Whether this hunk only reports a submodule with a dirty worktree.
+    ///
+    /// Nothing in the parent repository can be staged from it: the recorded
+    /// commit has not changed, so `git apply --cached` succeeds without
+    /// touching the index and the same control comes back on the next refresh.
+    /// A surface that offers it reports a success that changed nothing.
+    pub submodule_dirty_only: bool,
     /// Optional scope/function context.
     pub context: Option<String>,
 }

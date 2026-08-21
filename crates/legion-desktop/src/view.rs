@@ -11304,6 +11304,7 @@ mod tests {
             new_lines: 2,
             added_lines: 1,
             deleted_lines: 1,
+            submodule_dirty_only: false,
             context: Some("main".to_string()),
         }];
         let blame_lines = vec![GitBlameLineProjection {

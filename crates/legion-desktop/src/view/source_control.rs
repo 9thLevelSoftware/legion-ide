@@ -378,6 +378,25 @@ fn render_git_hunk_controls(
         |hunk| hunk.stage == GitHunkStageProjection::Staged,
     );
     for hunk in &window.visible {
+        // A dirty submodule has nothing to stage from here.
+        //
+        // Git synthesises a hunk for a gitlink whose worktree changed while its
+        // recorded commit did not, and `git apply --cached` accepts it,
+        // succeeds, and changes nothing -- so the row reappeared identically on
+        // the next refresh and the control was a button that reported success
+        // for doing nothing. The row stays, because the change is real and
+        // hiding it would be its own lie; what it carries is the reason and the
+        // next step instead of an action that cannot work.
+        if hunk.submodule_dirty_only {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::muted(format!(
+                    "{} · submodule has uncommitted changes; commit them inside the submodule \
+                     before it can be staged here",
+                    hunk.path
+                )));
+            });
+            continue;
+        }
         ui.horizontal_wrapped(|ui| {
             let verb = match hunk.stage {
                 GitHunkStageProjection::Unstaged => "Stage",
@@ -1078,19 +1097,25 @@ mod stage_window_rules {
             "the reported offset does not describe the page that was actually built"
         );
 
-        // Advancing from what the page reports lands on a real page; advancing
-        // from the stored value would ask for slot 24 of a 12-item list and
-        // wrap straight back to the start forever.
-        let next = stage_window(
-            &items,
+        // Advancing from what the page reports reaches the tail; advancing from
+        // a stored offset that had already wrapped would ask for the first page
+        // again, forever.
+        //
+        // This runs against the 25-item list, not the 12-item one. Against
+        // twelve, `0 + 12` wraps back to zero and the page is non-empty either
+        // way -- a wrap-to-zero assertion wearing the name of a different
+        // property, which is the case the first assertion above already covers.
+        let tail = stage_window(
+            &deeper,
             GIT_HUNK_CONTROL_LIMIT,
-            window.staged_offset + window.staged_budget,
+            paged.staged_offset + paged.staged_budget,
             0,
             |item: &(usize, bool)| item.1,
         );
         assert!(
-            !next.visible.is_empty(),
-            "advancing from the reported offset produced an empty page"
+            tail.visible.iter().any(|item| item.0 >= 24),
+            "advancing twice never reached the last of twenty-five items, so the tail of a              long list is still unreachable; page showed {:?}",
+            tail.visible.iter().map(|item| item.0).collect::<Vec<_>>()
         );
     }
 
