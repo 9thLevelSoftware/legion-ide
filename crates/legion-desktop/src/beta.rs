@@ -650,6 +650,12 @@ fn run_edit_save_actions(
             "edited and saved isolated beta workspace file".to_string(),
             BetaSaveOutcome::Saved,
         ),
+        // The bytes reached disk; only the audit record did not. Counting this
+        // as a rejected save would report the file as unwritten when it is not.
+        (Ok(_), Ok(DesktopWorkflowOutcome::SavedWithAuditFailure(detail))) => (
+            format!("saved isolated beta workspace file, audit incomplete: {detail}"),
+            BetaSaveOutcome::Saved,
+        ),
         (Ok(_), Ok(DesktopWorkflowOutcome::SaveRejected(reason))) => {
             errors.push(BetaWorkflowError::Failed {
                 detail: format!("save rejected: {reason}"),
