@@ -52,6 +52,41 @@ fn subject(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> String {
         .unwrap_or_else(|| "the file".to_string())
 }
 
+/// A diagnostic message with embedded absolute paths reduced to file names.
+///
+/// The diagnostics this module now prefers are written where the failure
+/// happened, and a filesystem failure carries `PlatformError::to_string()` —
+/// which embeds the canonical path, `\\?\` prefix and all. Copying one verbatim
+/// into a status line puts the internal path disclosure back that this formatter
+/// exists to remove.
+///
+/// The cause survives; only the path shrinks. "failed to replace
+/// `\\?\C:\work\src\main.rs`: access denied" becomes "failed to replace
+/// `main.rs`: access denied" — still actionable, and still about a file the
+/// person can see.
+fn redact_paths(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|token| {
+            // A token is path-like if it carries a separator at all. Trailing
+            // punctuation is kept so the sentence still reads.
+            let trimmed = token.trim_matches(|c: char| "\"'`(),.:;".contains(c));
+            if !trimmed.contains('/') && !trimmed.contains('\\') {
+                return token.to_string();
+            }
+            let name = trimmed
+                .rsplit(['/', '\\'])
+                .find(|segment| !segment.is_empty())
+                .unwrap_or(trimmed);
+            if name == trimmed {
+                return token.to_string();
+            }
+            token.replace(trimmed, name)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What the app itself said went wrong, when it said something specific.
 ///
 /// Every refusal carries `ProtocolDiagnostic`s written where the failure
@@ -75,12 +110,12 @@ fn diagnostic_detail(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> Opt
                 && !diagnostic.message.trim().is_empty()
         })
         .map(|diagnostic| {
-            let message = diagnostic.message.trim();
+            let message = redact_paths(diagnostic.message.trim());
             if message.chars().count() > MAX_DETAIL {
                 let clipped: String = message.chars().take(MAX_DETAIL).collect();
                 format!("{clipped}…")
             } else {
-                message.to_string()
+                message
             }
         })
 }
@@ -161,9 +196,18 @@ fn failed_message(
     let cause = diagnostic_detail(&transition.diagnostics)
         .unwrap_or_else(|| failure_cause(reason).to_string());
     match reason {
+        // Not "partly written": `write_text_file_atomic` writes and syncs a
+        // complete temporary file before replacing the target, and the
+        // non-atomic fallback is disabled, so the file is either the whole old
+        // version or the whole new one. Saying it may be torn describes a state
+        // this writer cannot produce, and sends someone looking for damage that
+        // is not there. Which of the two it is, is the part they do need to
+        // check, because `ApplyFailed` covers failures on both sides of the
+        // replacement.
         ProposalFailureReason::ApplyFailed | ProposalFailureReason::RollbackFailed => format!(
-            "Save failed for {name}: {cause}. Your edits are still in the editor, but the file \
-             on disk may have been partly written — check it before retyping."
+            "Save failed for {name}: {cause}. Your edits are still in the editor. The file on \
+             disk is either the previous version or the newly written one, not a partial \
+             write — check which before retyping."
         ),
         _ => format!("Save failed: {name} was not written because {cause}. {EDITS_INTACT}"),
     }
@@ -562,6 +606,72 @@ mod save_message_tests {
         );
     }
 
+    /// A diagnostic's cause survives; its embedded absolute path does not.
+    ///
+    /// Preferring the app's own diagnostic is what made these messages specific,
+    /// and it is also what let a canonical path back in: a filesystem failure
+    /// carries `PlatformError::to_string()`, which embeds the full path with its
+    /// `\?\` prefix. The formatter exists partly to keep that off the screen.
+    #[test]
+    fn a_diagnostic_keeps_its_cause_and_loses_its_path() {
+        let redacted = super::redact_paths(
+            r"failed to replace \\?\C:\work\src\main.rs: access denied (os error 5)",
+        );
+
+        assert!(
+            redacted.contains("access denied"),
+            "the actionable cause must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("main.rs"),
+            "the file must still be identifiable: {redacted}"
+        );
+        for leak in [r"\\?\", r"C:\work", r"src\main.rs"] {
+            assert!(
+                !redacted.contains(leak),
+                "the embedded path is still disclosed ({leak:?}): {redacted}"
+            );
+        }
+
+        // A message with no path is left exactly as written.
+        let plain = "write of 900000 bytes exceeds the 524288 byte limit";
+        assert_eq!(super::redact_paths(plain), plain);
+    }
+
+    /// The redaction is reached by the message, not only by its own test.
+    ///
+    /// Testing `redact_paths` directly proves the function works and nothing
+    /// about whether anything calls it: removing the call from
+    /// `diagnostic_detail` left every other test green. This goes through the
+    /// public message, which is the thing that actually reaches a screen.
+    #[test]
+    fn a_failure_message_carries_no_absolute_path() {
+        let mut transition = transition_naming("main.rs");
+        transition.lifecycle_state = ProposalLifecycleState::Failed;
+        transition.diagnostics = vec![ProtocolDiagnostic {
+            code: "workspace.write_failed".to_string(),
+            message: r"failed to replace \\?\C:\work\src\main.rs: access denied".to_string(),
+            severity: ProtocolDiagnosticSeverity::Error,
+            path: Some(CanonicalPath("main.rs".to_string())),
+            range: None,
+        }];
+        let message = save_rejection_message(&ProposalResponse::Failed {
+            transition,
+            reason: ProposalFailureReason::ApplyFailed,
+        });
+
+        assert!(
+            message.contains("access denied"),
+            "the actionable cause must survive redaction: {message}"
+        );
+        for leak in [r"\\?\", r"C:\work"] {
+            assert!(
+                !message.contains(leak),
+                "an internal path reached the status line ({leak:?}): {message}"
+            );
+        }
+    }
+
     /// A size-limit denial must not read as a disabled build.
     ///
     /// `WorkspaceActor::save_file_with_proposal` maps the broker's detailed
@@ -676,8 +786,13 @@ mod save_message_tests {
              otherwise: {message}"
         );
         assert!(
-            message.contains("check it") || message.contains("partly written"),
+            message.contains("check which"),
             "the message should point at the one place that can settle it: {message}"
+        );
+        assert!(
+            !message.contains("partly written") || message.contains("not a partial"),
+            "atomic writes are all-or-nothing; describing a torn file sends someone looking \
+             for damage that cannot exist: {message}"
         );
     }
 
