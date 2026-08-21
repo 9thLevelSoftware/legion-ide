@@ -52,6 +52,50 @@ fn subject(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> String {
         .unwrap_or_else(|| "the file".to_string())
 }
 
+/// What the app itself said went wrong, when it said something specific.
+///
+/// Every refusal carries `ProtocolDiagnostic`s written where the failure
+/// happened, and they know things this module cannot: which configured limit a
+/// write exceeded, that a file disappeared rather than changed. The first
+/// version of this formatter threw them away and substituted prose derived from
+/// the typed reason alone, which collapses distinct causes into one sentence —
+/// a 512 KiB size-limit denial and a genuinely disabled build both arrive as
+/// `CapabilityDenied`, and both read as "this build is not allowed to write
+/// files".
+///
+/// So the typed reason picks the *shape* of the sentence and the diagnostic
+/// fills in the cause. Trimmed and bounded, because it is written for an
+/// operator rather than for a status line.
+fn diagnostic_detail(diagnostics: &[legion_protocol::ProtocolDiagnostic]) -> Option<String> {
+    const MAX_DETAIL: usize = 200;
+    diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.severity == legion_protocol::ProtocolDiagnosticSeverity::Error
+                && !diagnostic.message.trim().is_empty()
+        })
+        .map(|diagnostic| {
+            let message = diagnostic.message.trim();
+            if message.chars().count() > MAX_DETAIL {
+                let clipped: String = message.chars().take(MAX_DETAIL).collect();
+                format!("{clipped}…")
+            } else {
+                message.to_string()
+            }
+        })
+}
+
+/// The short display name of a path.
+fn file_name(path: &legion_protocol::CanonicalPath) -> String {
+    let shown = crate::path_display::display_path(path.0.as_str());
+    let name = shown.rsplit(['/', '\\']).next().unwrap_or(shown.as_ref());
+    if name.is_empty() {
+        "the file".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Why the version check failed, in the terms the person can see for themselves.
 fn stale_cause(reason: ProposalStaleReason) -> &'static str {
     match reason {
@@ -98,6 +142,33 @@ fn stale_message(transition: &ProposalLifecycleTransition, stale: &ProposalStale
     )
 }
 
+/// A failure, which may or may not have left new bytes on disk.
+///
+/// `ApplyFailed` is returned both when the write never happened and when
+/// `write_text_file_atomic` succeeded but the metadata read or fingerprint that
+/// follows it did not. In the second case the new bytes *are* on disk, so the
+/// categorical "was not written, your edits are unsaved" is exactly the lie this
+/// module was written to remove — reintroduced one variant over.
+///
+/// Neither this formatter nor the response can tell the two apart, so the
+/// message says what is certainly true and points at the one place that can
+/// settle it, rather than guessing and sounding confident.
+fn failed_message(
+    transition: &ProposalLifecycleTransition,
+    reason: ProposalFailureReason,
+) -> String {
+    let name = subject(&transition.diagnostics);
+    let cause = diagnostic_detail(&transition.diagnostics)
+        .unwrap_or_else(|| failure_cause(reason).to_string());
+    match reason {
+        ProposalFailureReason::ApplyFailed | ProposalFailureReason::RollbackFailed => format!(
+            "Save failed for {name}: {cause}. Your edits are still in the editor, but the file \
+             on disk may have been partly written — check it before retyping."
+        ),
+        _ => format!("Save failed: {name} was not written because {cause}. {EDITS_INTACT}"),
+    }
+}
+
 /// What the shell says about a save outcome, and how loudly.
 ///
 /// The choice between these wordings is the whole point of this module, so it
@@ -108,16 +179,35 @@ fn stale_message(transition: &ProposalLifecycleTransition, stale: &ProposalStale
 /// return a `String`.
 ///
 /// `None` for a clean save: there is nothing to explain.
-pub fn save_outcome_message(outcome: &AppSaveOutcome) -> Option<(bool, String)> {
+pub fn save_outcome_message(outcome: &AppSaveOutcome) -> Option<SaveReport> {
     match outcome {
         AppSaveOutcome::Saved(_) => None,
-        // `false` = not a refusal. The file changed, so this is a warning about
-        // the audit trail, not a report of work lost.
-        AppSaveOutcome::CommittedThenAuditFailed { response, .. } => {
-            Some((false, save_committed_audit_failure_message(response)))
-        }
-        AppSaveOutcome::Rejected(response) => Some((true, save_rejection_message(response))),
+        AppSaveOutcome::CommittedThenAuditFailed { path, response, .. } => Some(SaveReport {
+            // The file changed, so this is a warning about the audit trail and
+            // not a report of work lost.
+            reached_disk: true,
+            message: save_committed_audit_failure_message(path, response),
+        }),
+        AppSaveOutcome::Rejected(response) => Some(SaveReport {
+            reached_disk: false,
+            message: save_rejection_message(response),
+        }),
     }
+}
+
+/// What to tell the person, and whether the bytes got there.
+///
+/// A named field rather than a bare `bool` in a tuple. The first version
+/// returned `(bool, String)`, the caller destructured it as `(_refused,
+/// message)`, and the flag was silently dropped -- an accurate sentence in
+/// front of the person and a false outcome behind them. `_refused` reads like
+/// something safely ignorable; `reached_disk` does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveReport {
+    /// Whether the write actually landed on disk.
+    pub reached_disk: bool,
+    /// The sentence to show.
+    pub message: String,
 }
 
 /// A save whose bytes reached disk but whose record of it did not.
@@ -133,17 +223,29 @@ pub fn save_outcome_message(outcome: &AppSaveOutcome) -> Option<(bool, String)> 
 /// audit trail covering it is not. That is worth saying rather than hiding,
 /// because in a product whose premise is a trustworthy audit trail, a gap in it
 /// is the thing an operator needs to know about.
-pub fn save_committed_audit_failure_message(response: &ProposalResponse) -> String {
-    let name = match response {
+pub fn save_committed_audit_failure_message(
+    path: &legion_protocol::CanonicalPath,
+    response: &ProposalResponse,
+) -> String {
+    // The path is passed in, not recovered from the response.
+    // `audit_storage_failed_response` builds its diagnostic with `path: None`,
+    // so every attempt to read the filename back out of it yields "the file" —
+    // and the unit test that fabricated a path hid exactly that.
+    let name = file_name(path);
+    let detail = match response {
         ProposalResponse::Failed { transition, .. }
         | ProposalResponse::Denied { transition, .. }
         | ProposalResponse::Rejected { transition, .. }
-        | ProposalResponse::Stale { transition, .. } => subject(&transition.diagnostics),
-        _ => "the file".to_string(),
+        | ProposalResponse::Stale { transition, .. } => diagnostic_detail(&transition.diagnostics),
+        _ => None,
+    };
+    let because = match detail {
+        Some(detail) => format!(" ({detail})"),
+        None => String::new(),
     };
     format!(
-        "Saved {name}, but recording the save failed. The file on disk is correct and your \
-         edits are safe; the audit trail for this save is incomplete."
+        "Saved {name}, but recording the save failed{because}. The file on disk is correct and \
+         your edits are safe; the audit trail for this save is incomplete."
     )
 }
 
@@ -158,17 +260,25 @@ pub fn save_rejection_message(response: &ProposalResponse) -> String {
         ProposalResponse::Denied { transition, reason } => format!(
             "Save denied: {} was not written because {}. {EDITS_INTACT}",
             subject(&transition.diagnostics),
-            denial_cause(*reason),
+            // The diagnostic distinguishes a size-limit refusal from a build
+            // that cannot write at all; the typed reason calls both
+            // `CapabilityDenied`.
+            diagnostic_detail(&transition.diagnostics)
+                .unwrap_or_else(|| denial_cause(*reason).to_string()),
         ),
-        ProposalResponse::Failed { transition, reason } => format!(
-            "Save failed: {} was not written because {}. {EDITS_INTACT}",
-            subject(&transition.diagnostics),
-            failure_cause(*reason),
-        ),
-        ProposalResponse::Rejected { transition, .. } => format!(
-            "Save rejected: {} was not written. {EDITS_INTACT}",
-            subject(&transition.diagnostics),
-        ),
+        ProposalResponse::Failed { transition, reason } => failed_message(transition, *reason),
+        ProposalResponse::Rejected { transition, .. } => {
+            match diagnostic_detail(&transition.diagnostics) {
+                Some(detail) => format!(
+                    "Save rejected: {} was not written because {detail}. {EDITS_INTACT}",
+                    subject(&transition.diagnostics),
+                ),
+                None => format!(
+                    "Save rejected: {} was not written. {EDITS_INTACT}",
+                    subject(&transition.diagnostics),
+                ),
+            }
+        }
         // Every remaining variant is a success or a lifecycle step that should
         // never reach a save-rejection path. Naming the variant is enough to
         // find it, and is still one line rather than a structure dump.
@@ -190,7 +300,19 @@ fn conflict_message(
     } else {
         subject(&conflict.diagnostics)
     };
-    format!("Save rejected: {name} has a conflict with the copy on disk. {EDITS_INTACT}")
+    // "a conflict with the copy on disk" is wrong when the conflict is that
+    // there *is* no copy: a file deleted outside the editor arrives here with a
+    // diagnostic reading "file disappeared from disk before save". Saying it
+    // conflicts with something that does not exist leaves someone unable to tell
+    // whether to recreate the file or reconcile it.
+    let detail = diagnostic_detail(&conflict.diagnostics)
+        .or_else(|| diagnostic_detail(&transition.diagnostics));
+    match detail {
+        Some(detail) => format!("Save rejected: {name} — {detail}. {EDITS_INTACT}"),
+        None => {
+            format!("Save rejected: {name} has a conflict with the copy on disk. {EDITS_INTACT}")
+        }
+    }
 }
 
 fn variant_name(response: &ProposalResponse) -> &'static str {
@@ -255,6 +377,29 @@ mod save_message_tests {
         }
     }
 
+    /// A transition shaped like a real post-commit audit failure.
+    ///
+    /// `path: None`, exactly as `audit_storage_failed_response` builds it.
+    fn transition_without_path() -> ProposalLifecycleTransition {
+        ProposalLifecycleTransition {
+            proposal_id: ProposalId(7),
+            lifecycle_state: ProposalLifecycleState::Failed,
+            timestamp: TimestampMillis(0),
+            principal: legion_protocol::PrincipalId("desktop".to_string()),
+            capability: legion_protocol::CapabilityId("fs.write".to_string()),
+            correlation_id: CorrelationId(1),
+            causality_id: CausalityId(uuid::Uuid::nil()),
+            diagnostics: vec![ProtocolDiagnostic {
+                code: "proposal.audit_storage_failed".to_string(),
+                message: "proposal success blocked because audit storage failed: io_error"
+                    .to_string(),
+                severity: ProtocolDiagnosticSeverity::Error,
+                path: None,
+                range: None,
+            }],
+        }
+    }
+
     fn stale_response(path: &str) -> ProposalResponse {
         ProposalResponse::Stale {
             transition: transition_naming(path),
@@ -311,11 +456,17 @@ mod save_message_tests {
     /// so every claim the rejection wording makes is false there.
     #[test]
     fn a_committed_save_whose_audit_failed_is_not_described_as_unwritten() {
+        // Built the way production builds it: `audit_storage_failed_response`
+        // sets `path: None`, so nothing in the response names the file. An
+        // earlier version of this test fabricated a response *with* a path,
+        // which made the formatter look like it could name the file when in
+        // production it always said "the file". The path is now passed in.
         let response = ProposalResponse::Failed {
-            transition: transition_naming(r"\\?\C:\work\src\main.rs"),
+            transition: transition_without_path(),
             reason: ProposalFailureReason::StorageFailed,
         };
-        let message = save_committed_audit_failure_message(&response);
+        let path = CanonicalPath(r"\\?\C:\work\src\main.rs".to_string());
+        let message = save_committed_audit_failure_message(&path, &response);
 
         assert!(message.contains("main.rs"), "no file named: {message}");
         assert!(
@@ -377,28 +528,142 @@ mod save_message_tests {
             "a clean save has nothing to explain"
         );
 
-        let (refused, committed) =
-            super::save_outcome_message(&AppSaveOutcome::CommittedThenAuditFailed {
-                save,
-                response: Box::new(response.clone()),
-            })
-            .expect("a committed write with a failed audit has something to say");
+        let committed = super::save_outcome_message(&AppSaveOutcome::CommittedThenAuditFailed {
+            save,
+            path: CanonicalPath("main.rs".to_string()),
+            response: Box::new(response.clone()),
+        })
+        .expect("a committed write with a failed audit has something to say");
         assert!(
-            !refused,
-            "a write that reached disk is not a refusal, and severity follows this flag"
+            committed.reached_disk,
+            "a write that reached disk must say so; the desktop outcome follows this flag"
         );
         assert!(
-            committed.starts_with("Saved "),
-            "the committed outcome got the rejection wording: {committed}"
+            committed.message.starts_with("Saved "),
+            "the committed outcome got the rejection wording: {}",
+            committed.message
         );
 
-        let (refused, rejected) =
-            super::save_outcome_message(&AppSaveOutcome::Rejected(Box::new(response)))
-                .expect("a rejection has something to say");
-        assert!(refused, "a rejected save is a refusal");
+        let rejected = super::save_outcome_message(&AppSaveOutcome::Rejected(Box::new(response)))
+            .expect("a rejection has something to say");
+        assert!(!rejected.reached_disk, "a rejected save wrote nothing");
         assert!(
-            rejected.contains("was not written"),
-            "the rejected outcome got the committed wording: {rejected}"
+            rejected.message.contains("was not written"),
+            "the rejected outcome got the committed wording: {}",
+            rejected.message
+        );
+    }
+
+    /// A size-limit denial must not read as a disabled build.
+    ///
+    /// `WorkspaceActor::save_file_with_proposal` maps the broker's detailed
+    /// size-limit refusal to `CapabilityDenied`, which is the same typed reason
+    /// a genuinely write-disabled build produces. Deriving the sentence from the
+    /// reason alone therefore tells someone that saving is switched off, when in
+    /// fact one file was too large — a normal policy rejection made impossible
+    /// to diagnose.
+    #[test]
+    fn a_denial_says_which_policy_refused_it() {
+        let mut transition = transition_naming("main.rs");
+        transition.lifecycle_state = ProposalLifecycleState::Denied;
+        transition.diagnostics = vec![ProtocolDiagnostic {
+            code: "capability.write_size".to_string(),
+            message: "write of 900000 bytes exceeds the 524288 byte limit".to_string(),
+            severity: ProtocolDiagnosticSeverity::Error,
+            path: Some(CanonicalPath("main.rs".to_string())),
+            range: None,
+        }];
+        let message = save_rejection_message(&ProposalResponse::Denied {
+            transition,
+            reason: legion_protocol::ProposalDenialReason::CapabilityDenied,
+        });
+
+        assert!(
+            message.contains("524288") || message.contains("exceeds"),
+            "the denial does not say which limit refused it: {message}"
+        );
+        assert!(
+            !message.contains("not allowed to write files"),
+            "a size-limit refusal is being reported as a disabled build: {message}"
+        );
+    }
+
+    /// A deleted file is described as deleted, not as conflicting with a copy.
+    #[test]
+    fn a_conflict_over_a_deleted_file_says_it_disappeared() {
+        let mut transition = transition_naming("main.rs");
+        transition.lifecycle_state = ProposalLifecycleState::Conflict;
+        // `conflict_save_response` puts the same diagnostic on both the conflict
+        // state and the transition, so either carries it in production. This
+        // populates the conflict state, which is the one the formatter reads
+        // first.
+        let diagnostic = ProtocolDiagnostic {
+            code: "workspace.file_missing".to_string(),
+            message: "file disappeared from disk before save".to_string(),
+            severity: ProtocolDiagnosticSeverity::Error,
+            path: Some(CanonicalPath("main.rs".to_string())),
+            range: None,
+        };
+        let identity = legion_protocol::FileIdentity {
+            file_id: legion_protocol::FileId(0),
+            workspace_id: legion_protocol::WorkspaceId(0),
+            canonical_path: CanonicalPath("main.rs".to_string()),
+            content_version: legion_protocol::FileContentVersion(1),
+            content_hash: None,
+        };
+        let message = save_rejection_message(&ProposalResponse::Conflict {
+            transition,
+            conflict: legion_protocol::FileConflictState {
+                state: legion_protocol::FileConflictLifecycleState::ConflictDirty,
+                context: legion_protocol::FileConflictContext {
+                    workspace_id: legion_protocol::WorkspaceId(0),
+                    file_identity: identity,
+                    buffer_version: legion_protocol::BufferVersion(1),
+                    file_content_version: legion_protocol::FileContentVersion(1),
+                    snapshot_id: legion_protocol::SnapshotId(1),
+                    disk_fingerprint: None,
+                    expected_fingerprint: None,
+                    reason: legion_protocol::FileConflictReason::FileDeletedOnDisk,
+                    diagnostics: vec![diagnostic.clone()],
+                },
+                diagnostics: vec![diagnostic],
+                schema_version: 1,
+            },
+        });
+
+        assert!(
+            message.contains("disappeared"),
+            "the deletion-specific cause was discarded: {message}"
+        );
+        assert!(
+            !message.contains("copy on disk"),
+            "the message claims a conflict with a copy that no longer exists: {message}"
+        );
+    }
+
+    /// An apply failure must not swear the file is unchanged.
+    ///
+    /// `ApplyFailed` covers both "the write never happened" and "the write
+    /// landed and the metadata read after it did not". Nothing in the response
+    /// distinguishes them, so a categorical "was not written" is the same lie
+    /// this module exists to remove, one variant over.
+    #[test]
+    fn an_apply_failure_does_not_claim_the_file_is_unchanged() {
+        let mut transition = transition_naming("main.rs");
+        transition.lifecycle_state = ProposalLifecycleState::Failed;
+        let message = save_rejection_message(&ProposalResponse::Failed {
+            transition,
+            reason: ProposalFailureReason::ApplyFailed,
+        });
+
+        assert!(
+            !message.contains("was not written"),
+            "an apply failure can happen after the bytes reach disk, so it must not claim \
+             otherwise: {message}"
+        );
+        assert!(
+            message.contains("check it") || message.contains("partly written"),
+            "the message should point at the one place that can settle it: {message}"
         );
     }
 

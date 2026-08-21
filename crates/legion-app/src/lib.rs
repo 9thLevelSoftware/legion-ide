@@ -1039,6 +1039,15 @@ pub enum AppSaveOutcome {
     CommittedThenAuditFailed {
         /// The write that did land.
         save: SaveRequestDto,
+        /// Path of the file whose bytes are now on disk.
+        ///
+        /// Carried explicitly because the audit failure cannot supply it:
+        /// `audit_storage_failed_response` builds its diagnostic with
+        /// `path: None`, so anything recovering the filename from the response
+        /// gets nothing and has to say "the file". This is the one outcome where
+        /// naming the file matters most — it is the difference between "your
+        /// work is safe" and "*which* work is safe".
+        path: CanonicalPath,
         /// The failure recorded after it.
         response: Box<ProposalResponse>,
     },
@@ -25673,6 +25682,7 @@ impl AppComposition {
             }
             Err(failure) => {
                 if let Some(committed) = failure.committed {
+                    let path = committed.applied.identity.canonical_path.clone();
                     // The on-disk write already committed before the post-commit
                     // audit failed. Reconcile editor state with disk (mark the
                     // buffer saved) so we never leave a dirty buffer over content
@@ -25692,6 +25702,7 @@ impl AppComposition {
                     // what happened here.
                     return Ok(AppSaveOutcome::CommittedThenAuditFailed {
                         save: committed.save,
+                        path,
                         response: Box::new(failure.response),
                     });
                 } else if failure.request_id != uuid::Uuid::nil() {
