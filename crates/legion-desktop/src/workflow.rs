@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
-    AppSaveOutcome, AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind,
+    AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind,
     proposal::{ProposalHunkDispositionState, filtered_batch_proposal_for_accepted_targets},
 };
 use legion_protocol::{
@@ -370,6 +370,14 @@ pub enum DesktopWorkflowOutcome {
     },
     /// Save was rejected without marking editor text clean.
     SaveRejected(String),
+    /// The write reached disk, but recording it afterwards failed.
+    ///
+    /// Distinct from [`Self::SaveRejected`], whose contract is that the buffer
+    /// stays dirty. Here `save_buffer` has already marked the buffer clean and
+    /// bound it to the new disk state, so reporting a rejection contradicts what
+    /// the app did — and any consumer counting rejections records a save whose
+    /// bytes are on disk as a failure. `beta.rs` did exactly that.
+    SavedWithAuditFailure(String),
     /// Active tab changed through app authority.
     TabSwitched(BufferId),
     /// Clean tab closed through app authority.
@@ -2681,14 +2689,28 @@ impl DesktopRuntime {
                     cut: metadata.cut,
                 }
             }
-            AppCommandOutcome::Save(AppSaveOutcome::Saved(_)) => {
-                self.set_status(StatusSeverity::Info, "Saved");
-                DesktopWorkflowOutcome::Saved
-            }
-            AppCommandOutcome::Save(AppSaveOutcome::Rejected(response)) => {
-                let message = format!("Save rejected: {response:?}");
-                self.set_status(StatusSeverity::Warning, message.clone());
-                DesktopWorkflowOutcome::SaveRejected(message)
+            AppCommandOutcome::Save(outcome) => {
+                // Not `{response:?}`: that put ~1,500 characters of lifecycle
+                // ids, version preconditions, fingerprint hashes and the
+                // extended-length path on screen, and said nothing about what
+                // had happened or whether the edits survived. And not a match
+                // on the outcome here either -- `save_outcome_message` owns the
+                // choice between the two wordings so it can be tested as one
+                // thing, rather than as two arms an edit can quietly swap.
+                match crate::save_rejection::save_outcome_message(&outcome) {
+                    // The flag is the whole point of that function returning a
+                    // pair. Discarding it -- which this did -- put an accurate
+                    // sentence in front of the person and a false outcome into
+                    // every consumer behind them.
+                    Some(report) => {
+                        self.set_status(StatusSeverity::Warning, report.message.clone());
+                        save_outcome_for_report(report)
+                    }
+                    None => {
+                        self.set_status(StatusSeverity::Info, "Saved");
+                        DesktopWorkflowOutcome::Saved
+                    }
+                }
             }
             AppCommandOutcome::SaveAll(outcome) => {
                 self.set_save_all_status(&outcome);
@@ -3579,13 +3601,25 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
         .map(|path| path.0.as_str())
         .unwrap_or("<unknown>");
     match item.status {
-        AppSaveAllItemStatus::Saved => status_message(
-            StatusSeverity::Info,
-            format!(
-                "Save all item saved: buffer {} path={path} dirty={}",
-                item.buffer_id.0, item.final_dirty
+        AppSaveAllItemStatus::Saved => match &item.rejection_metadata {
+            // Saved, with a caveat: the write landed and the record of it did
+            // not. Silence here would be the shell claiming a clean save it
+            // knows was not clean.
+            Some(metadata) => status_message(
+                StatusSeverity::Warning,
+                format!(
+                    "Save all item saved but not recorded: buffer {} path={path} dirty={} reason={}",
+                    item.buffer_id.0, item.final_dirty, metadata.response_kind
+                ),
             ),
-        ),
+            None => status_message(
+                StatusSeverity::Info,
+                format!(
+                    "Save all item saved: buffer {} path={path} dirty={}",
+                    item.buffer_id.0, item.final_dirty
+                ),
+            ),
+        },
         AppSaveAllItemStatus::Rejected | AppSaveAllItemStatus::MetadataMissing => {
             let kind = item
                 .rejection_metadata
@@ -5544,6 +5578,21 @@ fn open_url_windows(url: &str) -> Result<()> {
     }
 }
 
+/// The desktop outcome a save report implies.
+///
+/// A function rather than an inline branch, because the branch *is* a contract:
+/// `SaveRejected` promises the buffer is still dirty, and a committed write has
+/// already been marked clean by `save_buffer`. Inline, the flag was dropped once
+/// and nothing in the suite noticed -- a correct sentence in front of the person
+/// and a false outcome behind them, all the way into `beta.rs`.
+fn save_outcome_for_report(report: crate::save_rejection::SaveReport) -> DesktopWorkflowOutcome {
+    if report.reached_disk {
+        DesktopWorkflowOutcome::SavedWithAuditFailure(report.message)
+    } else {
+        DesktopWorkflowOutcome::SaveRejected(report.message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -6404,5 +6453,42 @@ mod tests {
                 && message.contains("Plugin command denied")
                 && message.contains("UnsupportedHostCall")
         ));
+    }
+}
+
+#[cfg(test)]
+mod save_outcome_tests {
+    use super::{DesktopWorkflowOutcome, save_outcome_for_report};
+    use crate::save_rejection::SaveReport;
+
+    /// A write that reached disk is never reported as a rejection.
+    ///
+    /// `SaveRejected`'s documented contract is that the buffer stays dirty, and
+    /// consumers rely on it: `beta.rs` counts one as a failed save. When the
+    /// post-commit audit fails, `save_buffer` has already marked the buffer
+    /// clean over content that is on disk, so a rejection here is false in both
+    /// directions at once.
+    #[test]
+    fn a_report_that_reached_disk_is_not_a_rejection() {
+        let outcome = save_outcome_for_report(SaveReport {
+            reached_disk: true,
+            message: "Saved main.rs, but recording the save failed.".to_string(),
+        });
+        assert!(
+            matches!(outcome, DesktopWorkflowOutcome::SavedWithAuditFailure(_)),
+            "a committed write was reported as {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_report_that_did_not_reach_disk_is_a_rejection() {
+        let outcome = save_outcome_for_report(SaveReport {
+            reached_disk: false,
+            message: "Save rejected: main.rs was not written.".to_string(),
+        });
+        assert!(
+            matches!(outcome, DesktopWorkflowOutcome::SaveRejected(_)),
+            "a refused save was reported as {outcome:?}"
+        );
     }
 }
