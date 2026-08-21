@@ -1215,3 +1215,566 @@ fn git_snapshot_projects_agent_worktrees_as_agent_kind() {
 
     let _ = std::fs::remove_dir_all(&agent_worktree);
 }
+
+/// Staged hunks survive a working tree that exceeds the projection limit.
+///
+/// Unstaged hunks used to consume the whole `max_hunks` allowance before staged
+/// hunks were requested at all, so a tree with more unstaged hunks than the
+/// limit projected none of the index's work. No surface reading this projection
+/// could show it, let alone unstage it, and a renderer cannot fix that by
+/// partitioning what it receives: by then the staged hunks are already gone.
+#[test]
+fn staged_hunks_are_projected_when_unstaged_hunks_exceed_the_limit() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let mut seed = String::new();
+    for line in 0..400 {
+        seed.push_str(&format!("line {line}\n"));
+    }
+    repo.write("wide.txt", &seed);
+    repo.write("staged.txt", "one\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+
+    repo.write("staged.txt", "one changed\n");
+    run_git(root, ["add", "staged.txt"]);
+
+    let mut edited = String::new();
+    for line in 0..400 {
+        if line % 4 == 0 && line > 0 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    repo.write("wide.txt", &edited);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 8,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot should collect");
+
+    let staged = snapshot
+        .hunks
+        .iter()
+        .filter(|hunk| hunk.stage == GitHunkStage::Staged)
+        .count();
+    let unstaged = snapshot.hunks.len() - staged;
+    assert!(
+        unstaged > 0,
+        "the fixture must produce unstaged hunks for this test to mean anything"
+    );
+    assert!(
+        staged > 0,
+        "staged hunks must reach the projection even when unstaged hunks alone would fill it; got {} hunks, all unstaged",
+        snapshot.hunks.len()
+    );
+    assert!(
+        snapshot.hunks.len() <= 8,
+        "the limit must still hold, got {}",
+        snapshot.hunks.len()
+    );
+}
+
+/// A repository with exactly the allowance is not truncated.
+///
+/// `git_diff_hunks` stops at the limit it is given, so a vector of exactly
+/// `max_hunks` is ambiguous by length alone. The first version of the flag read
+/// that as truncation, so a caller asking for eight hunks from a repository with
+/// exactly eight was told hunks had been omitted when none had — which makes a
+/// public projection contract unreliable in the one direction that matters,
+/// since a surface trusting it will stop showing exact counts it could show.
+#[test]
+fn a_snapshot_holding_every_hunk_is_not_marked_truncated() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let mut seed = String::new();
+    for line in 0..40 {
+        seed.push_str(&format!("line {line}\n"));
+    }
+    repo.write("exact.txt", &seed);
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+
+    // Two widely separated edits: exactly two unstaged hunks, no staged ones.
+    let mut edited = String::new();
+    for line in 0..40 {
+        if line == 5 || line == 30 {
+            edited.push_str(&format!("line {line} CHANGED\n"));
+        } else {
+            edited.push_str(&format!("line {line}\n"));
+        }
+    }
+    repo.write("exact.txt", &edited);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 2,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot should collect");
+
+    assert_eq!(
+        snapshot.hunks.len(),
+        2,
+        "the fixture must produce exactly the allowance"
+    );
+    assert!(
+        !snapshot.hunks_truncated,
+        "every hunk in the repository is present, so nothing was omitted"
+    );
+}
+
+/// A merge resolved toward the current side still owes a commit.
+///
+/// The panel gates its Commit control on the snapshot. Resolving the last
+/// conflict with **Use Current** can leave the index byte-identical to `HEAD`,
+/// at which point porcelain status reports nothing at all -- while `MERGE_HEAD`
+/// is still on disk and `git commit` would succeed and conclude the merge.
+///
+/// A snapshot that only counts changed files therefore tells the panel there is
+/// nothing to commit in direct response to the panel's own conflict action, and
+/// the repository is left mid-merge with no way to finish from that surface.
+/// This is asserted against a real merge rather than a fixture because the
+/// whole point is what git does with an empty index, not what a struct says.
+#[test]
+fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("shared.txt", "base\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "base"]);
+    let base = run_git(root, ["rev-parse", "HEAD"]).trim().to_string();
+
+    // One side changes the file.
+    repo.write("shared.txt", "ours\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "ours"]);
+
+    // The other side changes the same line, from the same base.
+    run_git(root, ["checkout", "-b", "theirs", &base]);
+    repo.write("shared.txt", "theirs\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "theirs"]);
+
+    run_git(root, ["checkout", "-"]);
+    // Conflicts, so this is expected to fail.
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("merge should run");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+
+    let conflicted =
+        collect_git_snapshot(root, None, options.clone()).expect("snapshot during conflict");
+    assert!(
+        conflicted.merge_awaiting_commit,
+        "MERGE_HEAD exists during a conflicted merge"
+    );
+
+    // Resolve toward the current side, which is what **Use Current** does. The
+    // index now matches HEAD exactly, because ours never changed.
+    run_git(root, ["checkout", "--ours", "shared.txt"]);
+    run_git(root, ["add", "shared.txt"]);
+
+    let resolved =
+        collect_git_snapshot(root, None, options.clone()).expect("snapshot after resolution");
+    assert!(
+        resolved
+            .changed_files
+            .iter()
+            .all(|file| !file.status.starts_with('U') && !file.status.ends_with('U')),
+        "no unmerged entries should remain, got {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+    // The case only bites when nothing is staged, so prove that first. If a
+    // future git version or a changed fixture leaves an entry here, this test
+    // is no longer exercising the empty-index path, and the assertion below
+    // would pass for a reason unrelated to the fix.
+    assert!(
+        resolved
+            .changed_files
+            .iter()
+            .all(|file| file.status.starts_with(' ') || file.status.starts_with('?')),
+        "the fixture must leave nothing staged, or it is not testing the empty-index merge; \
+         got {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        resolved.merge_awaiting_commit,
+        "the merge is unfinished and `git commit` would conclude it, but the snapshot says \
+         there is nothing to commit. Changed files were {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+
+    // The claim above is only worth anything if git agrees, so ask it.
+    let commit = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["commit", "--no-edit"])
+        .output()
+        .expect("commit should run");
+    assert!(
+        commit.status.success(),
+        "git refused the commit this snapshot said it would accept: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let concluded = collect_git_snapshot(root, None, options).expect("snapshot after commit");
+    assert!(
+        !concluded.merge_awaiting_commit,
+        "the merge is finished, so nothing is owed any more"
+    );
+}
+
+/// A cherry-pick resolved to the current side owes nothing a commit can give.
+///
+/// The sibling of `a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make`,
+/// and the reason that flag is not simply "an operation is in progress".
+///
+/// With an index identical to `HEAD`, `git commit` **succeeds** for a merge and
+/// **fails** for a cherry-pick — "The previous cherry-pick is now empty", exit
+/// non-zero, `--allow-empty` required. An earlier version of the flag grouped
+/// `CHERRY_PICK_HEAD` and `REVERT_HEAD` with `MERGE_HEAD` on the assumption they
+/// behaved alike, which would have offered a Commit control whose only outcome
+/// is an error.
+///
+/// This asserts both halves against real git, because the whole distinction is
+/// a claim about what git does and nothing else can settle it.
+#[test]
+fn a_cherry_pick_resolved_to_the_current_side_is_not_committable() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("shared.txt", "base\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "base"]);
+    let base = run_git(root, ["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write("shared.txt", "ours\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "ours"]);
+
+    run_git(root, ["checkout", "-b", "side", &base]);
+    repo.write("shared.txt", "theirs\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "theirs"]);
+    run_git(root, ["checkout", "-"]);
+
+    // Expected to conflict.
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["cherry-pick", "side"])
+        .output()
+        .expect("cherry-pick should run");
+
+    // Resolve toward the current side, leaving the index equal to HEAD.
+    run_git(root, ["checkout", "--ours", "shared.txt"]);
+    run_git(root, ["add", "shared.txt"]);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("snapshot");
+
+    assert!(
+        !snapshot.merge_awaiting_commit,
+        "a cherry-pick is not a merge awaiting a commit; offering Commit here produces a \
+         button whose only outcome is an error"
+    );
+
+    // And git agrees, which is the whole point of the distinction.
+    let commit = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["commit", "--no-edit"])
+        .output()
+        .expect("commit should run");
+    assert!(
+        !commit.status.success(),
+        "git accepted an empty cherry-pick commit, so this test's premise is wrong and the \
+         merge-only restriction should be revisited: {}",
+        String::from_utf8_lossy(&commit.stdout)
+    );
+}
+
+/// A filename with spaces still projects its hunks against the right path.
+///
+/// Git appends metadata after a tab when a filename needs it, so a change to
+/// `foo bar.txt` produces a `+++ b/foo bar.txt<TAB>` header. Keeping that
+/// separator in the hunk's path made it disagree with the path porcelain status
+/// reports, and the file then looked like it had no hunks at all.
+///
+/// That is not a cosmetic mismatch. A file believed hunkless gets a whole-path
+/// Stage control *beside* its hunk controls, where one click stages every hunk
+/// instead of the selected one — the exact outcome hunk-level staging exists to
+/// prevent, reachable through a filename.
+#[test]
+fn a_filename_with_spaces_projects_hunks_under_its_real_path() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("foo bar.txt", "one\ntwo\nthree\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    repo.write("foo bar.txt", "one\nCHANGED\nthree\n");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let hunk_paths: Vec<&str> = snapshot
+        .hunks
+        .iter()
+        .map(|hunk| hunk.path.as_str())
+        .collect();
+    assert!(
+        hunk_paths.contains(&"foo bar.txt"),
+        "the hunk must be filed under the path status reports, got {hunk_paths:?}"
+    );
+    for path in &hunk_paths {
+        assert!(
+            !path.contains('\t'),
+            "a diff header's trailing metadata leaked into the hunk path: {path:?}"
+        );
+    }
+
+    // And the two halves of the projection agree, which is what the panel relies
+    // on to decide a file is hunkless.
+    let changed: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert!(
+        changed.contains(&"foo bar.txt"),
+        "status should report the same path, got {changed:?}"
+    );
+}
+
+/// A non-ASCII filename matches its own hunks.
+///
+/// With `core.quotePath` at its default, git renders non-ASCII bytes in a diff
+/// header as C-style escapes inside quotes — `+++ "b/caf\303\251.txt"` — while
+/// porcelain `-z` reports the raw bytes. The two then describe the same file
+/// differently, so its hunks cannot be matched to its status row and it is
+/// treated as hunkless: whole-path staging appears beside its own hunk controls,
+/// where one click stages every hunk instead of the selected one.
+///
+/// The flag fixes this case. It does not fix every case: `core.quotePath` governs
+/// *high* bytes only, and git escapes a double quote, a backslash and every
+/// control character no matter what it is set to. The parser decodes those --
+/// see `a_filename_with_a_tab_matches_its_own_hunks`, which is the case the flag
+/// cannot reach.
+#[test]
+fn a_non_ascii_filename_matches_its_own_hunks() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let name = "caf\u{e9}.txt";
+    repo.write(name, "one\ntwo\nthree\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    repo.write(name, "one\nCHANGED\nthree\n");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let hunk_paths: Vec<&str> = snapshot
+        .hunks
+        .iter()
+        .map(|hunk| hunk.path.as_str())
+        .collect();
+    let changed: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+
+    assert!(
+        hunk_paths.contains(&name),
+        "the hunk must be filed under the real filename, got {hunk_paths:?}"
+    );
+    assert!(
+        changed.contains(&name),
+        "status must report the same filename, got {changed:?}"
+    );
+    for path in &hunk_paths {
+        assert!(
+            !path.starts_with('"'),
+            "a quoted path representation reached the projection: {path:?}"
+        );
+    }
+}
+
+/// Filenames git must quote match their own hunks.
+///
+/// The cases `core.quotePath=false` cannot reach. That setting stops git
+/// escaping high bytes; `quote_c_style` still escapes a double quote, a
+/// backslash and every control character unconditionally, so these files arrive
+/// in a diff header as `+++ "b/tab\\tname.txt"` while porcelain `-z` reports the
+/// raw bytes. Unmatched hunks make a file look hunkless, and a hunkless file is
+/// offered whole-path staging beside its own hunk controls -- one click from
+/// staging every hunk in a file somebody meant to stage one hunk of.
+///
+/// Unix only: NTFS rejects a tab in a filename and treats a backslash as a
+/// separator, so there is no way to build either fixture on Windows. The
+/// escapes no filesystem will hold at all are covered by the parser's own tests.
+#[cfg(unix)]
+#[test]
+fn filenames_git_must_quote_match_their_own_hunks() {
+    for (name, description) in [
+        ("tab\tname.txt", "a tab"),
+        ("back\\slash.txt", "a backslash"),
+        ("quo\"te.txt", "a double quote"),
+    ] {
+        let repo = TempGitRepo::new();
+        let root = repo.path();
+
+        repo.write(name, "one\ntwo\nthree\n");
+        run_git(root, ["add", "."]);
+        run_git(root, ["commit", "-m", "seed"]);
+        repo.write(name, "one\nCHANGED\nthree\n");
+
+        let options = GitSnapshotOptions {
+            max_file_bytes_for_syntactic_diff: 1024 * 1024,
+            max_hunks: 16,
+            max_blame_lines: 16,
+            max_commits: 8,
+        };
+        let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+        let hunk_paths: Vec<&str> = snapshot
+            .hunks
+            .iter()
+            .map(|hunk| hunk.path.as_str())
+            .collect();
+        let changed: Vec<&str> = snapshot
+            .changed_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+
+        assert!(
+            hunk_paths.contains(&name),
+            "a filename containing {description} must file its hunk under the real name, \
+             got {hunk_paths:?}"
+        );
+        assert!(
+            changed.contains(&name),
+            "status must report the same filename, got {changed:?}"
+        );
+        // The specific failure this guards: a quoted or mangled representation
+        // reaching the projection, where it matches no status row and the file
+        // silently becomes hunkless.
+        for path in &hunk_paths {
+            assert!(
+                !path.starts_with('\"'),
+                "a hunk path kept its quoting with {description} in the name: {path:?}"
+            );
+        }
+    }
+}
+
+/// A staged rename does not invent a changed file that is not there.
+///
+/// `git diff --cached --numstat` reports a rename in a display form --
+/// `dir/{old.txt => new.txt}` -- which is not a path and names no file. Keyed
+/// as one it produced a second changed-file row with a synthesized `??` status:
+/// the panel withheld the genuine `R` row, as it should, and offered Stage for
+/// the invention, where clicking it failed because there is no such file. Read
+/// through `-z` the rename arrives as its own records and the counts land on
+/// the destination, which is the path status reports.
+#[test]
+fn a_staged_rename_does_not_fabricate_a_changed_file() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("dir/old.txt", "one\ntwo\nthree\nfour\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    run_git(root, ["mv", "dir/old.txt", "dir/new.txt"]);
+    run_git(root, ["add", "."]);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let paths: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    for path in &paths {
+        assert!(
+            !path.contains("=>") && !path.contains('{'),
+            "a numstat display form reached the projection as a file path: {path:?}"
+        );
+    }
+    // The fixture has to actually be a rename, or this asserts nothing.
+    assert!(
+        snapshot
+            .changed_files
+            .iter()
+            .any(|file| file.status.starts_with('R')),
+        "the fixture must produce a rename status, got {:?}",
+        snapshot
+            .changed_files
+            .iter()
+            .map(|file| (&file.path, &file.status))
+            .collect::<Vec<_>>()
+    );
+    // Every row a rename produces must carry the rename status, so the panel
+    // withholds whole-path staging for all of them. The defect was not the row
+    // count -- porcelain reports both sides of a rename -- but a row invented
+    // from a display string, which arrived with a synthesized `??` and was
+    // offered a Stage control that named no file.
+    for file in &snapshot.changed_files {
+        assert!(
+            file.status.starts_with('R'),
+            "{:?} carries {:?}, not a rename status; a synthesized status is how a fabricated              row gets a Stage control the genuine row is denied",
+            file.path,
+            file.status
+        );
+    }
+}

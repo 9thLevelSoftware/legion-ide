@@ -37,7 +37,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 | 5 | Assist: Deterministic proposal appears | | |
 | 6 | Assist Auto with Ollama (if installed): streaming status then proposal | | |
 | 7 | Delegate chat: Streaming… then reply | | |
-| 8 | Git panel opens / status rows | | |
+| 8 | Git panel opens / status rows; stage a hunk, then commit it | | See note below |
 | 9 | Debug: refresh configs; Launch (`F5` idle+configs, toolbar, or `:debug-launch`) | | B17 |
 | 10 | Debug dual-mode banner: **SIMULATED** (fixture) or **live adapter** | | Honest cut line |
 | 11 | Debug: Continue (`F5` or toolbar); live path shows Running then auto-poll Paused | | B7/B8 |
@@ -53,7 +53,6 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > in `crates/legion-desktop/src/workflow.rs` (`ActivateExplorerFile`) and
 > guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
 > row: an affordance that is never checked is an affordance that can rot back.
-
 
 > **Why row 2 now says "See note below".** Driven through the rendered UI for
 > the first time on 2026-08-20. The behaviour was right and the *reporting* was
@@ -78,6 +77,48 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > to show that Ctrl+S did not save; it does. Any rendered-UI test that asserts a
 > chord *does* something would have been testing nothing, and one asserting a
 > chord does *not* do something would have passed vacuously.
+
+> **Why row 8 now names staging and committing.** The row used to stop at
+> "status rows", and against a real repository neither half of it held.
+> `GitProjection` is populated only by an explicit `RefreshGit`, and nothing
+> issued one on workspace open or on selecting the surface — so opening Source
+> Control over a tree with three changed files rendered "No source-control
+> status", and the remote verbs (gated on a projected branch label) were absent
+> with it. Underneath that, the panel had no stage, unstage or commit control at
+> all: `StageGitHunk` and `UnstageGitHunk` reached `git apply --cached` through
+> app authority and no rendered control ever pushed either, so Push was the only
+> write the panel could perform and it could only push what some other tool had
+> staged. Fixed in `crates/legion-desktop/src/view/source_control.rs` and the
+> activity rail in `crates/legion-desktop/src/view.rs`, guarded by
+> `crates/legion-desktop/tests/source_control_reachability.rs`, which asks git —
+> not the projection — whether the index changed.
+>
+> That sentence used to end by saying untracked files have no stage control and
+> no path-level authority exists to give them one. Both halves stopped being
+> true in this same change and the note is corrected rather than left standing:
+> `StageGitPath` and `UnstageGitPath` are routed through the renderer, the
+> bridge, app authority and `legion-project` to `git add --` and
+> `git restore --staged --`, so an untracked file, a modified binary, a
+> mode-only change and anything else `git diff` emits no hunk for now has a
+> Stage control of its own.
+>
+> What an operator should still expect to be *absent*, so a missing button reads
+> as a decision rather than a defect:
+>
+> - **Directories.** An untracked directory is reported as one row ending in
+>   `/`, and staging it would add every file underneath, unseen.
+> - **Renames and copies.** A status beginning `R` or `C` names two paths, and
+>   one control cannot say which one it acts on.
+> - **Files with hidden textual hunks, when the hunk list is truncated.** Those
+>   have hunk controls of their own; offering whole-path staging beside them is
+>   one click from staging every hunk in a file somebody meant to stage one
+>   hunk of.
+>
+> Each of those is named on screen rather than silently omitted, and each has a
+> test in `source_control_reachability.rs`. Past the twelve-control budget,
+> hunks and files are reachable through "Show the other N …" rather than being
+> hidden — a note that named what it could not reach was the earlier behaviour
+> and is not what to check for now.
 
 > **Why rows 9-12 were never passable.** Until 2026-08-20 the shipped app could
 > not start a debug session at all. `DebugWorkflow::runtime_enabled` was set by

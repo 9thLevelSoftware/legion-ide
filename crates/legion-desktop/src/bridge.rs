@@ -498,6 +498,20 @@ pub enum DesktopAction {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage every change to one path, hunk or not.
+    ///
+    /// The only way to stage a modified binary file, a mode-only change or a
+    /// pure rename: none of them produce a `@@` hunk, so hunk controls cannot
+    /// reach them and the commit flow was unusable for them.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
+    },
     /// Accept the current (ours) side of a conflicted file.
     AcceptGitConflictCurrent {
         /// Repository-relative path of the conflicted file.
@@ -2036,6 +2050,12 @@ impl DesktopCommandBridge {
                 }),
             DesktopAction::StageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitHunk { hunk_id })
+            }
+            DesktopAction::StageGitPath { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitPath { path })
+            }
+            DesktopAction::UnstageGitPath { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitPath { path })
             }
             DesktopAction::UnstageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitHunk { hunk_id })
