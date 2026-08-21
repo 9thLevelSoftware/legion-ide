@@ -617,3 +617,99 @@ fn a_conflict_blocks_commit_even_with_another_file_staged() {
         rendered_text(&panel)
     );
 }
+
+/// Resolving the last conflict must not take away the control that finishes it.
+///
+/// **Use Current** on the final conflict can leave the index byte-identical to
+/// `HEAD` -- it does whenever the current side is the one that never changed.
+/// Porcelain status then reports nothing at all, while `MERGE_HEAD` is still on
+/// disk and `git commit` would succeed and conclude the merge.
+///
+/// A Commit gate reading changed files alone therefore withdrew the panel's only
+/// Commit control in direct response to the panel's own conflict action, leaving
+/// the repository mid-merge with no way to finish from that surface. Worse than
+/// a missing feature: the panel walks you into the state and then removes the
+/// exit.
+///
+/// The merge here is set up with git rather than through the conflict buttons
+/// because the property under test is the gate, not the resolution controls, and
+/// `git checkout --ours` is exactly what **Use Current** performs.
+#[test]
+fn commit_survives_a_merge_resolved_to_the_current_side() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_empty_merge");
+    init_repo(&workspace);
+    let root = workspace.path().to_path_buf();
+
+    workspace.write("shared.rs", "fn shared() { let value = 0; }\n");
+    git(&root, &["add", "shared.rs"]);
+    git(&root, &["commit", "-m", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+
+    workspace.write("shared.rs", "fn shared() { let value = 1; }\n");
+    git(&root, &["add", "shared.rs"]);
+    git(&root, &["commit", "-m", "ours"]);
+
+    git(&root, &["checkout", "-b", "theirs", &base]);
+    workspace.write("shared.rs", "fn shared() { let value = 2; }\n");
+    git(&root, &["add", "shared.rs"]);
+    git(&root, &["commit", "-m", "theirs"]);
+    git(&root, &["checkout", "-"]);
+
+    // Expected to conflict, so this one is not asserted successful.
+    let _ = Command::new("git")
+        .args(["merge", "theirs"])
+        .current_dir(&root)
+        .output()
+        .expect("merge should run");
+
+    // While conflicts remain, Commit must stay withdrawn: `git commit` refuses
+    // an unmerged index, so offering it would be a button that only errors.
+    let mut app = open_app(&root);
+    let conflicted = open_source_control(&mut app);
+    assert!(
+        clickable_center(&conflicted, "Commit…").is_none(),
+        "Commit was offered with the index unmerged, where git refuses it; frame showed {:?}",
+        rendered_text(&conflicted).len()
+    );
+
+    // **Use Current**: keep our side. Ours is what HEAD already holds, so the
+    // index now matches HEAD and status goes quiet.
+    git(&root, &["checkout", "--ours", "shared.rs"]);
+    git(&root, &["add", "shared.rs"]);
+    assert!(
+        staged_paths(&root).is_empty(),
+        "the fixture must leave an empty index, or it is not testing this case; staged: {:?}",
+        staged_paths(&root)
+    );
+
+    let mut app = open_app(&root);
+    let resolved = open_source_control(&mut app);
+    let commit = clickable_center(&resolved, "Commit…").unwrap_or_else(|| {
+        panic!(
+            "the merge is unfinished and `git commit` would conclude it, but the panel offers \
+             no Commit control -- the surface that created this state has no way out of it. \
+             Frame showed {:?}",
+            rendered_text(&resolved)
+        )
+    });
+
+    // And it has to actually work, not merely be present.
+    let _ = click_at(&mut app, commit);
+    let message = "conclude the merge";
+    app.run_headless_full_frame(full_frame_input(vec![egui::Event::Text(
+        message.to_string(),
+    )]));
+    app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: Some(egui::Key::Enter),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+    app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        !root.join(".git").join("MERGE_HEAD").exists(),
+        "the merge is still unfinished after committing from the panel"
+    );
+}

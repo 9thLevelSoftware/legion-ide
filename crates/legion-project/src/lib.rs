@@ -917,6 +917,16 @@ pub struct ProjectGitSnapshot {
     /// A reader that states an exact number of hidden hunks from a truncated
     /// list states a wrong one.
     pub hunks_truncated: bool,
+    /// Whether a bare `git commit` would conclude an operation already underway.
+    ///
+    /// True while `MERGE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD` exists. In
+    /// that state `git commit` succeeds and finishes the operation *even with an
+    /// index identical to `HEAD`* -- which is exactly what resolving the last
+    /// conflict in favour of the current side produces. Porcelain status then
+    /// reports no entries at all, so anything deciding whether to offer Commit
+    /// from changed files alone withdraws it at the one moment it is needed, and
+    /// leaves the repository mid-merge with no way out of the panel.
+    pub commit_would_conclude_operation: bool,
     /// Inline blame lines for the active file.
     pub blame_lines: Vec<ProjectGitBlameLine>,
     /// Commit graph/history rows.
@@ -1049,6 +1059,7 @@ pub fn collect_git_snapshot_with_backend(
         None => Vec::new(),
     };
     let commits = git_commits(&repository_root, options.max_commits)?;
+    let commit_would_conclude_operation = unconcluded_operation(&repository_root);
 
     Ok(ProjectGitSnapshot {
         root: CanonicalPath(repository_root.to_string_lossy().into_owned()),
@@ -1059,6 +1070,7 @@ pub fn collect_git_snapshot_with_backend(
         changed_files,
         hunks,
         hunks_truncated,
+        commit_would_conclude_operation,
         blame_lines,
         commits,
         conflicts,
@@ -1806,6 +1818,29 @@ fn is_conflict_base(line: &str, expected_len: usize) -> bool {
 fn is_conflict_end(line: &str, expected_len: usize) -> bool {
     let prefix_len = line.chars().take_while(|c| *c == '>').count();
     prefix_len == expected_len && line.as_bytes().get(prefix_len).copied() == Some(b' ')
+}
+
+/// Whether git is part-way through an operation a commit would finish.
+///
+/// Read from the marker files rather than from porcelain text, because the
+/// porcelain output that names the state is exactly the output that goes empty
+/// once the last conflict is resolved.
+///
+/// `--git-dir` rather than `<root>/.git`, so this still answers correctly in a
+/// linked worktree or a submodule, where `.git` is a file pointing elsewhere.
+fn unconcluded_operation(repository_root: &Path) -> bool {
+    let Ok(git_dir) = git_stdout(repository_root, &["rev-parse", "--git-dir"], None) else {
+        return false;
+    };
+    let git_dir = PathBuf::from(git_dir.trim());
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        repository_root.join(git_dir)
+    };
+    ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+        .iter()
+        .any(|marker| git_dir.join(marker).exists())
 }
 
 fn git_stdout(

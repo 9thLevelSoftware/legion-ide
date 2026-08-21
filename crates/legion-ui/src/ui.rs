@@ -1828,6 +1828,11 @@ pub struct GitProjection {
     /// from "twelve of thousands", so a panel that states an exact number of
     /// hidden hunks from a truncated list states a wrong one.
     pub hunks_truncated: bool,
+    /// Whether a bare `git commit` would conclude an operation already underway.
+    ///
+    /// True mid-merge, mid-cherry-pick or mid-revert, where a commit finishes the
+    /// operation even with an index identical to `HEAD`.
+    pub commit_would_conclude_operation: bool,
     /// Inline blame rows for the active file.
     pub blame_lines: Vec<GitBlameLineProjection>,
     /// Commit graph/history rows.
@@ -1872,6 +1877,7 @@ impl GitProjection {
             changed_files: Vec::new(),
             hunks: Vec::new(),
             hunks_truncated: false,
+            commit_would_conclude_operation: false,
             blame_lines: Vec::new(),
             commits: Vec::new(),
             conflicts: Vec::new(),

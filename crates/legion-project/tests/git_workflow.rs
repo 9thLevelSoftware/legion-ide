@@ -1330,3 +1330,126 @@ fn a_snapshot_holding_every_hunk_is_not_marked_truncated() {
         "every hunk in the repository is present, so nothing was omitted"
     );
 }
+
+/// A merge resolved toward the current side still owes a commit.
+///
+/// The panel gates its Commit control on the snapshot. Resolving the last
+/// conflict with **Use Current** can leave the index byte-identical to `HEAD`,
+/// at which point porcelain status reports nothing at all -- while `MERGE_HEAD`
+/// is still on disk and `git commit` would succeed and conclude the merge.
+///
+/// A snapshot that only counts changed files therefore tells the panel there is
+/// nothing to commit in direct response to the panel's own conflict action, and
+/// the repository is left mid-merge with no way to finish from that surface.
+/// This is asserted against a real merge rather than a fixture because the
+/// whole point is what git does with an empty index, not what a struct says.
+#[test]
+fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("shared.txt", "base\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "base"]);
+    let base = run_git(root, ["rev-parse", "HEAD"]).trim().to_string();
+
+    // One side changes the file.
+    repo.write("shared.txt", "ours\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "ours"]);
+
+    // The other side changes the same line, from the same base.
+    run_git(root, ["checkout", "-b", "theirs", &base]);
+    repo.write("shared.txt", "theirs\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "theirs"]);
+
+    let default_branch = run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    let _ = default_branch;
+    run_git(root, ["checkout", "-"]);
+    // Conflicts, so this is expected to fail.
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["merge", "theirs"])
+        .output()
+        .expect("merge should run");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+
+    let conflicted =
+        collect_git_snapshot(root, None, options.clone()).expect("snapshot during conflict");
+    assert!(
+        conflicted.commit_would_conclude_operation,
+        "MERGE_HEAD exists during a conflicted merge"
+    );
+
+    // Resolve toward the current side, which is what **Use Current** does. The
+    // index now matches HEAD exactly, because ours never changed.
+    run_git(root, ["checkout", "--ours", "shared.txt"]);
+    run_git(root, ["add", "shared.txt"]);
+
+    let resolved =
+        collect_git_snapshot(root, None, options.clone()).expect("snapshot after resolution");
+    assert!(
+        resolved
+            .changed_files
+            .iter()
+            .all(|file| !file.status.starts_with('U') && !file.status.ends_with('U')),
+        "no unmerged entries should remain, got {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+    // The case only bites when nothing is staged, so prove that first. If a
+    // future git version or a changed fixture leaves an entry here, this test
+    // is no longer exercising the empty-index path, and the assertion below
+    // would pass for a reason unrelated to the fix.
+    assert!(
+        resolved
+            .changed_files
+            .iter()
+            .all(|file| file.status.starts_with(' ') || file.status.starts_with('?')),
+        "the fixture must leave nothing staged, or it is not testing the empty-index merge; \
+         got {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        resolved.commit_would_conclude_operation,
+        "the merge is unfinished and `git commit` would conclude it, but the snapshot says \
+         there is nothing to commit. Changed files were {:?}",
+        resolved
+            .changed_files
+            .iter()
+            .map(|file| (&file.status, &file.path))
+            .collect::<Vec<_>>()
+    );
+
+    // The claim above is only worth anything if git agrees, so ask it.
+    let commit = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["commit", "--no-edit"])
+        .output()
+        .expect("commit should run");
+    assert!(
+        commit.status.success(),
+        "git refused the commit this snapshot said it would accept: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let concluded = collect_git_snapshot(root, None, options).expect("snapshot after commit");
+    assert!(
+        !concluded.commit_would_conclude_operation,
+        "the merge is finished, so nothing is owed any more"
+    );
+}

@@ -13446,6 +13446,7 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
     GitProjection {
         root_label: Some(snapshot.root.0),
         hunks_truncated: snapshot.hunks_truncated,
+        commit_would_conclude_operation: snapshot.commit_would_conclude_operation,
         branch_label: snapshot.branch_label,
         head_short: snapshot.head_short,
         remote_url: snapshot.remote_url,
