@@ -6859,10 +6859,11 @@ fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
     // `as_chunks` rather than `chunks_exact`: both sizes are constants, so
     // they belong in the type. The word split then yields `[u8; 4]`, which
     // `from_be_bytes` takes directly instead of being rebuilt element by
-    // element from a slice.
+    // element from a slice -- and sixteen of them, by the type, so the loop
+    // needs no bound of its own.
     for chunk in message.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (word_index, word_bytes) in chunk.as_chunks::<4>().0.iter().take(16).enumerate() {
+        for (word_index, word_bytes) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[word_index] = u32::from_be_bytes(*word_bytes);
         }
         for word_index in 16..64 {
