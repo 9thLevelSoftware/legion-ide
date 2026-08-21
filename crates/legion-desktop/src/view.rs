@@ -3212,6 +3212,17 @@ fn action_is_editor_scoped(action: &DesktopAction) -> bool {
             | DesktopAction::FindNext
             | DesktopAction::FindPrevious
             | DesktopAction::ToggleFindReplace
+            // F12 and F9. Both are published keymap entries, both act on the
+            // buffer's cursor line, and both were missing from the first
+            // version of this list -- which mattered more than the omission
+            // itself, because ADR-0051 and the dependency-policy entry promise
+            // that no editor input reaches a buffer while the canvas is
+            // showing. That is a claim about the whole set, and a set with two
+            // holes in it makes the document wrong rather than merely
+            // incomplete. A breakpoint landing on a file nobody is looking at
+            // fails exactly the way `GoToDefinition` does: silently.
+            | DesktopAction::GoToDefinition { .. }
+            | DesktopAction::ToggleDebugBreakpoint { .. }
     )
 }
 

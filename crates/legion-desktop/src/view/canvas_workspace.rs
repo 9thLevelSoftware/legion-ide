@@ -119,19 +119,24 @@ fn slot_position(slot: usize) -> egui::Pos2 {
 /// The search is bounded: each drawn card can block at most four cells, so a
 /// free one always exists within `4 * rendered.len() + 1` of the start, and the
 /// bound is a guard rather than a limit anybody can reach.
-fn first_free_slot(from: usize, rendered: &BTreeMap<&str, egui::Pos2>) -> usize {
+fn first_free_slot(from: usize, taken: &[egui::Pos2]) -> usize {
     let limit = from
-        .saturating_add(rendered.len().saturating_mul(4))
+        .saturating_add(taken.len().saturating_mul(4))
         .saturating_add(1);
     (from..=limit)
-        .find(|slot| {
-            let candidate = slot_position(*slot);
-            !rendered.values().any(|saved| {
-                (saved.x - candidate.x).abs() < DEFAULT_STRIDE
-                    && (saved.y - candidate.y).abs() < DEFAULT_STRIDE
-            })
-        })
+        .find(|slot| !overlaps(slot_position(*slot), taken))
         .unwrap_or(limit)
+}
+
+/// Whether a card at `candidate` would be drawn over one already placed.
+///
+/// Grid cells are one stride square, so a card strictly inside another's cell
+/// on both axes covers it.
+fn overlaps(candidate: egui::Pos2, taken: &[egui::Pos2]) -> bool {
+    taken.iter().any(|position| {
+        (position.x - candidate.x).abs() < DEFAULT_STRIDE
+            && (position.y - candidate.y).abs() < DEFAULT_STRIDE
+    })
 }
 
 /// The nodes a snapshot implies, positioned from saved layout where it exists.
@@ -186,16 +191,6 @@ pub(crate) fn nodes_for_sections(
     // at slot 6, `y = 760`, outside the initial viewport, and the canvas looked
     // empty while the file was open. Restoration and placement need different
     // views of the same map.
-    let rendered: BTreeMap<&str, egui::Pos2> = sections
-        .iter()
-        .filter_map(|section| section.file_path.as_ref())
-        .filter_map(|path| {
-            positions
-                .get(path.0.as_str())
-                .map(|position| (path.0.as_str(), *position))
-        })
-        .collect();
-    let mut next_slot = rendered.len();
     // One card per path.
     //
     // Nothing upstream promises the excerpt sections are distinct by file, and
@@ -204,26 +199,74 @@ pub(crate) fn nodes_for_sections(
     // the one that resolves a dropped connection -- silently picks whichever the
     // iteration reached first.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    sections
+    let drawn: Vec<&legion_ui::ui::ExcerptSurfaceSectionProjection> = sections
         .iter()
-        .filter_map(|section| {
-            let path = section.file_path.clone()?;
-            if !seen.insert(path.0.clone()) {
-                return None;
+        .filter(|section| {
+            section
+                .file_path
+                .as_ref()
+                .is_some_and(|path| seen.insert(path.0.clone()))
+        })
+        .collect();
+
+    // Pass one: saved positions claim their ground, first come first served.
+    //
+    // A saved position can collide now that closed files no longer reserve
+    // their slots. Close a card in slot 0, open a new file into the vacancy,
+    // reopen the first: both are saved at the same coordinates and one is drawn
+    // underneath the other, unreachable without moving the one on top. Whoever
+    // is later in tab order gives way, deterministically.
+    let mut taken: Vec<egui::Pos2> = Vec::new();
+    let mut resolved: Vec<Option<egui::Pos2>> = Vec::with_capacity(drawn.len());
+    for section in &drawn {
+        let saved = section
+            .file_path
+            .as_ref()
+            .and_then(|path| positions.get(path.0.as_str()).copied());
+        match saved {
+            // Exactly equal, not merely overlapping. Dragging one card on top
+            // of another is a thing a person may deliberately do, and a rule
+            // that shuffled the card underneath would rearrange an arrangement
+            // somebody had just made by hand. Two cards at the *same
+            // coordinates* is the case nothing but a reused default slot
+            // produces, and the case where one is perfectly hidden.
+            Some(position) if !taken.contains(&position) => {
+                taken.push(position);
+                resolved.push(Some(position));
             }
-            let saved = positions.get(path.0.as_str()).copied();
-            // The default slot comes from the section's own index, not from a
-            // running count of unplaced cards. With a counter, moving one card
-            // stopped incrementing it and every later unplaced card shifted a
-            // slot to the left on the next frame -- so dragging the first of
-            // three made the other two jump, possibly onto the card just moved.
-            // A person's arrangement must not rearrange itself around them.
-            let position = saved.unwrap_or_else(|| {
-                let free = first_free_slot(next_slot, &rendered);
-                next_slot = free + 1;
-                slot_position(free)
-            });
-            let placed = saved.is_some();
+            _ => resolved.push(None),
+        }
+    }
+
+    // Pass two: everything still unplaced takes the first slot nothing covers.
+    //
+    // Numbering starts after the cards that kept a saved position, which is
+    // what stops an unplaced card sliding left when some *other* card moves.
+    let mut next_slot = taken.len();
+    for slot in resolved.iter_mut() {
+        if slot.is_some() {
+            continue;
+        }
+        let free = first_free_slot(next_slot, &taken);
+        next_slot = free + 1;
+        let position = slot_position(free);
+        taken.push(position);
+        *slot = Some(position);
+    }
+
+    drawn
+        .into_iter()
+        .zip(resolved)
+        .filter_map(|(section, position)| {
+            let path = section.file_path.clone()?;
+            let position = position?;
+            // "Placed" means the position on screen is the one on record. A
+            // card displaced out of a collision is not, so it is written down
+            // like any other default -- otherwise the arrangement on disk would
+            // keep describing two cards in one place.
+            let placed = positions
+                .get(path.0.as_str())
+                .is_some_and(|saved| *saved == position);
             let available = section.lines.len();
             let lines: Vec<String> = section
                 .lines
@@ -890,6 +933,38 @@ mod canvas_layout_rules {
     /// Default slots used to come from a running count of *unplaced* cards, so
     /// one card gaining a position stopped the counter and moved every later
     /// card a slot to the left -- possibly onto the one just placed.
+    #[test]
+    fn a_reopened_file_does_not_land_on_the_card_that_took_its_slot() {
+        // The cost of not reserving slots for closed files. Close the card in
+        // slot 0, open a new file into the vacancy, reopen the first: both are
+        // saved at the same coordinates, and one is drawn underneath the other
+        // where it cannot be reached without moving the one on top.
+        let mut positions = BTreeMap::new();
+        positions.insert("closed.rs".to_string(), egui::pos2(0.0, 0.0));
+        positions.insert("fresh.rs".to_string(), egui::pos2(0.0, 0.0));
+
+        let nodes = nodes_for_sections(&[section("fresh.rs"), section("closed.rs")], &positions);
+
+        assert_eq!(nodes.len(), 2, "both files must be drawn");
+        assert_ne!(
+            nodes[0].position, nodes[1].position,
+            "two saved cards were drawn at the same coordinates, so one of them is invisible \
+             and unreachable"
+        );
+        // Whoever is later in tab order gives way, and the displacement is
+        // recorded rather than recomputed every frame -- otherwise the saved
+        // arrangement would go on describing two cards in one place.
+        assert_eq!(
+            nodes[0].position,
+            egui::pos2(0.0, 0.0),
+            "the first card in tab order keeps the position it was saved at"
+        );
+        assert!(
+            !nodes[1].placed,
+            "a displaced card must be written down at where it is actually drawn"
+        );
+    }
+
     #[test]
     fn positions_kept_for_closed_files_do_not_push_new_cards_off_screen() {
         // Closing a file keeps its position on purpose, so reopening puts the

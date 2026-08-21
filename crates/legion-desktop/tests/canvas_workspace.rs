@@ -813,3 +813,63 @@ fn undo_on_the_canvas_never_rewrites_the_buffer_behind_it() {
         "an undo or redo shortcut pressed on the canvas rewrote the buffer behind it"
     );
 }
+
+#[test]
+fn editor_function_keys_do_not_reach_the_buffer_behind_the_canvas() {
+    // F12 moves the cursor through a file that is not on screen and F9 drops a
+    // breakpoint on it. Both are published keymap entries routed through the
+    // same dispatcher as undo, and both were missing from the first version of
+    // the gate -- which made ADR-0051 and the dependency-policy entry wrong,
+    // not merely incomplete: they promise that no editor input reaches a buffer
+    // while the canvas is showing, and that is a claim about the whole set.
+    let workspace = workspace_with_files("legion_desktop_canvas_no_fkeys");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let before = app.runtime_snapshot();
+    let breakpoints_before = before.debug_projection.breakpoints.len();
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+    // The cursor position as the status bar states it. Read from the rendered
+    // frame rather than from a projection field, because what must not change
+    // is what the person can see.
+    let cursor_line = |frame: &egui::FullOutput| {
+        rendered_text(frame)
+            .into_iter()
+            .find(|line| line.starts_with("Ln "))
+            .unwrap_or_default()
+    };
+    let cursor_before = cursor_line(&canvas);
+    assert!(
+        !cursor_before.is_empty(),
+        "the status bar must state a cursor position, or this proves nothing"
+    );
+
+    for key in [egui::Key::F9, egui::Key::F12] {
+        let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }]));
+        let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    }
+
+    let after = app.runtime_snapshot();
+    assert_eq!(
+        after.debug_projection.breakpoints.len(),
+        breakpoints_before,
+        "F9 on the canvas put a breakpoint on a file nobody was looking at"
+    );
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert_eq!(
+        cursor_line(&settled),
+        cursor_before,
+        "F12 on the canvas moved the cursor through a buffer that was not on screen"
+    );
+}
