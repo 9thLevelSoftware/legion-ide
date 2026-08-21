@@ -387,14 +387,45 @@ fn render_path_stage_controls(
     // the visible twelve left the thirteenth hidden forever and the only way to
     // reach it was git directly. Ordering by what still needs staging means each
     // Stage click frees a slot for the next file that does.
+    //
+    // The budget is split rather than a plain prefix, for the same reason the
+    // hunk controls above split theirs: ordering alone fixes only one direction.
+    // With more than twelve *staged* hunkless files and nothing unstaged, a
+    // prefix over the sorted list would show twelve Unstage controls and hide
+    // the rest with no way to reach them -- the mirror image of the defect, and
+    // just as permanent.
     candidates.sort_by_key(|file| status_is_committable(&file.status));
 
     if candidates.is_empty() && withheld.is_empty() {
         return;
     }
-    let shown = candidates.len().min(GIT_HUNK_CONTROL_LIMIT);
-    let hidden = candidates.len().saturating_sub(shown);
-    let candidates = &candidates[..shown];
+    // Half each, with either side's unused share given to the other, so a list
+    // of only one kind still fills the whole budget.
+    let staged_total = candidates
+        .iter()
+        .filter(|file| status_is_committable(&file.status))
+        .count();
+    let unstaged_total = candidates.len() - staged_total;
+    let half = GIT_HUNK_CONTROL_LIMIT / 2;
+    let staged_budget = half.max(GIT_HUNK_CONTROL_LIMIT.saturating_sub(unstaged_total));
+    let unstaged_budget = GIT_HUNK_CONTROL_LIMIT.saturating_sub(staged_budget.min(staged_total));
+    let mut staged_shown = 0usize;
+    let mut unstaged_shown = 0usize;
+    let visible: Vec<&legion_ui::GitFileProjection> = candidates
+        .iter()
+        .copied()
+        .filter(|file| {
+            if status_is_committable(&file.status) {
+                staged_shown += 1;
+                staged_shown <= staged_budget
+            } else {
+                unstaged_shown += 1;
+                unstaged_shown <= unstaged_budget
+            }
+        })
+        .collect();
+    let hidden = candidates.len() - visible.len();
+    let candidates = &visible[..];
 
     // Only when something is under it. With every eligible file withheld -- a
     // few renames, an untracked directory -- a bare "Files" header above the

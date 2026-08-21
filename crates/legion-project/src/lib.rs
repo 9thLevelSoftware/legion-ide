@@ -1915,7 +1915,27 @@ fn git_stdout(
 ) -> Result<String, GitInspectionError> {
     let command_label = args.join(" ");
     let mut command = Command::new("git");
-    command.current_dir(root).args(args);
+    // Two global flags on every invocation, both closing a gap between what a
+    // path *is* and what git will do with it.
+    //
+    // `--literal-pathspecs`: a path is a filename here, never a pattern. `--`
+    // stops option parsing and does nothing about pathspec magic, so a tracked
+    // file genuinely named `:(glob)*.txt` turned one Stage click into
+    // `git add` over every matching file -- staging things the row never named,
+    // which is the exact outcome the app-layer "path must be in the projection"
+    // check exists to prevent.
+    //
+    // `core.quotePath=false`: by default git renders non-ASCII bytes in a
+    // filename as C-style escapes inside quotes (`"caf\303\251.txt"`) in diff
+    // headers, while porcelain `-z` reports the raw bytes. The two then disagree
+    // about the same file, and a file whose hunks cannot be matched to its
+    // status row is treated as hunkless -- which offers whole-path staging
+    // beside its own hunk controls.
+    command
+        .current_dir(root)
+        .arg("--literal-pathspecs")
+        .args(["-c", "core.quotePath=false"])
+        .args(args);
     let output = if let Some(input) = input {
         let mut child = command
             .stdin(Stdio::piped())
@@ -2205,17 +2225,6 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
 
 /// The path from a `+++` diff header.
 ///
-/// Git appends metadata after a TAB when the filename needs it — a name
-/// containing spaces produces `+++ b/foo bar.txt<TAB>`. Keeping that separator
-/// in the path made the hunk's path disagree with the one porcelain status
-/// reports, so a file with spaces in its name looked like it had no hunks: the
-/// panel then offered a whole-path Stage *beside* its hunk controls, and one
-/// click staged every hunk instead of the selected one.
-///
-/// Split before the TAB, not trimmed after it: a filename can legitimately end
-/// in a space, and trimming would corrupt a path git was quoting correctly.
-/// The path from a `+++` diff header.
-///
 /// Git appends metadata after a tab when the filename needs it: a name
 /// containing spaces produces `+++ b/foo bar.txt<TAB>`. Keeping that separator
 /// in the path made the hunk disagree with the path porcelain status reports, so
@@ -2224,7 +2233,11 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
 /// click stages every hunk instead of the selected one.
 ///
 /// Split at the tab rather than trimming after it: a filename can legitimately
-/// end in a space, and trimming would corrupt a path git was quoting correctly.
+/// end in a space, and trimming would corrupt it.
+///
+/// Quoting is handled upstream rather than here — `git_stdout` passes
+/// `core.quotePath=false`, so a non-ASCII name arrives as raw bytes instead of
+/// as an escaped `"b/cafÃ©.txt"` this parser would have to decode.
 fn parse_diff_plus_path(line: &str) -> Option<String> {
     line.strip_prefix("+++ ")
         .map(|rest| rest.split('\t').next().unwrap_or(rest))

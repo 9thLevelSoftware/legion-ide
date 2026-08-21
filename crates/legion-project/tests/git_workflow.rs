@@ -1582,3 +1582,61 @@ fn a_filename_with_spaces_projects_hunks_under_its_real_path() {
         "status should report the same path, got {changed:?}"
     );
 }
+
+/// A non-ASCII filename matches its own hunks.
+///
+/// With `core.quotePath` at its default, git renders non-ASCII bytes in a diff
+/// header as C-style escapes inside quotes — `+++ "b/caf\303\251.txt"` — while
+/// porcelain `-z` reports the raw bytes. The two then describe the same file
+/// differently, so its hunks cannot be matched to its status row and it is
+/// treated as hunkless: whole-path staging appears beside its own hunk controls,
+/// where one click stages every hunk instead of the selected one.
+///
+/// Fixed by asking git not to quote rather than by teaching the parser to
+/// unquote — one flag on every invocation, instead of a decoder that has to stay
+/// correct for every escape git might emit.
+#[test]
+fn a_non_ascii_filename_matches_its_own_hunks() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    let name = "caf\u{e9}.txt";
+    repo.write(name, "one\ntwo\nthree\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    repo.write(name, "one\nCHANGED\nthree\n");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let hunk_paths: Vec<&str> = snapshot
+        .hunks
+        .iter()
+        .map(|hunk| hunk.path.as_str())
+        .collect();
+    let changed: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+
+    assert!(
+        hunk_paths.contains(&name),
+        "the hunk must be filed under the real filename, got {hunk_paths:?}"
+    );
+    assert!(
+        changed.contains(&name),
+        "status must report the same filename, got {changed:?}"
+    );
+    for path in &hunk_paths {
+        assert!(
+            !path.starts_with('"'),
+            "a quoted path representation reached the projection: {path:?}"
+        );
+    }
+}
