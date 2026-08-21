@@ -193,6 +193,7 @@ impl AppComposition {
     /// Authorization happens here, on this thread, before any buffer text is
     /// captured for the worker: a refusal must never be something a background
     /// thread discovers after the excerpt has been copied out of the editor.
+    #[cfg(feature = "ai")]
     pub(crate) fn spawn_live_inline_prediction(
         &mut self,
         metadata: &InlinePredictionRequestMetadata,
@@ -250,6 +251,20 @@ impl AppComposition {
             // which releases it.
             Err(_error) => Ok(false),
         }
+    }
+
+    /// No live provider is compiled in, so there is nothing to hand to a worker.
+    ///
+    /// Returning `false` routes the request down the deterministic path, which
+    /// is what a build without the `ai` feature has always done. Stated as its
+    /// own definition rather than as a branch inside the live one, because the
+    /// live body names types that do not exist here at all.
+    #[cfg(not(feature = "ai"))]
+    pub(crate) fn spawn_live_inline_prediction(
+        &mut self,
+        _metadata: &InlinePredictionRequestMetadata,
+    ) -> Result<bool, AppCompositionError> {
+        Ok(false)
     }
 
     /// The buffer text a prediction request is allowed to see.

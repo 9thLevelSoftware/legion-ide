@@ -14,6 +14,18 @@
 
 use super::*;
 
+/// Completion tokens a product chat completion may return.
+///
+/// Named because it is also *declared* to the capability broker: an org policy
+/// bundle can cap tokens per request, and a request that declares none is never
+/// compared against that cap at all. A literal in one place and a declaration in
+/// another would drift, and the drift would show up as a cap that silently
+/// stopped applying.
+///
+/// Ungated deliberately. The declaration is made on every build; only the code
+/// that would consume the tokens is behind `ai`.
+pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
+
 /// Product completion bound to the **authorized** live backend only.
 ///
 /// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
@@ -25,15 +37,6 @@ use super::*;
 /// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
 /// chunks arrive). Ollama remains a single-chunk completion.
 #[cfg(feature = "ai")]
-/// Completion tokens a product chat completion may return.
-///
-/// Named because it is also *declared* to the capability broker: an org policy
-/// bundle can cap tokens per request, and a request that declares none is never
-/// compared against that cap at all. A literal in one place and a declaration in
-/// another would drift, and the drift would show up as a cap that silently
-/// stopped applying.
-pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
-
 pub(crate) fn complete_product_chat(
     backend: Option<ProductAiLiveBackend>,
     system: &str,
