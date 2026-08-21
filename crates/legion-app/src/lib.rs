@@ -2036,6 +2036,17 @@ impl ProductAiLaneReservation {
         self.sink.clone()
     }
 
+    /// Give the lane up without finishing it, because somebody else already has.
+    ///
+    /// A cancelled prediction releases the lane from the app thread so the rest
+    /// of the product is not blocked behind a provider call nobody is waiting
+    /// for. The worker still holds this reservation until its request returns,
+    /// and it must not release the lane a second time -- by then it may belong
+    /// to another operation.
+    fn abandon(mut self) {
+        self.armed = false;
+    }
+
     fn finish(mut self, completion: Option<&ProductChatCompletion>) {
         self.armed = false;
         self.sink.finish(completion, self.operation);
@@ -14580,6 +14591,12 @@ pub struct AppComposition {
     live_product_ai_stream: Arc<LiveProductAiStreamSink>,
     /// Live Assist proposal awaiting worker completion (registered on poll).
     pending_assist_proposal: Option<PendingAssistProposalJob>,
+    /// Set when a running inline prediction has been cancelled.
+    ///
+    /// The worker cannot be interrupted -- the provider client is blocking --
+    /// but it can be told that nobody wants its answer, so it releases nothing
+    /// and publishes nothing when it finally returns.
+    pending_inline_prediction_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The inline prediction request a worker thread is currently running.
     ///
     /// Kept so that a worker returning nothing -- an unreachable provider, an
@@ -14947,6 +14964,7 @@ impl AppComposition {
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
             pending_inline_prediction: None,
+            pending_inline_prediction_cancelled: None,
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -24520,7 +24538,10 @@ impl AppComposition {
         provider_class: legion_protocol::AssistedAiProviderClass,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         self.require_assist_mode()?;
-        let instruction_label = instruction_label.into();
+        // Trimmed to the length declared to the broker above. An unbounded
+        // instruction makes the declaration a number the request is free to
+        // exceed, which is the same as declaring nothing.
+        let instruction_label = bounded_assist_instruction(&instruction_label.into());
         let context = self.active_documents.require_active_save_context()?;
         let event_context = self.next_event_context();
         let generated_at = TimestampMillis::now();
@@ -24684,7 +24705,7 @@ impl AppComposition {
                         // is never compared against the org's cap, so a bundle
                         // capping tokens per request had nothing to cap.
                         budget_request_tokens: Some(declared_request_tokens(
-                            ASSIST_EXCERPT_MAX_CHARS,
+                            ASSIST_PROMPT_MAX_CHARS,
                             crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                         )),
                         budget_request_cost_cents: live_backend
@@ -24865,9 +24886,18 @@ impl AppComposition {
                 false
             }
         };
+        // Whether a worker runs follows the backend the broker approved, not a
+        // second probe of the same question.
+        //
+        // `product_ai_will_attempt_live` re-asks whether a live route exists.
+        // Between authorization and here that answer can change -- an Ollama
+        // server that stopped, a network that went away -- and when it flipped
+        // to `false` the fallback ran the already-authorized backend
+        // *synchronously on this thread*, which is the blocking provider call
+        // this lane exists to prevent. The authorized backend is a fact; a
+        // re-probe is a guess about it.
         #[cfg(feature = "ai")]
-        let use_background_live =
-            product_ai_will_attempt_live(self.preferred_ai_provider) || inject_assist_spawn_failure;
+        let use_background_live = live_backend.is_some() || inject_assist_spawn_failure;
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
         let lane_reservation = ProductAiLaneReservation::try_acquire(
@@ -27408,7 +27438,7 @@ impl AppComposition {
                     // has nothing to match against.
                     ai_provider_id: Some(route_provider_id_for_decision),
                     budget_request_tokens: Some(declared_request_tokens(
-                        ASSIST_EXCERPT_MAX_CHARS,
+                        ASSIST_PROMPT_MAX_CHARS,
                         crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                     )),
                     budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
@@ -27762,6 +27792,15 @@ impl AppComposition {
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
+        // Release the shared lane now, rather than when the provider gets round
+        // to answering.
+        //
+        // The worker holds a `ProductAiLaneReservation` for the whole of its
+        // request, and the transport allows that up to 120 seconds. Leaving it
+        // held meant `product_ai_stream_in_flight()` stayed true after the
+        // cancel: every Assist proposal, prediction and Delegate control stayed
+        // disabled while the surface said the prediction had been cancelled.
+        self.release_cancelled_inline_prediction_lane();
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             return Err(AppCompositionError::AiRuntime(
@@ -27844,6 +27883,22 @@ impl AppComposition {
         self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Cancel)?;
         self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Cancelled)?;
         Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    /// Tell a running prediction worker that nobody is waiting, and free the lane.
+    ///
+    /// Safe when no worker is running: the flag is absent and the sink is not
+    /// in flight, so both halves are no-ops.
+    fn release_cancelled_inline_prediction_lane(&mut self) {
+        self.pending_inline_prediction = None;
+        let Some(flag) = self.pending_inline_prediction_cancelled.take() else {
+            return;
+        };
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.live_product_ai_stream.snapshot().operation.as_str() == "assist.inline_prediction" {
+            self.live_product_ai_stream
+                .finish(None, "assist.inline_prediction");
+        }
     }
 
     fn inline_prediction_request_metadata(

@@ -363,14 +363,3 @@ pub(crate) fn product_stream_from_completion(
         text_preview: bounded_label(completion.text.as_str(), 480),
     }
 }
-
-/// Whether product AI will attempt a live (non-fixture) completion for `preference`.
-#[cfg(feature = "ai")]
-pub(crate) fn product_ai_will_attempt_live(preference: ProductAiProviderPreference) -> bool {
-    product_ai_selected_live_backend(preference).is_some()
-}
-
-#[cfg(not(feature = "ai"))]
-pub(crate) fn product_ai_will_attempt_live(_preference: ProductAiProviderPreference) -> bool {
-    false
-}

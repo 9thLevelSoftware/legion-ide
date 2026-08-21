@@ -22,6 +22,50 @@ pub(crate) const INLINE_PREDICTION_EXCERPT_MAX_CHARS: usize = 2_000;
 /// Completion tokens an inline prediction may return.
 pub(crate) const INLINE_PREDICTION_COMPLETION_MAX_TOKENS: u32 = 128;
 
+/// Characters of caller-supplied instruction an Assist operation may send.
+///
+/// Bounded because it is declared. `StartAiProposal` takes an instruction label
+/// from the caller with no length of its own, and the prompt built from it also
+/// carries the file path, framing and a system preamble -- so a declaration
+/// counting only the excerpt understated the request, and an org token cap set
+/// between the declared size and the real one permitted exactly the request it
+/// was meant to refuse. A budget declaration is only as honest as the smallest
+/// bound on what it describes.
+pub(crate) const ASSIST_INSTRUCTION_MAX_CHARS: usize = 2_000;
+
+/// Characters of prompt framing: system preamble, file path, delimiters.
+///
+/// A generous fixed allowance rather than a measurement of the template, so
+/// that editing the prompt cannot silently shrink what was declared.
+pub(crate) const ASSIST_PROMPT_FRAMING_MAX_CHARS: usize = 1_000;
+
+/// Every character an Assist prompt can carry: excerpt, instruction, framing.
+///
+/// One number, so the three bounds and the declaration cannot drift apart.
+pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize =
+    ASSIST_EXCERPT_MAX_CHARS + ASSIST_INSTRUCTION_MAX_CHARS + ASSIST_PROMPT_FRAMING_MAX_CHARS;
+
+/// The declared total must cover every part, or it understates the request.
+///
+/// A compile-time check rather than a test: this cannot be true at some times
+/// and false at others, and a test asserting it would only ever restate the
+/// arithmetic above.
+const _: () = assert!(
+    ASSIST_PROMPT_MAX_CHARS > ASSIST_EXCERPT_MAX_CHARS + ASSIST_INSTRUCTION_MAX_CHARS,
+    "the declared prompt must allow for framing as well as excerpt and instruction"
+);
+
+/// Trim a caller-supplied instruction to the length that was declared.
+///
+/// Declaring a bound and not enforcing it is the same defect as declaring
+/// nothing: the cap is compared against a number the request is free to exceed.
+pub(crate) fn bounded_assist_instruction(instruction: &str) -> String {
+    instruction
+        .chars()
+        .take(ASSIST_INSTRUCTION_MAX_CHARS)
+        .collect()
+}
+
 /// The most tokens a request could consume, for declaration to the broker.
 ///
 /// A ceiling rather than an estimate of what this particular call will use,
@@ -108,10 +152,19 @@ impl AppComposition {
             }
         }
 
-        // An empty org allowlist is "unrestricted", not "nothing allowed" --
-        // treating it as the latter would deny every route the moment any bundle
-        // was installed. A non-empty one intersects.
-        if !org.network_policy.allowlist.is_empty() {
+        // An empty org allowlist means what it means to the broker: nothing.
+        //
+        // `DenyByDefaultBroker` allows a destination only when some allowlist
+        // entry matches it, so an empty list denies every host. Reading it here
+        // as "unrestricted" made the ceiling disagree with the component that
+        // enforces it, in the one direction a ceiling must never take: a bundle
+        // that switched off network egress entirely kept the product's own
+        // Ollama and Anthropic hosts, and the routes this PR made reachable
+        // would have uploaded workspace excerpts under a policy forbidding it.
+        //
+        // Intersecting unconditionally is what the org asked for. An empty
+        // result denies, which is exactly what an empty org list says.
+        {
             // Case-insensitively, for the reason above and with a sharper
             // consequence: an exact comparison between a configured endpoint of
             // `API.ANTHROPIC.COM` and an allowlist entry of `api.anthropic.com`
@@ -220,12 +273,22 @@ impl AppComposition {
 
         let buffer_excerpt = self.inline_prediction_excerpt(metadata);
         let metadata_for_worker = metadata.clone();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_for_worker = cancelled.clone();
         let worker = move || {
             let prediction = try_live_product_inline_prediction(
                 Some(backend),
                 &metadata_for_worker,
                 &buffer_excerpt,
             );
+            // Cancelled while this ran. The lane was already released from the
+            // app thread so the product would not sit blocked behind a request
+            // nobody wanted; releasing it again here could free a lane that now
+            // belongs to somebody else.
+            if cancelled_for_worker.load(std::sync::atomic::Ordering::SeqCst) {
+                lane_reservation.abandon();
+                return;
+            }
             lane_reservation.finish_background(
                 ProductAiBackgroundResult {
                     assistant_message_id: String::new(),
@@ -243,6 +306,7 @@ impl AppComposition {
         {
             Ok(_handle) => {
                 self.pending_inline_prediction = Some(metadata.clone());
+                self.pending_inline_prediction_cancelled = Some(cancelled);
                 Ok(true)
             }
             // A spawn failure is not a reason to have no ghost text, and it is
@@ -253,12 +317,6 @@ impl AppComposition {
         }
     }
 
-    /// No live provider is compiled in, so there is nothing to hand to a worker.
-    ///
-    /// Returning `false` routes the request down the deterministic path, which
-    /// is what a build without the `ai` feature has always done. Stated as its
-    /// own definition rather than as a branch inside the live one, because the
-    /// live body names types that do not exist here at all.
     #[cfg(not(feature = "ai"))]
     pub(crate) fn spawn_live_inline_prediction(
         &mut self,
@@ -343,6 +401,17 @@ mod org_ceiling {
     /// Editing the real bundle rather than hand-rolling one keeps the
     /// fixture honest about the schema: a bundle that stopped parsing would
     /// fail here rather than quietly testing a default.
+    /// Sign and verify a bundle payload this test built.
+    fn signed(payload: &str) -> legion_security::VerifiedPolicyBundle {
+        let keyring = PolicyKeyring::new(vec![PolicySigningKey {
+            key_id: KEY_ID.to_string(),
+            verifying_key_b64: policy_bundle_verifying_key_b64(&SEED),
+        }]);
+        sign_policy_bundle(payload, KEY_ID, &SEED)
+            .verify(&keyring)
+            .expect("a bundle this test signed must verify")
+    }
+
     fn bundle_with(find: &str, replace: &str) -> legion_security::VerifiedPolicyBundle {
         let payload = include_str!("../../../xtask/legion-policy.example.toml");
         assert!(
@@ -504,6 +573,59 @@ mod org_ceiling {
                 .refusal("ai.provider.invoke", Some(0), None, Some(0))
                 .is_none(),
             "the undeclared case is what this fix exists to stop being the norm"
+        );
+    }
+
+    #[test]
+    fn an_empty_org_allowlist_denies_every_host() {
+        // `DenyByDefaultBroker` allows a destination only when some allowlist
+        // entry matches it, so an empty list denies every host. Reading it here
+        // as "unrestricted" made the ceiling disagree with the component that
+        // enforces it, in the one direction a ceiling must never take: a bundle
+        // that switched network egress off entirely kept the product's own
+        // Ollama and Anthropic hosts, and the routes this PR made reachable
+        // would have uploaded workspace excerpts under a policy forbidding it.
+        // Line endings normalised: the file is CRLF in this repository and may be
+        // checked out as LF elsewhere, and a fixture that matched only one of
+        // those would pass or fail by platform rather than by behaviour.
+        let payload =
+            include_str!("../../../xtask/legion-policy.example.toml").replace("\r\n", "\n");
+        let hosts = "  \"localhost\",\n  \"127.0.0.1\",\n  \"::1\",\n";
+        assert!(
+            payload.contains(hosts),
+            "the example bundle no longer lists those hosts, so emptying them proves nothing"
+        );
+
+        let mut app = super::AppComposition::new();
+        app.set_org_policy_bundle(signed(&payload.replace(hosts, "")));
+
+        let merged = app.product_ai_policy_with_org_ceiling(None);
+        assert!(
+            merged.network_policy.allowlist.is_empty(),
+            "an org bundle that allows no hosts left {:?} allowed, so a policy forbidding \
+             egress would still have let workspace text out",
+            merged.network_policy.allowlist
+        );
+    }
+
+    #[test]
+    fn the_assist_declaration_covers_the_whole_prompt() {
+        // The declaration counted only the excerpt while the prompt also carried
+        // an unbounded instruction, the file path and a system preamble. An org
+        // token cap set between the declared size and the real one then
+        // permitted exactly the request it was meant to refuse.
+        // And the bound is enforced, not merely declared. A bound nothing
+        // applies is a number the request is free to exceed.
+        let long = "x".repeat(super::ASSIST_INSTRUCTION_MAX_CHARS * 3);
+        assert_eq!(
+            super::bounded_assist_instruction(&long).chars().count(),
+            super::ASSIST_INSTRUCTION_MAX_CHARS,
+            "an instruction longer than the declared bound was not trimmed"
+        );
+        assert_eq!(
+            super::bounded_assist_instruction("short"),
+            "short",
+            "an instruction within the bound must be left exactly as written"
         );
     }
 

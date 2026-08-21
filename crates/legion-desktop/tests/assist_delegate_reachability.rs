@@ -166,24 +166,7 @@ fn clicking_predict_puts_a_deterministic_suggestion_on_screen() {
     // had answered, which is the synchronous behaviour this replaced.
     let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
     let settled_frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
-    let live = app
-        .runtime_snapshot()
-        .assist_inline_prediction_projection
-        .clone();
-    eprintln!(
-        "DBG at settled frame: in_flight={} has_active={} label={:?}",
-        live.request_in_flight,
-        live.active_prediction.is_some(),
-        live.active_prediction
-            .as_ref()
-            .map(|p| p.provider_label.clone())
-    );
     let text = rendered_text(&settled_frame);
-    eprintln!(
-        "DBG frame has Cancel={} has Predict={}",
-        text.iter().any(|l| l == "Cancel"),
-        text.iter().any(|l| l == "Predict")
-    );
     assert!(
         text.iter().any(|line| line == &prediction.ghost_text_label),
         "the suggested text `{}` must be rendered, not merely projected; frame was {text:?}",
