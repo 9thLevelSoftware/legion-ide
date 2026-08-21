@@ -244,6 +244,12 @@ impl CommandDispatcher {
             CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
             }
+            CommandDispatchIntent::StageGitPath { path } => {
+                Ok(AppCommandRequest::StageGitPath { path })
+            }
+            CommandDispatchIntent::UnstageGitPath { path } => {
+                Ok(AppCommandRequest::UnstageGitPath { path })
+            }
             CommandDispatchIntent::ResolveGitConflict { path, choice } => {
                 Ok(AppCommandRequest::ResolveGitConflict {
                     path,

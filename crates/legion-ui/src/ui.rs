@@ -1683,6 +1683,13 @@ pub struct GitHunkProjection {
     pub added_lines: u32,
     /// Deleted line count.
     pub deleted_lines: u32,
+    /// Whether this hunk only reports a submodule with a dirty worktree.
+    ///
+    /// Nothing in the parent repository can be staged from it: the recorded
+    /// commit has not changed, so `git apply --cached` succeeds without
+    /// touching the index and the same control comes back on the next refresh.
+    /// A surface that offers it reports a success that changed nothing.
+    pub submodule_dirty_only: bool,
     /// Optional scope/function context.
     pub context: Option<String>,
 }
@@ -1822,6 +1829,18 @@ pub struct GitProjection {
     pub changed_files: Vec<GitFileProjection>,
     /// Staged and unstaged hunks.
     pub hunks: Vec<GitHunkProjection>,
+    /// Whether `hunks` omits hunks the repository actually has.
+    ///
+    /// A surface counting what it received cannot tell "twelve of fourteen"
+    /// from "twelve of thousands", so a panel that states an exact number of
+    /// hidden hunks from a truncated list states a wrong one.
+    pub hunks_truncated: bool,
+    /// Whether a merge is underway that a bare `git commit` would conclude.
+    ///
+    /// True mid-merge, where a commit finishes the merge even with an index
+    /// identical to `HEAD`. Cherry-pick and revert are deliberately excluded:
+    /// git refuses an empty commit for those without `--allow-empty`.
+    pub merge_awaiting_commit: bool,
     /// Inline blame rows for the active file.
     pub blame_lines: Vec<GitBlameLineProjection>,
     /// Commit graph/history rows.
@@ -1865,6 +1884,8 @@ impl GitProjection {
             remote_default_branch: None,
             changed_files: Vec::new(),
             hunks: Vec::new(),
+            hunks_truncated: false,
+            merge_awaiting_commit: false,
             blame_lines: Vec::new(),
             commits: Vec::new(),
             conflicts: Vec::new(),
@@ -3071,6 +3092,16 @@ pub enum CommandDispatchIntent {
     StageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
+    },
+    /// Stage every change to one path, hunk or not.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
     },
     /// Unstage one cached git hunk by projected hunk id.
     UnstageGitHunk {
