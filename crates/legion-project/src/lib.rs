@@ -1314,12 +1314,32 @@ pub fn unstage_git_path(
     root: impl AsRef<Path>,
     relative_path: &str,
 ) -> Result<(), GitInspectionError> {
-    git_stdout(
-        root.as_ref(),
-        &["restore", "--staged", "--", relative_path],
-        None,
-    )
-    .map(|_| ())
+    let root = root.as_ref();
+    match git_stdout(root, &["restore", "--staged", "--", relative_path], None) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            // Before the first commit there is no `HEAD` to restore from, and
+            // `git restore --staged` exits with `could not resolve HEAD` while
+            // leaving the entry staged. That is reachable: staging a hunkless
+            // path in a fresh repository is exactly what the new control does,
+            // and Unstage beside it would then be a button that only errors.
+            //
+            // `git rm --cached` is the operation `restore` performs in that
+            // state -- drop the index entry, leave the working tree alone -- and
+            // is only attempted when `HEAD` really is unresolvable, so a genuine
+            // failure is still reported rather than retried into a delete.
+            if git_stdout(root, &["rev-parse", "--verify", "HEAD"], None).is_err() {
+                git_stdout(
+                    root,
+                    &["rm", "--cached", "--force", "--", relative_path],
+                    None,
+                )
+                .map(|_| ())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Unstage one projected staged git hunk.

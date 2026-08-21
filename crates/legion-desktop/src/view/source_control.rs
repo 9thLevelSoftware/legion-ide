@@ -301,6 +301,44 @@ fn render_git_hunk_controls(
     }
 }
 
+/// Whether a whole-path stage control is safe to offer for this file.
+///
+/// "Has no hunk" is not sufficient, and each way it falls short stages
+/// something the person did not choose:
+///
+/// * **A truncated hunk list.** Earlier files can consume the snapshot's hunk
+///   allowance, leaving a text file with real hunks and no entry in the
+///   projected vector. Staging the whole path then stages every hunk in it,
+///   including the ones deliberately left unstaged. Numstat is the tell: it
+///   comes from `git diff --numstat` and is not subject to the hunk budget, so
+///   a file reporting changed lines has hunks whether or not they survived.
+/// * **An untracked directory.** Porcelain projects `?? dir/` as one row, and
+///   `git add dir/` stages everything inside it — many files, from one click,
+///   on a row that named none of them.
+/// * **A rename.** The projected path is porcelain's trailing field, which is
+///   the *source* name. Unstaging with it leaves the destination staged as an
+///   addition and restores only the deletion: a half-undone rename, which is
+///   worse than no control at all.
+///
+/// Withholding is deliberate over guessing. The panel says why beneath the list.
+fn path_control_is_safe(file: &legion_ui::GitFileProjection, hunks_truncated: bool) -> bool {
+    if file.path.ends_with('/') {
+        return false;
+    }
+    if file
+        .status
+        .chars()
+        .next()
+        .is_some_and(|index| index == 'R' || index == 'C')
+    {
+        return false;
+    }
+    if hunks_truncated && (file.inserted_lines > 0 || file.deleted_lines > 0) {
+        return false;
+    }
+    true
+}
+
 /// Stage or unstage a whole path, for changes no hunk can express.
 ///
 /// `git diff` emits no `@@` hunk for a file git has never seen, for a modified
@@ -329,7 +367,8 @@ fn render_path_stage_controls(
         .map(|hunk| hunk.path.as_str())
         .collect();
 
-    let candidates: Vec<&legion_ui::GitFileProjection> = snapshot
+    let truncated = snapshot.git_projection.hunks_truncated;
+    let eligible: Vec<&legion_ui::GitFileProjection> = snapshot
         .git_projection
         .changed_files
         .iter()
@@ -337,12 +376,17 @@ fn render_path_stage_controls(
         // An unmerged path is not stageable by `git add` in any useful sense:
         // it would mark a conflict resolved that nobody resolved.
         .filter(|file| !status_pair(&file.status).is_some_and(|(x, y)| is_unmerged(x, y)))
-        .take(GIT_HUNK_CONTROL_LIMIT)
         .collect();
+    let (candidates, withheld): (Vec<_>, Vec<_>) = eligible
+        .into_iter()
+        .partition(|file| path_control_is_safe(file, truncated));
 
-    if candidates.is_empty() {
+    if candidates.is_empty() && withheld.is_empty() {
         return;
     }
+    let shown = candidates.len().min(GIT_HUNK_CONTROL_LIMIT);
+    let hidden = candidates.len().saturating_sub(shown);
+    let candidates = &candidates[..shown];
 
     super::components::section_header(ui, "Files", Some(theme::tokens().accent.cyan));
     for file in candidates {
@@ -370,6 +414,21 @@ fn render_path_stage_controls(
             }
             ui.label(theme::muted(format!("{} {}", file.status, file.path)));
         });
+    }
+    // The hunk controls above state their own truncation; a silent cap here
+    // would show twelve buttons and no sign that a thirteenth file exists.
+    if hidden > 0 {
+        ui.label(theme::muted(format!("{hidden} more file(s) not shown")));
+    }
+    if !withheld.is_empty() {
+        // Named rather than omitted. A row that quietly has no button beside
+        // rows that do reads as the panel being broken -- the same reason the
+        // untracked note existed before there was an action to replace it.
+        ui.label(theme::muted(format!(
+            "{} file(s) need git directly: a directory, a rename, or a file whose \
+             hunks exceeded this view's budget",
+            withheld.len()
+        )));
     }
 }
 
@@ -593,4 +652,80 @@ pub(super) fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             .map(|warn| format!("git commit-warning: {warn}")),
     );
     rows
+}
+
+#[cfg(test)]
+mod path_control_safety {
+    use super::path_control_is_safe;
+    use legion_ui::GitFileProjection;
+
+    fn file(path: &str, status: &str, inserted: u32, deleted: u32) -> GitFileProjection {
+        GitFileProjection {
+            path: path.to_string(),
+            status: status.to_string(),
+            inserted_lines: inserted,
+            deleted_lines: deleted,
+            unstaged_hunk_count: 0,
+            staged_hunk_count: 0,
+            stageable: false,
+            diff_strategy: legion_ui::GitDiffStrategyProjection::LineFallback,
+            fallback_reason: None,
+            conflict: false,
+        }
+    }
+
+    /// The cases the control exists for stay offered.
+    #[test]
+    fn hunkless_files_keep_their_control() {
+        // Untracked, binary modification, mode-only change: none produce a hunk
+        // and none report changed lines, so none can be hiding staged content.
+        for (path, status) in [("new.rs", "??"), ("blob.bin", " M"), ("run.sh", " M")] {
+            assert!(
+                path_control_is_safe(&file(path, status, 0, 0), false),
+                "{path} is exactly the case this control was added for"
+            );
+        }
+    }
+
+    /// A truncated hunk list must not make a text file look hunkless.
+    ///
+    /// Earlier files can consume the snapshot's hunk allowance, leaving a file
+    /// with real hunks and no entry in the projected vector. A whole-path Stage
+    /// would then stage every hunk in it -- including the ones deliberately left
+    /// unstaged, which is the one outcome hunk-level staging exists to prevent.
+    ///
+    /// Numstat is the tell: it comes from `git diff --numstat` and is not
+    /// subject to the hunk budget.
+    #[test]
+    fn a_text_file_with_truncated_hunks_is_withheld() {
+        let changed = file("big.rs", " M", 40, 12);
+        assert!(
+            !path_control_is_safe(&changed, true),
+            "a file reporting changed lines has hunks, whether or not they survived truncation"
+        );
+        assert!(
+            path_control_is_safe(&changed, false),
+            "with nothing truncated the projection is complete and can be trusted"
+        );
+    }
+
+    /// An untracked directory stages files the row never named.
+    #[test]
+    fn an_untracked_directory_is_withheld() {
+        assert!(
+            !path_control_is_safe(&file("build/", "??", 0, 0), false),
+            "porcelain projects an untracked directory as one row, and `git add dir/` stages everything inside it"
+        );
+    }
+
+    /// A rename carries the source path, so unstaging it half-undoes the rename.
+    #[test]
+    fn a_rename_is_withheld() {
+        for status in ["R ", "RM", "C "] {
+            assert!(
+                !path_control_is_safe(&file("old.rs", status, 0, 0), false),
+                "{status} projects the source name; unstaging with it leaves the destination staged as an addition"
+            );
+        }
+    }
 }
