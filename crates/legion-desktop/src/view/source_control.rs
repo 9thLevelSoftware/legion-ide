@@ -377,9 +377,17 @@ fn render_path_stage_controls(
         // it would mark a conflict resolved that nobody resolved.
         .filter(|file| !status_pair(&file.status).is_some_and(|(x, y)| is_unmerged(x, y)))
         .collect();
-    let (candidates, withheld): (Vec<_>, Vec<_>) = eligible
+    let (mut candidates, withheld): (Vec<_>, Vec<_>) = eligible
         .into_iter()
         .partition(|file| path_control_is_safe(file, truncated));
+    // Unstaged first, so the window moves as work is done.
+    //
+    // A staged file keeps its row (it now offers Unstage), so a plain
+    // first-twelve prefix was permanent: with thirteen untracked files, staging
+    // the visible twelve left the thirteenth hidden forever and the only way to
+    // reach it was git directly. Ordering by what still needs staging means each
+    // Stage click frees a slot for the next file that does.
+    candidates.sort_by_key(|file| status_is_committable(&file.status));
 
     if candidates.is_empty() && withheld.is_empty() {
         return;
@@ -388,7 +396,12 @@ fn render_path_stage_controls(
     let hidden = candidates.len().saturating_sub(shown);
     let candidates = &candidates[..shown];
 
-    super::components::section_header(ui, "Files", Some(theme::tokens().accent.cyan));
+    // Only when something is under it. With every eligible file withheld -- a
+    // few renames, an untracked directory -- a bare "Files" header above the
+    // explanation reads as a section that failed to load.
+    if !candidates.is_empty() {
+        super::components::section_header(ui, "Files", Some(theme::tokens().accent.cyan));
+    }
     for file in candidates {
         ui.horizontal_wrapped(|ui| {
             let staged = status_is_committable(&file.status);

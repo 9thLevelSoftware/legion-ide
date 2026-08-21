@@ -2081,7 +2081,20 @@ fn parse_diff_hunks(
     let mut current_path = String::new();
     let mut hunk_lines = Vec::<String>::new();
 
-    for line in patch.lines() {
+    // `split_inclusive('\n')` with the newline trimmed back off, rather than
+    // `lines()`.
+    //
+    // `lines()` strips a trailing `\r` as well as the `\n`, so a repository
+    // storing CRLF content (`core.autocrlf=false`, or a `-text` attribute) had
+    // every content line silently converted to LF when the patch was rebuilt.
+    // `git apply --cached` then compared LF deletion lines against CRLF file
+    // content and refused with "patch does not apply" -- so hunk staging did
+    // not work at all in such a repository, which this PR made reachable
+    // rather than caused.
+    for line in patch
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+    {
         if line.starts_with("diff --git ") {
             flush_git_hunk(
                 &mut hunks,
@@ -2190,8 +2203,31 @@ fn parse_diff_git_path(line: &str) -> Option<String> {
         .filter(|path| path != "/dev/null")
 }
 
+/// The path from a `+++` diff header.
+///
+/// Git appends metadata after a TAB when the filename needs it — a name
+/// containing spaces produces `+++ b/foo bar.txt<TAB>`. Keeping that separator
+/// in the path made the hunk's path disagree with the one porcelain status
+/// reports, so a file with spaces in its name looked like it had no hunks: the
+/// panel then offered a whole-path Stage *beside* its hunk controls, and one
+/// click staged every hunk instead of the selected one.
+///
+/// Split before the TAB, not trimmed after it: a filename can legitimately end
+/// in a space, and trimming would corrupt a path git was quoting correctly.
+/// The path from a `+++` diff header.
+///
+/// Git appends metadata after a tab when the filename needs it: a name
+/// containing spaces produces `+++ b/foo bar.txt<TAB>`. Keeping that separator
+/// in the path made the hunk disagree with the path porcelain status reports, so
+/// a file with spaces in its name looked like it had no hunks at all -- and the
+/// panel then offered a whole-path Stage *beside* its hunk controls, where one
+/// click stages every hunk instead of the selected one.
+///
+/// Split at the tab rather than trimming after it: a filename can legitimately
+/// end in a space, and trimming would corrupt a path git was quoting correctly.
 fn parse_diff_plus_path(line: &str) -> Option<String> {
     line.strip_prefix("+++ ")
+        .map(|rest| rest.split('\t').next().unwrap_or(rest))
         .map(strip_git_side_prefix)
         .filter(|path| path != "/dev/null")
 }

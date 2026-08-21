@@ -26793,10 +26793,19 @@ impl AppComposition {
                 format!("`{path}` is not a changed file in the current projection"),
             ));
         }
+        // Run from the repository root, not the workspace root.
+        //
+        // The projection reports repository-relative paths, so when the opened
+        // workspace is a subdirectory (`/repo/sub`) a status entry reads
+        // `sub/blob.bin` and `git add -- sub/blob.bin` executed there resolves to
+        // `/repo/sub/sub/blob.bin`. The control then failed for every file in
+        // such a workspace, which is an ordinary way to open one.
+        let repo_root =
+            git_repository_root(Path::new(root_path)).map_err(git_inspection_protocol_error)?;
         if stage {
-            stage_git_path(Path::new(root_path), path).map_err(git_inspection_protocol_error)?;
+            stage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
         } else {
-            unstage_git_path(Path::new(root_path), path).map_err(git_inspection_protocol_error)?;
+            unstage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
         }
         Ok(self.refresh_git_projection())
     }

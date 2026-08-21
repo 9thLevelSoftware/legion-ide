@@ -1524,3 +1524,61 @@ fn a_cherry_pick_resolved_to_the_current_side_is_not_committable() {
         String::from_utf8_lossy(&commit.stdout)
     );
 }
+
+/// A filename with spaces still projects its hunks against the right path.
+///
+/// Git appends metadata after a tab when a filename needs it, so a change to
+/// `foo bar.txt` produces a `+++ b/foo bar.txt<TAB>` header. Keeping that
+/// separator in the hunk's path made it disagree with the path porcelain status
+/// reports, and the file then looked like it had no hunks at all.
+///
+/// That is not a cosmetic mismatch. A file believed hunkless gets a whole-path
+/// Stage control *beside* its hunk controls, where one click stages every hunk
+/// instead of the selected one — the exact outcome hunk-level staging exists to
+/// prevent, reachable through a filename.
+#[test]
+fn a_filename_with_spaces_projects_hunks_under_its_real_path() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("foo bar.txt", "one\ntwo\nthree\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "seed"]);
+    repo.write("foo bar.txt", "one\nCHANGED\nthree\n");
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+
+    let hunk_paths: Vec<&str> = snapshot
+        .hunks
+        .iter()
+        .map(|hunk| hunk.path.as_str())
+        .collect();
+    assert!(
+        hunk_paths.contains(&"foo bar.txt"),
+        "the hunk must be filed under the path status reports, got {hunk_paths:?}"
+    );
+    for path in &hunk_paths {
+        assert!(
+            !path.contains('\t'),
+            "a diff header's trailing metadata leaked into the hunk path: {path:?}"
+        );
+    }
+
+    // And the two halves of the projection agree, which is what the panel relies
+    // on to decide a file is hunkless.
+    let changed: Vec<&str> = snapshot
+        .changed_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert!(
+        changed.contains(&"foo bar.txt"),
+        "status should report the same path, got {changed:?}"
+    );
+}
