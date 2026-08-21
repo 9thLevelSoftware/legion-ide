@@ -91,10 +91,34 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > staged. Fixed in `crates/legion-desktop/src/view/source_control.rs` and the
 > activity rail in `crates/legion-desktop/src/view.rs`, guarded by
 > `crates/legion-desktop/tests/source_control_reachability.rs`, which asks git —
-> not the projection — whether the index changed. Untracked files still have no
-> stage control: staging applies a projected hunk, `git diff` emits none for a
-> file git has never seen, and there is no path-level `git add` authority to
-> reach for. The panel says so rather than showing a row with no button.
+> not the projection — whether the index changed.
+>
+> That sentence used to end by saying untracked files have no stage control and
+> no path-level authority exists to give them one. Both halves stopped being
+> true in this same change and the note is corrected rather than left standing:
+> `StageGitPath` and `UnstageGitPath` are routed through the renderer, the
+> bridge, app authority and `legion-project` to `git add --` and
+> `git restore --staged --`, so an untracked file, a modified binary, a
+> mode-only change and anything else `git diff` emits no hunk for now has a
+> Stage control of its own.
+>
+> What an operator should still expect to be *absent*, so a missing button reads
+> as a decision rather than a defect:
+>
+> - **Directories.** An untracked directory is reported as one row ending in
+>   `/`, and staging it would add every file underneath, unseen.
+> - **Renames and copies.** A status beginning `R` or `C` names two paths, and
+>   one control cannot say which one it acts on.
+> - **Files with hidden textual hunks, when the hunk list is truncated.** Those
+>   have hunk controls of their own; offering whole-path staging beside them is
+>   one click from staging every hunk in a file somebody meant to stage one
+>   hunk of.
+>
+> Each of those is named on screen rather than silently omitted, and each has a
+> test in `source_control_reachability.rs`. Past the twelve-control budget,
+> hunks and files are reachable through "Show the other N …" rather than being
+> hidden — a note that named what it could not reach was the earlier behaviour
+> and is not what to check for now.
 
 > **Why rows 9-12 were never passable.** Until 2026-08-20 the shipped app could
 > not start a debug session at all. `DebugWorkflow::runtime_enabled` was set by

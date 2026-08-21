@@ -2052,14 +2052,52 @@ fn git_numstat(
     };
     let mut stats = HashMap::new();
     for line in output.lines() {
-        let mut parts = line.split('\t');
+        // `splitn(3)`, so the path keeps whatever is left of the line rather
+        // than being cut at a tab inside it. Git quotes any path containing a
+        // real tab, so the escapes inside a quoted path are `\t` -- two
+        // characters -- and cannot split; an unquoted path has no tab to split
+        // at. Either way the third field is the whole path.
+        let mut parts = line.splitn(3, '\t');
         let inserted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
         let deleted = parts.next().and_then(parse_numstat_count).unwrap_or(0);
+        // Decoded exactly as the diff headers are.
+        //
+        // These counts are what tells the panel whether a file has textual
+        // hunks it did not draw. A quoted path stored as a separate key means
+        // the real status row sees zero inserted and zero deleted, which reads
+        // as "no textual changes" and authorizes whole-path staging beside the
+        // file's own hidden hunks -- one click from staging all of them.
         if let Some(path) = parts.next() {
-            stats.insert(path.to_string(), (inserted, deleted));
+            match decode_git_path(path) {
+                Some(path) => {
+                    stats.insert(path, (inserted, deleted));
+                }
+                // Unreadable rather than absent. Dropping the row silently
+                // would leave the file at zero counts, which is the reading
+                // that offers the unsafe control; naming it lets the caller
+                // withhold instead.
+                None => {
+                    stats.insert(UNDECODABLE_NUMSTAT_PATH.to_string(), (inserted, deleted));
+                }
+            }
         }
     }
     Ok(stats)
+}
+
+/// The key recorded for a numstat row whose path could not be decoded.
+///
+/// A path no filename can equal, so it never matches a status row and is never
+/// mistaken for a real file's counts.
+pub(crate) const UNDECODABLE_NUMSTAT_PATH: &str = "\u{0}legion.numstat.undecodable";
+
+/// A path as git printed it, decoded if git had to quote it.
+fn decode_git_path(path: &str) -> Option<String> {
+    if path.starts_with('"') {
+        decode_c_quoted(path)
+    } else {
+        Some(path.to_string())
+    }
 }
 
 fn parse_numstat_count(value: &str) -> Option<u32> {
@@ -2265,10 +2303,14 @@ fn parse_diff_plus_path(line: &str) -> Option<String> {
 
 /// The filename inside a C-quoted git path, with git's escapes undone.
 ///
-/// `None` when the text is not a well-formed quoted string, or decodes to bytes
-/// that are not UTF-8 -- both of which mean the caller cannot match this hunk to
-/// a status row, and a caller that knows it cannot match is in a far better
-/// position than one holding a mangled path it believes.
+/// `None` only when the text is not a well-formed quoted string -- an unbalanced
+/// quote or an escape git does not emit. A caller that knows it could not read
+/// the path is in a far better position than one holding a mangled path it
+/// believes, so this refuses rather than guessing.
+///
+/// Bytes that are not UTF-8 are *not* a failure here: they are converted the
+/// same lossy way `git_stdout` converts everything else, so the result still
+/// equals the path the status row is holding.
 fn decode_c_quoted(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     if bytes.first() != Some(&b'"') {
@@ -2278,7 +2320,17 @@ fn decode_c_quoted(text: &str) -> Option<String> {
     let mut index = 1usize;
     while index < bytes.len() {
         match bytes[index] {
-            b'"' => return String::from_utf8(decoded).ok(),
+            // Lossy, because the other side of the comparison is lossy.
+            //
+            // `git_stdout` reads every invocation through `from_utf8_lossy`, so
+            // a filename that is not UTF-8 -- a latin-1 name on Linux, which is
+            // an ordinary thing to find -- reaches the status row with
+            // replacement characters in it. Decoding these bytes strictly would
+            // reject the very path the status row is holding, and the file would
+            // look hunkless for the one reason that has nothing to do with it
+            // having no hunks. Mangled identically on both sides, the two still
+            // name the same file.
+            b'"' => return Some(String::from_utf8_lossy(&decoded).into_owned()),
             b'\\' => {
                 index += 1;
                 let escape = *bytes.get(index)?;
@@ -7970,6 +8022,49 @@ mod tests {
                  is offered whole-path staging beside its own hunk controls"
             );
         }
+    }
+
+    /// A filename git had to quote decodes to the same text on both sides.
+    ///
+    /// `git diff --numstat` quotes a path exactly as a diff header does, and
+    /// those counts are what tells the panel whether a file has textual hunks
+    /// it did not draw. Keyed under the quoted form, the real status row reads
+    /// zero inserted and zero deleted -- "no textual changes" -- and
+    /// whole-path staging is offered beside the file's own hidden hunks, one
+    /// click from staging all of them.
+    #[test]
+    fn a_quoted_numstat_path_decodes_to_the_status_rows_filename() {
+        for (quoted, expected) in [
+            (r#""b/tab\tname.txt""#, "b/tab\tname.txt"),
+            (r#""quo\"te.txt""#, r#"quo"te.txt"#),
+        ] {
+            assert_eq!(
+                super::decode_git_path(quoted).as_deref(),
+                Some(expected),
+                "{quoted} did not decode to the name porcelain reports, so its line counts \
+                 are filed under a key no status row can match"
+            );
+        }
+    }
+
+    /// A filename that is not UTF-8 is mangled the same way on both sides.
+    ///
+    /// `git_stdout` reads every invocation through `from_utf8_lossy`, so a
+    /// latin-1 name reaches the status row with replacement characters in it.
+    /// Decoding strictly would reject the very path the status row holds, and
+    /// the file would look hunkless for a reason that has nothing to do with
+    /// whether it has hunks.
+    #[test]
+    fn a_non_utf8_filename_decodes_the_way_the_status_row_did() {
+        let raw_bytes = [b'c', b'a', b'f', 0xE9, b'.', b't', b'x', b't'];
+        let as_status_reports_it = String::from_utf8_lossy(&raw_bytes).into_owned();
+
+        assert_eq!(
+            super::decode_git_path(r#""caf\351.txt""#).as_deref(),
+            Some(as_status_reports_it.as_str()),
+            "the decoder and the status reader must agree about a name neither can \
+             represent exactly"
+        );
     }
 
     /// An unquoted header still drops the metadata git appends after a tab.

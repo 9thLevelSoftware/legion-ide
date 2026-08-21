@@ -212,6 +212,10 @@ pub(crate) struct StageWindow<'a, T> {
     pub(crate) staged_budget: usize,
     /// How far the unstaged offset advances.
     pub(crate) unstaged_budget: usize,
+    /// The staged offset this page actually used, after normalization.
+    pub(crate) staged_offset: usize,
+    /// The unstaged offset this page actually used.
+    pub(crate) unstaged_offset: usize,
 }
 
 /// One page of a two-stage list, budgeted per stage and offset within each.
@@ -291,10 +295,18 @@ pub(crate) fn stage_window<'a, T>(
         unstaged_hidden: unstaged_total - unstaged_shown,
         staged_budget,
         unstaged_budget,
+        // Reported, not just applied. The wrap above is local to this call, so
+        // a caller that advanced from the *stored* value kept adding a budget
+        // to an offset the window had already discarded: page to the last
+        // staged hunk and unstage it, and the stored 12 outlives the list it
+        // indexed into, so every later click re-rendered the first page and the
+        // final Unstage control could not be reached again.
+        staged_offset,
+        unstaged_offset,
     }
 }
 
-/// Read a stage's window offset out of renderer memory.
+/// Read a stage's stored window offset out of renderer memory.
 ///
 /// Adapter-local view state, in the same category as explorer expansion: which
 /// page of a list somebody is looking at is not something the app decides, and
@@ -311,12 +323,12 @@ fn render_window_advance(
     key: &'static str,
     hidden: usize,
     budget: usize,
+    offset: usize,
     noun: &str,
 ) {
     if hidden == 0 || budget == 0 {
         return;
     }
-    let offset = window_offset(ui, key);
     let label = format!("Show the other {hidden} {noun}");
     if ui.button(&label).clicked() {
         ui.ctx()
@@ -397,11 +409,6 @@ fn render_git_hunk_controls(
             )));
         });
     }
-    // The count is stated only when it is knowable. The projection caps what it
-    // collects, so a panel subtracting what it drew from what it received would
-    // report "116 more" for a repository with sixteen thousand -- a precise
-    // number that is precisely wrong. When the projection says it truncated,
-    // the panel says there are more without pretending to know how many.
     // The controls that move the window, so a hunk off this page is a click
     // away rather than out of reach. Without them the tail of a long staged list
     // could not be got to at all: no sequence of Stage and Unstage on the hunks
@@ -411,6 +418,7 @@ fn render_git_hunk_controls(
         HUNK_STAGED_WINDOW,
         window.staged_hidden,
         window.staged_budget,
+        window.staged_offset,
         "staged hunks",
     );
     render_window_advance(
@@ -418,6 +426,7 @@ fn render_git_hunk_controls(
         HUNK_UNSTAGED_WINDOW,
         window.unstaged_hidden,
         window.unstaged_budget,
+        window.unstaged_offset,
         "unstaged hunks",
     );
     // The count is stated only when it is knowable. The projection caps what it
@@ -538,17 +547,14 @@ fn render_path_stage_controls(
         |file| status_is_committable(&file.status),
     );
     let hidden = window.staged_hidden + window.unstaged_hidden;
-    let visible: Vec<&legion_ui::GitFileProjection> =
-        window.visible.iter().copied().copied().collect();
-    let candidates = &visible[..];
 
     // Only when something is under it. With every eligible file withheld -- a
     // few renames, an untracked directory -- a bare "Files" header above the
     // explanation reads as a section that failed to load.
-    if !candidates.is_empty() {
+    if !window.visible.is_empty() {
         super::components::section_header(ui, "Files", Some(theme::tokens().accent.cyan));
     }
-    for file in candidates {
+    for file in window.visible.iter().copied() {
         ui.horizontal_wrapped(|ui| {
             let staged = status_is_committable(&file.status);
             let verb = if staged { "Unstage" } else { "Stage" };
@@ -589,6 +595,7 @@ fn render_path_stage_controls(
         PATH_STAGED_WINDOW,
         window.staged_hidden,
         window.staged_budget,
+        window.staged_offset,
         "staged files",
     );
     render_window_advance(
@@ -596,6 +603,7 @@ fn render_path_stage_controls(
         PATH_UNSTAGED_WINDOW,
         window.unstaged_hidden,
         window.unstaged_budget,
+        window.unstaged_offset,
         "unstaged files",
     );
     if !withheld.is_empty() {
@@ -1020,6 +1028,69 @@ mod stage_window_rules {
         assert!(
             window.visible.iter().any(|item| !item.1),
             "the unstaged items got no controls"
+        );
+    }
+
+    /// The page reports the offset it actually used, not the one it was handed.
+    ///
+    /// The wrap is local to the call, so a caller advancing from the *stored*
+    /// value kept adding a budget to an offset the window had already
+    /// discarded. The 13-staged flow does exactly that: page to the last hunk
+    /// and unstage it, and the stored 12 outlives the list it indexed into --
+    /// every later click re-renders the first page and the final Unstage
+    /// control cannot be reached again.
+    #[test]
+    fn the_page_reports_the_offset_it_used() {
+        let items = items(12, 0);
+        let window = stage_window(
+            &items,
+            GIT_HUNK_CONTROL_LIMIT,
+            12,
+            0,
+            |item: &(usize, bool)| item.1,
+        );
+
+        assert_eq!(
+            window.staged_offset, 0,
+            "an offset at or past the end wrapped to the first page, so that is the offset \
+             the next advance must count from"
+        );
+
+        // And the other half, without which reporting a constant zero passes:
+        // an offset the window actually used must come back unchanged, or every
+        // advance would restart from the first page.
+        // Built inline: the local binding above shadows the `items` helper.
+        let deeper: Vec<(usize, bool)> = (0..25).map(|index| (index, true)).collect();
+        let paged = stage_window(
+            &deeper,
+            GIT_HUNK_CONTROL_LIMIT,
+            12,
+            0,
+            |item: &(usize, bool)| item.1,
+        );
+        assert_eq!(
+            paged.staged_offset, 12,
+            "an in-range offset was not reported back, so advancing from it would count from \
+             somewhere the page never was"
+        );
+        assert!(
+            paged.visible.iter().all(|item| item.0 >= 12),
+            "the reported offset does not describe the page that was actually built"
+        );
+
+        // Advancing from what the page reports lands on a real page; advancing
+        // from the stored value would ask for slot 24 of a 12-item list and
+        // wrap straight back to the start forever.
+        let next = stage_window(
+            &items,
+            GIT_HUNK_CONTROL_LIMIT,
+            window.staged_offset + window.staged_budget,
+            0,
+            |item: &(usize, bool)| item.1,
+        );
+        assert!(
+            !next.visible.is_empty(),
+            "advancing from the reported offset produced an empty page"
         );
     }
 
