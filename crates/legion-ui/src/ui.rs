@@ -1828,11 +1828,12 @@ pub struct GitProjection {
     /// from "twelve of thousands", so a panel that states an exact number of
     /// hidden hunks from a truncated list states a wrong one.
     pub hunks_truncated: bool,
-    /// Whether a bare `git commit` would conclude an operation already underway.
+    /// Whether a merge is underway that a bare `git commit` would conclude.
     ///
-    /// True mid-merge, mid-cherry-pick or mid-revert, where a commit finishes the
-    /// operation even with an index identical to `HEAD`.
-    pub commit_would_conclude_operation: bool,
+    /// True mid-merge, where a commit finishes the merge even with an index
+    /// identical to `HEAD`. Cherry-pick and revert are deliberately excluded:
+    /// git refuses an empty commit for those without `--allow-empty`.
+    pub merge_awaiting_commit: bool,
     /// Inline blame rows for the active file.
     pub blame_lines: Vec<GitBlameLineProjection>,
     /// Commit graph/history rows.
@@ -1877,7 +1878,7 @@ impl GitProjection {
             changed_files: Vec::new(),
             hunks: Vec::new(),
             hunks_truncated: false,
-            commit_would_conclude_operation: false,
+            merge_awaiting_commit: false,
             blame_lines: Vec::new(),
             commits: Vec::new(),
             conflicts: Vec::new(),

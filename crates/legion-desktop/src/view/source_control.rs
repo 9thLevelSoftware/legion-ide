@@ -117,10 +117,12 @@ const GIT_HUNK_CONTROL_LIMIT: usize = 12;
 /// tree. Anything in `X` other than a space is staged; `?` is the untracked
 /// marker (`??`), which is not.
 ///
-/// An operation already underway counts even with nothing staged: mid-merge,
-/// mid-cherry-pick or mid-revert, `git commit` concludes it whether or not the
-/// index differs from `HEAD`, and resolving a final conflict toward the current
-/// side produces exactly that empty index.
+/// A merge already underway counts even with nothing staged: `git commit`
+/// concludes it whether or not the index differs from `HEAD`, and resolving a
+/// final conflict toward the current side produces exactly that empty index.
+/// Cherry-pick and revert do *not* count -- git refuses an empty commit for
+/// those -- so offering Commit on their behalf would be a button that only
+/// errors.
 ///
 /// Unmerged entries are excluded even though their index column qualifies.
 /// `DD`, `AU`, `UD`, `UA`, `DU`, `AA` and `UU` all mean an unresolved merge, and
@@ -144,7 +146,7 @@ fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
     if files.iter().any(|file| status_is_committable(&file.status)) {
         return true;
     }
-    // Nothing staged, but the repository may still owe a commit.
+    // Nothing staged, but the repository may still owe a merge commit.
     //
     // Resolving the last conflict with **Use Current** can leave the index
     // identical to `HEAD`, and porcelain status then reports no entries at all
@@ -155,7 +157,7 @@ fn index_has_staged_changes(snapshot: &ShellProjectionSnapshot) -> bool {
     //
     // Reached only after the unmerged veto above, so this cannot re-offer
     // Commit while conflicts remain.
-    snapshot.git_projection.commit_would_conclude_operation
+    snapshot.git_projection.merge_awaiting_commit
 }
 
 /// The two porcelain columns, when the status is well formed.

@@ -1364,8 +1364,6 @@ fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
     run_git(root, ["add", "."]);
     run_git(root, ["commit", "-m", "theirs"]);
 
-    let default_branch = run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    let _ = default_branch;
     run_git(root, ["checkout", "-"]);
     // Conflicts, so this is expected to fail.
     let _ = std::process::Command::new("git")
@@ -1384,7 +1382,7 @@ fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
     let conflicted =
         collect_git_snapshot(root, None, options.clone()).expect("snapshot during conflict");
     assert!(
-        conflicted.commit_would_conclude_operation,
+        conflicted.merge_awaiting_commit,
         "MERGE_HEAD exists during a conflicted merge"
     );
 
@@ -1425,7 +1423,7 @@ fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
             .collect::<Vec<_>>()
     );
     assert!(
-        resolved.commit_would_conclude_operation,
+        resolved.merge_awaiting_commit,
         "the merge is unfinished and `git commit` would conclude it, but the snapshot says \
          there is nothing to commit. Changed files were {:?}",
         resolved
@@ -1449,7 +1447,80 @@ fn a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make() {
 
     let concluded = collect_git_snapshot(root, None, options).expect("snapshot after commit");
     assert!(
-        !concluded.commit_would_conclude_operation,
+        !concluded.merge_awaiting_commit,
         "the merge is finished, so nothing is owed any more"
+    );
+}
+
+/// A cherry-pick resolved to the current side owes nothing a commit can give.
+///
+/// The sibling of `a_merge_resolved_to_the_current_side_still_reports_a_commit_to_make`,
+/// and the reason that flag is not simply "an operation is in progress".
+///
+/// With an index identical to `HEAD`, `git commit` **succeeds** for a merge and
+/// **fails** for a cherry-pick — "The previous cherry-pick is now empty", exit
+/// non-zero, `--allow-empty` required. An earlier version of the flag grouped
+/// `CHERRY_PICK_HEAD` and `REVERT_HEAD` with `MERGE_HEAD` on the assumption they
+/// behaved alike, which would have offered a Commit control whose only outcome
+/// is an error.
+///
+/// This asserts both halves against real git, because the whole distinction is
+/// a claim about what git does and nothing else can settle it.
+#[test]
+fn a_cherry_pick_resolved_to_the_current_side_is_not_committable() {
+    let repo = TempGitRepo::new();
+    let root = repo.path();
+
+    repo.write("shared.txt", "base\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "base"]);
+    let base = run_git(root, ["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.write("shared.txt", "ours\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "ours"]);
+
+    run_git(root, ["checkout", "-b", "side", &base]);
+    repo.write("shared.txt", "theirs\n");
+    run_git(root, ["add", "."]);
+    run_git(root, ["commit", "-m", "theirs"]);
+    run_git(root, ["checkout", "-"]);
+
+    // Expected to conflict.
+    let _ = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["cherry-pick", "side"])
+        .output()
+        .expect("cherry-pick should run");
+
+    // Resolve toward the current side, leaving the index equal to HEAD.
+    run_git(root, ["checkout", "--ours", "shared.txt"]);
+    run_git(root, ["add", "shared.txt"]);
+
+    let options = GitSnapshotOptions {
+        max_file_bytes_for_syntactic_diff: 1024 * 1024,
+        max_hunks: 16,
+        max_blame_lines: 16,
+        max_commits: 8,
+    };
+    let snapshot = collect_git_snapshot(root, None, options).expect("snapshot");
+
+    assert!(
+        !snapshot.merge_awaiting_commit,
+        "a cherry-pick is not a merge awaiting a commit; offering Commit here produces a \
+         button whose only outcome is an error"
+    );
+
+    // And git agrees, which is the whole point of the distinction.
+    let commit = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["commit", "--no-edit"])
+        .output()
+        .expect("commit should run");
+    assert!(
+        !commit.status.success(),
+        "git accepted an empty cherry-pick commit, so this test's premise is wrong and the \
+         merge-only restriction should be revisited: {}",
+        String::from_utf8_lossy(&commit.stdout)
     );
 }
