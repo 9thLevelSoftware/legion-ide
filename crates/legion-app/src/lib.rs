@@ -148,7 +148,8 @@ use legion_project::{
     WorkspaceRestoreFileOp, WorkspaceSaveRequest, collect_git_snapshot, commit_git_changes,
     create_git_branch, delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
     prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
-    stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
+    stage_git_hunk, stage_git_path, stash_git_changes, switch_git_branch, unstage_git_hunk,
+    unstage_git_path,
 };
 use legion_protocol::CallHierarchyDirection;
 use legion_protocol::{
@@ -10126,6 +10127,16 @@ pub enum AppCommandRequest {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage every change to one path, hunk or not.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
+    },
     /// Unstage one cached git hunk by projected hunk id.
     UnstageGitHunk {
         /// Projected hunk identifier.
@@ -10832,6 +10843,8 @@ impl CommandExecutionService {
             | AppCommandRequest::RefreshGit
             | AppCommandRequest::StageGitHunk { .. }
             | AppCommandRequest::UnstageGitHunk { .. }
+            | AppCommandRequest::StageGitPath { .. }
+            | AppCommandRequest::UnstageGitPath { .. }
             | AppCommandRequest::ResolveGitConflict { .. }
             | AppCommandRequest::CommitGitChanges { .. }
             | AppCommandRequest::SwitchGitBranch { .. }
@@ -18738,6 +18751,12 @@ impl AppComposition {
             )),
             AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
+            )),
+            AppCommandRequest::StageGitPath { path } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_path(&path, true)?,
+            )),
+            AppCommandRequest::UnstageGitPath { path } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_path(&path, false)?,
             )),
             AppCommandRequest::ResolveGitConflict { path, choice } => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -26746,6 +26765,40 @@ impl AppComposition {
         })?;
 
         Ok(evidence_path.to_string_lossy().into_owned())
+    }
+
+    /// Stage or unstage one path, refusing anything the projection does not know.
+    ///
+    /// The path is checked against the current status projection rather than
+    /// passed through. `git add` is happy to take any path in the repository, so
+    /// without this the renderer could stage a file the person never saw listed
+    /// — and a Source Control panel that stages something off-screen is worse
+    /// than one that stages nothing.
+    fn stage_or_unstage_git_path(
+        &mut self,
+        path: &str,
+        stage: bool,
+    ) -> Result<GitProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        if !self
+            .git_projection
+            .changed_files
+            .iter()
+            .any(|file| file.path == path)
+        {
+            return Err(git_protocol_error(
+                "git_path_not_changed",
+                format!("`{path}` is not a changed file in the current projection"),
+            ));
+        }
+        if stage {
+            stage_git_path(Path::new(root_path), path).map_err(git_inspection_protocol_error)?;
+        } else {
+            unstage_git_path(Path::new(root_path), path).map_err(git_inspection_protocol_error)?;
+        }
+        Ok(self.refresh_git_projection())
     }
 
     fn stage_or_unstage_git_hunk(

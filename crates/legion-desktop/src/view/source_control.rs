@@ -74,7 +74,7 @@ pub(super) fn render_git_controls(
         }
     });
     render_git_hunk_controls(ui, snapshot, actions);
-    render_untracked_note(ui, snapshot);
+    render_path_stage_controls(ui, snapshot, actions);
     if let Some(conflict) = snapshot.git_projection.conflicts.first() {
         ui.horizontal_wrapped(|ui| {
             if soft_button(ui, "Use Current").clicked() {
@@ -301,29 +301,76 @@ fn render_git_hunk_controls(
     }
 }
 
-/// Say why untracked files have no stage control, instead of leaving a row that
-/// silently has no button next to rows that do.
+/// Stage or unstage a whole path, for changes no hunk can express.
 ///
-/// Staging goes through `git apply --cached` on a projected hunk, and `git diff`
-/// emits no hunks for a file git has never seen — so an untracked file projects
-/// with `stageable: false` and cannot be staged from here. Adding one to the
-/// index needs a path-level `git add`, which is authority the app layer does not
-/// have; it is a gap, not a rendering bug, and the panel should say so rather
-/// than look broken.
-fn render_untracked_note(ui: &mut egui::Ui, snapshot: &ShellProjectionSnapshot) {
-    let untracked = snapshot
+/// `git diff` emits no `@@` hunk for a file git has never seen, for a modified
+/// binary, for a mode-only change, or for a pure rename. Every one of those
+/// appears in status as a changed file, and none of them could be staged from
+/// this panel — which left the commit control this PR added unusable for them
+/// without dropping to a terminal.
+///
+/// This used to be a sentence explaining that untracked files must be added with
+/// git first. The explanation was honest about the gap and did nothing about it;
+/// `git add -- <path>` reaches all four cases, so the panel now offers the
+/// action instead of apologising for its absence.
+///
+/// Only files with no hunk of their own get a control here. A file that *does*
+/// have hunks is staged hunk by hunk above, and a whole-path button beside those
+/// would silently stage changes the person had deliberately left out.
+fn render_path_stage_controls(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let hunk_paths: std::collections::BTreeSet<&str> = snapshot
+        .git_projection
+        .hunks
+        .iter()
+        .map(|hunk| hunk.path.as_str())
+        .collect();
+
+    let candidates: Vec<&legion_ui::GitFileProjection> = snapshot
         .git_projection
         .changed_files
         .iter()
-        .filter(|file| file.status.trim() == "??")
-        .count();
-    if untracked == 0 {
+        .filter(|file| !hunk_paths.contains(file.path.as_str()))
+        // An unmerged path is not stageable by `git add` in any useful sense:
+        // it would mark a conflict resolved that nobody resolved.
+        .filter(|file| !status_pair(&file.status).is_some_and(|(x, y)| is_unmerged(x, y)))
+        .take(GIT_HUNK_CONTROL_LIMIT)
+        .collect();
+
+    if candidates.is_empty() {
         return;
     }
-    let noun = if untracked == 1 { "file" } else { "files" };
-    ui.label(theme::muted(format!(
-        "{untracked} untracked {noun}: add with git before staging here"
-    )));
+
+    super::components::section_header(ui, "Files", Some(theme::tokens().accent.cyan));
+    for file in candidates {
+        ui.horizontal_wrapped(|ui| {
+            let staged = status_is_committable(&file.status);
+            let verb = if staged { "Unstage" } else { "Stage" };
+            let response = soft_button(ui, verb);
+            // The visible label is the verb; the accessible label names the path
+            // it acts on, for the same reason the hunk controls do it — a column
+            // of buttons all called "Stage" is unusable with a screen reader and
+            // untestable from the accessibility tree.
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_label(format!("{verb} {}", file.path));
+            });
+            if response.clicked() {
+                actions.push(if staged {
+                    DesktopAction::UnstageGitPath {
+                        path: file.path.clone(),
+                    }
+                } else {
+                    DesktopAction::StageGitPath {
+                        path: file.path.clone(),
+                    }
+                });
+            }
+            ui.label(theme::muted(format!("{} {}", file.status, file.path)));
+        });
+    }
 }
 
 pub(super) fn git_relative_path(

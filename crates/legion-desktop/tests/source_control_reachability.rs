@@ -294,16 +294,21 @@ fn commit_is_offered_exactly_when_something_is_staged() {
     );
 }
 
-/// An untracked file gets a row with no stage control, and the panel says why.
+/// An untracked file can be staged from the panel.
 ///
-/// Staging goes through `git apply --cached` on a projected hunk, and `git diff`
-/// emits nothing for a file git has never seen: an untracked file projects with
-/// no hunks and so gets no button. That is a real gap — there is no path-level
-/// `git add` authority in the app layer to reach for — but a row sitting next to
-/// rows that *do* have buttons, with no explanation, reads as the panel being
-/// broken. This pins both halves: no control, and a stated reason.
+/// This test used to assert the opposite half: that an untracked file had *no*
+/// control and the panel explained why, because staging went through `git apply
+/// --cached` on a projected hunk and `git diff` emits nothing for a file git has
+/// never seen. The explanation was honest and useless — it told you to go and
+/// use git.
+///
+/// Path-level staging removes the gap rather than describing it. The same
+/// `git add -- <path>` reaches untracked files, modified binaries, mode-only
+/// changes and pure renames, none of which produce a hunk. Kept as a test
+/// because an affordance that was once missing is exactly the kind that rots
+/// back.
 #[test]
-fn an_untracked_file_is_explained_rather_than_silently_unstageable() {
+fn an_untracked_file_can_be_staged_from_the_panel() {
     let workspace = TempWorkspace::new("legion_desktop_source_control_untracked");
     init_repo(&workspace);
     workspace.write("brand-new.rs", "fn brand_new() {}\n");
@@ -311,26 +316,38 @@ fn an_untracked_file_is_explained_rather_than_silently_unstageable() {
 
     let mut app = open_app(&root);
     let panel = open_source_control(&mut app);
-    let text = rendered_text(&panel).join("\n");
 
     assert!(
-        text.contains("brand-new.rs"),
-        "the panel does not show the untracked file at all.\n{text}"
+        rendered_text(&panel)
+            .iter()
+            .any(|text| text.contains("brand-new.rs")),
+        "the panel does not show the untracked file at all"
     );
+    // Non-vacuity: an untracked file must still project no hunk, or this is
+    // exercising the ordinary hunk path rather than the gap it was written for.
     assert!(
         app.runtime_snapshot()
             .git_projection
             .hunks
             .iter()
             .all(|hunk| hunk.path != "brand-new.rs"),
-        "fixture assumption broken: an untracked file projected a hunk, so the \
-         note this test guards would be wrong"
+        "fixture assumption broken: an untracked file projected a hunk"
     );
+
+    let stage = clickable_center(&panel, "Stage brand-new.rs").unwrap_or_else(|| {
+        panic!(
+            "an untracked file must offer a Stage control; frame showed {:?}",
+            rendered_text(&panel)
+        )
+    });
+    let _ = click_at(&mut app, stage);
+
     assert!(
-        text.contains("1 untracked file: add with git before staging here"),
-        "the panel shows an untracked file with no stage control and no reason. \
-         A row that silently has no button next to rows that do reads as a \
-         broken panel.\n{text}"
+        staged_paths(&root)
+            .iter()
+            .any(|path| path.contains("brand-new.rs")),
+        "clicking Stage did not add the untracked file to the index; staged: {:?}",
+        staged_paths(&root)
     );
 }
 
@@ -711,5 +728,77 @@ fn commit_survives_a_merge_resolved_to_the_current_side() {
     assert!(
         !root.join(".git").join("MERGE_HEAD").exists(),
         "the merge is still unfinished after committing from the panel"
+    );
+}
+
+/// A change with no textual hunk must still be stageable from the panel.
+///
+/// `git diff` emits no `@@` hunk for a modified binary, so hunk controls cannot
+/// reach it. Before path-level staging, such a file appeared in the status list
+/// with no control beside it and the panel's commit flow was unusable for it
+/// without dropping to a terminal — a gap the panel previously *explained*
+/// (untracked files got a sentence saying to use git first) rather than closed.
+///
+/// Driven end to end and checked against git: the index is the witness, not the
+/// projection.
+#[test]
+fn a_binary_change_can_be_staged_and_committed_from_the_panel() {
+    let workspace = TempWorkspace::new("legion_desktop_source_control_binary");
+    init_repo(&workspace);
+    let root = workspace.path().to_path_buf();
+
+    // A file git treats as binary: NUL bytes, no trailing newline convention.
+    let binary_path = root.join("blob.bin");
+    std::fs::write(&binary_path, [0u8, 1, 2, 0, 3, 4, 0, 5]).expect("write binary fixture");
+    git(&root, &["add", "blob.bin"]);
+    git(&root, &["commit", "-m", "add binary"]);
+
+    // Modify it, so it is a tracked change with no textual hunk.
+    std::fs::write(&binary_path, [0u8, 9, 9, 0, 9, 9, 0, 9]).expect("modify binary fixture");
+
+    let mut app = open_app(&root);
+    let panel = open_source_control(&mut app);
+
+    // Non-vacuity: the fixture really must produce no hunk, or this test is
+    // exercising the ordinary hunk path and proves nothing about the gap.
+    let snapshot = app.runtime_snapshot();
+    assert!(
+        !snapshot
+            .git_projection
+            .hunks
+            .iter()
+            .any(|hunk| hunk.path.contains("blob.bin")),
+        "the binary fixture produced a textual hunk, so this test no longer covers the \
+         hunkless case; hunks were {:?}",
+        snapshot
+            .git_projection
+            .hunks
+            .iter()
+            .map(|hunk| &hunk.path)
+            .collect::<Vec<_>>()
+    );
+
+    let stage = clickable_center(&panel, "Stage blob.bin").unwrap_or_else(|| {
+        panic!(
+            "a changed binary file must offer a Stage control; frame showed {:?}",
+            rendered_text(&panel)
+        )
+    });
+    let _ = click_at(&mut app, stage);
+
+    // git is the witness.
+    assert!(
+        staged_paths(&root)
+            .iter()
+            .any(|path| path.contains("blob.bin")),
+        "clicking Stage did not put the binary change in the index; staged: {:?}",
+        staged_paths(&root)
+    );
+
+    // And it commits, which is the point of staging it.
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        clickable_center(&after, "Commit…").is_some(),
+        "Commit was not offered after staging a binary change"
     );
 }

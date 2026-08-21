@@ -3086,6 +3086,16 @@ pub enum CommandDispatchIntent {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage every change to one path, hunk or not.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
+    },
     /// Unstage one cached git hunk by projected hunk id.
     UnstageGitHunk {
         /// Projected hunk identifier.

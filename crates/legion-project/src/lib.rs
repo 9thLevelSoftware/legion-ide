@@ -1287,6 +1287,41 @@ pub fn stage_git_hunk(
     .map(|_| ())
 }
 
+/// Stage every change to one path, whether or not it has a textual hunk.
+///
+/// `git add -- <path>`, which is what hunk staging cannot express. A modified
+/// binary file, a mode-only change and a pure rename all appear in status with a
+/// staged-able index column and produce no `@@` hunk at all, so a panel offering
+/// only hunk controls leaves them unstageable — and therefore leaves the commit
+/// flow unusable for them without dropping to a terminal.
+///
+/// Paths are passed after `--` so one beginning with a dash cannot be read as an
+/// option.
+pub fn stage_git_path(
+    root: impl AsRef<Path>,
+    relative_path: &str,
+) -> Result<(), GitInspectionError> {
+    git_stdout(root.as_ref(), &["add", "--", relative_path], None).map(|_| ())
+}
+
+/// Unstage every change to one path.
+///
+/// `git restore --staged`, which resets the index entry to `HEAD` without
+/// touching the working tree — the exact inverse of [`stage_git_path`]. `git
+/// reset` would do the same thing for a tracked file but also moves `HEAD` if
+/// the arguments are ever wrong, which is a much worse failure for a button.
+pub fn unstage_git_path(
+    root: impl AsRef<Path>,
+    relative_path: &str,
+) -> Result<(), GitInspectionError> {
+    git_stdout(
+        root.as_ref(),
+        &["restore", "--staged", "--", relative_path],
+        None,
+    )
+    .map(|_| ())
+}
+
 /// Unstage one projected staged git hunk.
 pub fn unstage_git_hunk(
     root: impl AsRef<Path>,
