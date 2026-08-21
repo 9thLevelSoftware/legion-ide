@@ -160,7 +160,30 @@ fn clicking_predict_puts_a_deterministic_suggestion_on_screen() {
             "clicking Predict must produce a prediction. A button that changes a \
              status line and produces nothing is the defect this row exists to catch.",
         );
-    let text = rendered_text(&after);
+    // A frame drawn *after* settlement. `after` is the frame that started the
+    // request, and the prediction now lands on a later one -- asserting against
+    // the starting frame would require the label to appear before the provider
+    // had answered, which is the synchronous behaviour this replaced.
+    let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let settled_frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let live = app
+        .runtime_snapshot()
+        .assist_inline_prediction_projection
+        .clone();
+    eprintln!(
+        "DBG at settled frame: in_flight={} has_active={} label={:?}",
+        live.request_in_flight,
+        live.active_prediction.is_some(),
+        live.active_prediction
+            .as_ref()
+            .map(|p| p.provider_label.clone())
+    );
+    let text = rendered_text(&settled_frame);
+    eprintln!(
+        "DBG frame has Cancel={} has Predict={}",
+        text.iter().any(|l| l == "Cancel"),
+        text.iter().any(|l| l == "Predict")
+    );
     assert!(
         text.iter().any(|line| line == &prediction.ghost_text_label),
         "the suggested text `{}` must be rendered, not merely projected; frame was {text:?}",
@@ -251,22 +274,44 @@ fn a_remote_route_preference_resolves_and_the_panel_names_the_real_provider() {
         clickable_center(&frame, "Predict").expect("Assist must offer `Predict` to exercise row 6");
 
     let started = Instant::now();
-    let after = click_at(&mut app, predict);
+    // The frame the click produces is not where the prediction appears any
+    // more; it is polled for below. What this frame is measured for is how long
+    // it took to come back.
+    let _ = click_at(&mut app, predict);
     let elapsed = started.elapsed();
 
-    let projection = app
+    // The click frame returns without waiting for the provider.
+    //
+    // A live prediction runs on a worker now. It used to be invoked inline on
+    // this thread, where the blocking transport allows a request 120 seconds
+    // and eframe can neither repaint nor read input for any of it -- so the
+    // `request_in_flight` state the projection models, and the Cancel control
+    // that depends on it, could never be seen. The old bound here was 30
+    // seconds, which a frozen UI passes comfortably.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the frame that starts a prediction must not wait for the provider; it took {elapsed:?}"
+    );
+
+    // Then it settles, on a later frame, without anyone clicking again.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut projection = app
         .runtime_snapshot()
         .assist_inline_prediction_projection
         .clone();
-    assert!(
-        elapsed < Duration::from_secs(30),
-        "a prediction request against an absent provider must fall back rather \
-         than block the UI thread; it took {elapsed:?}"
-    );
+    while projection.request_in_flight && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        projection = app
+            .runtime_snapshot()
+            .assist_inline_prediction_projection
+            .clone();
+    }
     assert!(
         !projection.request_in_flight,
-        "the request must not still be in flight once the frame returns; a \
-         status that says `requesting` forever is a lie the user cannot act on"
+        "the request never stopped being in flight; a status that says `requesting` forever \
+         is a lie the user cannot act on, and it strands the Cancel control with nothing to \
+         cancel"
     );
     let prediction = projection
         .active_prediction
@@ -276,11 +321,34 @@ fn a_remote_route_preference_resolves_and_the_panel_names_the_real_provider() {
         "the panel must name the provider that answered; an unattributed \
          suggestion is exactly the surface claiming a capability it may not have"
     );
-    let text = rendered_text(&after);
+
+    // Polled until the label is on screen, rather than asserted against one
+    // chosen frame.
+    //
+    // The prediction now arrives on whichever frame the worker's result is
+    // merged, and pinning the assertion to a particular frame index makes the
+    // test a statement about scheduling instead of about what the person sees.
+    // What has to be true is that the label appears, without another click.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_frame_text: Vec<String> = Vec::new();
+    let mut on_screen = false;
+    while Instant::now() < deadline {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        last_frame_text = rendered_text(&frame);
+        if last_frame_text
+            .iter()
+            .any(|line| line == &prediction.provider_label)
+        {
+            on_screen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
-        text.iter().any(|line| line == &prediction.provider_label),
-        "the projected provider label `{}` must be the one on screen, not a \
-         substituted or omitted one; frame was {text:?}",
+        on_screen,
+        "the projected provider label `{}` never reached the screen; an unattributed \
+         suggestion is the surface claiming a capability it may not have, and a projection \
+         nothing renders is the same defect one layer down. Last frame was {last_frame_text:?}",
         prediction.provider_label
     );
 }

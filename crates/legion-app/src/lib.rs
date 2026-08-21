@@ -52,7 +52,9 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 
 /// Live product-AI completions: which backend answers, and what it returns.
 mod product_ai_completion;
+mod product_ai_policy;
 use product_ai_completion::*;
+use product_ai_policy::*;
 
 /// Where a product AI chat turn's bytes actually go, and what the audit says.
 pub mod ai_route_descriptor;
@@ -1964,6 +1966,14 @@ struct ProductAiBackgroundResult {
     stream: Option<ProductAiStreamProjection>,
     /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
     assist_proposal: Option<AssistedEditProposalSource>,
+    /// When set, a live inline prediction finished on a worker thread.
+    ///
+    /// Ghost text is the smallest of these operations and was the only one that
+    /// ran its provider call inline on the UI thread. The transport allows a
+    /// request 120 seconds, and for all of it eframe could neither repaint nor
+    /// read input -- so the `request_in_flight` state the projection already
+    /// modelled, and the Cancel control that depends on it, could never be seen.
+    inline_prediction: Option<InlinePredictionResult>,
 }
 
 /// Context retained while a live Assist proposal streams on a worker thread.
@@ -2137,7 +2147,7 @@ impl LiveProductAiStreamSink {
         };
         match guard.operation.as_str() {
             "delegate.chat" => mode.allows_delegate(),
-            "assist.proposal" => mode.allows_assist(),
+            "assist.proposal" | "assist.inline_prediction" => mode.allows_assist(),
             _ => false,
         }
     }
@@ -2210,7 +2220,14 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
     // would repeat the delegate-chat defect: the caller has just authorized one
     // destination through the broker, and a second resolution can answer
     // differently and send the excerpt somewhere never approved.
-    let completion = complete_product_chat(backend, &system, &user, 128, 0.1, None)?;
+    let completion = complete_product_chat(
+        backend,
+        &system,
+        &user,
+        INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
+        0.1,
+        None,
+    )?;
     let text = bound_inline_prediction_text(completion.text.trim(), max_bytes);
     if text.is_empty() {
         return None;
@@ -14563,6 +14580,14 @@ pub struct AppComposition {
     live_product_ai_stream: Arc<LiveProductAiStreamSink>,
     /// Live Assist proposal awaiting worker completion (registered on poll).
     pending_assist_proposal: Option<PendingAssistProposalJob>,
+    /// The inline prediction request a worker thread is currently running.
+    ///
+    /// Kept so that a worker returning nothing -- an unreachable provider, an
+    /// empty completion -- can still be answered with the deterministic
+    /// prediction, on the app thread, rather than leaving the request with no
+    /// result at all. The synchronous path used to fall through to that fixture
+    /// itself; moving the live call to a worker moved the fallback with it.
+    pending_inline_prediction: Option<InlinePredictionRequestMetadata>,
     palette: PaletteState,
     settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
@@ -14921,6 +14946,7 @@ impl AppComposition {
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
+            pending_inline_prediction: None,
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -15537,76 +15563,6 @@ impl AppComposition {
     /// restrictive of the two, so an installed bundle can only ever narrow what
     /// the product policy already allowed — a bundle that said `air_gap = false`
     /// must not be able to switch off an air gap the product asked for.
-    fn product_ai_policy_with_org_ceiling(
-        &self,
-        backend: Option<ProductAiLiveBackend>,
-    ) -> SecurityPolicy {
-        let mut policy = product_ai_security_policy(backend);
-        let Some(bundle) = self.org_policy_bundle.as_ref() else {
-            return policy;
-        };
-        let org = &bundle.bundle().security_policy;
-
-        // Every field the bundle can tighten, not the three that were noticed.
-        //
-        // The first version of this helper copied two booleans and the
-        // allowlist, which made it a partial ceiling wearing a complete one's
-        // name -- and a partial ceiling is worse than none, because the call
-        // sites now believe they are governed. A bundle that sets
-        // `provider_invocation_enabled = false` is an org-wide kill switch, and
-        // it was being dropped on the floor: Delegate chat went on invoking
-        // Ollama and Anthropic exactly as before.
-        policy.network_policy.air_gap |= org.network_policy.air_gap;
-        policy.network_policy.local_provider_only |= org.network_policy.local_provider_only;
-        policy.network_policy.allow_untrusted &= org.network_policy.allow_untrusted;
-        policy.ai_provider_policy.provider_invocation_enabled &=
-            org.ai_provider_policy.provider_invocation_enabled;
-        policy.ai_provider_policy.allow_remote_provider &=
-            org.ai_provider_policy.allow_remote_provider;
-        policy.ai_provider_policy.allow_local_provider &=
-            org.ai_provider_policy.allow_local_provider;
-        policy.ai_provider_policy.deny_when_untrusted |= org.ai_provider_policy.deny_when_untrusted;
-
-        // The blocklist is a union: naming a host only ever denies more, so
-        // there is no direction in which taking both lists loosens anything.
-        for host in &org.network_policy.blocklist {
-            if !policy
-                .network_policy
-                .blocklist
-                .iter()
-                .any(|existing| existing == host)
-            {
-                policy.network_policy.blocklist.push(host.clone());
-            }
-        }
-
-        // An empty org allowlist is "unrestricted", not "nothing allowed" --
-        // treating it as the latter would deny every route the moment any bundle
-        // was installed. A non-empty one intersects.
-        if !org.network_policy.allowlist.is_empty() {
-            policy.network_policy.allowlist.retain(|host| {
-                org.network_policy
-                    .allowlist
-                    .iter()
-                    .any(|allowed| allowed == host)
-            });
-        }
-
-        // The bundle's own enforcement rules -- provider allowlist, MCP
-        // allowlist, budget caps, retention and export -- taken wholesale. The
-        // product default refuses nothing (`default_bundle_enforcement_refuses_nothing`),
-        // so adopting the org's can only ever add refusals. Leaving this at the
-        // default was what let a bundle name an allowed provider and have
-        // nothing consult the list.
-        policy.bundle_enforcement = org.bundle_enforcement.clone();
-
-        // `consented_git_remote_hosts` is deliberately untouched. It records a
-        // user consent event for the git push/fetch path and grants nothing to
-        // AI egress; intersecting it against a bundle that simply does not
-        // mention git remotes would revoke a consent the org never spoke about.
-        policy
-    }
-
     /// Whether the installed org policy bundle's mode ceiling refuses `mode`.
     ///
     /// `false` when no bundle is installed — an absent bundle imposes no ceiling,
@@ -15724,6 +15680,41 @@ impl AppComposition {
                     .find(|m| m.message_id == result.assistant_message_id)
             {
                 message.content_label = result.content_label;
+                changed = true;
+            }
+            if let Some(prediction) = result.inline_prediction {
+                self.pending_inline_prediction = None;
+                self.merge_inline_prediction_result(prediction);
+                changed = true;
+            } else if let Some(metadata) = self.pending_inline_prediction.take() {
+                // The worker finished with nothing to show -- an unreachable
+                // provider, or a completion that came back empty. Answer with
+                // the deterministic prediction, here on the app thread, rather
+                // than leaving the request with no result: that is what the
+                // synchronous path did, and losing it would trade a frozen UI
+                // for ghost text that silently stops appearing.
+                let failed_request_id = metadata.request_id.clone();
+                match self.invoke_inline_prediction_provider(metadata) {
+                    Ok(prediction) => {
+                        self.merge_inline_prediction_result(prediction);
+                    }
+                    Err(_error) => {
+                        // Nothing to show and nothing to say. Clearing the flag
+                        // is the part that matters -- leaving it set strands the
+                        // Cancel control with nothing to cancel -- but only for
+                        // the request that actually failed, since a newer one
+                        // may already own this state.
+                        if self
+                            .assist_inline_prediction_state
+                            .active_request_id
+                            .as_ref()
+                            == Some(&failed_request_id)
+                        {
+                            self.assist_inline_prediction_state.request_in_flight = false;
+                            self.assist_inline_prediction_state.active_request_id = None;
+                        }
+                    }
+                }
                 changed = true;
             }
             if let Some(proposal_source) = result.assist_proposal
@@ -24689,6 +24680,15 @@ impl AppComposition {
                         // restriction against, so an allowlist naming exactly
                         // which providers may run has no input to evaluate.
                         ai_provider_id: Some(route_provider_id.clone()),
+                        // Same reasoning one field up: an undeclared token count
+                        // is never compared against the org's cap, so a bundle
+                        // capping tokens per request had nothing to cap.
+                        budget_request_tokens: Some(declared_request_tokens(
+                            ASSIST_EXCERPT_MAX_CHARS,
+                            crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
+                        )),
+                        budget_request_cost_cents: live_backend
+                            .and_then(declared_request_cost_cents),
                         ..Default::default()
                     },
                     correlation_id: event_context.correlation_id,
@@ -24929,6 +24929,7 @@ impl AppComposition {
                         content_label: String::new(),
                         stream,
                         assist_proposal: Some(proposal_source),
+                        inline_prediction: None,
                     },
                     completion.as_ref(),
                 );
@@ -27406,6 +27407,11 @@ impl AppComposition {
                     // identity, and an org bundle forbidding a specific provider
                     // has nothing to match against.
                     ai_provider_id: Some(route_provider_id_for_decision),
+                    budget_request_tokens: Some(declared_request_tokens(
+                        ASSIST_EXCERPT_MAX_CHARS,
+                        crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
+                    )),
+                    budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
                     ..Default::default()
                 },
                 correlation_id: event_context.correlation_id,
@@ -27497,6 +27503,7 @@ impl AppComposition {
                             content_label: label,
                             stream,
                             assist_proposal: None,
+                            inline_prediction: None,
                         },
                         completion.as_ref(),
                     );
@@ -27714,6 +27721,26 @@ impl AppComposition {
             .requests
             .insert(metadata.request_id.clone(), metadata.clone());
 
+        // A live provider call does not run here.
+        //
+        // This is the UI thread. The blocking transport allows a request 120
+        // seconds, and for all of it eframe can neither repaint nor read input
+        // -- so the `request_in_flight` state set two lines above, and the
+        // Cancel control that depends on it, could never actually be seen. The
+        // deterministic path stays inline because it returns immediately and
+        // running it through a thread would only add a frame of latency.
+        match self.spawn_live_inline_prediction(&metadata) {
+            Ok(true) => {
+                return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.assist_inline_prediction_state.request_in_flight = false;
+                self.assist_inline_prediction_state.active_request_id = None;
+                return Err(error);
+            }
+        }
+
         let result = match self.invoke_inline_prediction_provider(metadata) {
             Ok(result) => result,
             Err(error) => {
@@ -27926,55 +27953,14 @@ impl AppComposition {
         &self,
         metadata: InlinePredictionRequestMetadata,
     ) -> Result<InlinePredictionResult, AppCompositionError> {
-        // Tier 2: local-first product completion (Ollama / Anthropic) for ghost text.
-        // Without a live route (CI/offline), keep deterministic fixture.
+        // The deterministic offline prediction.
         //
-        // Authorize the concrete backend before any buffer excerpt leaves the process.
-        // DenyByDefaultBroker recognizes `ai.provider.invoke` / `ai.provider.stream`
-        // for provider egress — not the structural `ai.inline_prediction.invoke`
-        // label carried in InlinePredictionRequestMetadata.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
-        if let Some(backend) = live_backend {
-            let (_provider_id, _model, _class, network_target, _, _, _) =
-                product_ai_route_fields(Some(backend));
-            let broker = DenyByDefaultBroker::new(
-                product_ai_security_policy(Some(backend)),
-                CapabilityNamespace("app.ai".to_string()),
-            );
-            let decision = broker
-                .handle(CapabilityRequest::Request {
-                    principal_id: metadata.principal_id.clone(),
-                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
-                    workspace_trust_state: metadata.workspace_trust_state.clone(),
-                    target_path: None,
-                    decision_id: None,
-                    context: legion_protocol::CapabilityRequestContext {
-                        network_target,
-                        ..Default::default()
-                    },
-                    correlation_id: metadata.correlation_id,
-                })
-                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
-            let granted = matches!(
-                decision,
-                CapabilityResponse::Decision(ref d) if d.granted
-            ) || matches!(decision, CapabilityResponse::Granted(_));
-            if granted {
-                let buffer_excerpt = self
-                    .editor
-                    .text(metadata.buffer_id)
-                    .unwrap_or("")
-                    .chars()
-                    .take(2_000)
-                    .collect::<String>();
-                if let Some(live) =
-                    try_live_product_inline_prediction(Some(backend), &metadata, &buffer_excerpt)
-                {
-                    return Ok(live);
-                }
-            }
-            // Live route denied or empty: fall through to deterministic offline fixture.
-        }
+        // A live route is attempted by `spawn_live_inline_prediction` on a
+        // worker thread and lands through `merge_inline_prediction_result`.
+        // This is what answers when there is no live backend, when policy
+        // refused one, or when the worker came back with nothing -- and it is
+        // the only path that may run on the calling thread, because it does no
+        // network work at all.
 
         let request = InlinePredictionRequest {
             provider: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
@@ -33024,122 +33010,6 @@ pub fn default_workspace_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    /// The org ceiling covers every field a bundle can tighten.
-    ///
-    /// Not a style point. The first version copied two booleans and the
-    /// allowlist, so a bundle setting `provider_invocation_enabled = false` --
-    /// an org-wide kill switch, the bluntest control an administrator has --
-    /// was dropped and Delegate chat went on invoking providers exactly as
-    /// before. A partial ceiling is worse than none: the call sites believe
-    /// they are governed.
-    mod org_ceiling {
-        use legion_security::{
-            PolicyKeyring, PolicySigningKey, policy_bundle_verifying_key_b64, sign_policy_bundle,
-        };
-
-        const SEED: [u8; 32] = [11u8; 32];
-        const KEY_ID: &str = "org-ceiling-test-signer";
-
-        /// The shipped example with one line replaced.
-        ///
-        /// Editing the real bundle rather than hand-rolling one keeps the
-        /// fixture honest about the schema: a bundle that stopped parsing would
-        /// fail here rather than quietly testing a default.
-        fn bundle_with(find: &str, replace: &str) -> legion_security::VerifiedPolicyBundle {
-            let payload = include_str!("../../../xtask/legion-policy.example.toml");
-            assert!(
-                payload.contains(find),
-                "the example bundle no longer contains {find}, so this fixture is not \
-                 changing what it claims to change"
-            );
-            let edited = payload.replace(find, replace);
-            let keyring = PolicyKeyring::new(vec![PolicySigningKey {
-                key_id: KEY_ID.to_string(),
-                verifying_key_b64: policy_bundle_verifying_key_b64(&SEED),
-            }]);
-            sign_policy_bundle(&edited, KEY_ID, &SEED)
-                .verify(&keyring)
-                .expect("a bundle this test signed must verify")
-        }
-
-        #[test]
-        fn an_org_wide_provider_kill_switch_is_honored() {
-            let mut app = super::super::AppComposition::new();
-            app.set_org_policy_bundle(bundle_with(
-                "provider_invocation_enabled = true",
-                "provider_invocation_enabled = false",
-            ));
-
-            let policy = app.product_ai_policy_with_org_ceiling(None);
-            assert!(
-                !policy.ai_provider_policy.provider_invocation_enabled,
-                "the bundle disabled provider invocation outright and the effective policy \
-                 still permits it, so every provider lane is unguarded by the one control \
-                 that was meant to stop all of them"
-            );
-        }
-
-        #[test]
-        fn the_bundles_own_enforcement_rules_are_adopted() {
-            let mut app = super::super::AppComposition::new();
-            app.set_org_policy_bundle(bundle_with(
-                "provider_invocation_enabled = true",
-                "provider_invocation_enabled = true",
-            ));
-
-            let policy = app.product_ai_policy_with_org_ceiling(None);
-            let expected = &app
-                .org_policy_bundle
-                .as_ref()
-                .expect("the bundle was just installed")
-                .bundle()
-                .security_policy
-                .bundle_enforcement;
-            assert_eq!(
-                policy.bundle_enforcement.provider.enforced, expected.provider.enforced,
-                "the bundle's provider allowlist was not adopted, so a bundle naming exactly \
-                 which providers may run has nothing consulting the list"
-            );
-            assert_eq!(
-                policy.bundle_enforcement.provider.allowed_provider_ids,
-                expected.provider.allowed_provider_ids,
-                "the allowed provider ids were dropped"
-            );
-        }
-
-        #[test]
-        fn an_org_blocklist_is_added_rather_than_replacing_the_products() {
-            let mut app = super::super::AppComposition::new();
-            let product = super::super::product_ai_security_policy(None);
-            app.set_org_policy_bundle(bundle_with(
-                "provider_invocation_enabled = true",
-                "provider_invocation_enabled = true",
-            ));
-
-            let policy = app.product_ai_policy_with_org_ceiling(None);
-            for host in &product.network_policy.blocklist {
-                assert!(
-                    policy.network_policy.blocklist.contains(host),
-                    "installing a bundle removed {host} from the blocklist; a ceiling that \
-                     un-denies something is not a ceiling"
-                );
-            }
-        }
-
-        #[test]
-        fn no_bundle_imposes_no_ceiling() {
-            // Non-vacuity: the refusals above must be the bundle talking, not
-            // this helper denying everything it is handed.
-            let app = super::super::AppComposition::new();
-            let policy = app.product_ai_policy_with_org_ceiling(None);
-            let product = super::super::product_ai_security_policy(None);
-            assert_eq!(
-                policy.ai_provider_policy.provider_invocation_enabled,
-                product.ai_provider_policy.provider_invocation_enabled,
-                "with no bundle installed the product policy must pass through unchanged"
-            );
-        }
-    }
 
     use super::*;
     use std::fs;
@@ -36060,6 +35930,7 @@ mod pkt_worker_tests {
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
             },
             None,
             "assist.proposal",
@@ -36158,6 +36029,7 @@ mod pkt_worker_tests {
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
             },
             None,
             "delegate.chat",
@@ -36203,6 +36075,7 @@ mod pkt_worker_tests {
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
             },
             None,
             "delegate.chat",

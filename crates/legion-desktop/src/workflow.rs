@@ -1258,8 +1258,19 @@ impl DesktopRuntime {
 
     /// Return the latest shell projection snapshot.
     /// Poll progressive product AI stream state into the app projection cache.
+    ///
+    /// Refreshes the shell projection when something merged, exactly as
+    /// [`Self::poll_delegated_task`] does. Without it the app state moved and
+    /// the snapshot every surface reads did not: a worker result -- a streamed
+    /// delta, a registered Assist proposal, an inline prediction settling --
+    /// landed in the app and stayed invisible until some unrelated action
+    /// happened to rebuild the projection.
     pub fn poll_product_ai_stream(&mut self) -> bool {
-        self.app.poll_product_ai_stream()
+        let changed = self.app.poll_product_ai_stream();
+        if changed {
+            let _ = self.refresh_projection();
+        }
+        changed
     }
 
     /// Return the delay until app-owned proposal observation delivery retries.

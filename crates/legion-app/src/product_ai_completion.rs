@@ -25,6 +25,15 @@ use super::*;
 /// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
 /// chunks arrive). Ollama remains a single-chunk completion.
 #[cfg(feature = "ai")]
+/// Completion tokens a product chat completion may return.
+///
+/// Named because it is also *declared* to the capability broker: an org policy
+/// bundle can cap tokens per request, and a request that declares none is never
+/// compared against that cap at all. A literal in one place and a declaration in
+/// another would drift, and the drift would show up as a cap that silently
+/// stopped applying.
+pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
+
 pub(crate) fn complete_product_chat(
     backend: Option<ProductAiLiveBackend>,
     system: &str,
@@ -208,7 +217,14 @@ no markdown fences, no explanation.";
     // The backend the caller already authorized. Resolving again here is the
     // same defect closed in Delegate chat and inline prediction: the broker was
     // asked about one destination and a second probe can answer differently.
-    match complete_product_chat(backend, system, &user, 512, 0.2, on_delta) {
+    match complete_product_chat(
+        backend,
+        system,
+        &user,
+        PRODUCT_COMPLETION_MAX_TOKENS,
+        0.2,
+        on_delta,
+    ) {
         Some(completion) => {
             let mut text = completion.text.clone();
             if !text.ends_with('\n') {
@@ -282,7 +298,14 @@ Do not invent file paths. Keep the reply under ~800 characters.";
     let user = format!(
         "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
     );
-    match complete_product_chat(backend, system, &user, 512, 0.2, on_delta) {
+    match complete_product_chat(
+        backend,
+        system,
+        &user,
+        PRODUCT_COMPLETION_MAX_TOKENS,
+        0.2,
+        on_delta,
+    ) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "delegate.chat");
             (bounded_label(completion.text, 1_200), Some(stream))

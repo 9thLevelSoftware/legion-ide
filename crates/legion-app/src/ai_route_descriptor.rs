@@ -58,6 +58,20 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
         None => ("https", trimmed),
     };
     let authority = rest.split('/').next().unwrap_or(rest);
+    // Userinfo is not part of the host, and keeping it was worse than untidy.
+    //
+    // `https://user:secret@proxy.internal/v1` produced a `NetworkTarget.host` of
+    // `user:secret@proxy.internal`. The policy then allowlisted and authorized
+    // that string while the HTTP client connected to `proxy.internal` -- so the
+    // decision was made about a host nothing talks to -- and the password was
+    // copied into route metadata that carries a metadata-only redaction hint,
+    // which is precisely the promise that the value is safe to keep.
+    //
+    // The last `@` wins: userinfo may contain a percent-encoded one, a host may
+    // not contain any.
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
     let mut parts = authority.rsplitn(2, ':');
     let (host, port) = match (parts.next(), parts.next()) {
         // `rsplitn` yields the tail first, so a parsed port means an explicit
@@ -218,6 +232,49 @@ pub(crate) fn route_descriptor_for_backend(
 
 #[cfg(test)]
 mod delegate_chat_route_honesty_tests {
+
+    /// Userinfo never reaches the authorized host, or the audit record.
+    ///
+    /// `https://user:secret@proxy.internal/v1` gave a host of
+    /// `user:secret@proxy.internal`. The policy allowlisted and authorized that
+    /// string while the client connected to `proxy.internal` -- a decision made
+    /// about a host nothing talks to -- and the password was copied into route
+    /// metadata carrying a metadata-only redaction hint, which is exactly the
+    /// promise that the value is safe to keep.
+    #[test]
+    fn userinfo_is_not_part_of_the_authorized_host() {
+        for base in [
+            "https://user:secret@proxy.internal/v1",
+            "https://user@proxy.internal/v1",
+            "HTTPS://user:secret@proxy.internal:8443/v1",
+        ] {
+            let target = super::network_target_from_base_url(base, "api.anthropic.com");
+            assert!(
+                !target.host.contains('@'),
+                "{base} left userinfo in the host: {}",
+                target.host
+            );
+            assert!(
+                !target.host.contains("secret"),
+                "{base} carried a credential into the route metadata: {}",
+                target.host
+            );
+            assert_eq!(
+                target.host, "proxy.internal",
+                "{base} must authorize the host the client actually connects to"
+            );
+        }
+    }
+
+    /// An explicit port still parses once userinfo is gone.
+    #[test]
+    fn a_port_survives_userinfo_removal() {
+        let target = super::network_target_from_base_url(
+            "https://user:secret@proxy.internal:8443/v1",
+            "api.anthropic.com",
+        );
+        assert_eq!(target.port, Some(8443), "the configured port was lost");
+    }
 
     /// A proxy path survives the upgrade to HTTPS, whatever case the scheme is in.
     ///
