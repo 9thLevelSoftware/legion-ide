@@ -1643,65 +1643,71 @@ fn a_non_ascii_filename_matches_its_own_hunks() {
     }
 }
 
-/// A filename containing a tab matches its own hunks.
+/// Filenames git must quote match their own hunks.
 ///
-/// The case `core.quotePath=false` cannot reach. That setting stops git escaping
-/// high bytes; `quote_c_style` still escapes a double quote, a backslash and
-/// every control character unconditionally, so this file arrives in a diff
-/// header as `+++ "b/tab\\tname.txt"` while porcelain `-z` reports the raw
-/// bytes. Unmatched hunks make a file look hunkless, and a hunkless file is
+/// The cases `core.quotePath=false` cannot reach. That setting stops git
+/// escaping high bytes; `quote_c_style` still escapes a double quote, a
+/// backslash and every control character unconditionally, so these files arrive
+/// in a diff header as `+++ "b/tab\\tname.txt"` while porcelain `-z` reports the
+/// raw bytes. Unmatched hunks make a file look hunkless, and a hunkless file is
 /// offered whole-path staging beside its own hunk controls -- one click from
 /// staging every hunk in a file somebody meant to stage one hunk of.
 ///
-/// Unix only: NTFS rejects a tab in a filename outright, so there is no way to
-/// build the fixture on Windows. The escapes that no filesystem will hold are
-/// covered by the decoder's own tests.
+/// Unix only: NTFS rejects a tab in a filename and treats a backslash as a
+/// separator, so there is no way to build either fixture on Windows. The
+/// escapes no filesystem will hold at all are covered by the parser's own tests.
 #[cfg(unix)]
 #[test]
-fn a_filename_with_a_tab_matches_its_own_hunks() {
-    let repo = TempGitRepo::new();
-    let root = repo.path();
+fn filenames_git_must_quote_match_their_own_hunks() {
+    for (name, description) in [
+        ("tab\tname.txt", "a tab"),
+        ("back\\slash.txt", "a backslash"),
+        ("quo\"te.txt", "a double quote"),
+    ] {
+        let repo = TempGitRepo::new();
+        let root = repo.path();
 
-    let name = "tab\\tname.txt";
-    repo.write(name, "one\\ntwo\\nthree\\n");
-    run_git(root, ["add", "."]);
-    run_git(root, ["commit", "-m", "seed"]);
-    repo.write(name, "one\\nCHANGED\\nthree\\n");
+        repo.write(name, "one\ntwo\nthree\n");
+        run_git(root, ["add", "."]);
+        run_git(root, ["commit", "-m", "seed"]);
+        repo.write(name, "one\nCHANGED\nthree\n");
 
-    let options = GitSnapshotOptions {
-        max_file_bytes_for_syntactic_diff: 1024 * 1024,
-        max_hunks: 16,
-        max_blame_lines: 16,
-        max_commits: 8,
-    };
-    let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
+        let options = GitSnapshotOptions {
+            max_file_bytes_for_syntactic_diff: 1024 * 1024,
+            max_hunks: 16,
+            max_blame_lines: 16,
+            max_commits: 8,
+        };
+        let snapshot = collect_git_snapshot(root, None, options).expect("git snapshot");
 
-    let hunk_paths: Vec<&str> = snapshot
-        .hunks
-        .iter()
-        .map(|hunk| hunk.path.as_str())
-        .collect();
-    let changed: Vec<&str> = snapshot
-        .changed_files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect();
+        let hunk_paths: Vec<&str> = snapshot
+            .hunks
+            .iter()
+            .map(|hunk| hunk.path.as_str())
+            .collect();
+        let changed: Vec<&str> = snapshot
+            .changed_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
 
-    assert!(
-        hunk_paths.contains(&name),
-        "the hunk must be filed under the real filename, got {hunk_paths:?}"
-    );
-    assert!(
-        changed.contains(&name),
-        "status must report the same filename, got {changed:?}"
-    );
-    // The specific failure this guards: a quoted or truncated representation
-    // reaching the projection, where it matches no status row and the file
-    // silently becomes hunkless.
-    for path in &hunk_paths {
         assert!(
-            !path.starts_with('"') && path.contains('\t'),
-            "a hunk path lost its tab or kept its quoting: {path:?}"
+            hunk_paths.contains(&name),
+            "a filename containing {description} must file its hunk under the real name, \
+             got {hunk_paths:?}"
         );
+        assert!(
+            changed.contains(&name),
+            "status must report the same filename, got {changed:?}"
+        );
+        // The specific failure this guards: a quoted or mangled representation
+        // reaching the projection, where it matches no status row and the file
+        // silently becomes hunkless.
+        for path in &hunk_paths {
+            assert!(
+                !path.starts_with('\"'),
+                "a hunk path kept its quoting with {description} in the name: {path:?}"
+            );
+        }
     }
 }
