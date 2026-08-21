@@ -7448,7 +7448,7 @@ mod fingerprint_tests {
         // the largest message that still fits a single block; 56 is the
         // smallest that needs two; 64 lands exactly on the boundary, where the
         // padding rules are easiest to get wrong.
-        const VECTORS: [(&str, &str); 6] = [
+        const VECTORS: [(&str, &str); 7] = [
             (
                 "",
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -7472,6 +7472,10 @@ mod fingerprint_tests {
             (
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e",
             ),
         ];
         for (message, expected) in VECTORS {
