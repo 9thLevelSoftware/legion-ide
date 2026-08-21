@@ -41,13 +41,21 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
     // and was labelled `https` -- so `enforce_https_for_remote` saw nothing to
     // correct and the client sent the credential over plaintext while the audit
     // record claimed TLS.
-    let lowered = trimmed.to_ascii_lowercase();
-    let (scheme, rest) = if let Some(stripped) = lowered.strip_prefix("https://") {
-        ("https", &trimmed[trimmed.len() - stripped.len()..])
-    } else if let Some(stripped) = lowered.strip_prefix("http://") {
-        ("http", &trimmed[trimmed.len() - stripped.len()..])
-    } else {
-        ("https", trimmed)
+    // Found by position rather than by arithmetic on two strings. Slicing the
+    // original by the length of a slice of the lowercased one is correct only
+    // while `to_ascii_lowercase` preserves byte length -- true today, stated
+    // nowhere, enforced by nothing, and exactly the kind of cleverness the next
+    // reader simplifies back into the case-sensitive bug this replaced.
+    let (scheme, rest) = match trimmed.find("://") {
+        Some(scheme_end) => {
+            let rest = &trimmed[scheme_end + "://".len()..];
+            if trimmed[..scheme_end].eq_ignore_ascii_case("http") {
+                ("http", rest)
+            } else {
+                ("https", rest)
+            }
+        }
+        None => ("https", trimmed),
     };
     let authority = rest.split('/').next().unwrap_or(rest);
     let mut parts = authority.rsplitn(2, ':');
@@ -114,10 +122,19 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
         Some(80) | None => 443,
         Some(port) => port,
     };
-    let path = base_url
-        .trim()
-        .strip_prefix("http://")
-        .and_then(|rest| rest.split_once('/'))
+    // The path survives the rewrite, and the prefix is matched the same way the
+    // scheme is.
+    //
+    // A case-sensitive `strip_prefix("http://")` fails on `HTTP://proxy/anthropic`
+    // -- which the scheme detection above accepts -- so the path was dropped and
+    // the client was pointed at `https://proxy:443`, a different endpoint from
+    // the one configured. Half a URL parsed case-insensitively is not a
+    // case-insensitive parser.
+    let trimmed = base_url.trim();
+    let path = trimmed
+        .find("://")
+        .map(|scheme_end| &trimmed[scheme_end + "://".len()..])
+        .and_then(|authority_and_path| authority_and_path.split_once('/'))
         .map(|(_authority, path)| format!("/{path}"))
         .unwrap_or_default();
     format!("https://{}:{}{}", target.host, port, path)
@@ -201,6 +218,40 @@ pub(crate) fn route_descriptor_for_backend(
 
 #[cfg(test)]
 mod delegate_chat_route_honesty_tests {
+
+    /// A proxy path survives the upgrade to HTTPS, whatever case the scheme is in.
+    ///
+    /// Scheme detection was made case-insensitive and the path extraction was
+    /// not, so `HTTP://proxy.internal/anthropic` -- accepted by one half and
+    /// rejected by the other -- was rewritten to `https://proxy.internal:443`.
+    /// The path is where the proxy routes on, so requests went to a different
+    /// endpoint from the configured one while everything reported success.
+    #[test]
+    fn upgrading_a_mixed_case_proxy_keeps_its_path() {
+        for base in [
+            "HTTP://proxy.internal/anthropic",
+            "http://proxy.internal/anthropic",
+            "HtTp://proxy.internal/anthropic",
+        ] {
+            assert_eq!(
+                super::enforce_https_for_remote(base),
+                "https://proxy.internal:443/anthropic",
+                "{base} lost its path, so the client would be pointed at a different \
+                 endpoint from the one configured"
+            );
+        }
+    }
+
+    /// A path with several segments survives whole.
+    #[test]
+    fn upgrading_keeps_every_path_segment() {
+        assert_eq!(
+            super::enforce_https_for_remote("HTTP://proxy.internal:8080/v1/anthropic/messages"),
+            "https://proxy.internal:8080/v1/anthropic/messages",
+            "an explicitly configured port stays, and so does the whole path"
+        );
+    }
+
     use super::{ProductAiLiveBackend, network_target_from_base_url, route_descriptor_for_backend};
     use legion_protocol::ProposalPrivacyLabel;
     use std::sync::{Mutex, MutexGuard, OnceLock};

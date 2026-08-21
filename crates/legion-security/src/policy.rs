@@ -444,7 +444,6 @@ fn is_windows_drive_path(value: &str) -> bool {
     )
 }
 
-/// Whether a host is a loopback address that never leaves the machine.
 /// Whether a host never leaves the machine.
 ///
 /// One definition, because there were three and they disagreed. The broker

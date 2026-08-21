@@ -15521,12 +15521,38 @@ impl AppComposition {
         };
         let org = &bundle.bundle().security_policy;
 
+        // Every field the bundle can tighten, not the three that were noticed.
+        //
+        // The first version of this helper copied two booleans and the
+        // allowlist, which made it a partial ceiling wearing a complete one's
+        // name -- and a partial ceiling is worse than none, because the call
+        // sites now believe they are governed. A bundle that sets
+        // `provider_invocation_enabled = false` is an org-wide kill switch, and
+        // it was being dropped on the floor: Delegate chat went on invoking
+        // Ollama and Anthropic exactly as before.
         policy.network_policy.air_gap |= org.network_policy.air_gap;
         policy.network_policy.local_provider_only |= org.network_policy.local_provider_only;
+        policy.network_policy.allow_untrusted &= org.network_policy.allow_untrusted;
+        policy.ai_provider_policy.provider_invocation_enabled &=
+            org.ai_provider_policy.provider_invocation_enabled;
         policy.ai_provider_policy.allow_remote_provider &=
             org.ai_provider_policy.allow_remote_provider;
         policy.ai_provider_policy.allow_local_provider &=
             org.ai_provider_policy.allow_local_provider;
+        policy.ai_provider_policy.deny_when_untrusted |= org.ai_provider_policy.deny_when_untrusted;
+
+        // The blocklist is a union: naming a host only ever denies more, so
+        // there is no direction in which taking both lists loosens anything.
+        for host in &org.network_policy.blocklist {
+            if !policy
+                .network_policy
+                .blocklist
+                .iter()
+                .any(|existing| existing == host)
+            {
+                policy.network_policy.blocklist.push(host.clone());
+            }
+        }
 
         // An empty org allowlist is "unrestricted", not "nothing allowed" --
         // treating it as the latter would deny every route the moment any bundle
@@ -15539,6 +15565,19 @@ impl AppComposition {
                     .any(|allowed| allowed == host)
             });
         }
+
+        // The bundle's own enforcement rules -- provider allowlist, MCP
+        // allowlist, budget caps, retention and export -- taken wholesale. The
+        // product default refuses nothing (`default_bundle_enforcement_refuses_nothing`),
+        // so adopting the org's can only ever add refusals. Leaving this at the
+        // default was what let a bundle name an allowed provider and have
+        // nothing consult the list.
+        policy.bundle_enforcement = org.bundle_enforcement.clone();
+
+        // `consented_git_remote_hosts` is deliberately untouched. It records a
+        // user consent event for the git push/fetch path and grants nothing to
+        // AI egress; intersecting it against a bundle that simply does not
+        // mention git remotes would revoke a consent the org never spoke about.
         policy
     }
 
@@ -24597,7 +24636,13 @@ impl AppComposition {
             schema_version: 1,
         };
         let broker = DenyByDefaultBroker::new(
-            product_ai_security_policy(live_backend),
+            // The installed bundle, not the product defaults. Assist was reached
+            // through the rail commands this PR made reachable, and it asked
+            // `product_ai_security_policy` -- so a bundle permitting Assist mode
+            // while forbidding the selected provider still let the buffer
+            // excerpt go out. Mode ceiling and provider ceiling are different
+            // questions and passing the first is not passing the second.
+            self.product_ai_policy_with_org_ceiling(live_backend),
             CapabilityNamespace("app.ai".to_string()),
         );
         // Capability/network decision only — product prose is filled by
@@ -24612,6 +24657,12 @@ impl AppComposition {
                     decision_id: None,
                     context: legion_protocol::CapabilityRequestContext {
                         network_target: provider_route_request.network_target.clone(),
+                        // Declared, for the same reason the Delegate lane
+                        // declares it: without an identity the broker sees a
+                        // destination and nothing to match a provider
+                        // restriction against, so an allowlist naming exactly
+                        // which providers may run has no input to evaluate.
+                        ai_provider_id: Some(route_provider_id.clone()),
                         ..Default::default()
                     },
                     correlation_id: event_context.correlation_id,
@@ -32926,6 +32977,123 @@ pub fn default_workspace_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// The org ceiling covers every field a bundle can tighten.
+    ///
+    /// Not a style point. The first version copied two booleans and the
+    /// allowlist, so a bundle setting `provider_invocation_enabled = false` --
+    /// an org-wide kill switch, the bluntest control an administrator has --
+    /// was dropped and Delegate chat went on invoking providers exactly as
+    /// before. A partial ceiling is worse than none: the call sites believe
+    /// they are governed.
+    mod org_ceiling {
+        use legion_security::{
+            PolicyKeyring, PolicySigningKey, policy_bundle_verifying_key_b64, sign_policy_bundle,
+        };
+
+        const SEED: [u8; 32] = [11u8; 32];
+        const KEY_ID: &str = "org-ceiling-test-signer";
+
+        /// The shipped example with one line replaced.
+        ///
+        /// Editing the real bundle rather than hand-rolling one keeps the
+        /// fixture honest about the schema: a bundle that stopped parsing would
+        /// fail here rather than quietly testing a default.
+        fn bundle_with(find: &str, replace: &str) -> legion_security::VerifiedPolicyBundle {
+            let payload = include_str!("../../../xtask/legion-policy.example.toml");
+            assert!(
+                payload.contains(find),
+                "the example bundle no longer contains {find}, so this fixture is not \
+                 changing what it claims to change"
+            );
+            let edited = payload.replace(find, replace);
+            let keyring = PolicyKeyring::new(vec![PolicySigningKey {
+                key_id: KEY_ID.to_string(),
+                verifying_key_b64: policy_bundle_verifying_key_b64(&SEED),
+            }]);
+            sign_policy_bundle(&edited, KEY_ID, &SEED)
+                .verify(&keyring)
+                .expect("a bundle this test signed must verify")
+        }
+
+        #[test]
+        fn an_org_wide_provider_kill_switch_is_honored() {
+            let mut app = super::super::AppComposition::new();
+            app.set_org_policy_bundle(bundle_with(
+                "provider_invocation_enabled = true",
+                "provider_invocation_enabled = false",
+            ));
+
+            let policy = app.product_ai_policy_with_org_ceiling(None);
+            assert!(
+                !policy.ai_provider_policy.provider_invocation_enabled,
+                "the bundle disabled provider invocation outright and the effective policy \
+                 still permits it, so every provider lane is unguarded by the one control \
+                 that was meant to stop all of them"
+            );
+        }
+
+        #[test]
+        fn the_bundles_own_enforcement_rules_are_adopted() {
+            let mut app = super::super::AppComposition::new();
+            app.set_org_policy_bundle(bundle_with(
+                "provider_invocation_enabled = true",
+                "provider_invocation_enabled = true",
+            ));
+
+            let policy = app.product_ai_policy_with_org_ceiling(None);
+            let expected = &app
+                .org_policy_bundle
+                .as_ref()
+                .expect("the bundle was just installed")
+                .bundle()
+                .security_policy
+                .bundle_enforcement;
+            assert_eq!(
+                policy.bundle_enforcement.provider.enforced, expected.provider.enforced,
+                "the bundle's provider allowlist was not adopted, so a bundle naming exactly \
+                 which providers may run has nothing consulting the list"
+            );
+            assert_eq!(
+                policy.bundle_enforcement.provider.allowed_provider_ids,
+                expected.provider.allowed_provider_ids,
+                "the allowed provider ids were dropped"
+            );
+        }
+
+        #[test]
+        fn an_org_blocklist_is_added_rather_than_replacing_the_products() {
+            let mut app = super::super::AppComposition::new();
+            let product = super::super::product_ai_security_policy(None);
+            app.set_org_policy_bundle(bundle_with(
+                "provider_invocation_enabled = true",
+                "provider_invocation_enabled = true",
+            ));
+
+            let policy = app.product_ai_policy_with_org_ceiling(None);
+            for host in &product.network_policy.blocklist {
+                assert!(
+                    policy.network_policy.blocklist.contains(host),
+                    "installing a bundle removed {host} from the blocklist; a ceiling that \
+                     un-denies something is not a ceiling"
+                );
+            }
+        }
+
+        #[test]
+        fn no_bundle_imposes_no_ceiling() {
+            // Non-vacuity: the refusals above must be the bundle talking, not
+            // this helper denying everything it is handed.
+            let app = super::super::AppComposition::new();
+            let policy = app.product_ai_policy_with_org_ceiling(None);
+            let product = super::super::product_ai_security_policy(None);
+            assert_eq!(
+                policy.ai_provider_policy.provider_invocation_enabled,
+                product.ai_provider_policy.provider_invocation_enabled,
+                "with no bundle installed the product policy must pass through unchanged"
+            );
+        }
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;
