@@ -1416,10 +1416,11 @@ impl DenyByDefaultBroker {
     }
 
     fn is_loopback_host(host: &str) -> bool {
-        matches!(
-            host.to_ascii_lowercase().as_str(),
-            "localhost" | "127.0.0.1" | "::1"
-        )
+        // Delegates to the crate's single definition. Two copies of this
+        // predicate disagreed with the product AI descriptor's third, and a
+        // loopback address one accepted and another rejected denied every
+        // request to a server that was running.
+        crate::policy::is_loopback_host(host)
     }
 
     fn host_matches_configured(pattern: &str, host: &str) -> bool {

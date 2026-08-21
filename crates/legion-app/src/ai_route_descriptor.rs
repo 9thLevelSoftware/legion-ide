@@ -35,12 +35,19 @@ fn anthropic_base_url() -> String {
 /// reaches.
 fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_protocol::NetworkTarget {
     let trimmed = base.trim();
-    let (scheme, rest) = match trimmed.strip_prefix("https://") {
-        Some(rest) => ("https", rest),
-        None => match trimmed.strip_prefix("http://") {
-            Some(rest) => ("http", rest),
-            None => ("https", trimmed),
-        },
+    // Schemes are case-insensitive per RFC 3986, and a case-sensitive check here
+    // was a way past the TLS enforcement rather than a cosmetic gap:
+    // `HTTP://proxy.internal` matched neither prefix, fell to the default arm,
+    // and was labelled `https` -- so `enforce_https_for_remote` saw nothing to
+    // correct and the client sent the credential over plaintext while the audit
+    // record claimed TLS.
+    let lowered = trimmed.to_ascii_lowercase();
+    let (scheme, rest) = if let Some(stripped) = lowered.strip_prefix("https://") {
+        ("https", &trimmed[trimmed.len() - stripped.len()..])
+    } else if let Some(stripped) = lowered.strip_prefix("http://") {
+        ("http", &trimmed[trimmed.len() - stripped.len()..])
+    } else {
+        ("https", trimmed)
     };
     let authority = rest.split('/').next().unwrap_or(rest);
     let mut parts = authority.rsplitn(2, ':');
@@ -68,18 +75,16 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
 
 /// Whether a host is a loopback address, and therefore never leaves the machine.
 ///
-/// Textual rather than resolved on purpose: this decides whether plaintext is
-/// acceptable, and a DNS lookup that can be repointed is not a basis for that
-/// decision. `localhost` is included because every platform this ships on
-/// resolves it to loopback, and excluding it would reject the ordinary Ollama
-/// configuration.
+/// The broker's definition, not a second one. This decides both whether
+/// plaintext is acceptable here and whether the host is added to the policy
+/// allowlist, and the broker then re-decides it when the request is made -- so
+/// any disagreement between the two shows up as a request that was authorized
+/// locally and denied centrally.
+///
+/// Textual rather than resolved, on purpose: a DNS lookup that can be repointed
+/// is not a basis for deciding whether to send a credential in the clear.
 pub(crate) fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host == "::1"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
+    legion_security::policy::is_loopback_host(host)
 }
 
 /// A configured Anthropic base URL with plaintext refused off-machine.
@@ -499,11 +504,44 @@ mod delegate_chat_route_honesty_tests {
         assert_eq!(privacy, ProposalPrivacyLabel::ExternalEgressMetadata);
     }
 
+    /// An upper-case scheme is still plaintext.
+    ///
+    /// Schemes are case-insensitive per RFC 3986, and a case-sensitive check was
+    /// a way *past* the TLS enforcement rather than a cosmetic gap:
+    /// `HTTP://proxy.internal` matched neither prefix, fell to the default arm
+    /// and was labelled `https` — so nothing was corrected, and the client sent
+    /// the credential over plaintext while the audit record claimed TLS.
+    #[test]
+    fn an_upper_case_scheme_is_recognised_and_still_upgraded() {
+        for configured in [
+            "HTTP://proxy.internal/v1",
+            "Http://proxy.internal/v1",
+            "hTTp://proxy.internal/v1",
+        ] {
+            let upgraded = super::enforce_https_for_remote(configured);
+            assert!(
+                upgraded.starts_with("https://"),
+                "{configured} was not recognised as plaintext: {upgraded}"
+            );
+        }
+
+        // The host keeps its case: only the scheme is matched insensitively.
+        let target = super::network_target_from_base_url("HTTPS://Proxy.Internal:8443", "fallback");
+        assert_eq!(
+            (target.scheme.as_str(), target.host.as_str(), target.port),
+            ("https", "Proxy.Internal", Some(8443)),
+            "matching the scheme case-insensitively must not rewrite the host"
+        );
+    }
+
     /// Loopback recognition covers the forms a person actually configures.
     #[test]
     fn loopback_hosts_are_recognised_by_form_not_by_lookup() {
+        // The same predicate the broker applies when the request is actually
+        // made, so a host accepted here cannot be denied there.
         for host in [
             "localhost",
+            "127.0.0.2",
             "LOCALHOST",
             "127.0.0.1",
             "127.0.0.53",

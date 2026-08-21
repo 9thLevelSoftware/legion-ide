@@ -15499,6 +15499,49 @@ impl AppComposition {
         }
     }
 
+    /// The product AI policy for `backend`, tightened by any installed org bundle.
+    ///
+    /// `product_ai_security_policy` derives a policy from the backend alone, so
+    /// a signed org bundle that permits Delegate mode but forbids a provider was
+    /// never consulted on this route: the mode ceiling was checked and the
+    /// provider restriction was not, and the buffer excerpt could go to a
+    /// provider the organization had refused.
+    ///
+    /// Combined as a **ceiling**, never a permission. Every field takes the more
+    /// restrictive of the two, so an installed bundle can only ever narrow what
+    /// the product policy already allowed — a bundle that said `air_gap = false`
+    /// must not be able to switch off an air gap the product asked for.
+    fn product_ai_policy_with_org_ceiling(
+        &self,
+        backend: Option<ProductAiLiveBackend>,
+    ) -> SecurityPolicy {
+        let mut policy = product_ai_security_policy(backend);
+        let Some(bundle) = self.org_policy_bundle.as_ref() else {
+            return policy;
+        };
+        let org = &bundle.bundle().security_policy;
+
+        policy.network_policy.air_gap |= org.network_policy.air_gap;
+        policy.network_policy.local_provider_only |= org.network_policy.local_provider_only;
+        policy.ai_provider_policy.allow_remote_provider &=
+            org.ai_provider_policy.allow_remote_provider;
+        policy.ai_provider_policy.allow_local_provider &=
+            org.ai_provider_policy.allow_local_provider;
+
+        // An empty org allowlist is "unrestricted", not "nothing allowed" --
+        // treating it as the latter would deny every route the moment any bundle
+        // was installed. A non-empty one intersects.
+        if !org.network_policy.allowlist.is_empty() {
+            policy.network_policy.allowlist.retain(|host| {
+                org.network_policy
+                    .allowlist
+                    .iter()
+                    .any(|allowed| allowed == host)
+            });
+        }
+        policy
+    }
+
     /// Whether the installed org policy bundle's mode ceiling refuses `mode`.
     ///
     /// `false` when no bundle is installed — an absent bundle imposes no ceiling,
@@ -27105,6 +27148,7 @@ impl AppComposition {
         // going to Anthropic.
         let (route_provider_id, route_model_label, route_provider_class, ..) =
             product_ai_route_fields(live_backend);
+        let route_provider_id_for_decision = route_provider_id.clone();
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -27216,6 +27260,9 @@ impl AppComposition {
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
+            // Kept on the request because it is the audit record's copy of the
+            // destination; the authorization decision below is handed the same
+            // target directly rather than reading it back out of here.
             network_target: Some(route_target.clone()),
             cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
             health_labels: vec![route_health.to_string()],
@@ -27230,7 +27277,7 @@ impl AppComposition {
         };
         let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
-            product_ai_security_policy(live_backend),
+            self.product_ai_policy_with_org_ceiling(live_backend),
             CapabilityNamespace("app.delegate".to_string()),
         );
         // Authorization only. `route_completion` *invokes* the registry provider
@@ -27256,6 +27303,11 @@ impl AppComposition {
                 decision_id: None,
                 context: legion_protocol::CapabilityRequestContext {
                     network_target: Some(route_target_for_decision),
+                    // Declared so a provider restriction can actually be
+                    // evaluated. Without it the broker sees a destination and no
+                    // identity, and an org bundle forbidding a specific provider
+                    // has nothing to match against.
+                    ai_provider_id: Some(route_provider_id_for_decision),
                     ..Default::default()
                 },
                 correlation_id: event_context.correlation_id,
