@@ -105,24 +105,28 @@ fn slot_position(slot: usize) -> egui::Pos2 {
     )
 }
 
-/// The first grid slot at or after `from` that no saved card is sitting on.
+/// The first grid slot at or after `from` that no *drawn* card is sitting on.
 ///
 /// A slot is taken when a saved position falls inside its cell -- strictly
 /// within one stride on both axes -- because a card placed there would be drawn
 /// over the top of one already on screen, and the one underneath is unreachable
 /// without moving the new one off it first.
 ///
-/// The search is bounded: each saved card can block at most four cells, so a
-/// free one always exists within `4 * positions.len() + 1` of the start, and the
+/// A card that is not on screen blocks nothing: a closed file's position is
+/// kept so reopening restores it, and treating it as occupied would push every
+/// new card past a row of slots nothing is drawn in.
+///
+/// The search is bounded: each drawn card can block at most four cells, so a
+/// free one always exists within `4 * rendered.len() + 1` of the start, and the
 /// bound is a guard rather than a limit anybody can reach.
-fn first_free_slot(from: usize, positions: &BTreeMap<String, egui::Pos2>) -> usize {
+fn first_free_slot(from: usize, rendered: &BTreeMap<&str, egui::Pos2>) -> usize {
     let limit = from
-        .saturating_add(positions.len().saturating_mul(4))
+        .saturating_add(rendered.len().saturating_mul(4))
         .saturating_add(1);
     (from..=limit)
         .find(|slot| {
             let candidate = slot_position(*slot);
-            !positions.values().any(|saved| {
+            !rendered.values().any(|saved| {
                 (saved.x - candidate.x).abs() < DEFAULT_STRIDE
                     && (saved.y - candidate.y).abs() < DEFAULT_STRIDE
             })
@@ -174,7 +178,24 @@ pub(crate) fn nodes_for_sections(
     // stops being true. Move the only card onto slot 1 and the count still says
     // 1, so the next file opened is handed slot 1 as well and lands on top of
     // it. Count first, then skip what is actually occupied.
-    let mut next_slot = positions.len();
+    // Counted over the cards being drawn, not over every position ever saved.
+    //
+    // Closing a file keeps its position -- deliberately, so reopening it puts
+    // the card back where it was. But counting those made history occupy the
+    // leading slots forever: with six closed files the next file opened started
+    // at slot 6, `y = 760`, outside the initial viewport, and the canvas looked
+    // empty while the file was open. Restoration and placement need different
+    // views of the same map.
+    let rendered: BTreeMap<&str, egui::Pos2> = sections
+        .iter()
+        .filter_map(|section| section.file_path.as_ref())
+        .filter_map(|path| {
+            positions
+                .get(path.0.as_str())
+                .map(|position| (path.0.as_str(), *position))
+        })
+        .collect();
+    let mut next_slot = rendered.len();
     // One card per path.
     //
     // Nothing upstream promises the excerpt sections are distinct by file, and
@@ -198,7 +219,7 @@ pub(crate) fn nodes_for_sections(
             // three made the other two jump, possibly onto the card just moved.
             // A person's arrangement must not rearrange itself around them.
             let position = saved.unwrap_or_else(|| {
-                let free = first_free_slot(next_slot, positions);
+                let free = first_free_slot(next_slot, &rendered);
                 next_slot = free + 1;
                 slot_position(free)
             });
@@ -869,6 +890,37 @@ mod canvas_layout_rules {
     /// Default slots used to come from a running count of *unplaced* cards, so
     /// one card gaining a position stopped the counter and moved every later
     /// card a slot to the left -- possibly onto the one just placed.
+    #[test]
+    fn positions_kept_for_closed_files_do_not_push_new_cards_off_screen() {
+        // Closing a file keeps its position on purpose, so reopening puts the
+        // card back where it was. Counting those made history occupy the
+        // leading slots forever: six closed files put the next file opened at
+        // slot 6 -- `y = 760`, outside the initial viewport -- and the canvas
+        // looked empty while the file was open.
+        let mut positions = BTreeMap::new();
+        for index in 0..6 {
+            positions.insert(
+                format!("closed{index}.rs"),
+                egui::pos2(
+                    (index % 3) as f32 * DEFAULT_STRIDE,
+                    (index / 3) as f32 * DEFAULT_STRIDE,
+                ),
+            );
+        }
+
+        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions);
+
+        let fresh = nodes
+            .first()
+            .expect("the newly opened file must have a card");
+        assert_eq!(
+            fresh.position,
+            egui::pos2(0.0, 0.0),
+            "nothing is on screen, so the first slot is free; a card placed past six \
+             remembered-but-closed files is drawn where nobody is looking"
+        );
+    }
+
     #[test]
     fn a_new_card_never_lands_on_one_already_placed() {
         // Numbering the next slot by how many cards are saved assumes a placed

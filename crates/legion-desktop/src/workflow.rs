@@ -4120,7 +4120,12 @@ impl DesktopEframeApp {
         } else {
             // Route every published default keymap entry through one central
             // dispatcher before context-specific editor input handling.
-            crate::view::dispatch_keybindings(ui.ctx(), &snapshot, &mut actions);
+            crate::view::dispatch_keybindings(
+                ui.ctx(),
+                &snapshot,
+                self.runtime.editor_input_enabled(&snapshot),
+                &mut actions,
+            );
 
             if command && input.key_pressed(egui::Key::Q) {
                 actions.push(DesktopAction::Quit);

@@ -745,3 +745,71 @@ fn every_card_is_placed_before_the_canvas_finishes_its_first_frame() {
         );
     }
 }
+
+#[test]
+fn undo_on_the_canvas_never_rewrites_the_buffer_behind_it() {
+    // The typing gate closed one route into the hidden buffer and left another
+    // open. `dispatch_keybindings` runs before any editor-specific handling and
+    // consulted nothing about the centre surface, so Ctrl/Cmd+Z and
+    // Ctrl/Cmd+Shift+Z went straight to `DesktopAction::Undo` and `Redo` while
+    // the canvas was up -- rewriting a file that was not on screen, with
+    // nothing to see until it was saved.
+    let workspace = workspace_with_files("legion_desktop_canvas_no_undo");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    // Give the buffer some history to undo. Without an edit first, an undo that
+    // did reach the buffer would have nothing to do and the test would pass for
+    // the wrong reason.
+    for character in "EDIT".chars() {
+        let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Text(
+            character.to_string(),
+        )]));
+    }
+    let edited = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .small_buffer_preview
+        .unwrap_or_default();
+    assert!(
+        edited.contains("EDIT"),
+        "the fixture needs a real edit to undo, got {edited:?}"
+    );
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+
+    // Undo three times, and no redo. Pressing undo and then redo restores the
+    // buffer whether or not either reached it, so a test that sends both
+    // reports success against a product that is silently rewriting the file --
+    // which is what the first version of this test did.
+    for _ in 0..3 {
+        let modifiers = egui::Modifiers {
+            command: true,
+            ctrl: true,
+            ..Default::default()
+        };
+        let key = egui::Key::Z;
+        let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }]));
+        let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    }
+
+    let after = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .small_buffer_preview
+        .unwrap_or_default();
+    assert_eq!(
+        edited, after,
+        "an undo or redo shortcut pressed on the canvas rewrote the buffer behind it"
+    );
+}

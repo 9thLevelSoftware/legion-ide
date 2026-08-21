@@ -3,7 +3,9 @@
 Date: 2026-08-17, updated 2026-08-21
 Status: **Arrangement surface built and reachable. The rest of this document is
 still direction, not commitment.** Backlog: `P6.F5.T1` in
-`plans/kanban/legion-ga-backlog.toml`, covering the built slice only. No ADR.
+`plans/kanban/legion-ga-backlog.toml`, covering the built slice only. ADR:
+`plans/adrs/ADR-0051-canvas-workspace-surface.md`, which authorizes the
+arrangement surface and nothing else in this document.
 No product-readiness ledger row: `PR-UI-001` is Manual mode's evidence and this
 surface is not part of it, so nothing here is claimed as readiness evidence and
 the canvas is not on any promotion path yet.

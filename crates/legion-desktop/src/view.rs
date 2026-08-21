@@ -3190,9 +3190,35 @@ fn action_label_to_desktop_action(
 /// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
 /// hardcoded key checks so the keymap takes precedence for non-context-dependent
 /// actions.
+/// Whether an action's whole effect happens inside the editor view.
+///
+/// These mutate the active buffer or move a cursor through it, and none of it
+/// is visible from another centre surface. The canvas gate on text input closed
+/// one route to that and left this one open: the keymap dispatcher runs before
+/// any editor-specific handling, so Ctrl/Cmd+Z went on rewriting a file that
+/// was not on screen. An invisible edit is the worst shape a keyboard defect
+/// can take -- nothing looks wrong until the file is saved.
+///
+/// Saving is deliberately not in this set. It writes what is already there
+/// rather than changing it, the dirty marker is visible from any surface, and
+/// wanting to save while looking at the canvas is an ordinary thing to want.
+fn action_is_editor_scoped(action: &DesktopAction) -> bool {
+    matches!(
+        action,
+        DesktopAction::Undo
+            | DesktopAction::Redo
+            | DesktopAction::AddCursorAbove { .. }
+            | DesktopAction::AddCursorBelow { .. }
+            | DesktopAction::FindNext
+            | DesktopAction::FindPrevious
+            | DesktopAction::ToggleFindReplace
+    )
+}
+
 pub(crate) fn dispatch_keybindings(
     ctx: &egui::Context,
     snapshot: &ShellProjectionSnapshot,
+    editor_input_enabled: bool,
     actions: &mut Vec<DesktopAction>,
 ) {
     let bindings = legion_ui::ui::default_keymap();
@@ -3217,7 +3243,9 @@ pub(crate) fn dispatch_keybindings(
             if binding.combo.alt != input.modifiers.alt {
                 continue;
             }
-            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot) {
+            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot)
+                && (editor_input_enabled || !action_is_editor_scoped(&action))
+            {
                 actions.push(action);
             }
         }
