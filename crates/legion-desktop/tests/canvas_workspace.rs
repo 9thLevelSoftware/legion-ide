@@ -433,3 +433,105 @@ fn cards_and_ports_are_published_as_controls() {
         );
     }
 }
+
+/// Typing while the canvas is up must not reach the hidden buffer.
+///
+/// `editor_input_enabled` derived only from palette and dirty-prompt state, so
+/// characters, Backspace, Delete and every editor shortcut still mutated the
+/// active buffer while the editor was off screen. Invisible edits are the worst
+/// shape a keyboard defect can take: nothing looks wrong until the file is
+/// saved, and by then there is nothing to point at.
+///
+/// This is the canvas twin of the BYOK isolation test — same property, different
+/// surface.
+#[test]
+fn typing_on_the_canvas_never_reaches_the_open_buffer() {
+    let workspace = workspace_with_files("legion_desktop_canvas_no_edit");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let before = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .small_buffer_preview
+        .unwrap_or_default();
+    assert!(
+        !before.is_empty(),
+        "the fixture needs a readable buffer, or this proves nothing"
+    );
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+
+    for character in "ZZZ".chars() {
+        let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Text(
+            character.to_string(),
+        )]));
+    }
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::Backspace,
+        physical_key: Some(egui::Key::Backspace),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+
+    let after = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .small_buffer_preview
+        .unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "typing on the canvas edited the buffer behind it"
+    );
+}
+
+/// A connection drawn by accident can be undone.
+///
+/// `DisconnectCanvasNodes` existed with no gesture that could emit it, so an
+/// edge drawn by mistake was permanent: the state had an undo and the surface
+/// did not. Repeating the same drag removes it — the smallest gesture that could
+/// work, and no sixth control on a card that already carries five.
+#[test]
+fn drawing_the_same_connection_again_removes_it() {
+    let workspace = workspace_with_files("legion_desktop_canvas_disconnect");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let from = clickable_center(&canvas, "Connect from alpha.rs").expect("outgoing port");
+    let to = clickable_center(&canvas, "Connect to beta.rs").expect("incoming port");
+
+    let _ = drag(&mut app, from, to);
+    let edges = |app: &DesktopEframeApp| {
+        app.capture_session_record()
+            .expect("session record")
+            .canvas_edges
+            .iter()
+            .filter(|edge| {
+                edge.from_path.0.ends_with("alpha.rs") && edge.to_path.0.ends_with("beta.rs")
+            })
+            .count()
+    };
+    assert_eq!(
+        edges(&app),
+        1,
+        "the first drag should create the connection"
+    );
+
+    // The ports have not moved, but read them again rather than assuming.
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let from = clickable_center(&after, "Connect from alpha.rs").expect("outgoing port");
+    let to = clickable_center(&after, "Connect to beta.rs").expect("incoming port");
+    let _ = drag(&mut app, from, to);
+
+    assert_eq!(
+        edges(&app),
+        0,
+        "repeating the gesture should remove the connection, not duplicate or keep it"
+    );
+}

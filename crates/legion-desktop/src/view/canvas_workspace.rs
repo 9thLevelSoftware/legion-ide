@@ -81,6 +81,8 @@ const ZOOM_MAX: f32 = 2.5;
 pub(crate) struct CanvasNode {
     /// Canonical path, which is also the node's identity across sessions.
     pub path: CanonicalPath,
+    /// Whether this card's position came from saved layout rather than a default.
+    pub placed: bool,
     /// Buffer behind this node, when the projection named one.
     pub buffer_id: Option<legion_protocol::BufferId>,
     /// Display title.
@@ -117,6 +119,16 @@ pub(crate) fn nodes_for_sections(
     sections: &[legion_ui::ui::ExcerptSurfaceSectionProjection],
     positions: &BTreeMap<String, egui::Pos2>,
 ) -> Vec<CanvasNode> {
+    // Slots for cards that have never been placed are numbered after the cards
+    // that have. Section index alone is not stable: the projection builds these
+    // in `open_tabs` order, so closing or reordering a tab renumbers every card
+    // after it and they all jump.
+    //
+    // The renderer persists each default the first time it draws it (see
+    // `render_canvas_workspace`), so this numbering only has to be free of
+    // collisions within a single frame -- by the next one, every card has a
+    // saved position and none of them can move again.
+    let mut next_slot = positions.len();
     // One card per path.
     //
     // Nothing upstream promises the excerpt sections are distinct by file, and
@@ -141,11 +153,14 @@ pub(crate) fn nodes_for_sections(
             // three made the other two jump, possibly onto the card just moved.
             // A person's arrangement must not rearrange itself around them.
             let position = saved.unwrap_or_else(|| {
+                let slot = next_slot;
+                next_slot += 1;
                 egui::pos2(
-                    (section_index % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
-                    (section_index / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+                    (slot % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+                    (slot / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
                 )
             });
+            let placed = saved.is_some();
             let available = section.lines.len();
             let lines: Vec<String> = section
                 .lines
@@ -153,8 +168,10 @@ pub(crate) fn nodes_for_sections(
                 .take(MAX_NODE_LINES)
                 .map(|line| line.visible_text.clone())
                 .collect();
+            let _ = section_index;
             Some(CanvasNode {
                 path,
+                placed,
                 buffer_id: section.buffer_id,
                 title: section.title.clone(),
                 dirty: section.dirty,
@@ -303,10 +320,22 @@ pub(crate) fn render_canvas_workspace(
             }
 
             for node in &nodes {
+                // A default slot is written down the first time it is used, so
+                // the card keeps it when the tab list changes underneath. Until
+                // it is saved, its position is derived from how many cards are
+                // placed, and that number moves.
+                if !node.placed {
+                    actions.push(DesktopAction::MoveCanvasNode {
+                        path: node.path.clone(),
+                        x: crate::bridge::WorldCoord::new(node.position.x),
+                        y: crate::bridge::WorldCoord::new(node.position.y),
+                        settled: true,
+                    });
+                }
                 render_node(ui, node, actions);
             }
 
-            render_ports(ui, &nodes, &by_path, actions);
+            render_ports(ui, &nodes, &by_path, edges, actions);
         });
 
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(SCENE_RECT_ID), rect));
@@ -385,12 +414,19 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
 
     // `drag_delta` is already divided by the layer's scaling inside a `Scene`,
     // so this is world units and needs no zoom correction of its own.
+    // The release frame can carry a delta too. egui reports `drag_stopped` on
+    // the frame the button comes up, and if the pointer also moved on that frame
+    // the delta is non-zero -- a fast flick does exactly this. Computing the
+    // settled position from `node.position` alone would then persist the
+    // second-to-last position and drop the final movement, leaving the card one
+    // frame behind where it was let go.
     let delta = header.drag_delta();
+    let settled_position = node.position + delta;
     if delta != egui::Vec2::ZERO {
         actions.push(DesktopAction::MoveCanvasNode {
             path: node.path.clone(),
-            x: crate::bridge::WorldCoord::new(node.position.x + delta.x),
-            y: crate::bridge::WorldCoord::new(node.position.y + delta.y),
+            x: crate::bridge::WorldCoord::new(settled_position.x),
+            y: crate::bridge::WorldCoord::new(settled_position.y),
             // Mid-drag: update the arrangement, do not write it to disk. This
             // fires on every pointer-movement frame, and persisting each one
             // rewrote, validated, `sync_all`ed and atomically replaced the
@@ -400,11 +436,12 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         });
     }
     if header.drag_stopped() {
-        // The drag ended: this is the position worth keeping.
+        // The drag ended: this is the position worth keeping, including any
+        // movement that arrived on this same frame.
         actions.push(DesktopAction::MoveCanvasNode {
             path: node.path.clone(),
-            x: crate::bridge::WorldCoord::new(node.position.x),
-            y: crate::bridge::WorldCoord::new(node.position.y),
+            x: crate::bridge::WorldCoord::new(settled_position.x),
+            y: crate::bridge::WorldCoord::new(settled_position.y),
             settled: true,
         });
     }
@@ -504,6 +541,7 @@ fn render_ports(
     ui: &mut egui::Ui,
     nodes: &[CanvasNode],
     by_path: &BTreeMap<&str, &CanvasNode>,
+    existing_edges: &[(String, String)],
     actions: &mut Vec<DesktopAction>,
 ) {
     let tokens = theme::tokens();
@@ -560,9 +598,27 @@ fn render_ports(
                         && node.path.0 != from
                         && by_path.contains_key(from.as_str())
                     {
-                        actions.push(DesktopAction::ConnectCanvasNodes {
-                            from_path: CanonicalPath(from.clone()),
-                            to_path: node.path.clone(),
+                        // Drawing a connection that already exists removes it.
+                        //
+                        // `DisconnectCanvasNodes` existed with no gesture that
+                        // could emit it, so an edge drawn by accident was
+                        // permanent -- the state had an undo and the surface did
+                        // not. Repeating the gesture is the smallest thing that
+                        // could work and needs no second control on a card that
+                        // already carries five.
+                        let already = existing_edges.iter().any(|(edge_from, edge_to)| {
+                            edge_from == &from && edge_to == &node.path.0
+                        });
+                        actions.push(if already {
+                            DesktopAction::DisconnectCanvasNodes {
+                                from_path: CanonicalPath(from.clone()),
+                                to_path: node.path.clone(),
+                            }
+                        } else {
+                            DesktopAction::ConnectCanvasNodes {
+                                from_path: CanonicalPath(from.clone()),
+                                to_path: node.path.clone(),
+                            }
                         });
                         break;
                     }
@@ -609,6 +665,58 @@ mod canvas_layout_rules {
         assert_eq!(nodes.len(), 2, "a repeated path produced a duplicate card");
         assert_eq!(nodes[0].path.0, "a.rs");
         assert_eq!(nodes[1].path.0, "b.rs");
+    }
+
+    /// A card is marked unplaced exactly when its slot is a default.
+    ///
+    /// The renderer persists an unplaced card's slot the first time it draws it,
+    /// which is what makes the slot stable when the tab list later changes. That
+    /// only works if `placed` tells the truth, so it is asserted directly rather
+    /// than inferred from a position.
+    #[test]
+    fn a_default_slot_is_reported_as_unplaced() {
+        let sections = vec![section("a.rs"), section("b.rs")];
+        let mut positions = BTreeMap::new();
+        positions.insert("a.rs".to_string(), egui::pos2(10.0, 20.0));
+
+        let nodes = nodes_for_sections(&sections, &positions);
+        assert!(nodes[0].placed, "a.rs has a saved position");
+        assert!(
+            !nodes[1].placed,
+            "b.rs is on a default slot and must say so"
+        );
+    }
+
+    /// Closing an earlier tab must not renumber the cards after it.
+    ///
+    /// Slots used to come from the section index, and the projection builds
+    /// sections in `open_tabs` order — so closing a tab shifted every later card
+    /// one slot left. Numbering from the count of *placed* cards instead means a
+    /// card that has been written down keeps its slot, and the renderer writes
+    /// each default down on first sight.
+    #[test]
+    fn removing_a_tab_does_not_move_the_cards_that_remain() {
+        let all = vec![section("a.rs"), section("b.rs"), section("c.rs")];
+        let first_pass = nodes_for_sections(&all, &BTreeMap::new());
+
+        // What the renderer persists on that first frame.
+        let saved: BTreeMap<String, egui::Pos2> = first_pass
+            .iter()
+            .map(|node| (node.path.0.clone(), node.position))
+            .collect();
+
+        // The middle tab closes.
+        let remaining = vec![section("a.rs"), section("c.rs")];
+        let second_pass = nodes_for_sections(&remaining, &saved);
+
+        assert_eq!(
+            second_pass[0].position, saved["a.rs"],
+            "a.rs moved when b.rs was closed"
+        );
+        assert_eq!(
+            second_pass[1].position, saved["c.rs"],
+            "c.rs moved when b.rs was closed — the defect this numbering fixes"
+        );
     }
 
     /// A card with a saved position does not shift the cards after it.

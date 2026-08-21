@@ -822,6 +822,13 @@ impl DesktopRuntime {
                 // thread dozens of times during a single gesture.
                 if settled {
                     self.persist_session_if_configured();
+                    // A failed save writes a warning into `last_status`, and
+                    // this action otherwise returns without rebuilding the
+                    // projection -- so a session path that went unwritable
+                    // mid-drag produced a status nobody would see until some
+                    // other action happened to refresh. Silence is the wrong
+                    // answer to "your arrangement is not being saved".
+                    self.refresh_projection()?;
                 }
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
@@ -2121,7 +2128,20 @@ impl DesktopRuntime {
     }
 
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
-        !snapshot.palette_projection.open && !close_dirty_prompt_active(snapshot)
+        // The centre has to be the editor for editor keys to mean anything.
+        //
+        // Without this, typing on the canvas still reached the active buffer:
+        // characters, Backspace, Delete, Enter and every editor shortcut mutated
+        // a file that was not on screen. Invisible edits are the worst shape a
+        // keyboard defect can take -- nothing looks wrong until the file is
+        // saved, and by then there is nothing to point at.
+        //
+        // Not the same condition as "a canvas widget has focus": a click on the
+        // canvas background focuses nothing, and the keystrokes after it would
+        // still have landed in the buffer.
+        self.center_surface == crate::view::CenterSurface::Editor
+            && !snapshot.palette_projection.open
+            && !close_dirty_prompt_active(snapshot)
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
