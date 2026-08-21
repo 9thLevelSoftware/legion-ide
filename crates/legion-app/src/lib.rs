@@ -116,6 +116,9 @@ use legion_editor::{
     Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection, TextEdit,
     TextPosition, TextRange as EditorTextRange,
 };
+// `AppSaveOutcome` carries this in two public variants, so a caller matching on
+// it needs to be able to name it without depending on `legion-editor` directly.
+pub use legion_editor::SaveRequestDto as PublicSaveRequestDto;
 use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
@@ -1025,6 +1028,20 @@ mod daily_editing_save_all_internal_tests {
 pub enum AppSaveOutcome {
     /// Save applied successfully.
     Saved(SaveRequestDto),
+    /// The write reached disk, but recording it afterwards failed.
+    ///
+    /// Kept apart from `Rejected` because the file really did change and the
+    /// buffer has already been reconciled with it -- the editor is clean and
+    /// the typed bytes are on disk. Folding this into `Rejected` tells someone
+    /// their work was not saved when it was, which is the more dangerous of the
+    /// two wrong answers: it invites re-typing over content that is already
+    /// there, or abandoning a file in the belief that it is unchanged.
+    CommittedThenAuditFailed {
+        /// The write that did land.
+        save: SaveRequestDto,
+        /// The failure recorded after it.
+        response: Box<ProposalResponse>,
+    },
     /// Save proposal was rejected, denied, stale, conflicting, or failed without mutating disk.
     Rejected(Box<ProposalResponse>),
 }
@@ -25668,6 +25685,15 @@ impl AppComposition {
                         .bind_saved_buffer(committed.save.buffer_id, committed.applied);
                     self.active_documents
                         .clear_dirty_prompt_for(committed.save.buffer_id);
+                    // Reported as its own outcome rather than as `Rejected`.
+                    // This function has just marked the buffer clean over
+                    // content that is on disk; returning "rejected" from the
+                    // same branch leaves the caller describing the opposite of
+                    // what happened here.
+                    return Ok(AppSaveOutcome::CommittedThenAuditFailed {
+                        save: committed.save,
+                        response: Box::new(failure.response),
+                    });
                 } else if failure.request_id != uuid::Uuid::nil() {
                     self.editor.acknowledge_save_outcome(
                         failure.request_id,
@@ -25719,16 +25745,26 @@ impl AppComposition {
             let file_id = Some(metadata.identity.file_id);
             let file_path = Some(metadata.identity.canonical_path);
             let outcome = self.save_buffer(buffer_id)?;
+            // A write that committed counts as saved, because the file
+            // changed. It previously counted as *rejected*, so save-all
+            // reported a file it had just written as one it had refused to.
+            // The audit failure is not dropped: it rides along as the item's
+            // rejection metadata, which is what renders the reason.
             let status = match &outcome {
-                AppSaveOutcome::Saved(_) => AppSaveAllItemStatus::Saved,
+                AppSaveOutcome::Saved(_) | AppSaveOutcome::CommittedThenAuditFailed { .. } => {
+                    AppSaveAllItemStatus::Saved
+                }
                 AppSaveOutcome::Rejected(_) => AppSaveAllItemStatus::Rejected,
             };
             let rejection_metadata = match &outcome {
                 AppSaveOutcome::Saved(_) => None,
-                AppSaveOutcome::Rejected(response) => Some(save_all_rejection_metadata(response)),
+                AppSaveOutcome::CommittedThenAuditFailed { response, .. }
+                | AppSaveOutcome::Rejected(response) => Some(save_all_rejection_metadata(response)),
             };
             match &outcome {
-                AppSaveOutcome::Saved(_) => saved_count += 1,
+                AppSaveOutcome::Saved(_) | AppSaveOutcome::CommittedThenAuditFailed { .. } => {
+                    saved_count += 1
+                }
                 AppSaveOutcome::Rejected(_) => rejected_count += 1,
             }
             results.push(AppSaveAllItemOutcome {

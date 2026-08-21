@@ -66,6 +66,14 @@ fn main() -> Result<()> {
                         save.file_id, save.snapshot_id.0, save.content_hash
                     );
                 }
+                AppSaveOutcome::CommittedThenAuditFailed { save, response } => {
+                    // The distinction matters even here: the file changed.
+                    println!(
+                        "Saved file_id={:?} snapshot={} hash={} -- but recording the save \
+                         failed: {response:?}",
+                        save.file_id, save.snapshot_id.0, save.content_hash
+                    );
+                }
                 AppSaveOutcome::Rejected(response) => {
                     println!("Save did not apply: {response:?}");
                 }

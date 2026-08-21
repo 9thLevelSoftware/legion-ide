@@ -70,16 +70,21 @@ fn app_with_unsaved_edit(workspace: &TempWorkspace, original: &str) -> DesktopEf
         )]));
     }
 
-    let preview = app
-        .runtime_snapshot()
-        .active_buffer_projection
-        .small_buffer_preview
-        .unwrap_or_default();
-    assert_ne!(
-        preview, original,
-        "the typing never reached the buffer, so nothing below tests saving. The editor is \
-         focused by clicking its body; if that layout moved, fix the click rather than the \
-         assertion."
+    // Compared as `Option`, not through `unwrap_or_default()`. A degraded
+    // projection carries no `small_buffer_preview` at all, and defaulting that
+    // to `""` would satisfy this `assert_ne!` without a single keystroke having
+    // landed -- turning the one guard that makes the rest of the test mean
+    // something into a guard that cannot fail.
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_preview
+            .as_deref()
+            .map(|preview| preview != original),
+        Some(true),
+        "the typing never reached the buffer (or the buffer has no readable preview), so \
+         nothing below tests saving. The editor is focused by clicking its body; if that \
+         layout moved, fix the click rather than the assertion."
     );
     app
 }

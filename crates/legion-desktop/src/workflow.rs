@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
-    AppSaveOutcome, AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind,
+    AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind,
     proposal::{ProposalHunkDispositionState, filtered_batch_proposal_for_accepted_targets},
 };
 use legion_protocol::{
@@ -2545,18 +2545,24 @@ impl DesktopRuntime {
                     cut: metadata.cut,
                 }
             }
-            AppCommandOutcome::Save(AppSaveOutcome::Saved(_)) => {
-                self.set_status(StatusSeverity::Info, "Saved");
-                DesktopWorkflowOutcome::Saved
-            }
-            AppCommandOutcome::Save(AppSaveOutcome::Rejected(response)) => {
+            AppCommandOutcome::Save(outcome) => {
                 // Not `{response:?}`: that put ~1,500 characters of lifecycle
                 // ids, version preconditions, fingerprint hashes and the
                 // extended-length path on screen, and said nothing about what
-                // had happened or whether the edits survived.
-                let message = crate::save_rejection::save_rejection_message(&response);
-                self.set_status(StatusSeverity::Warning, message.clone());
-                DesktopWorkflowOutcome::SaveRejected(message)
+                // had happened or whether the edits survived. And not a match
+                // on the outcome here either -- `save_outcome_message` owns the
+                // choice between the two wordings so it can be tested as one
+                // thing, rather than as two arms an edit can quietly swap.
+                match crate::save_rejection::save_outcome_message(&outcome) {
+                    Some((_refused, message)) => {
+                        self.set_status(StatusSeverity::Warning, message.clone());
+                        DesktopWorkflowOutcome::SaveRejected(message)
+                    }
+                    None => {
+                        self.set_status(StatusSeverity::Info, "Saved");
+                        DesktopWorkflowOutcome::Saved
+                    }
+                }
             }
             AppCommandOutcome::SaveAll(outcome) => {
                 self.set_save_all_status(&outcome);
@@ -3447,13 +3453,25 @@ fn save_all_item_status_message(item: &AppSaveAllItemOutcome) -> StatusMessagePr
         .map(|path| path.0.as_str())
         .unwrap_or("<unknown>");
     match item.status {
-        AppSaveAllItemStatus::Saved => status_message(
-            StatusSeverity::Info,
-            format!(
-                "Save all item saved: buffer {} path={path} dirty={}",
-                item.buffer_id.0, item.final_dirty
+        AppSaveAllItemStatus::Saved => match &item.rejection_metadata {
+            // Saved, with a caveat: the write landed and the record of it did
+            // not. Silence here would be the shell claiming a clean save it
+            // knows was not clean.
+            Some(metadata) => status_message(
+                StatusSeverity::Warning,
+                format!(
+                    "Save all item saved but not recorded: buffer {} path={path} dirty={} reason={}",
+                    item.buffer_id.0, item.final_dirty, metadata.response_kind
+                ),
             ),
-        ),
+            None => status_message(
+                StatusSeverity::Info,
+                format!(
+                    "Save all item saved: buffer {} path={path} dirty={}",
+                    item.buffer_id.0, item.final_dirty
+                ),
+            ),
+        },
         AppSaveAllItemStatus::Rejected | AppSaveAllItemStatus::MetadataMissing => {
             let kind = item
                 .rejection_metadata
