@@ -4346,7 +4346,11 @@ impl Shell {
 
     /// Drain queued command-dispatch intents.
     pub fn drain_command_dispatch_intents(&mut self) -> Vec<CommandDispatchIntent> {
-        self.command_dispatch_intents.drain(..).collect()
+        // `mem::take` rather than `drain(..).collect()`: draining every element
+        // into a fresh `Vec` of the same type allocates a second buffer and
+        // copies into it, when the queue can simply be handed over and replaced
+        // with an empty one.
+        std::mem::take(&mut self.command_dispatch_intents)
     }
 
     /// Render basic status and file content.

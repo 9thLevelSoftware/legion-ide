@@ -1732,7 +1732,9 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, RawSourceVaultError> {
         });
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
-    for chunk in text.as_bytes().chunks_exact(2) {
+    // `as_chunks` rather than `chunks_exact`: a hex pair is a constant two
+    // bytes, and the odd-length case is already refused above.
+    for chunk in text.as_bytes().as_chunks::<2>().0 {
         let high = hex_value(chunk[0])?;
         let low = hex_value(chunk[1])?;
         bytes.push((high << 4) | low);
