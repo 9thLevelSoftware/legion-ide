@@ -1969,13 +1969,25 @@ impl Default for AnthropicMessagesClient<ReqwestProviderHttpTransport> {
 impl AnthropicMessagesClient<ReqwestProviderHttpTransport> {
     /// Creates an Anthropic adapter from environment configuration.
     pub fn from_env(id: impl Into<ProviderId>) -> Self {
-        let (api_key, credential_kind) = Self::credential_from_env();
         let base_url = first_configured_value([
             std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var("ANTHROPIC_BASE_URL").ok(),
         ])
         .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+        Self::from_env_with_base_url(id, base_url)
+    }
+
+    /// Credentials from the environment, endpoint from the caller.
+    ///
+    /// A caller that has already decided which endpoint is acceptable -- for
+    /// example after refusing plaintext for a non-loopback host -- must be able
+    /// to build the client against *that* URL. `from_env` reads the environment
+    /// for both, so a caller correcting only its own copy leaves this client
+    /// posting to the original address: the credential travels the route nobody
+    /// authorized.
+    pub fn from_env_with_base_url(id: impl Into<ProviderId>, base_url: impl Into<String>) -> Self {
+        let (api_key, credential_kind) = Self::credential_from_env();
         Self::with_transport_kind(
             id,
             base_url,

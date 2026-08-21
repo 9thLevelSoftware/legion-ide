@@ -82,33 +82,49 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// A configured Anthropic base URL with plaintext refused off-machine.
+///
+/// **Applied to the URL, not to a copy of it.** An earlier version rewrote only
+/// the `NetworkTarget` used by the broker and the audit record, while
+/// `anthropic_client_with_keyring_fallback` still handed the raw environment
+/// value to the client -- so the credential and the buffer excerpt went over
+/// HTTP anyway, and the authorized route now *disagreed* with the real one. That
+/// is the same defect the descriptor exists to prevent, introduced by the fix
+/// for it. Enforcing here means the client, the broker allowlist and the audit
+/// record all read one already-corrected string.
+///
+/// Upgraded rather than silently honoured: if the proxy does not speak TLS the
+/// request fails visibly, which is the right outcome for a credential-bearing
+/// call. Loopback keeps `http` -- it never leaves the machine, and demanding TLS
+/// there would break local proxies for nothing.
+pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
+    let target = network_target_from_base_url(base_url, "api.anthropic.com");
+    if target.scheme != "http" || is_loopback_host(&target.host) {
+        return base_url.trim().to_string();
+    }
+    // The port came from the URL or from HTTP's default. A default of 80 was
+    // chosen for a scheme no longer in use, so it moves with it; an explicitly
+    // configured port is what the operator asked for and stays.
+    let port = match target.port {
+        Some(80) | None => 443,
+        Some(port) => port,
+    };
+    let path = base_url
+        .trim()
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_authority, path)| format!("/{path}"))
+        .unwrap_or_default();
+    format!("https://{}:{}{}", target.host, port, path)
+}
+
 /// The Anthropic endpoint this build will actually contact.
 ///
-/// Parsed from the configured base URL so the authorized target, the audit
-/// record and the request all name one destination.
-///
-/// **Plaintext is refused off-machine.** A base URL of `http://proxy.internal`
-/// would otherwise produce an HTTP target that `product_ai_security_policy`
-/// allowlists and the generic `ai.provider.invoke` policy accepts, putting the
-/// BYOK credential and the raw buffer excerpt on the wire in clear. A
-/// configured endpoint that cannot be reached safely is upgraded to `https`
-/// rather than silently honoured: if the proxy does not speak TLS the request
-/// fails visibly, which is the correct outcome for a credential-bearing call.
-///
-/// Loopback keeps `http`, because it never leaves the machine and demanding TLS
-/// there would break local proxies for no gain.
+/// Parsed from the configured base URL -- already HTTPS-enforced by
+/// [`enforce_https_for_remote`] -- so the authorized target, the audit record
+/// and the request all name one destination.
 pub(crate) fn anthropic_network_target() -> legion_protocol::NetworkTarget {
-    let mut target = network_target_from_base_url(&anthropic_base_url(), "api.anthropic.com");
-    if target.scheme == "http" && !is_loopback_host(&target.host) {
-        target.scheme = "https".to_string();
-        // The port came from the URL or from HTTP's default. A default of 80
-        // was chosen for a scheme that is no longer in use, so it moves with it;
-        // an explicitly configured port is what the operator asked for and stays.
-        if target.port == Some(80) {
-            target.port = Some(443);
-        }
-    }
-    target
+    network_target_from_base_url(&anthropic_base_url(), "api.anthropic.com")
 }
 
 /// The Ollama endpoint this build will actually contact.
@@ -422,6 +438,42 @@ mod delegate_chat_route_honesty_tests {
             target.port,
             Some(8443),
             "an operator's explicit port is what they asked for and must be kept"
+        );
+    }
+
+    /// The *URL* is corrected, not just the descriptor's view of it.
+    ///
+    /// The first attempt at this rewrote only the `NetworkTarget` handed to the
+    /// broker and the audit record, while the client was still constructed from
+    /// the raw environment value — so the credential went over HTTP anyway and
+    /// the authorized route now disagreed with the real one, which is worse than
+    /// the defect it was meant to fix.
+    ///
+    /// Asserting on the string every consumer reads is what makes that
+    /// impossible: there is no second copy left to correct.
+    #[test]
+    fn the_configured_url_itself_is_upgraded_not_just_the_target() {
+        assert_eq!(
+            super::enforce_https_for_remote("http://proxy.internal/v1"),
+            "https://proxy.internal:443/v1",
+            "a remote endpoint must be corrected in the URL the client is built from"
+        );
+        assert_eq!(
+            super::enforce_https_for_remote("http://proxy.internal:8443/v1"),
+            "https://proxy.internal:8443/v1",
+            "an explicitly configured port is the operator's choice and stays"
+        );
+        // Loopback is left exactly as configured — including its path and the
+        // absence of an added port, since nothing needed correcting.
+        assert_eq!(
+            super::enforce_https_for_remote("http://localhost:8080/v1"),
+            "http://localhost:8080/v1",
+            "a loopback proxy never leaves the machine, so nothing is rewritten"
+        );
+        assert_eq!(
+            super::enforce_https_for_remote("https://api.anthropic.com"),
+            "https://api.anthropic.com",
+            "an already-secure endpoint is untouched"
         );
     }
 

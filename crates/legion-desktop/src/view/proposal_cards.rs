@@ -184,7 +184,7 @@ mod proposal_card_rules {
         ] {
             assert!(
                 !proposal_is_applicable(state),
-                "{state:?} must not offer Apply; applying an unreviewed or terminal                  proposal routes around the approval this surface exists to collect"
+                "{state:?} must not offer Apply; applying an unreviewed or terminal proposal routes around the approval this surface exists to collect"
             );
         }
     }

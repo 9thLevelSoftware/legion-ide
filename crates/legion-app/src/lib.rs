@@ -1662,6 +1662,7 @@ fn anthropic_base_url_from_env() -> String {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         })
+        .map(|configured| crate::ai_route_descriptor::enforce_https_for_remote(&configured))
         .unwrap_or_else(|| "https://api.anthropic.com".to_string())
 }
 
@@ -1686,9 +1687,11 @@ fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMes
             ReqwestProviderHttpTransport,
         );
     }
-    // No explicit key: still use from_env so base URL + any remaining credential
-    // sources stay consistent with the provider adapter.
-    AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
+    // No explicit key: env credential resolution, but *this* base URL. Plain
+    // `from_env` reads the environment for the endpoint too, which would undo
+    // the plaintext refusal above and post the credential to the original
+    // address.
+    AnthropicMessagesClient::from_env_with_base_url(ANTHROPIC_PROVIDER_ID, base_url)
 }
 
 /// Resolve the configured Ollama base URL (custom port / self-hosted).
@@ -1944,7 +1947,7 @@ pub struct ProductAiStreamProjection {
 /// Resolve assist edit text via product preference routing (Ollama / Anthropic / fixture).
 #[cfg(feature = "ai")]
 fn resolve_assisted_edit_proposal_text(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     instruction_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -1959,14 +1962,10 @@ no markdown fences, no explanation.";
     let user = format!(
         "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
     );
-    match complete_product_chat(
-        product_ai_selected_live_backend(preference),
-        system,
-        &user,
-        512,
-        0.2,
-        on_delta,
-    ) {
+    // The backend the caller already authorized. Resolving again here is the
+    // same defect closed in Delegate chat and inline prediction: the broker was
+    // asked about one destination and a second probe can answer differently.
+    match complete_product_chat(backend, system, &user, 512, 0.2, on_delta) {
         Some(completion) => {
             let mut text = completion.text.clone();
             if !text.ends_with('\n') {
@@ -1979,7 +1978,18 @@ no markdown fences, no explanation.";
                     summary: format!("Assist edit proposal from {}", completion.provider_id),
                     details: vec![
                         format!("model={}", completion.model),
-                        format!("preference={}", preference.as_str()),
+                        // The backend that actually answered, not the
+                        // preference that suggested it. On `Auto` they differ,
+                        // and this line is metadata on a proposal a person will
+                        // review.
+                        format!(
+                            "backend={}",
+                            match backend {
+                                Some(ProductAiLiveBackend::Ollama) => "ollama",
+                                Some(ProductAiLiveBackend::Anthropic) => "anthropic",
+                                None => "none",
+                            }
+                        ),
                         format!(
                             "streamed={} chunks={}",
                             completion.streamed,
@@ -1998,7 +2008,7 @@ no markdown fences, no explanation.";
 
 #[cfg(not(feature = "ai"))]
 fn resolve_assisted_edit_proposal_text(
-    _preference: ProductAiProviderPreference,
+    _backend: Option<ProductAiLiveBackend>,
     _instruction_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -16943,6 +16953,37 @@ impl AppComposition {
                 return Ok(validated);
             }
         }
+        // Approving a freshly created proposal walks it through the same steps
+        // `Preview` gets above, instead of failing on a lifecycle it was never
+        // given a chance to satisfy.
+        //
+        // An Assist rail command registers its proposal in `Created` and nothing
+        // advances it: `OpenProposalDetails` maps to no request, so the panel
+        // offered an Approve whose only outcome was a refusal, which then landed
+        // the proposal in a terminal state. That is the "approve turns into
+        // rejected" behaviour recorded in the interactive-GUI journal, and it is
+        // a lifecycle gap rather than an approval policy -- validation and
+        // preview are precisely the checks approval is supposed to come after,
+        // so running them is not weakening the gate, it is honouring it.
+        if let ProposalRequest::Approve(command) = &request {
+            let proposal_id = command.proposal_id;
+            let state = self
+                .proposal_coordinator
+                .current_lifecycle_state(proposal_id);
+            if matches!(state, Some(ProposalLifecycleState::Created))
+                && let Some(proposal) = self.proposal_coordinator.proposal(proposal_id)
+            {
+                let validated =
+                    self.handle_proposal_request(ProposalRequest::Validate(proposal.clone()))?;
+                if !matches!(validated, ProposalResponse::Validated(_)) {
+                    return Ok(validated);
+                }
+                let previewed = self.handle_proposal_request(ProposalRequest::Preview(proposal))?;
+                if !matches!(previewed, ProposalResponse::Previewed { .. }) {
+                    return Ok(previewed);
+                }
+            }
+        }
         self.handle_proposal_request(request)
     }
 
@@ -25055,7 +25096,9 @@ impl AppComposition {
 
         #[cfg(feature = "ai")]
         if use_background_live {
-            let preference = self.preferred_ai_provider;
+            // No preference is captured: the worker uses the backend the
+            // broker already approved, so there is nothing here that could
+            // resolve to a different destination than the one authorized.
             let file_path = context.metadata.identity.canonical_path.0.clone();
             let instruction_for_worker = instruction_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
@@ -25078,7 +25121,7 @@ impl AppComposition {
             let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-                    preference,
+                    live_backend,
                     &instruction_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -25149,7 +25192,7 @@ impl AppComposition {
         let sink_delta = lane_reservation.sink();
         let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
         let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-            self.preferred_ai_provider,
+            live_backend,
             &instruction_label,
             &buffer_excerpt,
             &context.metadata.identity.canonical_path.0,
@@ -27504,7 +27547,7 @@ impl AppComposition {
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(route_target),
+            network_target: Some(route_target.clone()),
             cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
             health_labels: vec![route_health.to_string()],
             cost_labels: vec![route_cost.to_string()],
@@ -27516,17 +27559,47 @@ impl AppComposition {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         };
+        let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
             product_ai_security_policy(live_backend),
             CapabilityNamespace("app.delegate".to_string()),
         );
-        let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
-            .route_completion(provider_route_request)
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        // Policy router is metadata-only; product chat text comes from a live
-        // provider when credentials exist, else a deterministic fixture label.
-        let route_completed = provider_route_response.invocation_state
-            == AssistedAiProviderInvocationState::Completed;
+        // Authorization only. `route_completion` *invokes* the registry provider
+        // named in the request, which was harmless while that name was the
+        // deterministic fixture and became a real call the moment the request
+        // started naming the live backend honestly. With an environment
+        // credential that is a synchronous paid completion here, followed by a
+        // second one in the worker for the reply the person actually sees; with
+        // a keyring credential the registry client has no key at all and the
+        // chat fails before reaching `anthropic_client_with_keyring_fallback`.
+        //
+        // The Assist and inline-prediction paths ask the broker for the
+        // capability and nothing more. This does the same, so naming the true
+        // provider costs a policy decision rather than a provider call.
+        let route_id = provider_route_request.route_id.clone();
+        let route_labels = provider_route_request.proposal_intent.labels.clone();
+        let decision = broker
+            .handle(CapabilityRequest::Request {
+                principal_id: input.principal.clone(),
+                capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                workspace_trust_state: context.trust.clone(),
+                target_path: None,
+                decision_id: None,
+                context: legion_protocol::CapabilityRequestContext {
+                    network_target: Some(route_target_for_decision),
+                    ..Default::default()
+                },
+                correlation_id: event_context.correlation_id,
+            })
+            .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+        let refusal_reason = match &decision {
+            CapabilityResponse::Decision(decision) if !decision.granted => decision.reason.clone(),
+            CapabilityResponse::Denied(denial) => Some(denial.reason.clone()),
+            _ => None,
+        };
+        let route_completed = refusal_reason.is_none()
+            && (matches!(decision, CapabilityResponse::Decision(ref d) if d.granted)
+                || matches!(decision, CapabilityResponse::Granted(_)));
         #[cfg(feature = "ai")]
         let use_background_live = route_completed && live_backend.is_some();
         #[cfg(not(feature = "ai"))]
@@ -27560,12 +27633,8 @@ impl AppComposition {
             format!(
                 "Delegate provider refused; citation(s)={} route={} reason={}",
                 citation_ids.len(),
-                provider_route_response.route_id,
-                provider_route_response
-                    .refusal
-                    .as_ref()
-                    .map(|refusal| refusal.reason_code.as_str())
-                    .unwrap_or("unknown")
+                route_id,
+                refusal_reason.as_deref().unwrap_or("unknown")
             )
         } else if use_background_live {
             // Non-blocking path: stream on a worker thread; poll_product_ai_stream
@@ -27575,8 +27644,8 @@ impl AppComposition {
             // is nothing for it to re-resolve, so the destination it contacts is
             // the one the broker approved above and cannot become another.
             let file_path = input.metadata.identity.canonical_path.0.clone();
-            let route_id = provider_route_response.route_id.clone();
-            let route_labels = provider_route_response.output_labels.clone();
+            let route_id = route_id.clone();
+            let route_labels = route_labels.clone();
             let citation_count = citation_ids.len();
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
@@ -27628,8 +27697,8 @@ impl AppComposition {
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,
                 citation_ids.len(),
-                &provider_route_response.route_id,
-                &provider_route_response.output_labels,
+                &route_id,
+                &route_labels,
                 Some(&mut on_delta),
             );
             if let Some(stream) = stream {
