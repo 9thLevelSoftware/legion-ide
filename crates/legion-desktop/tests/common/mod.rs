@@ -299,12 +299,35 @@ impl Drop for TempWorkspace {
 /// across suites; a test that needs a different viewport should say so by
 /// building its own.
 pub fn full_frame_input(events: Vec<egui::Event>) -> egui::RawInput {
+    // Carry the chord's modifiers on the frame as well as on the event.
+    //
+    // egui answers `input.modifiers` from `RawInput::modifiers`, not from
+    // whichever event happens to be in the queue, and the central keybinding
+    // dispatcher tests `input.modifiers.command`. Leaving this at the default
+    // made every modifier chord sent through this helper arrive as a bare
+    // keypress -- so Ctrl+S dispatched nothing, and a test written to check
+    // that Ctrl+S saves would have reported the product broken when the harness
+    // was. Taken from the last pressed key event, which is the chord the frame
+    // is being built for.
+    let modifiers = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            egui::Event::Key {
+                pressed: true,
+                modifiers,
+                ..
+            } => Some(*modifiers),
+            _ => None,
+        })
+        .unwrap_or_default();
     egui::RawInput {
         focused: true,
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(1_440.0, 900.0),
         )),
+        modifiers,
         events,
         ..egui::RawInput::default()
     }
@@ -350,6 +373,23 @@ pub fn enabled_clickable_center(output: &egui::FullOutput, label: &str) -> Optio
                 ((bounds.y0 + bounds.y1) * 0.5) as f32,
             )
         })
+}
+
+/// The accessibility *description* of the node carrying `label`.
+///
+/// egui exposes a control's name as its label and its supplementary state as a
+/// description -- which is where the editor tab puts "Unsaved changes". A test
+/// reading only labels cannot see it, and neither can anything else that reads
+/// the tree by name alone.
+pub fn node_description(output: &egui::FullOutput, label: &str) -> Option<String> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|(_id, node)| node.label() == Some(label))
+        .and_then(|(_id, node)| node.description().map(str::to_string))
 }
 
 pub fn clickable_center(output: &egui::FullOutput, label: &str) -> Option<egui::Pos2> {

@@ -22,6 +22,8 @@ pub mod metrics;
 pub mod package;
 mod path_display;
 pub mod platform;
+/// Turning a refused save into a sentence a person can act on.
+pub mod save_rejection;
 pub mod search;
 pub mod session;
 pub mod smoke;

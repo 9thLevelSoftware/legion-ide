@@ -31,7 +31,7 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 |---|--------|-------|-------|
 | 1 | Open this repo; expand nested dirs (crates/…) | | Watcher should not thrash |
 | 1a | **Click a file row; confirm it opens in the editor** | | See note below |
-| 2 | Edit a file; save; confirm dirty → clean; external overwrite conflict | | |
+| 2 | Edit a file; save; confirm dirty → clean; external overwrite conflict | | See note below |
 | 3 | Focus BYOK field; type; confirm key not inserted into buffer | | |
 | 4 | Terminal: type command, see output, kill if needed | | |
 | 5 | Assist: Deterministic proposal appears | | |
@@ -69,6 +69,31 @@ Record branch, SHA (`git rev-parse HEAD`), OS, and whether Ollama/Anthropic keys
 > in `crates/legion-desktop/src/workflow.rs` (`ActivateExplorerFile`) and
 > guarded by `crates/legion-desktop/tests/explorer_activation.rs`. Keep this
 > row: an affordance that is never checked is an affordance that can rot back.
+
+
+> **Why row 2 now says "See note below".** Driven through the rendered UI for
+> the first time on 2026-08-20. The behaviour was right and the *reporting* was
+> not. Typing marks the tab (`Unsaved changes` on its accessibility node), the
+> published Ctrl/Cmd+S binding saves, and a save that would overwrite a change
+> made outside the editor is refused with the file on disk left alone and the
+> edits still in the buffer — the safety property holds. But the refusal was
+> rendered as `format!("Save rejected: {response:?}")`: about fifteen hundred
+> characters of lifecycle ids, version preconditions, fingerprint hashes and the
+> extended-length `\\?\` path, saying nothing about what happened or whether
+> the edits survived. `save_all_conflict.rs` had covered the same authority
+> through `runtime.handle_action` and could not see any of that, because it
+> never rendered a frame. Humanised in
+> `crates/legion-desktop/src/save_rejection.rs` and guarded end to end by
+> `crates/legion-desktop/tests/save_row_2.rs`.
+>
+> One harness defect fell out of it, and it is worth knowing about: the shared
+> `full_frame_input` helper built a frame whose `RawInput::modifiers` were
+> always default, while egui answers `input.modifiers` from that field rather
+> than from the event in the queue. Every modifier chord sent through the shared
+> rig therefore arrived as a bare keypress. The first run of this row appeared
+> to show that Ctrl+S did not save; it does. Any rendered-UI test that asserts a
+> chord *does* something would have been testing nothing, and one asserting a
+> chord does *not* do something would have passed vacuously.
 
 > **Why rows 9-12 were never passable.** Until 2026-08-20 the shipped app could
 > not start a debug session at all. `DebugWorkflow::runtime_enabled` was set by
