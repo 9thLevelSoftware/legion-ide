@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted; amended 2026-08-19 (see [Amendment 1](#amendment-1-2026-08-19--pr-ui-001-promoted-pr-ent-002-undeferred)).
+**Retired 2026-08-21** by owner decision. Superseded in full; see
+[Retirement](#retirement-2026-08-21) at the end of this document. The text below
+is kept as written so the reasoning that produced the freeze stays legible —
+none of it is in force.
+
+Previously: Accepted; amended 2026-08-19 (see [Amendment 1](#amendment-1-2026-08-19--pr-ui-001-promoted-pr-ent-002-undeferred)).
 
 ## Context
 
@@ -106,3 +111,39 @@ Two caveats carried forward rather than dropped:
 - Product Readiness Ledger (PR-UI-001: still Substrate validated; PR-ENT-002:
   undeferred by Amendment 1, but not promoted — see the amendment)
 - Course Correction Plan W6 finding
+
+---
+
+## Retirement (2026-08-21)
+
+Retired by owner decision, in full. Clauses 1 through 4 no longer constrain the
+workspace.
+
+**Why.** The freeze existed to keep scope narrow until Manual mode was
+daily-drivable, and it did its job: the surfaces it froze stayed frozen through
+eight months of substrate work. What changed is the owner's judgement about
+sequencing — the canvas workspace
+([`docs/ui/canvas-workspace-direction.md`](../../docs/ui/canvas-workspace-direction.md))
+was directed as the next product direction, and a blanket rule against new
+surfaces is the wrong instrument for deciding whether a specific one is worth
+building. That decision belongs to the roadmap, where it can be argued about per
+surface, rather than to a standing prohibition that has to be amended each time
+it is right to proceed.
+
+**What this does not do.** Retiring the freeze is not approval of anything it
+happened to be blocking. PR-VSC-002, PR-ENT-001 and PR-ENT-002 remain deferred
+in the product-readiness ledger, and they remain deferred for their own reasons:
+none has product evidence, an activation ADR, or tests behind a rendered
+surface. `xtask deferred-surfaces` still enforces that a row claiming more than
+"deferred" must carry the artifacts to back it, and that gate is unchanged.
+
+The distinction matters. Before today those three were blocked by a rule; from
+today they are blocked by not being ready, which is the more honest reason and
+the harder one to argue away.
+
+**What replaces it.** Nothing, deliberately. New surfaces are proposed,
+scheduled and evidenced through the roadmap and the readiness ledger like any
+other work. The four zero-fan-in crates (`legion-remote-transport`,
+`legion-retention`, `legion-telemetry`, `legion-vscode-compat`) are no longer
+product-activation-gated by this ADR; activating any of them still requires the
+evidence its readiness row asks for.

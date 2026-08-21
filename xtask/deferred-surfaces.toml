@@ -1,9 +1,14 @@
 # Deferred-surface gate (roadmap P9.F3.T4).
 #
-# ADR-0046 freezes surface expansion until PR-UI-001 reaches "product workflow
-# validated", and keeps three gates deferred by name. The roadmap's rule is that
-# each of those surfaces needs its own ADR, policy, tests, and product evidence
-# before its readiness status changes.
+# The roadmap's rule (P9.F3.T4) is that each deferred surface needs its own ADR,
+# policy, tests, and product evidence before its readiness status changes, and
+# that the core renderer gate (PR-UI-001) is validated first.
+#
+# This gate used to be founded on ADR-0046, the surface-expansion freeze, which
+# was retired on 2026-08-21. The gate is deliberately unchanged: retiring a
+# blanket prohibition on *new* surfaces says nothing about whether these three
+# particular ones are ready, and quietly relaxing the check while removing the
+# rule would turn one owner decision into three unreviewed promotions.
 #
 # Without this gate that rule was enforceable only by whoever happened to review
 # the diff: the readiness ledger is a markdown table, and a surface could be
@@ -15,13 +20,13 @@
 
 ledger = "plans/product-readiness-ledger.md"
 
-# The freeze precondition, and the condition that actually bites today.
+# The core-renderer precondition, and the condition that actually bites today.
 #
-# ADR-0046 clause 2 gates product activation on PR-UI-001 reaching "product
-# workflow validated". Every frozen surface already has its own ADR — remote has
-# four — so checking artifacts alone would wave through a promotion the ADR
-# forbids outright. The artifacts are necessary; the freeze being lifted is what
-# makes them sufficient.
+# Product activation waits on PR-UI-001 reaching "product workflow validated".
+# Every deferred surface already has its own ADR — remote has four — so checking
+# artifacts alone would wave through a promotion while the editor underneath is
+# still substrate. The artifacts are necessary; the core gate being validated is
+# what makes them sufficient.
 freeze_gate = "PR-UI-001"
 freeze_lifted_status = "Product workflow validated"
 
@@ -36,8 +41,8 @@ deferred_statuses = [
 [[surfaces]]
 gate = "PR-VSC-002"
 reason = """
-Isolated extension host. ADR-0046 clause 3 keeps this deferred and says
-undeferring requires an amendment to that ADR. `legion-vscode-compat` classifies
+Isolated extension host. ADR-0046 kept this deferred until it was retired on
+2026-08-21; it stays deferred on its own evidence, not on that rule. `legion-vscode-compat` classifies
 manifests and contribution points; it does not execute extensions, and no
 shipped composition path depends on it.
 """

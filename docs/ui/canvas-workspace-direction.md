@@ -357,10 +357,12 @@ before the surface could be called ready.
 
 ## 4. Conflicts with accepted decisions
 
-- [**ADR-0046**](../../plans/adrs/ADR-0046-surface-expansion-freeze.md) — no new
-  crates or surface activation until Manual mode is daily-drivable. The work
-  fits inside existing crates, but the freeze's *intent* is no surface expansion
-  before the basics work, and this is plainly surface expansion.
+- [**ADR-0046**](../../plans/adrs/ADR-0046-surface-expansion-freeze.md) —
+  **resolved.** The freeze forbade surface expansion before Manual mode was
+  daily-drivable, and this is plainly surface expansion. The owner retired the
+  ADR on 2026-08-21 rather than amend it per surface; see its Retirement
+  section. Retiring it approved nothing else: the three gates it froze are still
+  deferred, now on their own lack of evidence.
 - [**ADR-0048**](../../plans/adrs/ADR-0048-renderer-strategy.md) — stay on egui,
   with `CodeCanvasPainter` as the escape hatch. Compatible in principle; the
   painter is the mechanism a canvas would use. The perf budgets bind.

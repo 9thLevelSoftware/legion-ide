@@ -1904,6 +1904,23 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
 # EPIC P7 — Plugin and extension runtime
 # Readiness rows: PR-VSC-001, PR-VSC-002 deferred.
 # ---------------------------------------------------------------------------
+  [[epics.features]]
+  id = "P6.F5"
+  title = "Canvas workspace"
+
+    [[epics.features.tasks]]
+    id = "P6.F5.T1"
+    title = "Open files as draggable cards with connections the person draws"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/src/view/canvas_workspace.rs", "crates/legion-desktop/tests/canvas_workspace.rs", "docs/ui/canvas-workspace-direction.md"]
+    dependencies = []
+    verification = ["cargo test -p legion-desktop --test canvas_workspace", "cargo run -p xtask -- deferred-surfaces"]
+    acceptance = ["A Canvas control on the activity rail switches the centre; every open file is a card carrying its own text; a card can be dragged and two cards connected; the arrangement survives a restart.", "Edges are the person's own claim, kept in their own type, so a derived import or call graph can be added later without reinterpreting them."]
+    stop_condition = "Stop if an edge is ever derived from guessed structure: no workspace-wide index retains import targets today, so a drawn architecture would be false on its first frame."
+    status = "done"
+    evidence = "docs/ui/canvas-workspace-direction.md"
+
 [[epics]]
 id = "P7"
 title = "Plugin and extension runtime"

@@ -1,4 +1,6 @@
-//! Substrate complete; product activation gated on PR-UI-001 (see ADR-0046).
+//! Substrate complete; not product-activated. ADR-0046 (which gated this on
+//! PR-UI-001) was retired 2026-08-21; activation now needs the evidence this
+//! crate's readiness row asks for, which it does not yet have.
 //! Deterministic and production-gated Phase 8 remote transport carriers.
 
 #![warn(missing_docs)]
