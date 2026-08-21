@@ -4285,7 +4285,13 @@ impl DesktopEframeApp {
             // Escape while it is open and is checked first for the same reason.
             {
                 let view_state = self.runtime.projection_view_state();
-                if input.key_pressed(egui::Key::Escape)
+                // Gated like every other editor key. This one lives outside
+                // `dispatch_keybindings`, so completing the keymap filter could
+                // not reach it: Escape on the canvas went on clearing extra
+                // cursors in a buffer that was not on screen. Invisible editor
+                // state is the same defect whichever dispatcher carries it.
+                if self.runtime.editor_input_enabled(&snapshot)
+                    && input.key_pressed(egui::Key::Escape)
                     && !view_state.completion_popup_open
                     && projected_cursor_count(&snapshot) > 1
                 {

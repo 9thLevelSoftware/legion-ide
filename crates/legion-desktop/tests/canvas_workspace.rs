@@ -873,3 +873,68 @@ fn editor_function_keys_do_not_reach_the_buffer_behind_the_canvas() {
         "F12 on the canvas moved the cursor through a buffer that was not on screen"
     );
 }
+
+#[test]
+fn escape_on_the_canvas_does_not_clear_cursors_in_the_hidden_buffer() {
+    // Escape is dispatched by a hard-coded block outside `dispatch_keybindings`,
+    // so completing the keymap filter could not reach it. Multi-cursor state is
+    // exactly the kind of thing that vanishing invisibly is worst for: nothing
+    // is on screen to show it went, and the next edit does something other than
+    // what was intended.
+    let workspace = workspace_with_files("legion_desktop_canvas_no_escape");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    // Two cursors, through the published keymap entry.
+    let modifiers = egui::Modifiers {
+        command: true,
+        ctrl: true,
+        alt: true,
+        ..Default::default()
+    };
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::ArrowDown,
+        physical_key: Some(egui::Key::ArrowDown),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }]));
+    let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    // The same count the Escape handler itself consults.
+    let cursor_count = |app: &DesktopEframeApp| {
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .map(|viewport| viewport.cursors.len().max(1))
+            .unwrap_or(1)
+    };
+    let cursors_before = cursor_count(&app);
+    if cursors_before <= 1 {
+        // The fixture could not produce a second cursor, so this test cannot
+        // say anything. Fail rather than pass quietly.
+        panic!("the fixture needs more than one cursor to prove Escape did not clear them");
+    }
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: Some(egui::Key::Escape),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+    let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert_eq!(
+        cursor_count(&app),
+        cursors_before,
+        "Escape on the canvas cleared extra cursors in a buffer that was not on screen"
+    );
+}

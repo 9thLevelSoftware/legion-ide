@@ -345,12 +345,52 @@ pub(crate) const SCENE_RECT_ID: &str = "legion-canvas-scene-rect";
 /// egui id under which an in-progress connection is kept.
 pub(crate) const PENDING_EDGE_ID: &str = "legion-canvas-pending-edge";
 
-/// Read the saved scene viewport, or the default view.
-fn scene_rect(ctx: &egui::Context) -> egui::Rect {
-    ctx.data_mut(|data| data.get_temp::<egui::Rect>(egui::Id::new(SCENE_RECT_ID)))
-        .unwrap_or_else(|| {
-            egui::Rect::from_min_size(egui::pos2(-40.0, -40.0), egui::vec2(1200.0, 800.0))
-        })
+/// Read the saved scene viewport, or a first view that contains `nodes`.
+///
+/// Pan and zoom live in egui's temp store and do not survive a restart, while
+/// card positions do -- so a fixed opening rectangle showed an empty canvas to
+/// anybody who had arranged their cards outside it, which panning an infinite
+/// surface makes ordinary. There is no minimap and no fit-to-content control to
+/// recover with, so "empty" is indistinguishable from "broken".
+///
+/// The opening view is derived from the cards instead: their bounding box, with
+/// a margin, and never smaller than the default so a single card does not open
+/// zoomed to fill the screen.
+fn scene_rect(ctx: &egui::Context, nodes: &[CanvasNode]) -> egui::Rect {
+    if let Some(saved) =
+        ctx.data_mut(|data| data.get_temp::<egui::Rect>(egui::Id::new(SCENE_RECT_ID)))
+    {
+        return saved;
+    }
+    default_scene_rect(nodes)
+}
+
+/// The view a canvas opens at when nothing has panned it yet.
+pub(crate) fn default_scene_rect(nodes: &[CanvasNode]) -> egui::Rect {
+    const MARGIN: f32 = 40.0;
+    let fallback =
+        egui::Rect::from_min_size(egui::pos2(-MARGIN, -MARGIN), egui::vec2(1200.0, 800.0));
+    let mut bounds: Option<egui::Rect> = None;
+    for node in nodes {
+        let rect = node_rect(node);
+        bounds = Some(match bounds {
+            Some(current) => current.union(rect),
+            None => rect,
+        });
+    }
+    let Some(bounds) = bounds else {
+        return fallback;
+    };
+    let bounds = bounds.expand(MARGIN);
+    // Never smaller than the default. A lone card would otherwise open filling
+    // the screen, which is a different kind of disorienting from an empty one.
+    egui::Rect::from_min_size(
+        bounds.min,
+        egui::vec2(
+            bounds.width().max(fallback.width()),
+            bounds.height().max(fallback.height()),
+        ),
+    )
 }
 
 /// Draw the canvas, and return the rect it occupied.
@@ -376,7 +416,7 @@ pub(crate) fn render_canvas_workspace(
         return outer;
     }
 
-    let mut rect = scene_rect(ui.ctx());
+    let mut rect = scene_rect(ui.ctx(), &nodes);
     let ctx = ui.ctx().clone();
 
     egui::Scene::new()
@@ -993,6 +1033,47 @@ mod canvas_layout_rules {
             egui::pos2(0.0, 0.0),
             "nothing is on screen, so the first slot is free; a card placed past six \
              remembered-but-closed files is drawn where nobody is looking"
+        );
+    }
+
+    #[test]
+    fn the_opening_view_contains_every_saved_card() {
+        // Card positions survive a restart; pan and zoom live in egui's temp
+        // store and do not. A fixed opening rectangle therefore showed an empty
+        // canvas to anybody who had arranged their cards outside it -- and with
+        // no minimap and no fit-to-content control, "empty" cannot be told from
+        // "broken".
+        let mut positions = BTreeMap::new();
+        positions.insert("far.rs".to_string(), egui::pos2(-4000.0, 2500.0));
+        positions.insert("near.rs".to_string(), egui::pos2(-3600.0, 2500.0));
+
+        let nodes = nodes_for_sections(&[section("far.rs"), section("near.rs")], &positions);
+        let view = super::default_scene_rect(&nodes);
+
+        for node in &nodes {
+            assert!(
+                view.contains_rect(super::node_rect(node)),
+                "{} sits outside the opening view {view:?}, so the canvas opens empty with no \
+                 way to find it",
+                node.path.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_opening_view_of_a_lone_card_is_not_a_single_card() {
+        // The other direction. Fitting exactly to one card opens zoomed to fill
+        // the screen with it, which is a different kind of disorienting.
+        let nodes = nodes_for_sections(&[section("only.rs")], &BTreeMap::new());
+        let view = super::default_scene_rect(&nodes);
+
+        assert!(
+            view.width() >= 1200.0 && view.height() >= 800.0,
+            "a single card opened a view of {view:?}, tighter than the default"
+        );
+        assert!(
+            view.contains_rect(super::node_rect(&nodes[0])),
+            "the card must still be inside the view it widened to"
         );
     }
 
