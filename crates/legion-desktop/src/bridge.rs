@@ -139,6 +139,14 @@ pub enum DesktopAction {
         x: WorldCoord,
         /// World-space y.
         y: WorldCoord,
+        /// Whether the drag has ended and this position is worth persisting.
+        ///
+        /// A drag emits one of these per pointer-movement frame. Writing the
+        /// session file on each would put a rewrite, a validate, a `sync_all`
+        /// and an atomic replace on the renderer thread dozens of times during
+        /// one gesture. The arrangement updates every frame; only the last one
+        /// reaches disk.
+        settled: bool,
     },
     /// Record a connection the person drew between two canvas nodes.
     ///

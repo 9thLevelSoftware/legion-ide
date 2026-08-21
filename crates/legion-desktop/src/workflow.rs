@@ -809,9 +809,20 @@ impl DesktopRuntime {
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
             }
-            DesktopAction::MoveCanvasNode { path, x, y } => {
+            DesktopAction::MoveCanvasNode {
+                path,
+                x,
+                y,
+                settled,
+            } => {
                 self.canvas_nodes.insert(path.0.clone(), (x.get(), y.get()));
-                self.persist_session_if_configured();
+                // Only the end of a drag reaches disk. Mid-drag frames update
+                // the arrangement in memory; persisting each one put a rewrite,
+                // a validate, a `sync_all` and an atomic replace on the renderer
+                // thread dozens of times during a single gesture.
+                if settled {
+                    self.persist_session_if_configured();
+                }
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
             }

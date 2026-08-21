@@ -326,3 +326,110 @@ fn the_canvas_toggle_returns_to_the_editor() {
         "the editor is not showing the active buffer after toggling back; frame had {texts:?}"
     );
 }
+
+/// Moving one card must not move the others.
+///
+/// Default slots used to come from a running count of *unplaced* cards, so the
+/// moment one card gained a saved position the counter stopped incrementing for
+/// it and every later unplaced card shifted one slot left on the next frame.
+/// Dragging the first of three made the second and third jump — possibly onto
+/// the card just moved.
+///
+/// This is the property a spatial workspace cannot compromise on: things stay
+/// where they were put, including the ones that were never put anywhere.
+#[test]
+fn moving_one_card_leaves_the_others_where_they_were() {
+    let workspace = workspace_with_files("legion_desktop_canvas_stability");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let before_beta = clickable_center(&canvas, "Card beta.rs").expect("beta card");
+    let before_gamma = clickable_center(&canvas, "Card gamma.rs").expect("gamma card");
+
+    // Move a *different* card.
+    let alpha = clickable_center(&canvas, "Card alpha.rs").expect("alpha card");
+    let settled = drag(&mut app, alpha, alpha + egui::vec2(40.0, 220.0));
+
+    let after_beta = clickable_center(&settled, "Card beta.rs").expect("beta card after");
+    let after_gamma = clickable_center(&settled, "Card gamma.rs").expect("gamma card after");
+
+    assert_eq!(
+        before_beta, after_beta,
+        "dragging alpha moved beta, which nobody touched"
+    );
+    assert_eq!(
+        before_gamma, after_gamma,
+        "dragging alpha moved gamma, which nobody touched"
+    );
+}
+
+/// One file is one card, however many excerpt sections describe it.
+///
+/// Nothing upstream promises the sections are distinct by path. Two for the same
+/// file would stack two cards in one slot, and every lookup by path — including
+/// the one that resolves a dropped connection — would silently pick whichever
+/// the iteration reached first.
+#[test]
+fn a_file_gets_exactly_one_card() {
+    let workspace = workspace_with_files("legion_desktop_canvas_unique");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let update = canvas
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("the canvas frame must publish an accessibility tree");
+    for name in ["alpha.rs", "beta.rs", "gamma.rs"] {
+        let label = format!("Card {name}");
+        let count = update
+            .nodes
+            .iter()
+            .filter(|(_id, node)| node.label() == Some(label.as_str()))
+            .count();
+        assert_eq!(
+            count, 1,
+            "{name} should have exactly one card, found {count}"
+        );
+    }
+}
+
+/// Cards and ports announce themselves as controls, not as text.
+///
+/// The rest of this module works hard to be legible to the accessibility tree —
+/// bounds carry the layer transform, body text is hoisted into a value — and a
+/// node with a label and no role undoes that: "Card alpha.rs" reads as a
+/// heading, "Connect from alpha.rs" as a section title, and nothing says either
+/// can be pressed or dragged.
+#[test]
+fn cards_and_ports_are_published_as_controls() {
+    let workspace = workspace_with_files("legion_desktop_canvas_roles");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let update = canvas
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("accessibility tree");
+    for label in [
+        "Card alpha.rs",
+        "Connect from alpha.rs",
+        "Connect to alpha.rs",
+    ] {
+        let node = update
+            .nodes
+            .iter()
+            .find(|(_id, node)| node.label() == Some(label))
+            .map(|(_id, node)| node)
+            .unwrap_or_else(|| panic!("no node labelled {label:?}"));
+        assert_eq!(
+            node.role(),
+            egui::accesskit::Role::Button,
+            "{label} must announce itself as a control, not as text"
+        );
+    }
+}

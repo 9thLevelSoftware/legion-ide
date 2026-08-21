@@ -104,20 +104,46 @@ pub(crate) fn nodes_for_snapshot(
     snapshot: &ShellProjectionSnapshot,
     positions: &BTreeMap<String, egui::Pos2>,
 ) -> Vec<CanvasNode> {
-    let mut unplaced = 0usize;
-    snapshot
-        .excerpt_surface_projection
-        .sections
+    nodes_for_sections(&snapshot.excerpt_surface_projection.sections, positions)
+}
+
+/// The cards a set of excerpt sections implies.
+///
+/// Split from the snapshot so the rules below can be tested against inputs the
+/// live projection does not currently produce -- notably two sections naming one
+/// file, which nothing upstream promises against and which no fixture can be
+/// made to emit.
+pub(crate) fn nodes_for_sections(
+    sections: &[legion_ui::ui::ExcerptSurfaceSectionProjection],
+    positions: &BTreeMap<String, egui::Pos2>,
+) -> Vec<CanvasNode> {
+    // One card per path.
+    //
+    // Nothing upstream promises the excerpt sections are distinct by file, and
+    // two sections for one path would stack two cards in the same slot: they
+    // fight for the same default position, and every lookup by path -- including
+    // the one that resolves a dropped connection -- silently picks whichever the
+    // iteration reached first.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    sections
         .iter()
-        .filter_map(|section| {
+        .enumerate()
+        .filter_map(|(section_index, section)| {
             let path = section.file_path.clone()?;
+            if !seen.insert(path.0.clone()) {
+                return None;
+            }
             let saved = positions.get(path.0.as_str()).copied();
+            // The default slot comes from the section's own index, not from a
+            // running count of unplaced cards. With a counter, moving one card
+            // stopped incrementing it and every later unplaced card shifted a
+            // slot to the left on the next frame -- so dragging the first of
+            // three made the other two jump, possibly onto the card just moved.
+            // A person's arrangement must not rearrange itself around them.
             let position = saved.unwrap_or_else(|| {
-                let index = unplaced;
-                unplaced += 1;
                 egui::pos2(
-                    (index % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
-                    (index / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+                    (section_index % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+                    (section_index / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
                 )
             });
             let available = section.lines.len();
@@ -365,6 +391,21 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
             path: node.path.clone(),
             x: crate::bridge::WorldCoord::new(node.position.x + delta.x),
             y: crate::bridge::WorldCoord::new(node.position.y + delta.y),
+            // Mid-drag: update the arrangement, do not write it to disk. This
+            // fires on every pointer-movement frame, and persisting each one
+            // rewrote, validated, `sync_all`ed and atomically replaced the
+            // session file from the renderer thread -- dozens of filesystem
+            // flushes during one drag, on the thread that has to keep drawing it.
+            settled: false,
+        });
+    }
+    if header.drag_stopped() {
+        // The drag ended: this is the position worth keeping.
+        actions.push(DesktopAction::MoveCanvasNode {
+            path: node.path.clone(),
+            x: crate::bridge::WorldCoord::new(node.position.x),
+            y: crate::bridge::WorldCoord::new(node.position.y),
+            settled: true,
         });
     }
     if header.clicked()
@@ -386,6 +427,12 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     // filename here names three different things -- ambiguous to a screen
     // reader, and to anything else reading the tree by name.
     ui.ctx().accesskit_node_builder(header.id, |builder| {
+        // Without a role these publish as plain text: "Card alpha.rs" reads like
+        // a heading and "Connect from alpha.rs" like a section title, so nothing
+        // tells a screen reader they can be pressed or dragged. A module that
+        // went to the trouble of transforming bounds and hoisting body text
+        // should not then ship half a tree.
+        builder.set_role(egui::accesskit::Role::Button);
         builder.set_label(format!("Card {title}"));
         if node.dirty {
             builder.set_description("Unsaved changes");
@@ -428,6 +475,8 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         let body_bounds = global_rect(ui, body_rect);
         let text = node.lines.join("\n");
         ui.ctx().accesskit_node_builder(body.id, |builder| {
+            // Not a button: this is a region of text with a name and a value.
+            builder.set_role(egui::accesskit::Role::Label);
             builder.set_label(format!("{} contents", node.title));
             builder.set_value(text.clone());
             set_bounds(builder, body_bounds);
@@ -469,6 +518,7 @@ fn render_ports(
         ui.painter()
             .circle_filled(out_pos, PORT_RADIUS, tokens.accent.orange);
         ui.ctx().accesskit_node_builder(out.id, |builder| {
+            builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect from {}", node.title));
             set_bounds(builder, out_bounds);
         });
@@ -490,6 +540,7 @@ fn render_ports(
             egui::Stroke::new(1.5_f32, tokens.accent.cyan),
         );
         ui.ctx().accesskit_node_builder(input.id, |builder| {
+            builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect to {}", node.title));
             set_bounds(builder, in_bounds);
         });
@@ -519,5 +570,80 @@ fn render_ports(
             }
             ctx.data_mut(|data| data.remove::<String>(egui::Id::new(PENDING_EDGE_ID)));
         }
+    }
+}
+
+#[cfg(test)]
+mod canvas_layout_rules {
+    use super::{DEFAULT_STRIDE, nodes_for_sections};
+    use legion_protocol::CanonicalPath;
+    use legion_ui::ui::ExcerptSurfaceSectionProjection;
+    use std::collections::BTreeMap;
+
+    fn section(path: &str) -> ExcerptSurfaceSectionProjection {
+        ExcerptSurfaceSectionProjection {
+            excerpt_id: format!("excerpt:{path}"),
+            workspace_id: None,
+            buffer_id: None,
+            file_id: None,
+            file_path: Some(CanonicalPath(path.to_string())),
+            title: path.to_string(),
+            dirty: false,
+            editable: true,
+            snapshot_id: None,
+            cursor: None,
+            lines: Vec::new(),
+        }
+    }
+
+    /// Two sections naming one file produce one card.
+    ///
+    /// Nothing upstream promises the sections are distinct by path. Two cards
+    /// for one file stack in the same slot and every lookup by path -- including
+    /// the one resolving a dropped connection -- silently picks whichever the
+    /// iteration reached first.
+    #[test]
+    fn one_file_is_one_card_even_if_the_projection_repeats_it() {
+        let sections = vec![section("a.rs"), section("a.rs"), section("b.rs")];
+        let nodes = nodes_for_sections(&sections, &BTreeMap::new());
+        assert_eq!(nodes.len(), 2, "a repeated path produced a duplicate card");
+        assert_eq!(nodes[0].path.0, "a.rs");
+        assert_eq!(nodes[1].path.0, "b.rs");
+    }
+
+    /// A card with a saved position does not shift the cards after it.
+    ///
+    /// Default slots used to come from a running count of *unplaced* cards, so
+    /// one card gaining a position stopped the counter and moved every later
+    /// card a slot to the left -- possibly onto the one just placed.
+    #[test]
+    fn a_saved_position_does_not_reshuffle_the_unplaced_cards() {
+        let sections = vec![section("a.rs"), section("b.rs"), section("c.rs")];
+
+        let untouched = nodes_for_sections(&sections, &BTreeMap::new());
+        let b_before = untouched[1].position;
+        let c_before = untouched[2].position;
+
+        let mut positions = BTreeMap::new();
+        positions.insert("a.rs".to_string(), egui::pos2(-900.0, 900.0));
+        let after = nodes_for_sections(&sections, &positions);
+
+        assert_eq!(
+            after[1].position, b_before,
+            "placing a.rs moved b.rs, which nobody touched"
+        );
+        assert_eq!(
+            after[2].position, c_before,
+            "placing a.rs moved c.rs, which nobody touched"
+        );
+        assert_eq!(
+            after[0].position,
+            egui::pos2(-900.0, 900.0),
+            "the saved position must win over the default slot"
+        );
+        assert!(
+            (b_before.x - DEFAULT_STRIDE).abs() < f32::EPSILON,
+            "the fixture assumes b.rs starts in the second column"
+        );
     }
 }
