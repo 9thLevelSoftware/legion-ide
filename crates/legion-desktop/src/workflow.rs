@@ -3,7 +3,7 @@
 #[cfg(not(target_os = "windows"))]
 use std::process::Command;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     path::{Path, PathBuf},
     time::Instant,
@@ -604,6 +604,20 @@ pub struct DesktopRuntime {
     workspace_root: PathBuf,
     principal: PrincipalId,
     explorer_expansion: BTreeSet<String>,
+    /// Where the person put each canvas card, keyed by canonical path.
+    ///
+    /// Adapter-local for the same reason explorer expansion is: the app decides
+    /// which buffers exist, the person decides where they sit. Keyed by path
+    /// rather than `BufferId` so an arrangement survives the restart that
+    /// renumbers buffers.
+    canvas_nodes: BTreeMap<String, (f32, f32)>,
+    /// Connections the person drew, as ordered `(from, to)` path pairs.
+    ///
+    /// A `BTreeSet` so drawing the same connection twice is idempotent and the
+    /// order a session is written in is stable.
+    canvas_edges: BTreeSet<(String, String)>,
+    /// Which surface the centre shows.
+    center_surface: crate::view::CenterSurface,
     dismissed_toast_ids: BTreeSet<u64>,
     panel_state: SessionPanelState,
     /// Bottom-panel selection kept separate from the currently active side panel.
@@ -682,6 +696,8 @@ impl DesktopRuntime {
             });
 
         let mut explorer_expansion = BTreeSet::new();
+        let mut canvas_nodes: BTreeMap<String, (f32, f32)> = BTreeMap::new();
+        let mut canvas_edges: BTreeSet<(String, String)> = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
         // Whether `dock_layouts` represents a layout the user arranged, rather
@@ -700,6 +716,17 @@ impl DesktopRuntime {
                     .explorer_expansion
                     .iter()
                     .map(|path| path.0.clone())
+                    .collect();
+                canvas_nodes = record
+                    .canvas_nodes
+                    .iter()
+                    .map(|node| (node.path.0.clone(), (node.x, node.y)))
+                    .collect();
+                canvas_edges = record
+                    .canvas_edges
+                    .iter()
+                    .filter(|edge| edge.from_path.0 != edge.to_path.0)
+                    .map(|edge| (edge.from_path.0.clone(), edge.to_path.0.clone()))
                     .collect();
                 panel_state = record.panel_state.clone();
                 dock_layouts = restore_dock_layouts(record);
@@ -743,6 +770,9 @@ impl DesktopRuntime {
             workspace_root: config.workspace_root.clone(),
             principal: config.principal,
             explorer_expansion,
+            canvas_nodes,
+            canvas_edges,
+            center_surface: crate::view::CenterSurface::Editor,
             dismissed_toast_ids: BTreeSet::new(),
             panel_state,
             selected_bottom_panel,
@@ -773,6 +803,35 @@ impl DesktopRuntime {
     /// Handle a desktop action through bridge and app-owned authority.
     pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
         match action {
+            DesktopAction::SetCenterSurface { surface } => {
+                self.center_surface = surface;
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::MoveCanvasNode { path, x, y } => {
+                self.canvas_nodes.insert(path.0.clone(), (x.get(), y.get()));
+                self.persist_session_if_configured();
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ConnectCanvasNodes { from_path, to_path } => {
+                // A node is not connected to itself, and the check lives here
+                // rather than only in the renderer so the invariant holds for
+                // every route into this state.
+                if from_path.0 != to_path.0 {
+                    self.canvas_edges.insert((from_path.0, to_path.0));
+                    self.persist_session_if_configured();
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::DisconnectCanvasNodes { from_path, to_path } => {
+                self.canvas_edges.remove(&(from_path.0, to_path.0));
+                self.persist_session_if_configured();
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
             DesktopAction::DismissToast { toast_id } => {
                 self.dismissed_toast_ids.insert(toast_id);
                 self.refresh_projection()?;
@@ -1568,6 +1627,23 @@ impl DesktopRuntime {
             .collect();
         record.panel_state = self.panel_state.clone();
         record.dock_layouts = session_dock_layouts_from_ui(&self.dock_layouts);
+        record.canvas_nodes = self
+            .canvas_nodes
+            .iter()
+            .map(|(path, (x, y))| legion_protocol::SessionCanvasNode {
+                path: CanonicalPath(path.clone()),
+                x: *x,
+                y: *y,
+            })
+            .collect();
+        record.canvas_edges = self
+            .canvas_edges
+            .iter()
+            .map(|(from, to)| legion_protocol::SessionCanvasEdge {
+                from_path: CanonicalPath(from.clone()),
+                to_path: CanonicalPath(to.clone()),
+            })
+            .collect();
         Ok(record)
     }
 
@@ -1667,6 +1743,13 @@ impl DesktopRuntime {
         DesktopProjectionViewState {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
+            canvas_positions: self
+                .canvas_nodes
+                .iter()
+                .map(|(path, (x, y))| (path.clone(), egui::pos2(*x, *y)))
+                .collect(),
+            canvas_edges: self.canvas_edges.iter().cloned().collect(),
+            center_surface: self.center_surface,
             dock_layouts: self.dock_layouts.clone(),
             dock_layouts_user_arranged: self.dock_layouts_user_arranged,
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
@@ -3645,6 +3728,15 @@ impl DesktopEframeApp {
     /// storage directly.
     pub fn runtime_snapshot(&self) -> legion_ui::ShellProjectionSnapshot {
         self.runtime.projection_snapshot()
+    }
+
+    /// The session record the runtime would write right now.
+    ///
+    /// Mirrors [`Self::runtime_snapshot`]. A renderer test can see that a card
+    /// moved on screen; only this can show that the arrangement was *kept*,
+    /// which is the property a spatial workspace lives or dies on.
+    pub fn capture_session_record(&self) -> Result<legion_protocol::WorkspaceSessionRecord> {
+        self.runtime.capture_session_record()
     }
 
     /// Drive a desktop action through the wrapped runtime.

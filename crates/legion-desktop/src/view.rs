@@ -20,6 +20,8 @@ use tab_strip::render_tab_strip;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Files as draggable cards in an infinite 2D space.
+pub mod canvas_workspace;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
 pub mod cloud_lane;
 pub mod extensions_panel;
@@ -35,6 +37,7 @@ pub(crate) mod interactive_fields;
 pub mod manifest_panel;
 /// Editable plan editor projection.
 pub mod plan_editor;
+
 /// Proposal review and checkpoint timeline view models.
 pub mod proposal_review;
 /// Risk strip view model and row projections for proposal review surfaces.
@@ -73,7 +76,7 @@ pub use plan_editor::{
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -295,6 +298,12 @@ pub struct DesktopProjectionViewState {
     pub expanded_explorer_paths: BTreeSet<String>,
     /// Adapter-local explorer selection override, if a native control is ahead of projection.
     pub selected_explorer_file: Option<FileId>,
+    /// Where the person placed each canvas card, keyed by canonical path.
+    pub canvas_positions: BTreeMap<String, egui::Pos2>,
+    /// Connections the person drew, as ordered  canonical paths.
+    pub canvas_edges: Vec<(String, String)>,
+    /// Which surface the centre shows.
+    pub center_surface: CenterSurface,
     /// App-authoritative bottom-panel selection persisted across renderer frames.
     pub selected_bottom_panel: BottomPanelTab,
     /// Canonical workspace root projected by the runtime for scoped Delegate work.
@@ -348,6 +357,9 @@ impl Default for DesktopProjectionViewState {
         Self {
             expanded_explorer_paths: BTreeSet::new(),
             selected_explorer_file: None,
+            canvas_positions: BTreeMap::new(),
+            canvas_edges: Vec::new(),
+            center_surface: CenterSurface::Editor,
             selected_bottom_panel: BottomPanelTab::Terminal,
             canonical_workspace_root: None,
             dock_layouts: DockLayout::standard_all_modes(),
@@ -1175,7 +1187,7 @@ impl DesktopProjectionViewModel {
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
-            center_surface: center_surface_label(snapshot).to_string(),
+            center_surface: center_surface_label(state.center_surface).to_string(),
             mode_surface: ModeSurfaceModel::from_snapshot(snapshot, state),
             directive_panel_rows: directive_panel_rows(snapshot),
             onboarding_rows,
@@ -1289,6 +1301,32 @@ pub enum ActivitySurface {
     Tests,
     /// Run and debug tools.
     Debug,
+}
+
+/// What the central panel is currently showing.
+///
+/// New concept. Until now the centre was always the editor —
+/// `center_surface_label` returned a hard-coded `"editor"` and ignored its
+/// argument — so there was nothing to switch. Renderer-owned, like the activity
+/// rail selection: which files are open is the app's business, which of them you
+/// are looking at and how is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CenterSurface {
+    /// The code editor.
+    #[default]
+    Editor,
+    /// The canvas workspace: every open file as a card in 2D space.
+    Canvas,
+}
+
+impl CenterSurface {
+    /// The label the status line and tests use for this surface.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "editor",
+            Self::Canvas => "canvas",
+        }
+    }
 }
 
 /// Renderer-owned utility presentation that stays independent of product mode.
@@ -1745,8 +1783,20 @@ impl ProjectionView {
         let _center_content = egui::CentralPanel::default()
             .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
-                self.last_editor_rect =
-                    Some(render_code_canvas(ui, snapshot, &model, &mut actions));
+                // `last_editor_rect` stays populated whichever surface is up:
+                // several suites and the panel-tiling gate assert against it,
+                // and a canvas that returned nothing would fail them for a
+                // reason unrelated to the canvas.
+                self.last_editor_rect = Some(match state.center_surface {
+                    CenterSurface::Editor => render_code_canvas(ui, snapshot, &model, &mut actions),
+                    CenterSurface::Canvas => canvas_workspace::render_canvas_workspace(
+                        ui,
+                        snapshot,
+                        &state.canvas_positions,
+                        &state.canvas_edges,
+                        &mut actions,
+                    ),
+                });
             })
             .response
             .rect;
@@ -2368,7 +2418,7 @@ fn render_left_sidebar(
         ui.allocate_ui_with_layout(
             egui::vec2(geometry.activity_rail_width, ui.available_height()),
             egui::Layout::top_down(egui::Align::Center),
-            |ui| render_activity_rail(ui, snapshot, geometry, view, actions),
+            |ui| render_activity_rail(ui, snapshot, state, geometry, view, actions),
         );
         ui.separator();
         ui.vertical(|ui| {
@@ -2415,6 +2465,7 @@ const RAIL_BUTTON_SIZE: [f32; 2] = [38.0, 28.0];
 fn render_activity_rail(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
     geometry: ShellGeometry,
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
@@ -2480,6 +2531,30 @@ fn render_activity_rail(
                 actions.push(DesktopAction::OpenPalette { mode, query, scope });
             }
         }
+    }
+    // Canvas is a *centre* switch, not a side-panel one, so it is a toggle
+    // rather than a member of the selection above: choosing Explorer while the
+    // canvas is up should change the sidebar and leave the canvas alone.
+    let canvas = ui
+        .push_id(("legion_desktop_activity", "Canvas"), |ui| {
+            render_rail_button(
+                ui,
+                RailGlyph::Text("◳"),
+                state.center_surface == CenterSurface::Canvas,
+            )
+        })
+        .inner
+        .on_hover_text("Canvas");
+    ui.ctx().accesskit_node_builder(canvas.id, |node| {
+        node.set_label("Canvas");
+    });
+    if canvas.clicked() {
+        actions.push(DesktopAction::SetCenterSurface {
+            surface: match state.center_surface {
+                CenterSurface::Editor => CenterSurface::Canvas,
+                CenterSurface::Canvas => CenterSurface::Editor,
+            },
+        });
     }
     ui.separator();
     let diagnostics = ui
@@ -8392,8 +8467,8 @@ fn left_sidebar_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     )]
 }
 
-fn center_surface_label(_snapshot: &ShellProjectionSnapshot) -> &'static str {
-    "editor"
+fn center_surface_label(surface: CenterSurface) -> &'static str {
+    surface.label()
 }
 
 fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

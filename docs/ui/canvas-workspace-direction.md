@@ -1,8 +1,9 @@
 # Canvas workspace — UI direction
 
-Date: 2026-08-17
-Status: **Explored, not scheduled and not accepted.** No ADR, no backlog task, no
-product-readiness ledger row. Nothing in this document is committed work.
+Date: 2026-08-17, updated 2026-08-20
+Status: **Arrangement surface built and reachable. The rest of this document is
+still direction, not commitment.** No ADR, no backlog task, no product-readiness
+ledger row.
 Source: Claude Design project `Application UI review and redesign`
 (`b0839227-4e52-4aee-b1a2-8a56a825ff57`), file `Legion Canvas Workspace.dc.html`.
 
@@ -10,6 +11,45 @@ This document exists so a direction explored in a design tool survives outside
 that tool. It records the concept, a spec precise enough to rebuild the layout
 without the mock, and — the part worth more than the spec — what is actually
 true in this codebase today that would have to change first.
+
+## What is built, as of 2026-08-20
+
+The owner directed a pivot to this direction, so section 3's "would have to be
+true first" is no longer hypothetical for the first slice. What exists in
+`crates/legion-desktop/src/view/canvas_workspace.rs`, reachable from a `Canvas`
+control on the activity rail:
+
+- Pan and zoom through `egui::Scene`, with `zoom_range` set explicitly because
+  `Scene`'s own default caps at 1.0 and zooming in would otherwise do nothing.
+- One card per open file, carrying that file's real text from
+  `ExcerptSurfaceProjection`.
+- Drag a card's header to move it. `Response::drag_delta` already divides by the
+  layer's scaling inside a `Scene`, so — contrary to section 2's note, taken from
+  the mock's JavaScript — no manual division by zoom is needed.
+- Ports on each card, and a drag between them draws a connection.
+- Positions and connections persist in `WorkspaceSessionRecord`, keyed by
+  canonical path so an arrangement survives the restart that renumbers buffers.
+
+**Edges are the person's, not the code's.** An edge here means "I say these are
+related". Derived edges — imports, calls — remain absent for exactly the reason
+section 3 gives: nothing in the tree can produce them yet. They are kept in a
+separate type so derived ones can be added later without reinterpreting what
+someone drew by hand.
+
+Not built, and still as section 3 describes: syntax colouring inside cards,
+terminal/test/proposal node kinds, group frames, the minimap, edge labels, and
+every derived relationship.
+
+Two things found while building it, both fixed here and neither specific to the
+canvas:
+
+- egui fills accessibility bounds from the widget rect in *ui* coordinates and
+  applies no layer transform, so every node inside a `Scene` publishes its world
+  position as its screen bounds. Any assistive technology would point at empty
+  chrome. The canvas sets its own bounds through
+  `Context::layer_transform_to_global`.
+- `Context::pointer_interact_pos` answers in screen space regardless of the
+  asking layer, so comparing it to scene-space geometry silently never matches.
 
 It follows the posture of [`four-mode-prototype-fidelity.md`](four-mode-prototype-fidelity.md):
 a visual direction retained as reference, explicit about which parts are product

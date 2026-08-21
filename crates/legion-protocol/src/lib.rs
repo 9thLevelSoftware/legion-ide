@@ -22027,6 +22027,41 @@ pub struct TrustRecord {
     pub schema_version: u16,
 }
 
+/// Where one canvas node sits, and what it is a node of.
+///
+/// Positions are adapter-local view state in the same category as explorer
+/// expansion: the app owns which buffers are open, the renderer owns where the
+/// person put them. Stored in world coordinates, not screen coordinates, so a
+/// layout survives a different window size.
+///
+/// Keyed by canonical path rather than `BufferId`, because buffer ids are
+/// assigned per session and a layout that forgot its arrangement on every
+/// restart would not be a layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasNode {
+    /// Canonical path of the file this node shows.
+    pub path: CanonicalPath,
+    /// World-space x offset.
+    pub x: f32,
+    /// World-space y offset.
+    pub y: f32,
+}
+
+/// A connection the person drew between two canvas nodes.
+///
+/// Deliberately not derived from the code. An edge here means "I say these are
+/// related", which is a different and weaker claim than an import or a call --
+/// and one nothing else in the tree can currently make, since no workspace-wide
+/// index retains import targets. Keeping the two apart means a derived edge can
+/// be added later without silently reinterpreting what a person drew.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasEdge {
+    /// Canonical path of the node the connection starts at.
+    pub from_path: CanonicalPath,
+    /// Canonical path of the node the connection ends at.
+    pub to_path: CanonicalPath,
+}
+
 /// Persisted session tab record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTab {
@@ -22160,6 +22195,12 @@ pub struct WorkspaceSessionRecord {
     pub layout_splits: Vec<SessionLayoutSplit>,
     /// Expanded explorer paths.
     pub explorer_expansion: Vec<CanonicalPath>,
+    /// Where the person placed each canvas node, in world coordinates.
+    #[serde(default)]
+    pub canvas_nodes: Vec<SessionCanvasNode>,
+    /// Connections the person drew between canvas nodes.
+    #[serde(default)]
+    pub canvas_edges: Vec<SessionCanvasEdge>,
     /// Panel state.
     pub panel_state: SessionPanelState,
     /// Mode-scoped dock layouts.

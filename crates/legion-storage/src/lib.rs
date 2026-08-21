@@ -7686,6 +7686,8 @@ mod tests {
             tab_groups: Vec::new(),
             layout_splits: Vec::new(),
             explorer_expansion: Vec::new(),
+            canvas_nodes: Vec::new(),
+            canvas_edges: Vec::new(),
             panel_state: legion_protocol::SessionPanelState {
                 bottom_visible: true,
                 side_visible: true,
