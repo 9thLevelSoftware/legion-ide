@@ -383,7 +383,7 @@ fn the_rendered_panel_marks_the_keyboard_focused_row() {
     );
 }
 
-/// A hover on another buffer must not empty the Problems panel.
+/// A language read must not empty the Problems panel.
 ///
 /// `ingest_language_read` rebuilt the language projection from empty whenever a
 /// read named a different buffer, and `problems` went with it. The panel is a
@@ -391,12 +391,13 @@ fn the_rendered_panel_marks_the_keyboard_focused_row() {
 /// file on purpose -- so one hover cleared diagnostics that had nothing to do
 /// with it, and nothing republished them until that file's server spoke again.
 #[test]
-fn a_language_read_for_another_buffer_leaves_the_problems_alone() {
+fn a_language_read_leaves_the_problems_alone() {
     let workspace = TempWorkspace::new("legion_desktop_problems_panel");
     let (mut app, _file) = app_with_diagnostics(&workspace, &[(4, "unresolved import")]);
 
-    // Any frame carrying pointer motion arms the hover debounce, and the read
-    // it produces is what used to clear the list.
+    // The shell issues reads on its own -- a hover debounce fires and the
+    // index leg answers it -- and that read is what used to clear the list.
+    // One buffer is the whole scenario: the defect needed no second file.
     let panel = show_problems_panel(&mut app, 1);
     assert!(
         frame_shows(&panel, "main.rs:4"),

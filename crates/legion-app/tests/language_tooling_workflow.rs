@@ -666,3 +666,169 @@ fn language_tooling_projects_inlay_hints_and_code_lenses_from_symbols() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Diagnostics belong to the workspace they were reported in.
+///
+/// The Problems panel is a workspace-wide list, so a language read that names a
+/// different *buffer* keeps the rows for every other file. A different
+/// *workspace* is not the same thing: opening B keeps the same
+/// `LanguageToolingWorkflow`, so B's first read arrives holding A's rows, and a
+/// problem row records no workspace of its own -- nothing downstream could ever
+/// retire them, and clicking one would send the reader at a path outside the
+/// workspace they are in.
+#[test]
+fn problems_do_not_follow_the_reader_into_another_workspace() {
+    let first_root = create_root();
+    let decoy = first_root.join("decoy.rs");
+    let first_file = first_root.join("first.rs");
+    std::fs::write(&decoy, "fn decoy() {}\n").expect("write decoy source file");
+    std::fs::write(&first_file, "fn main() {}\n").expect("write first source file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &first_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open first workspace");
+    // Open a decoy first so `first.rs` is not assigned the same `FileId` that
+    // workspace B's single file will get. File identity is allocated per
+    // workspace and starts over, so without this the two files collide and
+    // `ingest_lsp_diagnostics` retires the stale row by accident -- which
+    // looks exactly like the guard working and is not.
+    app.open_file(decoy.to_string_lossy())
+        .expect("open decoy source file");
+    app.open_file(first_file.to_string_lossy())
+        .expect("open first source file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    let payload = json!({
+        "uri": "file:///workspace/first.rs",
+        "diagnostics": [{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 2}
+            },
+            "severity": 1,
+            "code": "E0001",
+            "source": "rustc",
+            "message": "a problem in the first workspace"
+        }]
+    });
+    let projected = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &payload, true, None)
+        .expect("ingest diagnostics for the first workspace");
+    assert!(
+        projected
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0001")),
+        "the first workspace's diagnostic must be listed before the switch"
+    );
+
+    // Open a second workspace and read in it, which is what reaches the
+    // identity reset holding the first workspace's rows.
+    let second_root = create_root();
+    let second_file = second_root.join("second.rs");
+    std::fs::write(&second_file, "fn other() {}\n").expect("write second source file");
+    app.open_workspace(
+        &second_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open second workspace");
+    app.open_file(second_file.to_string_lossy())
+        .expect("open second source file");
+    let second_buffer = app.active_buffer_id().expect("second active buffer");
+
+    let cleared = json!({
+        "uri": "file:///workspace/second.rs",
+        "diagnostics": []
+    });
+    let after = app
+        .ingest_lsp_publish_diagnostics_for_buffer(second_buffer, &cleared, true, None)
+        .expect("ingest diagnostics for the second workspace");
+
+    assert!(
+        !after
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0001")),
+        "a diagnostic from another workspace must not be listed here -- nothing \
+         downstream can retire it and its path leads outside this workspace; got {:?}",
+        after
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&first_root).ok();
+    std::fs::remove_dir_all(&second_root).ok();
+}
+
+/// Within one workspace, a read for another buffer keeps the other file's rows.
+///
+/// The other half of the same rule, and the one the panel depends on: the
+/// Problems list spans the workspace, so reading in `b.rs` must not retire the
+/// diagnostics reported against `a.rs`.
+#[test]
+fn problems_for_one_file_survive_a_read_in_another_file() {
+    let root = create_root();
+    let first = root.join("a.rs");
+    let second = root.join("b.rs");
+    std::fs::write(&first, "fn a() {}\n").expect("write a.rs");
+    std::fs::write(&second, "fn b() {}\n").expect("write b.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(first.to_string_lossy()).expect("open a.rs");
+    let first_buffer = app.active_buffer_id().expect("a.rs buffer");
+
+    let payload = json!({
+        "uri": "file:///workspace/a.rs",
+        "diagnostics": [{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 2}
+            },
+            "severity": 1,
+            "code": "E0002",
+            "source": "rustc",
+            "message": "a problem in a.rs"
+        }]
+    });
+    app.ingest_lsp_publish_diagnostics_for_buffer(first_buffer, &payload, true, None)
+        .expect("ingest diagnostics for a.rs");
+
+    app.open_file(second.to_string_lossy()).expect("open b.rs");
+    let second_buffer = app.active_buffer_id().expect("b.rs buffer");
+    let cleared = json!({
+        "uri": "file:///workspace/b.rs",
+        "diagnostics": []
+    });
+    let after = app
+        .ingest_lsp_publish_diagnostics_for_buffer(second_buffer, &cleared, true, None)
+        .expect("ingest diagnostics for b.rs");
+
+    assert!(
+        after
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0002")),
+        "a.rs's diagnostic must survive a read in b.rs -- the Problems panel is \
+         a workspace-wide list, not a view of the active buffer; got {:?}",
+        after
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
