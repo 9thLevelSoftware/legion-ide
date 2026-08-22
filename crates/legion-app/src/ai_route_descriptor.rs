@@ -57,7 +57,17 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
         }
         None => ("https", trimmed),
     };
-    let authority = rest.split('/').next().unwrap_or(rest);
+    // The authority ends at the first `/`, `?` or `#`.
+    //
+    // Splitting on `/` alone kept a query in the host:
+    // `https://proxy.internal?token=secret` recorded
+    // `proxy.internal?token=secret`, so policy authorized and audited a
+    // destination the client never connects to, and a credential went into
+    // route metadata carrying a metadata-only redaction hint. The same defect
+    // as the userinfo one, through a different delimiter -- which is the
+    // argument for terminating on all of them at once rather than adding them
+    // as they are reported.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     // Userinfo is not part of the host, and keeping it was worse than untidy.
     //
     // `https://user:secret@proxy.internal/v1` produced a `NetworkTarget.host` of
@@ -149,7 +159,13 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
         .find("://")
         .map(|scheme_end| &trimmed[scheme_end + "://".len()..])
         .and_then(|authority_and_path| authority_and_path.split_once('/'))
-        .map(|(_authority, path)| format!("/{path}"))
+        // Only the path, not a trailing query or fragment: those are not part
+        // of the endpoint being addressed and carrying them into the rewritten
+        // base URL would move a credential rather than drop it.
+        .map(|(_authority, path)| {
+            let path = path.split(['?', '#']).next().unwrap_or(path);
+            format!("/{path}")
+        })
         .unwrap_or_default();
     format!("https://{}:{}{}", target.host, port, path)
 }
@@ -262,6 +278,31 @@ mod delegate_chat_route_honesty_tests {
             assert_eq!(
                 target.host, "proxy.internal",
                 "{base} must authorize the host the client actually connects to"
+            );
+        }
+    }
+
+    /// A query or fragment is not part of the host either.
+    ///
+    /// The same defect as userinfo through a different delimiter: splitting the
+    /// authority on `/` alone recorded `proxy.internal?token=secret` as the
+    /// host, so policy authorized and audited a destination nothing connects to
+    /// and a credential went into metadata marked safe to retain.
+    #[test]
+    fn a_query_or_fragment_is_not_part_of_the_authorized_host() {
+        for base in [
+            "https://proxy.internal?token=secret",
+            "https://proxy.internal#fragment",
+            "https://proxy.internal:8443?token=secret",
+        ] {
+            let target = super::network_target_from_base_url(base, "api.anthropic.com");
+            assert_eq!(
+                target.host, "proxy.internal",
+                "{base} authorized a host the client never connects to"
+            );
+            assert!(
+                !target.host.contains("secret"),
+                "{base} carried a credential into the route metadata"
             );
         }
     }

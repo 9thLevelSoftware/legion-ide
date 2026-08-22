@@ -112,7 +112,16 @@ pub(crate) fn complete_product_chat(
                 metadata: Default::default(),
             };
             // Progressive SSE: on_delta fires as text deltas arrive on the wire.
+            //
+            // Whether anything reached the surface is recorded, because it
+            // decides whether a failure may be retried. A stream that emitted
+            // deltas and then failed has already been generated and already
+            // been paid for; sending the same prompt again bills a second
+            // generation and replaces the partial text on screen with an
+            // unrelated answer.
+            let emitted_delta = std::cell::Cell::new(false);
             let mut delta_sink = |text: &str| {
+                emitted_delta.set(true);
                 if let Some(cb) = on_delta.as_mut() {
                     cb(text);
                 }
@@ -138,6 +147,14 @@ pub(crate) fn complete_product_chat(
                         streamed,
                     });
                 }
+            }
+            // Only when the stream produced nothing at all.
+            //
+            // A failure before the first delta cost nothing and is worth
+            // retrying without streaming. A failure after one is not a retry,
+            // it is a second purchase.
+            if emitted_delta.get() {
+                return None;
             }
             if let Ok(response) = client.complete(request)
                 && !response.text.trim().is_empty()

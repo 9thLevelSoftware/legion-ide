@@ -22,9 +22,16 @@ use crate::bridge::DesktopAction;
 
 /// Whether this build can produce a proposal at all.
 ///
-/// The `offline` feature swaps in a router that always refuses, so the commands
-/// would dispatch, succeed, and create nothing.
-const PROPOSALS_AVAILABLE: bool = !cfg!(feature = "offline");
+/// Both halves, because either one alone leaves a control that cannot work.
+///
+/// The `offline` feature swaps in a router that always refuses, so the
+/// commands would dispatch, succeed, and create nothing. And a plain
+/// `--no-default-features` build has no `ai` feature at all, so `offline` is
+/// false while `legion-app` still falls back to `offline_ai::ProviderRouter`,
+/// which answers every request with `offline.ai_feature_disabled`. Checking only
+/// the marker therefore lit every proposal button in a supported build where
+/// pressing one cannot produce a proposal.
+const PROPOSALS_AVAILABLE: bool = cfg!(feature = "ai") && !cfg!(feature = "offline");
 
 /// The assistant rail commands, in the order the panel offers them.
 ///

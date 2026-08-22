@@ -1823,14 +1823,24 @@ fn product_ai_selected_live_backend(
         ProductAiProviderPreference::Anthropic => {
             resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
         }
+        // Auto never escalates to a remote provider on its own.
+        //
+        // A key in the environment is not consent. `can_activate_provider`
+        // holds a BYOK remote provider to `AssistedAiWorkspaceConsent::Granted`
+        // *and* a credential, and Auto was treating the credential alone as
+        // both -- so a workspace that happened to have `ANTHROPIC_API_KEY` set
+        // would send buffer excerpts to a paid remote provider because Ollama
+        // was not running, without anyone choosing that.
+        //
+        // Choosing Anthropic explicitly is a person selecting a remote provider
+        // in settings, which is an act they took. Auto is not, so Auto stops at
+        // the local route.
+        //
+        // Narrower than the full contract, and deliberately so: no
+        // `AssistedAiWorkspaceConsent` state exists in this composition yet, so
+        // this cannot check consent -- it removes the path that never asked.
         ProductAiProviderPreference::Auto => {
-            if ollama_loopback_reachable() {
-                Some(ProductAiLiveBackend::Ollama)
-            } else if resolve_anthropic_api_key().is_some() {
-                Some(ProductAiLiveBackend::Anthropic)
-            } else {
-                None
-            }
+            ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
         }
     }
 }
@@ -24560,7 +24570,7 @@ impl AppComposition {
         provider_class: legion_protocol::AssistedAiProviderClass,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         self.require_assist_mode()?;
-        // Trimmed to the length declared to the broker above. An unbounded
+        // Trimmed to the length declared to the broker below. An unbounded
         // instruction makes the declaration a number the request is free to
         // exceed, which is the same as declaring nothing.
         let instruction_label = bounded_assist_instruction(&instruction_label.into());
@@ -24940,7 +24950,11 @@ impl AppComposition {
             // No preference is captured: the worker uses the backend the
             // broker already approved, so there is nothing here that could
             // resolve to a different destination than the one authorized.
-            let file_path = context.metadata.identity.canonical_path.0.clone();
+            // Bounded like the instruction, and for the same reason: the
+            // prompt embeds this path and a canonical path has no length of its
+            // own, so a declaration allowing for a nominal one understates any
+            // request against a deeply nested file.
+            let file_path = bounded_assist_path(&context.metadata.identity.canonical_path.0);
             let instruction_for_worker = instruction_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
             let streaming_replay = legion_protocol::AgentReplayManifest {
@@ -27857,15 +27871,6 @@ impl AppComposition {
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
-        // Release the shared lane now, rather than when the provider gets round
-        // to answering.
-        //
-        // The worker holds a `ProductAiLaneReservation` for the whole of its
-        // request, and the transport allows that up to 120 seconds. Leaving it
-        // held meant `product_ai_stream_in_flight()` stayed true after the
-        // cancel: every Assist proposal, prediction and Delegate control stayed
-        // disabled while the surface said the prediction had been cancelled.
-        self.release_cancelled_inline_prediction_lane();
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             return Err(AppCompositionError::AiRuntime(
@@ -27939,6 +27944,20 @@ impl AppComposition {
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
+        // Release the shared lane now, rather than when the provider gets round
+        // to answering.
+        //
+        // The worker holds a `ProductAiLaneReservation` for the whole of its
+        // request, and the transport allows that up to 120 seconds. Leaving it
+        // held meant `product_ai_stream_in_flight()` stayed true after the
+        // cancel: every Assist proposal, prediction and Delegate control stayed
+        // disabled while the surface said the prediction had been cancelled.
+        //
+        // This sat in `accept_assist_inline_prediction` for one revision, which
+        // is a function that only ever runs against a *finished* prediction --
+        // no pending worker, no flag, an immediate early return. The comment
+        // described cancelling and the code was nowhere near it.
+        self.release_cancelled_inline_prediction_lane();
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             self.assist_inline_prediction_state.request_in_flight = false;

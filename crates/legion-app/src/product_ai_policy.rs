@@ -33,27 +33,57 @@ pub(crate) const INLINE_PREDICTION_COMPLETION_MAX_TOKENS: u32 = 128;
 /// bound on what it describes.
 pub(crate) const ASSIST_INSTRUCTION_MAX_CHARS: usize = 2_000;
 
-/// Characters of prompt framing: system preamble, file path, delimiters.
+/// Characters of file path an Assist prompt may carry.
 ///
-/// A generous fixed allowance rather than a measurement of the template, so
-/// that editing the prompt cannot silently shrink what was declared.
+/// Bounded for the same reason the instruction is: the prompt embeds the active
+/// file's canonical path, which has no length of its own, so a declaration
+/// allowing for a nominal path understated any request against a deeply nested
+/// one. Long enough for any path somebody works in, short enough to be a bound.
+pub(crate) const ASSIST_PATH_MAX_CHARS: usize = 512;
+
+/// Characters of fixed prompt framing: system preamble and delimiters.
+///
+/// A generous allowance rather than a measurement of the template, so that
+/// editing the prompt cannot silently shrink what was declared.
 pub(crate) const ASSIST_PROMPT_FRAMING_MAX_CHARS: usize = 1_000;
 
 /// Every character an Assist prompt can carry: excerpt, instruction, framing.
 ///
 /// One number, so the three bounds and the declaration cannot drift apart.
-pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize =
-    ASSIST_EXCERPT_MAX_CHARS + ASSIST_INSTRUCTION_MAX_CHARS + ASSIST_PROMPT_FRAMING_MAX_CHARS;
+pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize = ASSIST_EXCERPT_MAX_CHARS
+    + ASSIST_INSTRUCTION_MAX_CHARS
+    + ASSIST_PATH_MAX_CHARS
+    + ASSIST_PROMPT_FRAMING_MAX_CHARS;
 
-/// The declared total must cover every part, or it understates the request.
+/// The declared total must *be* every part, not merely exceed some of them.
+///
+/// Equality, because `>` reduced to "framing is non-zero" and would have been
+/// satisfied by a total that dropped a whole term -- which is exactly the
+/// regression this guard exists to catch.
 ///
 /// A compile-time check rather than a test: this cannot be true at some times
-/// and false at others, and a test asserting it would only ever restate the
-/// arithmetic above.
+/// and false at others, and a test asserting it would only restate arithmetic.
 const _: () = assert!(
-    ASSIST_PROMPT_MAX_CHARS > ASSIST_EXCERPT_MAX_CHARS + ASSIST_INSTRUCTION_MAX_CHARS,
-    "the declared prompt must allow for framing as well as excerpt and instruction"
+    ASSIST_PROMPT_MAX_CHARS
+        == ASSIST_EXCERPT_MAX_CHARS
+            + ASSIST_INSTRUCTION_MAX_CHARS
+            + ASSIST_PATH_MAX_CHARS
+            + ASSIST_PROMPT_FRAMING_MAX_CHARS,
+    "the declared prompt total must be the sum of every bounded part"
 );
+
+/// Trim a file path to the length that was declared, keeping its tail.
+///
+/// The tail, because the end of a path is what identifies the file; truncating
+/// from the front would leave every deeply nested file looking like the same
+/// prefix.
+pub(crate) fn bounded_assist_path(path: &str) -> String {
+    let length = path.chars().count();
+    if length <= ASSIST_PATH_MAX_CHARS {
+        return path.to_string();
+    }
+    path.chars().skip(length - ASSIST_PATH_MAX_CHARS).collect()
+}
 
 /// Trim a caller-supplied instruction to the length that was declared.
 ///
@@ -73,15 +103,16 @@ pub(crate) fn bounded_assist_instruction(instruction: &str) -> String {
 /// declared tokens exceed the org's limit, so declaring less than the request
 /// could consume lets through exactly what the cap exists to stop.
 ///
-/// The prompt is estimated at four characters per token, the usual rule of
-/// thumb for these models. It is an estimate -- there is no tokenizer here --
-/// and an estimate compared against a cap is worth incomparably more than the
-/// `None` declared before it, which `BudgetCapPolicy::refusal` never compares
-/// against anything at all.
+/// One token per character, which no text can exceed.
+///
+/// Four characters per token is the usual rule of thumb, and it is an
+/// *estimate*: source punctuation, uncommon Unicode and emoji all tokenize
+/// denser than that. An estimate is the wrong shape here, because a cap set
+/// between the estimate and the real count admits the very request it was
+/// configured to refuse and nobody can tell. A tokenizer would be better still;
+/// a bound nothing can exceed is what is available, and it errs safely.
 pub(crate) fn declared_request_tokens(prompt_chars: usize, completion_tokens: u32) -> u64 {
-    (prompt_chars as u64)
-        .div_ceil(4)
-        .saturating_add(u64::from(completion_tokens))
+    (prompt_chars as u64).saturating_add(u64::from(completion_tokens))
 }
 
 /// The cost a request can be truthfully declared to have, in cents.
@@ -396,11 +427,6 @@ mod org_ceiling {
     const SEED: [u8; 32] = [11u8; 32];
     const KEY_ID: &str = "org-ceiling-test-signer";
 
-    /// The shipped example with one line replaced.
-    ///
-    /// Editing the real bundle rather than hand-rolling one keeps the
-    /// fixture honest about the schema: a bundle that stopped parsing would
-    /// fail here rather than quietly testing a default.
     /// Sign and verify a bundle payload this test built.
     fn signed(payload: &str) -> legion_security::VerifiedPolicyBundle {
         let keyring = PolicyKeyring::new(vec![PolicySigningKey {
@@ -412,6 +438,11 @@ mod org_ceiling {
             .expect("a bundle this test signed must verify")
     }
 
+    /// The shipped example with one line replaced.
+    ///
+    /// Editing the real bundle rather than hand-rolling one keeps the fixture
+    /// honest about the schema: a bundle that stopped parsing would fail here
+    /// rather than quietly testing a default.
     fn bundle_with(find: &str, replace: &str) -> legion_security::VerifiedPolicyBundle {
         let payload = include_str!("../../../xtask/legion-policy.example.toml");
         assert!(
@@ -517,8 +548,10 @@ mod org_ceiling {
             .allowlist
             .clone();
         if org_hosts.is_empty() {
-            // An empty org allowlist is "unrestricted" and this rule cannot
-            // be exercised through it; say so rather than passing quietly.
+            // An empty org allowlist denies every host, which is a different
+            // rule with its own test, so case-insensitivity cannot be
+            // exercised through this bundle. Say so rather than passing
+            // quietly on a fixture that proves nothing.
             return;
         }
 
@@ -599,7 +632,23 @@ mod org_ceiling {
         let mut app = super::AppComposition::new();
         app.set_org_policy_bundle(signed(&payload.replace(hosts, "")));
 
-        let merged = app.product_ai_policy_with_org_ceiling(None);
+        // A backend whose product policy actually allowlists a host.
+        //
+        // Asked with `None`, `product_ai_security_policy` pushes no hosts at
+        // all, so the intersection came out empty whether or not the fix was
+        // applied -- the test passed against the code it was written to catch,
+        // and only exercised the bundle parser. The whole claim is that a
+        // bundle emptying its allowlist stops the *product's own* egress, so
+        // the product side has to have some.
+        let product =
+            super::product_ai_security_policy(Some(super::ProductAiLiveBackend::Anthropic));
+        assert!(
+            !product.network_policy.allowlist.is_empty(),
+            "the fixture needs a backend with product-side hosts, or it proves nothing"
+        );
+
+        let merged =
+            app.product_ai_policy_with_org_ceiling(Some(super::ProductAiLiveBackend::Anthropic));
         assert!(
             merged.network_policy.allowlist.is_empty(),
             "an org bundle that allows no hosts left {:?} allowed, so a policy forbidding \
@@ -626,6 +675,27 @@ mod org_ceiling {
             super::bounded_assist_instruction("short"),
             "short",
             "an instruction within the bound must be left exactly as written"
+        );
+
+        // The path is embedded in the prompt too, and a canonical path has no
+        // length of its own.
+        let deep = format!("/{}/main.rs", "nested".repeat(400));
+        let bounded = super::bounded_assist_path(&deep);
+        assert_eq!(
+            bounded.chars().count(),
+            super::ASSIST_PATH_MAX_CHARS,
+            "a path longer than the declared bound was not trimmed, so a deeply nested file \
+             makes the declaration understate the request"
+        );
+        assert!(
+            bounded.ends_with("main.rs"),
+            "the tail identifies the file; trimming from the end would leave every deep path \
+             looking alike, got {bounded:?}"
+        );
+        assert_eq!(
+            super::bounded_assist_path("src/lib.rs"),
+            "src/lib.rs",
+            "an ordinary path must be left exactly as written"
         );
     }
 
