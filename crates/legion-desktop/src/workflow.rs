@@ -838,7 +838,19 @@ impl DesktopRuntime {
     pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
         match action {
             DesktopAction::SetCenterSurface { surface } => {
+                // Leaving the canvas ends any arrangement gesture in progress.
+                //
+                // A keyboard nudge persists when the key is released, and
+                // switching surfaces mid-hold means no card is left to receive
+                // that release -- the canvas stops being drawn. The in-memory
+                // arrangement is already correct; this is the write that makes
+                // it survive the window closing.
+                let leaving_canvas = self.center_surface == crate::view::CenterSurface::Canvas
+                    && surface != crate::view::CenterSurface::Canvas;
                 self.center_surface = surface;
+                if leaving_canvas {
+                    self.persist_session_if_configured();
+                }
                 self.refresh_projection()?;
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)

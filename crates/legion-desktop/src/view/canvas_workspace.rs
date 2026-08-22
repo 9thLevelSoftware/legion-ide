@@ -1048,6 +1048,22 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     let header = ui.interact(header_rect, header_id, egui::Sense::click_and_drag());
     let header_bounds = global_rect(ui, header_rect);
 
+    // Which card the arrow keys will move.
+    //
+    // Tabbing to a card left it painted exactly like every other card, and
+    // arrow keys then moved something the person could not identify. A
+    // focusable control that looks unfocused is worse than an unfocusable one:
+    // it invites the gesture and hides its target. Drawn around the whole card
+    // rather than the header, because the whole card is what moves.
+    if header.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            8.0,
+            egui::Stroke::new(2.0_f32, tokens.accent.orange),
+            egui::StrokeKind::Outside,
+        );
+    }
+
     // The card follows the pointer, rather than accumulating deltas.
     //
     // `drag_delta` cannot answer on the frame that matters: egui 0.34.2 returns
@@ -1118,6 +1134,7 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     if !header.is_pointer_button_down_on() {
         ui.ctx().data_mut(|data| data.remove::<egui::Vec2>(grab_id));
     }
+    let unsaved_id = header_id.with("nudge-unsaved");
     // The same move, from a keyboard, with the same two halves a drag has.
     //
     // The arrow keys have to be taken deliberately: egui reads an unmodified
@@ -1164,7 +1181,31 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
                 y: crate::bridge::WorldCoord::new(target.y),
                 settled,
             });
+            // Whether this card owes a durable write. Cleared by the write
+            // itself, so the only state carried between frames is "a gesture
+            // moved this card and nothing has saved it yet".
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(unsaved_id, !settled));
         }
+    } else if ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(unsaved_id).unwrap_or(false))
+    {
+        // Focus left mid-gesture, so the release will never arrive here.
+        //
+        // Holding an arrow and then clicking something else takes focus away
+        // while every move so far has been `settled: false` -- and the key-up
+        // that would have persisted them lands on a card that no longer has the
+        // keyboard. Closing the window then loses the arrangement. Losing focus
+        // ends the gesture as surely as releasing the key does.
+        actions.push(DesktopAction::MoveCanvasNode {
+            path: node.path.clone(),
+            x: crate::bridge::WorldCoord::new(node.position.x),
+            y: crate::bridge::WorldCoord::new(node.position.y),
+            settled: true,
+        });
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(unsaved_id, false));
     }
 
     if header.clicked()

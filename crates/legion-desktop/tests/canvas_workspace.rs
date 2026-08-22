@@ -221,6 +221,32 @@ fn hold_key(app: &mut DesktopEframeApp, key: egui::Key, repeats: usize) -> egui:
     app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
+/// Hold a key across several frames and do *not* let go.
+fn hold_key_without_release(
+    app: &mut DesktopEframeApp,
+    key: egui::Key,
+    repeats: usize,
+) -> egui::FullOutput {
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]));
+    let mut last = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    for _ in 0..repeats {
+        last = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: true,
+            modifiers: egui::Modifiers::NONE,
+        }]));
+    }
+    last
+}
+
 /// A flick: press on one frame, then move and release together on the next.
 ///
 /// This is not a slower drag with the same ending — it is the case egui reports
@@ -460,6 +486,124 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     assert!(
         panel.contains(centre),
         "the keyboard reached a card at {centre:?} that the view never came to, outside          {panel:?} -- so the arrow keys would arrange a card nobody can see"
+    );
+}
+
+/// Strokes painted around a rect, with their width and colour.
+///
+/// Read from the paint output rather than the accessibility tree, because a
+/// focus indicator is by definition the thing the tree cannot carry: it exists
+/// for somebody who is looking at the screen and using a keyboard.
+fn strokes_around(output: &egui::FullOutput, target: egui::Pos2) -> Vec<(u32, egui::Color32)> {
+    fn collect(
+        shape: &egui::epaint::Shape,
+        target: egui::Pos2,
+        found: &mut Vec<(u32, egui::Color32)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Rect(rect) => {
+                if rect.rect.expand(8.0).contains(target) && rect.stroke.width > 0.0 {
+                    found.push((rect.stroke.width.round() as u32, rect.stroke.color));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, target, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, target, &mut found);
+    }
+    found
+}
+
+/// A focused card looks different from an unfocused one.
+///
+/// Tabbing to a card left it painted exactly like every other card, and the
+/// arrow keys then moved something the person could not identify. A focusable
+/// control that looks unfocused is worse than one that cannot be focused at
+/// all: it invites the gesture and hides its target.
+#[test]
+fn a_focused_card_is_drawn_differently_from_the_rest() {
+    let workspace = workspace_with_files("legion_desktop_canvas_focus_ring");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let centre = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let before = strokes_around(&canvas, centre);
+
+    let focused = focus(&mut app, card);
+    let centre = clickable_center(&focused, "Card alpha.rs").expect("the card must still be there");
+    let after = strokes_around(&focused, centre);
+
+    assert!(
+        after.len() > before.len(),
+        "focusing the card painted nothing new around it: {before:?} then {after:?}"
+    );
+
+    // And the difference is not painted around every card, or it says nothing
+    // about which one has the keyboard.
+    let other = clickable_center(&focused, "Card beta.rs").expect("beta.rs must have a card");
+    let unfocused = strokes_around(&focused, other);
+    assert!(
+        after.len() > unfocused.len(),
+        "the focused card is painted like the unfocused one: {after:?} against {unfocused:?}"
+    );
+}
+
+/// A gesture interrupted before the key comes up still reaches disk.
+///
+/// Batching the repeats onto the release means the release is the only durable
+/// write -- and holding an arrow, then clicking something else, takes focus
+/// away before it arrives. Every move so far was `settled: false`, so closing
+/// the window lost the arrangement. Losing focus ends the gesture as surely as
+/// letting go does.
+#[test]
+fn a_keyboard_move_survives_focus_leaving_mid_gesture() {
+    let workspace = workspace_with_files("legion_desktop_canvas_focus_flush");
+    let session = workspace.path().join("session.json");
+    let mut app = open_app(workspace.path(), Some(&session));
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let _ = focus(&mut app, card);
+    let _ = hold_key_without_release(&mut app, egui::Key::ArrowRight, 4);
+
+    let moved = app
+        .capture_session_record()
+        .expect("record")
+        .canvas_nodes
+        .iter()
+        .find(|node| node.path.0.ends_with("alpha.rs"))
+        .map(|node| node.x)
+        .expect("alpha.rs must be on the canvas");
+
+    // Focus goes elsewhere with the key still down: the release will never
+    // reach this card.
+    let other = accesskit_id(&canvas, "Card beta.rs").expect("beta.rs must have a card");
+    let _ = focus(&mut app, other);
+
+    // What a restart would read.
+    let restarted = open_app(workspace.path(), Some(&session));
+    let saved = restarted
+        .capture_session_record()
+        .expect("record")
+        .canvas_nodes
+        .iter()
+        .find(|node| node.path.0.ends_with("alpha.rs"))
+        .map(|node| node.x)
+        .expect("alpha.rs must be in the saved arrangement");
+    assert!(
+        (saved - moved).abs() < 0.5,
+        "the arrangement on disk has alpha.rs at {saved} and the session has it at          {moved}; a gesture that lost focus before the key came up was never saved"
     );
 }
 
