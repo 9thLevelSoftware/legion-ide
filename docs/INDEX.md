@@ -49,7 +49,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 
 - `ui/four-mode-prototype-fidelity.md` — fidelity ledger for the four-mode workbench: which parts of the v1 prototype are historical visual direction and which are the native v2 baseline.
 - `ui/snapshot-testing.md` — visual regression snapshots of the rendered shell: what they catch, what they do not, why baselines are per platform, and how to regenerate one for a platform you do not have.
-- `ui/canvas-workspace-direction.md` — **explored, not scheduled.** An infinite pan/zoom canvas workspace replacing the tabbed editor, plus the companion shell audit. Records the spec, the codebase constraints that would have to be solved first, and the conflicts with ADR-0046/ADR-0048 and the production roadmap. No ADR, no backlog task, no ledger row.
+- `ui/canvas-workspace-direction.md` — **arrangement surface built (P6.F5.T1); the rest is still direction.** An infinite pan/zoom canvas workspace where open files are draggable cards with connections you draw. Records the spec, the codebase constraints, and what remains unbuilt. ADR-0046 was retired rather than amended for it.
 
 ## Forward-looking / non-current release templates
 

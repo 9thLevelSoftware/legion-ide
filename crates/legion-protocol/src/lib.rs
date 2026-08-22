@@ -22027,6 +22027,61 @@ pub struct TrustRecord {
     pub schema_version: u16,
 }
 
+/// Serde default for fields that are absent only in older records.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// Where one canvas node sits, and what it is a node of.
+///
+/// Positions are adapter-local view state in the same category as explorer
+/// expansion: the app owns which buffers are open, the renderer owns where the
+/// person put them. Stored in world coordinates, not screen coordinates, so a
+/// layout survives a different window size.
+///
+/// Keyed by canonical path rather than `BufferId`, because buffer ids are
+/// assigned per session and a layout that forgot its arrangement on every
+/// restart would not be a layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasNode {
+    /// Canonical path of the file this node shows.
+    pub path: CanonicalPath,
+    /// World-space x offset.
+    pub x: f32,
+    /// World-space y offset.
+    pub y: f32,
+    /// Whether a person put the card here, rather than the layout doing it.
+    ///
+    /// The two cases need telling apart and geometry cannot do it. A card the
+    /// layout placed on a default slot may be moved out of a collision freely;
+    /// a card somebody dragged somewhere must never be moved by anything except
+    /// them, even onto another card, because overlapping two cards is a thing
+    /// people do on purpose.
+    ///
+    /// Defaults to `true` for records written before this field existed: an
+    /// arrangement already on disk was arrived at somehow, and treating it as
+    /// deliberate risks leaving two cards overlapping, while treating it as
+    /// automatic risks moving something a person placed. The first is visible
+    /// and fixable by dragging; the second is neither.
+    #[serde(default = "crate::default_true")]
+    pub placed_by_person: bool,
+}
+
+/// A connection the person drew between two canvas nodes.
+///
+/// Deliberately not derived from the code. An edge here means "I say these are
+/// related", which is a different and weaker claim than an import or a call --
+/// and one nothing else in the tree can currently make, since no workspace-wide
+/// index retains import targets. Keeping the two apart means a derived edge can
+/// be added later without silently reinterpreting what a person drew.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasEdge {
+    /// Canonical path of the node the connection starts at.
+    pub from_path: CanonicalPath,
+    /// Canonical path of the node the connection ends at.
+    pub to_path: CanonicalPath,
+}
+
 /// Persisted session tab record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTab {
@@ -22160,6 +22215,12 @@ pub struct WorkspaceSessionRecord {
     pub layout_splits: Vec<SessionLayoutSplit>,
     /// Expanded explorer paths.
     pub explorer_expansion: Vec<CanonicalPath>,
+    /// Where the person placed each canvas node, in world coordinates.
+    #[serde(default)]
+    pub canvas_nodes: Vec<SessionCanvasNode>,
+    /// Connections the person drew between canvas nodes.
+    #[serde(default)]
+    pub canvas_edges: Vec<SessionCanvasEdge>,
     /// Panel state.
     pub panel_state: SessionPanelState,
     /// Mode-scoped dock layouts.

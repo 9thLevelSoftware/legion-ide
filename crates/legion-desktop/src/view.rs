@@ -26,6 +26,10 @@ use tab_strip::render_tab_strip;
 
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
+/// Files as draggable cards in an infinite 2D space.
+pub mod canvas_workspace;
+mod keymap_dispatch;
+pub(crate) use keymap_dispatch::*;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
 pub mod cloud_lane;
 pub mod extensions_panel;
@@ -41,6 +45,7 @@ pub(crate) mod interactive_fields;
 pub mod manifest_panel;
 /// Editable plan editor projection.
 pub mod plan_editor;
+
 /// Proposal review and checkpoint timeline view models.
 pub mod proposal_review;
 /// Risk strip view model and row projections for proposal review surfaces.
@@ -79,7 +84,7 @@ pub use plan_editor::{
 pub use risk_strip::{DesktopProposalRiskStripViewModel, risk_strip_rows, risk_strip_view_model};
 pub use scope_picker::{DesktopScopePickerViewModel, ScopeRiskTolerance, ScopeTargetKind};
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -301,6 +306,12 @@ pub struct DesktopProjectionViewState {
     pub expanded_explorer_paths: BTreeSet<String>,
     /// Adapter-local explorer selection override, if a native control is ahead of projection.
     pub selected_explorer_file: Option<FileId>,
+    /// Where the person placed each canvas card, keyed by canonical path.
+    pub canvas_positions: BTreeMap<String, canvas_workspace::SavedPosition>,
+    /// Connections the person drew, as ordered  canonical paths.
+    pub canvas_edges: Vec<(String, String)>,
+    /// Which surface the centre shows.
+    pub center_surface: CenterSurface,
     /// App-authoritative bottom-panel selection persisted across renderer frames.
     pub selected_bottom_panel: BottomPanelTab,
     /// Canonical workspace root projected by the runtime for scoped Delegate work.
@@ -354,6 +365,9 @@ impl Default for DesktopProjectionViewState {
         Self {
             expanded_explorer_paths: BTreeSet::new(),
             selected_explorer_file: None,
+            canvas_positions: BTreeMap::new(),
+            canvas_edges: Vec::new(),
+            center_surface: CenterSurface::Editor,
             selected_bottom_panel: BottomPanelTab::Terminal,
             canonical_workspace_root: None,
             dock_layouts: DockLayout::standard_all_modes(),
@@ -1181,7 +1195,7 @@ impl DesktopProjectionViewModel {
             command_palette_rows,
             left_sidebar_rows: left_sidebar_rows(snapshot),
             main_canvas_rows: main_canvas_rows(snapshot),
-            center_surface: center_surface_label(snapshot).to_string(),
+            center_surface: center_surface_label(state.center_surface).to_string(),
             mode_surface: ModeSurfaceModel::from_snapshot(snapshot, state),
             directive_panel_rows: directive_panel_rows(snapshot),
             onboarding_rows,
@@ -1295,6 +1309,32 @@ pub enum ActivitySurface {
     Tests,
     /// Run and debug tools.
     Debug,
+}
+
+/// What the central panel is currently showing.
+///
+/// New concept. Until now the centre was always the editor —
+/// `center_surface_label` returned a hard-coded `"editor"` and ignored its
+/// argument — so there was nothing to switch. Renderer-owned, like the activity
+/// rail selection: which files are open is the app's business, which of them you
+/// are looking at and how is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CenterSurface {
+    /// The code editor.
+    #[default]
+    Editor,
+    /// The canvas workspace: every open file as a card in 2D space.
+    Canvas,
+}
+
+impl CenterSurface {
+    /// The label the status line and tests use for this surface.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "editor",
+            Self::Canvas => "canvas",
+        }
+    }
 }
 
 /// Renderer-owned utility presentation that stays independent of product mode.
@@ -1751,8 +1791,20 @@ impl ProjectionView {
         let _center_content = egui::CentralPanel::default()
             .frame(theme::pane_frame(theme::tokens().bg.code))
             .show_inside(ui, |ui| {
-                self.last_editor_rect =
-                    Some(render_code_canvas(ui, snapshot, &model, &mut actions));
+                // `last_editor_rect` stays populated whichever surface is up:
+                // several suites and the panel-tiling gate assert against it,
+                // and a canvas that returned nothing would fail them for a
+                // reason unrelated to the canvas.
+                self.last_editor_rect = Some(match state.center_surface {
+                    CenterSurface::Editor => render_code_canvas(ui, snapshot, &model, &mut actions),
+                    CenterSurface::Canvas => canvas_workspace::render_canvas_workspace(
+                        ui,
+                        snapshot,
+                        &state.canvas_positions,
+                        &state.canvas_edges,
+                        &mut actions,
+                    ),
+                });
             })
             .response
             .rect;
@@ -1790,9 +1842,25 @@ impl ProjectionView {
         }
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
-        render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
-        render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
-        render_find_bar(ui.ctx(), snapshot, &mut actions);
+        // Only over the editor.
+        //
+        // All three are overlays on the central region that belong to the
+        // buffer. Two of them dispatch mutations and are reached by controls
+        // rather than by keys -- the find bar's Replace and Replace All, and the
+        // completion popup's Enter, Tab and row click -- so switching to the
+        // canvas left them drawn and editing a file that was not on screen,
+        // past a gate that only ever looked at key events.
+        //
+        // The hover tooltip mutates nothing, and was left out of this gate for
+        // that reason. It still described a symbol in a file the canvas had
+        // replaced: a tooltip that survives the thing it points at is a label
+        // on the wrong object, and on this surface every card is a different
+        // file it could plausibly belong to.
+        if state.center_surface == CenterSurface::Editor {
+            render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
+            render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
+            render_find_bar(ui.ctx(), snapshot, &mut actions);
+        }
         if let Some(origin) = self.utility_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
@@ -2374,7 +2442,7 @@ fn render_left_sidebar(
         ui.allocate_ui_with_layout(
             egui::vec2(geometry.activity_rail_width, ui.available_height()),
             egui::Layout::top_down(egui::Align::Center),
-            |ui| render_activity_rail(ui, snapshot, geometry, view, actions),
+            |ui| render_activity_rail(ui, snapshot, state, geometry, view, actions),
         );
         ui.separator();
         ui.vertical(|ui| {
@@ -2421,6 +2489,7 @@ const RAIL_BUTTON_SIZE: [f32; 2] = [38.0, 28.0];
 fn render_activity_rail(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
+    state: &DesktopProjectionViewState,
     geometry: ShellGeometry,
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
@@ -2502,6 +2571,30 @@ fn render_activity_rail(
                 actions.push(DesktopAction::OpenPalette { mode, query, scope });
             }
         }
+    }
+    // Canvas is a *centre* switch, not a side-panel one, so it is a toggle
+    // rather than a member of the selection above: choosing Explorer while the
+    // canvas is up should change the sidebar and leave the canvas alone.
+    let canvas = ui
+        .push_id(("legion_desktop_activity", "Canvas"), |ui| {
+            render_rail_button(
+                ui,
+                RailGlyph::Text("◳"),
+                state.center_surface == CenterSurface::Canvas,
+            )
+        })
+        .inner
+        .on_hover_text("Canvas");
+    ui.ctx().accesskit_node_builder(canvas.id, |node| {
+        node.set_label("Canvas");
+    });
+    if canvas.clicked() {
+        actions.push(DesktopAction::SetCenterSurface {
+            surface: match state.center_surface {
+                CenterSurface::Editor => CenterSurface::Canvas,
+                CenterSurface::Canvas => CenterSurface::Editor,
+            },
+        });
     }
     ui.separator();
     let diagnostics = ui
@@ -3032,154 +3125,6 @@ fn key_label_to_egui(label: &str) -> Option<egui::Key> {
         "ArrowDown" => Some(egui::Key::ArrowDown),
         _ => None,
     }
-}
-
-/// Map a keybinding action label to a `DesktopAction`, if applicable.
-///
-/// Context-dependent actions like GoToDefinition are resolved from the current
-/// projection here so the default keymap remains the single source of truth.
-fn action_label_to_desktop_action(
-    label: &str,
-    snapshot: &ShellProjectionSnapshot,
-) -> Option<DesktopAction> {
-    match label {
-        "SaveActive" => Some(DesktopAction::SaveActive),
-        "SaveAll" => Some(DesktopAction::SaveAll),
-        // Preserve the existing Ctrl/Cmd+F search-palette behavior while
-        // routing it through the published keymap entry. The in-editor find
-        // bar remains available through its explicit UI action.
-        "ToggleFindBar" => Some(DesktopAction::OpenPalette {
-            mode: PaletteMode::Search,
-            query: "/".to_string(),
-            scope: SearchScopeProjection::ActiveFile,
-        }),
-        "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
-        "FindNext" => Some(DesktopAction::FindNext),
-        "FindPrevious" => Some(DesktopAction::FindPrevious),
-        "Undo" => Some(DesktopAction::Undo),
-        "Redo" => Some(DesktopAction::Redo),
-        "AddCursorAbove" => Some(DesktopAction::AddCursorAbove { buffer_id: None }),
-        "AddCursorBelow" => Some(DesktopAction::AddCursorBelow { buffer_id: None }),
-        "GoToDefinition" => Some(DesktopAction::GoToDefinition {
-            position: projected_cursor(snapshot),
-        }),
-        "GoToLine" => Some(DesktopAction::OpenPalette {
-            mode: PaletteMode::Command,
-            query: "Go to line".to_string(),
-            scope: SearchScopeProjection::ActiveFile,
-        }),
-        "OpenPalette" => Some(DesktopAction::OpenPalette {
-            mode: PaletteMode::File,
-            query: String::new(),
-            scope: SearchScopeProjection::ActiveFile,
-        }),
-        "OpenCommandPalette" => Some(DesktopAction::OpenPalette {
-            mode: PaletteMode::Command,
-            query: String::new(),
-            scope: SearchScopeProjection::ActiveFile,
-        }),
-        "CloseTab" => active_buffer_for_keybinding(snapshot)
-            .map(|buffer_id| DesktopAction::CloseTab { buffer_id }),
-        "NextTab" => adjacent_tab_for_keybinding(snapshot, 1)
-            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
-        "PrevTab" => adjacent_tab_for_keybinding(snapshot, -1)
-            .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
-        "DebugStart" => {
-            if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
-                Some(DesktopAction::DebugStep {
-                    session_id,
-                    kind: legion_ui::DebugStepKindProjection::Continue,
-                })
-            } else if let Some(configuration_id) = snapshot
-                .debug_projection
-                .configurations
-                .first()
-                .map(|config| config.configuration_id.clone())
-            {
-                Some(DesktopAction::LaunchDebugSession { configuration_id })
-            } else {
-                Some(DesktopAction::RefreshExplorer)
-            }
-        }
-        "DebugStop" => snapshot
-            .debug_projection
-            .active_session_id
-            .clone()
-            .map(|_| DesktopAction::StopDebugSession),
-        "ToggleBreakpoint" => {
-            active_buffer_for_keybinding(snapshot).map(|_| DesktopAction::ToggleDebugBreakpoint {
-                line: projected_cursor(snapshot).line,
-                condition: None,
-                hit_condition: None,
-                log_message: None,
-            })
-        }
-        "DebugStepOver" => snapshot
-            .debug_projection
-            .active_session_id
-            .clone()
-            .map(|session_id| DesktopAction::DebugStep {
-                session_id,
-                kind: legion_ui::DebugStepKindProjection::Over,
-            }),
-        "DebugStepInto" => snapshot
-            .debug_projection
-            .active_session_id
-            .clone()
-            .map(|session_id| DesktopAction::DebugStep {
-                session_id,
-                kind: legion_ui::DebugStepKindProjection::Into,
-            }),
-        "DebugStepOut" => snapshot
-            .debug_projection
-            .active_session_id
-            .clone()
-            .map(|session_id| DesktopAction::DebugStep {
-                session_id,
-                kind: legion_ui::DebugStepKindProjection::Out,
-            }),
-        _ => None,
-    }
-}
-
-/// Central keyboard dispatch from `default_keymap()`.
-///
-/// Reads the keymap bindings and checks each combo against egui's current
-/// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
-/// hardcoded key checks so the keymap takes precedence for non-context-dependent
-/// actions.
-pub(crate) fn dispatch_keybindings(
-    ctx: &egui::Context,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let bindings = legion_ui::ui::default_keymap();
-    ctx.input(|input| {
-        for binding in &bindings {
-            let Some(key) = key_label_to_egui(&binding.combo.key) else {
-                continue;
-            };
-            if !input.key_pressed(key) {
-                continue;
-            }
-            // The keymap's `ctrl` flag represents the platform command
-            // modifier. `egui::Modifiers::command` maps to Ctrl on Windows/
-            // Linux and Cmd on macOS, while `ctrl` is only the physical Ctrl
-            // key and would make the default map fail for Cmd-based input.
-            if binding.combo.ctrl != input.modifiers.command {
-                continue;
-            }
-            if binding.combo.shift != input.modifiers.shift {
-                continue;
-            }
-            if binding.combo.alt != input.modifiers.alt {
-                continue;
-            }
-            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot) {
-                actions.push(action);
-            }
-        }
-    });
 }
 
 fn active_buffer_for_keybinding(snapshot: &ShellProjectionSnapshot) -> Option<BufferId> {
@@ -8369,8 +8314,8 @@ fn left_sidebar_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     )]
 }
 
-fn center_surface_label(_snapshot: &ShellProjectionSnapshot) -> &'static str {
-    "editor"
+fn center_surface_label(surface: CenterSurface) -> &'static str {
+    surface.label()
 }
 
 fn main_canvas_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {

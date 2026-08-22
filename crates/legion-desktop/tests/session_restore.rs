@@ -528,6 +528,8 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
         tab_groups: Vec::new(),
         layout_splits: Vec::new(),
         explorer_expansion: Vec::new(),
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: false,
             side_visible: true,
