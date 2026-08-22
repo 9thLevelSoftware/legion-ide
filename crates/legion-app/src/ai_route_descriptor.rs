@@ -42,6 +42,18 @@ struct ParsedBaseUrl {
     target: legion_protocol::NetworkTarget,
     /// Whether the URL named a port, rather than one being supplied for the scheme.
     port_was_explicit: bool,
+    /// Userinfo as written, without the `@`, when the URL carried any.
+    ///
+    /// Deliberately absent from `target`: a proxy password must not reach a
+    /// record that carries a metadata-only redaction hint. It is returned
+    /// rather than dropped because the *client* URL needs it, and computing it
+    /// a second time from the same grammar is how this file has already lost a
+    /// query, a set of IPv6 brackets and this credential in turn.
+    userinfo: Option<String>,
+    /// Everything after the authority: path, query and fragment as written.
+    path_and_query: String,
+    /// The scheme the URL named, lowercased, when it named one at all.
+    declared_scheme: Option<String>,
 }
 
 /// The network target a base URL addresses.
@@ -76,16 +88,21 @@ fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
     // while `to_ascii_lowercase` preserves byte length -- true today, stated
     // nowhere, enforced by nothing, and exactly the kind of cleverness the next
     // reader simplifies back into the case-sensitive bug this replaced.
-    let (scheme, rest) = match trimmed.find("://") {
+    let (scheme, rest, declared_scheme) = match trimmed.find("://") {
         Some(scheme_end) => {
             let rest = &trimmed[scheme_end + "://".len()..];
-            if trimmed[..scheme_end].eq_ignore_ascii_case("http") {
-                ("http", rest)
-            } else {
-                ("https", rest)
-            }
+            let declared = trimmed[..scheme_end].to_ascii_lowercase();
+            // Only the two schemes this client speaks are honoured. Anything
+            // else used to be recorded as HTTPS while
+            // `enforce_https_for_remote` handed the original string to the
+            // client -- so policy authorized `https://proxy.internal:443` and
+            // the request went to `ftp://proxy.internal`, a different route
+            // that policy never saw. An unknown scheme is treated as HTTPS for
+            // the *target* and reported here so the caller can refuse it.
+            let scheme = if declared == "http" { "http" } else { "https" };
+            (scheme, rest, Some(declared))
         }
-        None => ("https", trimmed),
+        None => ("https", trimmed, None),
     };
     // The authority ends at the first `/`, `?` or `#`.
     //
@@ -98,6 +115,19 @@ fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
     // argument for terminating on all of them at once rather than adding them
     // as they are reported.
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    // Everything after it, kept as written: the client needs the path, and the
+    // query is often where a gateway's token lives.
+    let path_and_query = rest
+        .find(['/', '?', '#'])
+        .map(|index| {
+            let tail = &rest[index..];
+            if tail.starts_with('/') {
+                tail.to_string()
+            } else {
+                format!("/{tail}")
+            }
+        })
+        .unwrap_or_default();
     // Userinfo is not part of the host, and keeping it was worse than untidy.
     //
     // `https://user:secret@proxy.internal/v1` produced a `NetworkTarget.host` of
@@ -109,9 +139,11 @@ fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
     //
     // The last `@` wins: userinfo may contain a percent-encoded one, a host may
     // not contain any.
-    let authority = authority
+    let (userinfo, authority) = authority
         .rsplit_once('@')
-        .map_or(authority, |(_userinfo, host)| host);
+        .map_or((None, authority), |(userinfo, host)| {
+            (Some(userinfo.to_string()), host)
+        });
     let mut parts = authority.rsplitn(2, ':');
     // An IPv6 literal is written `[::1]` in a URL and `::1` everywhere else.
     //
@@ -147,6 +179,9 @@ fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
         port,
     };
     ParsedBaseUrl {
+        userinfo,
+        path_and_query,
+        declared_scheme,
         target,
         port_was_explicit,
     }
@@ -184,7 +219,19 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     let parsed = parse_base_url(base_url, "api.anthropic.com");
     let target = &parsed.target;
-    if target.scheme != "http" || is_loopback_host(&target.host) {
+    // A scheme this client does not speak is rebuilt, not passed through.
+    //
+    // `ftp://proxy.internal` was recorded as HTTPS for policy while the client
+    // received the original string, so the authorization and the request named
+    // different routes -- the exact split this function exists to close. Only
+    // `http` and `https` survive as written; anything else is reconstructed as
+    // the HTTPS the record already claims, which is the one destination policy
+    // approved.
+    let unsupported_scheme = parsed
+        .declared_scheme
+        .as_deref()
+        .is_some_and(|scheme| scheme != "http" && scheme != "https");
+    if !unsupported_scheme && (target.scheme != "http" || is_loopback_host(&target.host)) {
         // Whatever the caller wrote, with the scheme the parser inferred.
         //
         // A scheme-less `proxy.internal:8443` is authorized as
@@ -211,63 +258,18 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     } else {
         443
     };
-    // The path survives the rewrite, and the prefix is matched the same way the
-    // scheme is.
+    // The path, query, fragment and userinfo all come from the one parser.
     //
-    // A case-sensitive `strip_prefix("http://")` fails on `HTTP://proxy/anthropic`
-    // -- which the scheme detection above accepts -- so the path was dropped and
-    // the client was pointed at `https://proxy:443`, a different endpoint from
-    // the one configured. Half a URL parsed case-insensitively is not a
-    // case-insensitive parser.
-    let trimmed = base_url.trim();
-    // Everything after the authority, query and fragment included.
-    //
-    // Dropping the query was a mistake in the safer-looking direction: a
-    // gateway's token often *is* the query, so the upgraded URL reached the
-    // right host without the credential and every request failed. Nor is
-    // keeping it a leak: the query is already in the URL this rewrites, the
-    // authorized `NetworkTarget` is host and port only, and the client inserts
-    // its API path ahead of the query rather than after it.
-    let path = trimmed
-        .find("://")
-        .map(|scheme_end| &trimmed[scheme_end + "://".len()..])
-        .and_then(|authority_and_path| {
-            authority_and_path
-                .find(['/', '?', '#'])
-                .map(|index| &authority_and_path[index..])
-        })
-        .map(|rest| {
-            if rest.starts_with('/') {
-                rest.to_string()
-            } else {
-                // A query or fragment with no path of its own still belongs
-                // after the root.
-                format!("/{rest}")
-            }
-        })
-        .unwrap_or_default();
-    // Brackets come back for the URL, having been stripped for the policy.
-    //
-    // The two representations are not the same string and never were: a policy
-    // list is written `::1`, and a URL authority has to be `[::1]` or the colons
-    // in the address are read as the port separator. Rebuilding
-    // `https://2001:db8::1:8080/v1` produces a URL nothing can parse, so every
-    // request fails against an endpoint policy had just authorized -- which
-    // reads as the provider being down.
-    // Userinfo belongs to the client URL and not to the policy record.
-    //
-    // It is stripped from `NetworkTarget` on purpose -- an audit trail should
-    // not carry a proxy password -- and rebuilding the client URL from that
-    // stripped host dropped the credential from the request as well, so an
-    // authenticated proxy rejected every call. The two representations differ
-    // again, for the same reason the brackets do.
-    let userinfo = base_url
-        .trim()
-        .find("://")
-        .map(|scheme_end| &base_url.trim()[scheme_end + "://".len()..])
-        .and_then(|rest| rest.split(['/', '?', '#']).next())
-        .and_then(|authority| authority.rsplit_once('@'))
-        .map(|(userinfo, _host)| format!("{userinfo}@"))
+    // Re-deriving them here was three copies of the same grammar, and this file
+    // has already lost a query, a set of IPv6 brackets and a proxy credential
+    // one at a time to exactly that duplication. `parse_base_url` computes each
+    // of them on the way to the target; it returns them now instead of throwing
+    // them away.
+    let path = parsed.path_and_query.clone();
+    let userinfo = parsed
+        .userinfo
+        .as_ref()
+        .map(|userinfo| format!("{userinfo}@"))
         .unwrap_or_default();
     format!(
         "https://{}{}:{}{}",
@@ -449,6 +451,39 @@ mod delegate_chat_route_honesty_tests {
             );
             assert_eq!(target.port, expected_port, "{base} lost or invented a port");
         }
+    }
+
+    /// A scheme this client does not speak does not reach the client.
+    ///
+    /// `ftp://proxy.internal` was recorded as HTTPS for policy while the client
+    /// received the original string -- so the authorization and the request
+    /// named different routes, which is the split this function exists to
+    /// close.
+    #[test]
+    fn an_unsupported_scheme_is_rebuilt_rather_than_passed_through() {
+        for base in ["ftp://proxy.internal", "gopher://proxy.internal/v1"] {
+            let client = super::enforce_https_for_remote(base);
+            assert!(
+                client.starts_with("https://"),
+                "{base} reached the client as {client}, which is not the route policy                  authorized"
+            );
+            let target = super::network_target_from_base_url(base, "api.anthropic.com");
+            assert_eq!(
+                target.scheme, "https",
+                "{base} was authorized as something other than what the client will use"
+            );
+        }
+
+        // The two schemes this client does speak are still passed through as
+        // written, loopback included.
+        assert_eq!(
+            super::enforce_https_for_remote("https://api.anthropic.com"),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            super::enforce_https_for_remote("http://[::1]:11434"),
+            "http://[::1]:11434"
+        );
     }
 
     /// A proxy credential survives the upgrade, and stays out of the record.

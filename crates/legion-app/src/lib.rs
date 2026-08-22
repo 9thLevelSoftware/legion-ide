@@ -27583,25 +27583,46 @@ impl AppComposition {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         };
-        self.persist_phase4_runtime_records(
-            &delegate_run_id,
-            &provider_route_request.route_id,
-            invocation_state,
-            match invocation_state {
-                legion_protocol::AssistedAiProviderInvocationState::Completed => {
-                    "phase4.provider.route.completed"
-                }
-                legion_protocol::AssistedAiProviderInvocationState::Streaming => {
-                    "phase4.provider.route.streaming"
-                }
-                legion_protocol::AssistedAiProviderInvocationState::Failed => {
-                    "phase4.provider.route.failed"
-                }
-                _ => "phase4.provider.route.refused",
-            },
-            event_context,
-            &replay_manifest,
-        )?;
+        let outcome_label = match invocation_state {
+            legion_protocol::AssistedAiProviderInvocationState::Completed => {
+                "phase4.provider.route.completed"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Streaming => {
+                "phase4.provider.route.streaming"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Failed => {
+                "phase4.provider.route.failed"
+            }
+            _ => "phase4.provider.route.refused",
+        };
+        // Queued rather than returned, for the same reason the spawn failure is.
+        //
+        // By here the citations, the permission decision, both chat messages and
+        // possibly a live worker are all committed. Returning an error leaves a
+        // turn that happened looking like one that failed -- retrying duplicates
+        // it, and a worker already running finishes into the request the person
+        // was told had failed. The write is owed, not the turn.
+        if self
+            .persist_phase4_runtime_records(
+                &delegate_run_id,
+                &provider_route_request.route_id,
+                invocation_state,
+                outcome_label,
+                event_context,
+                &replay_manifest,
+            )
+            .is_err()
+        {
+            self.phase4_projection_state
+                .pending_route_audits
+                .push(PendingRouteAudit {
+                    run_id: delegate_run_id.clone(),
+                    route_id: provider_route_request.route_id.clone(),
+                    state: invocation_state,
+                    outcome_label,
+                    event_context,
+                });
+        }
 
         let projection = self.current_delegated_task_projection(TimestampMillis::now());
         Ok(AppDelegateChatOutcome {
