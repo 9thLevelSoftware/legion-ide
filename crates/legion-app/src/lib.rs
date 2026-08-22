@@ -15233,6 +15233,16 @@ impl AppComposition {
         })
     }
 
+    /// Whether the audit trail still owes a route record a write.
+    ///
+    /// The desktop repaints while this is true, because a failed write is only
+    /// retried by another poll and a poll only happens on a repaint: without
+    /// this the queue could sit untouched until unrelated input arrived, and a
+    /// finished turn would stay recorded as `Streaming` in the meantime.
+    pub fn has_pending_route_audits(&self) -> bool {
+        !self.phase4_projection_state.pending_route_audits.is_empty()
+    }
+
     /// Queue a route record for retry, replacing any older one for the same run.
     ///
     /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
@@ -27835,7 +27845,22 @@ impl AppComposition {
         // is a function that only ever runs against a *finished* prediction --
         // no pending worker, no flag, an immediate early return. The comment
         // described cancelling and the code was nowhere near it.
-        self.release_cancelled_inline_prediction_lane();
+        // Which prediction this cancel names, before anything is released.
+        //
+        // A `CancelGhostText` built from an older projection carries an old id,
+        // and releasing first cancelled whatever was running -- so a newer
+        // request was killed and its result fenced out by a command that was
+        // never about it. The validation below would then reject the id, having
+        // already done the damage.
+        let names_the_active_request = prediction_id.as_deref().is_none_or(|requested| {
+            self.assist_inline_prediction_state
+                .active_request_id
+                .as_ref()
+                .is_none_or(|active| active.0 == requested)
+        });
+        if names_the_active_request {
+            self.release_cancelled_inline_prediction_lane();
+        }
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             self.assist_inline_prediction_state.request_in_flight = false;

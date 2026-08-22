@@ -1309,6 +1309,11 @@ impl DesktopRuntime {
         self.app.product_ai_stream_in_flight()
     }
 
+    /// Whether the audit trail still owes a route record a write.
+    pub fn has_pending_route_audits(&self) -> bool {
+        self.app.has_pending_route_audits()
+    }
+
     /// Current shell projection snapshot for rendering and tests.
     pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
         self.shell.projection_snapshot()
@@ -3827,7 +3832,14 @@ impl DesktopEframeApp {
         }
         // Progressive product AI stream: merge live SSE sink into projection and
         // keep repainting while deltas are in flight.
-        if self.runtime.poll_product_ai_stream() || self.runtime.product_ai_stream_in_flight() {
+        // Also while an audit write is owed: a failed one is retried by the next
+        // poll, and a poll only happens on a repaint, so without this the queue
+        // could sit untouched until unrelated input arrived -- and a finished
+        // turn would read as `Streaming` for as long as that took.
+        if self.runtime.poll_product_ai_stream()
+            || self.runtime.product_ai_stream_in_flight()
+            || self.runtime.has_pending_route_audits()
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }

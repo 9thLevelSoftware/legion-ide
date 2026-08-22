@@ -1273,13 +1273,6 @@ fn a_background_delegate_turn_records_its_ending() {
     );
 }
 
-/// The network target a route request names, if it names one.
-fn route_target(
-    request: &legion_protocol::AssistedAiProviderRouteRequest,
-) -> Option<legion_protocol::NetworkTarget> {
-    request.network_target.clone()
-}
-
 /// The transcript can show where a turn's request went.
 ///
 /// The route survived only in the command outcome, which the desktop reads for
@@ -1327,7 +1320,7 @@ fn a_delegate_turn_shows_its_route_in_the_projection() {
     );
     // The whole authority, so the label names the destination that was actually
     // contacted rather than a different one that happens to share a host.
-    if let Some(target) = route_target(&outcome.provider_route_request) {
+    if let Some(target) = outcome.provider_route_request.network_target.as_ref() {
         if let Some(port) = target.port {
             assert!(
                 route.destination_label.ends_with(&format!(":{port}")),

@@ -531,6 +531,55 @@ pub(crate) fn phase4_permission_budget_projection(
 mod tests {
     use super::*;
 
+    /// A cancel names a request, and cancels only that one.
+    ///
+    /// `CancelGhostText` built from an older projection carries an old id.
+    /// Releasing the lane before checking which request the command named
+    /// cancelled whatever was running, so a newer prediction was killed and its
+    /// result fenced out by a command that was never about it -- and the
+    /// validation that would have rejected the id ran afterwards.
+    #[test]
+    fn a_cancel_for_an_older_request_leaves_the_current_one_running() {
+        let root =
+            std::env::temp_dir().join(format!("legion-cancel-target-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(root.join("lib.rs"), "pub fn marker() -> u32 { 42 }").expect("fixture");
+        let mut app = AppComposition::new();
+        app.open_workspace(
+            &root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("cancel-target".to_string()),
+        )
+        .expect("workspace should open");
+        app.open_file("lib.rs").expect("fixture file should open");
+        app.set_product_mode(AppProductMode::Assist);
+        let buffer_id = app
+            .active_buffer_id()
+            .expect("the open file must have a buffer");
+
+        // A live request, with the cancellation flag its worker watches.
+        app.assist_inline_prediction_state.request_in_flight = true;
+        app.assist_inline_prediction_state.active_request_id = Some(
+            legion_protocol::InlinePredictionRequestId("request-b".to_string()),
+        );
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.pending_inline_prediction_cancelled = Some(flag.clone());
+
+        // A cancel for the request that came before this one.
+        let _ = app.cancel_assist_inline_prediction(buffer_id, Some("request-a".to_string()));
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::SeqCst),
+            "a cancel naming an older request stopped the one that is running"
+        );
+
+        // And the request it does name is still cancellable.
+        let _ = app.cancel_assist_inline_prediction(buffer_id, Some("request-b".to_string()));
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "a cancel naming the running request must stop it"
+        );
+    }
+
     /// An operation that never calls a provider does not report an upload.
     ///
     /// `Explain` is answered from metadata and returns before any provider
