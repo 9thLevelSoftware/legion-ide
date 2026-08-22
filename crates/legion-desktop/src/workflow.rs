@@ -603,6 +603,15 @@ pub enum DesktopLegionWorkflowStatus {
     KillSwitchTriggered,
 }
 
+/// Where a canvas card sits, and who decided.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CanvasNodePlacement {
+    /// World-space position.
+    pub(crate) position: (f32, f32),
+    /// Whether a person dragged the card here.
+    pub(crate) placed_by_person: bool,
+}
+
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
@@ -618,7 +627,13 @@ pub struct DesktopRuntime {
     /// which buffers exist, the person decides where they sit. Keyed by path
     /// rather than `BufferId` so an arrangement survives the restart that
     /// renumbers buffers.
-    canvas_nodes: BTreeMap<String, (f32, f32)>,
+    /// Where each card sits, and whether a person put it there.
+    ///
+    /// The flag is what tells a default the layout assigned apart from a place
+    /// somebody dragged a card to. Geometry cannot: two cards at the same point
+    /// may be a reused default slot, which must be repaired, or a deliberate
+    /// stack, which must not be touched.
+    canvas_nodes: BTreeMap<String, CanvasNodePlacement>,
     /// Connections the person drew, as ordered `(from, to)` path pairs.
     ///
     /// A `BTreeSet` so drawing the same connection twice is idempotent and the
@@ -704,7 +719,7 @@ impl DesktopRuntime {
             });
 
         let mut explorer_expansion = BTreeSet::new();
-        let mut canvas_nodes: BTreeMap<String, (f32, f32)> = BTreeMap::new();
+        let mut canvas_nodes: BTreeMap<String, CanvasNodePlacement> = BTreeMap::new();
         let mut canvas_edges: BTreeSet<(String, String)> = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
@@ -728,7 +743,15 @@ impl DesktopRuntime {
                 canvas_nodes = record
                     .canvas_nodes
                     .iter()
-                    .map(|node| (node.path.0.clone(), (node.x, node.y)))
+                    .map(|node| {
+                        (
+                            node.path.0.clone(),
+                            CanvasNodePlacement {
+                                position: (node.x, node.y),
+                                placed_by_person: node.placed_by_person,
+                            },
+                        )
+                    })
                     .collect();
                 canvas_edges = record
                     .canvas_edges
@@ -823,7 +846,15 @@ impl DesktopRuntime {
                 y,
                 settled,
             } => {
-                self.canvas_nodes.insert(path.0.clone(), (x.get(), y.get()));
+                self.canvas_nodes.insert(
+                    path.0.clone(),
+                    CanvasNodePlacement {
+                        position: (x.get(), y.get()),
+                        // A drag is a person placing a card, which is what makes
+                        // this position untouchable by collision repair.
+                        placed_by_person: true,
+                    },
+                );
                 // Only the end of a drag reaches disk. Mid-drag frames update
                 // the arrangement in memory; persisting each one put a rewrite,
                 // a validate, a `sync_all` and an atomic replace on the renderer
@@ -850,7 +881,12 @@ impl DesktopRuntime {
                 for placement in placements {
                     self.canvas_nodes.insert(
                         placement.path.0.clone(),
-                        (placement.x.get(), placement.y.get()),
+                        CanvasNodePlacement {
+                            position: (placement.x.get(), placement.y.get()),
+                            // The layout chose this slot, so the layout may
+                            // choose again if something ends up on top of it.
+                            placed_by_person: false,
+                        },
                     );
                 }
                 if placed_any {
@@ -1678,10 +1714,11 @@ impl DesktopRuntime {
         record.canvas_nodes = self
             .canvas_nodes
             .iter()
-            .map(|(path, (x, y))| legion_protocol::SessionCanvasNode {
+            .map(|(path, placement)| legion_protocol::SessionCanvasNode {
                 path: CanonicalPath(path.clone()),
-                x: *x,
-                y: *y,
+                x: placement.position.0,
+                y: placement.position.1,
+                placed_by_person: placement.placed_by_person,
             })
             .collect();
         record.canvas_edges = self
@@ -1794,7 +1831,15 @@ impl DesktopRuntime {
             canvas_positions: self
                 .canvas_nodes
                 .iter()
-                .map(|(path, (x, y))| (path.clone(), egui::pos2(*x, *y)))
+                .map(|(path, placement)| {
+                    (
+                        path.clone(),
+                        crate::view::canvas_workspace::SavedPosition {
+                            position: egui::pos2(placement.position.0, placement.position.1),
+                            placed_by_person: placement.placed_by_person,
+                        },
+                    )
+                })
                 .collect(),
             canvas_edges: self.canvas_edges.iter().cloned().collect(),
             center_surface: self.center_surface,

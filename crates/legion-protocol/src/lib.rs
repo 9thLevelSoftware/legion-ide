@@ -22036,6 +22036,11 @@ pub struct TrustRecord {
 ///
 /// Keyed by canonical path rather than `BufferId`, because buffer ids are
 /// assigned per session and a layout that forgot its arrangement on every
+/// Serde default for fields that are absent only in older records.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// restart would not be a layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionCanvasNode {
@@ -22045,6 +22050,21 @@ pub struct SessionCanvasNode {
     pub x: f32,
     /// World-space y offset.
     pub y: f32,
+    /// Whether a person put the card here, rather than the layout doing it.
+    ///
+    /// The two cases need telling apart and geometry cannot do it. A card the
+    /// layout placed on a default slot may be moved out of a collision freely;
+    /// a card somebody dragged somewhere must never be moved by anything except
+    /// them, even onto another card, because overlapping two cards is a thing
+    /// people do on purpose.
+    ///
+    /// Defaults to `true` for records written before this field existed: an
+    /// arrangement already on disk was arrived at somehow, and treating it as
+    /// deliberate risks leaving two cards overlapping, while treating it as
+    /// automatic risks moving something a person placed. The first is visible
+    /// and fixable by dragging; the second is neither.
+    #[serde(default = "crate::default_true")]
+    pub placed_by_person: bool,
 }
 
 /// A connection the person drew between two canvas nodes.

@@ -305,7 +305,7 @@ pub struct DesktopProjectionViewState {
     /// Adapter-local explorer selection override, if a native control is ahead of projection.
     pub selected_explorer_file: Option<FileId>,
     /// Where the person placed each canvas card, keyed by canonical path.
-    pub canvas_positions: BTreeMap<String, egui::Pos2>,
+    pub canvas_positions: BTreeMap<String, canvas_workspace::SavedPosition>,
     /// Connections the person drew, as ordered  canonical paths.
     pub canvas_edges: Vec<(String, String)>,
     /// Which surface the centre shows.

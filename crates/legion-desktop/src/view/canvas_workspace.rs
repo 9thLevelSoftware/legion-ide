@@ -97,11 +97,26 @@ pub(crate) struct CanvasNode {
     pub position: egui::Pos2,
 }
 
-/// The world-space corner of a numbered grid slot.
-fn slot_position(slot: usize) -> egui::Pos2 {
+/// A saved card position, and whether a person chose it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SavedPosition {
+    /// Where the card sits.
+    pub position: egui::Pos2,
+    /// Whether somebody dragged the card here.
+    pub placed_by_person: bool,
+}
+
+/// The world-space corner of a numbered grid slot, measured from `origin`.
+///
+/// The origin follows the viewport rather than being fixed at world zero.
+/// Opening a file after panning away used to put its card near the origin --
+/// off screen, on a surface with no minimap and no fit-to-content control, so
+/// the canvas looked empty while the file was open. A new card belongs where
+/// the person is looking.
+fn slot_position_from(origin: egui::Pos2, slot: usize) -> egui::Pos2 {
     egui::pos2(
-        (slot % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
-        (slot / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+        origin.x + (slot % DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
+        origin.y + (slot / DEFAULT_COLUMNS) as f32 * DEFAULT_STRIDE,
     )
 }
 
@@ -119,12 +134,14 @@ fn slot_position(slot: usize) -> egui::Pos2 {
 /// The search is bounded: each drawn card can block at most four cells, so a
 /// free one always exists within `4 * rendered.len() + 1` of the start, and the
 /// bound is a guard rather than a limit anybody can reach.
-fn first_free_slot(from: usize, taken: &[egui::Pos2]) -> usize {
+fn first_free_slot(origin: egui::Pos2, from: usize, taken: &[(egui::Pos2, bool)]) -> usize {
     let limit = from
         .saturating_add(taken.len().saturating_mul(4))
         .saturating_add(1);
     (from..=limit)
-        .find(|slot| !overlaps(slot_position(*slot), taken))
+        .find(|slot| !overlaps(slot_position_from(origin, *slot), taken))
+        // A fresh card avoids everything already drawn, however it got there:
+        // opening a file on top of one somebody arranged is nobody's intent.
         .unwrap_or(limit)
 }
 
@@ -132,11 +149,25 @@ fn first_free_slot(from: usize, taken: &[egui::Pos2]) -> usize {
 ///
 /// Grid cells are one stride square, so a card strictly inside another's cell
 /// on both axes covers it.
-fn overlaps(candidate: egui::Pos2, taken: &[egui::Pos2]) -> bool {
-    taken.iter().any(|position| {
-        (position.x - candidate.x).abs() < DEFAULT_STRIDE
-            && (position.y - candidate.y).abs() < DEFAULT_STRIDE
-    })
+fn overlaps(candidate: egui::Pos2, taken: &[(egui::Pos2, bool)]) -> bool {
+    taken
+        .iter()
+        .any(|(position, _)| covers(*position, candidate))
+}
+
+/// Whether a card at `candidate` would cover one the *layout* placed.
+///
+/// A card somebody dragged there is not a collision to repair, whatever it
+/// overlaps: they can see it and they meant it.
+fn overlaps_automatic(candidate: egui::Pos2, taken: &[(egui::Pos2, bool)]) -> bool {
+    taken
+        .iter()
+        .any(|(position, by_person)| !by_person && covers(*position, candidate))
+}
+
+/// Whether two cards at these positions are drawn over one another.
+fn covers(one: egui::Pos2, other: egui::Pos2) -> bool {
+    (one.x - other.x).abs() < DEFAULT_STRIDE && (one.y - other.y).abs() < DEFAULT_STRIDE
 }
 
 /// The nodes a snapshot implies, positioned from saved layout where it exists.
@@ -146,9 +177,14 @@ fn overlaps(candidate: egui::Pos2, taken: &[egui::Pos2]) -> bool {
 /// and hides the rest.
 pub(crate) fn nodes_for_snapshot(
     snapshot: &ShellProjectionSnapshot,
-    positions: &BTreeMap<String, egui::Pos2>,
+    positions: &BTreeMap<String, SavedPosition>,
+    origin: egui::Pos2,
 ) -> Vec<CanvasNode> {
-    nodes_for_sections(&snapshot.excerpt_surface_projection.sections, positions)
+    nodes_for_sections(
+        &snapshot.excerpt_surface_projection.sections,
+        positions,
+        origin,
+    )
 }
 
 /// The cards a set of excerpt sections implies.
@@ -159,7 +195,8 @@ pub(crate) fn nodes_for_snapshot(
 /// made to emit.
 pub(crate) fn nodes_for_sections(
     sections: &[legion_ui::ui::ExcerptSurfaceSectionProjection],
-    positions: &BTreeMap<String, egui::Pos2>,
+    positions: &BTreeMap<String, SavedPosition>,
+    origin: egui::Pos2,
 ) -> Vec<CanvasNode> {
     // Slots for cards that have never been placed are numbered after the cards
     // that have. Section index alone is not stable: the projection builds these
@@ -216,7 +253,15 @@ pub(crate) fn nodes_for_sections(
     // reopen the first: both are saved at the same coordinates and one is drawn
     // underneath the other, unreachable without moving the one on top. Whoever
     // is later in tab order gives way, deterministically.
-    let mut taken: Vec<egui::Pos2> = Vec::new();
+    // Each entry records whether a person put the card there, because only two
+    // *automatic* positions count as a collision worth repairing.
+    //
+    // A person dragging one card onto another is their arrangement, and neither
+    // card may be moved for it: not the one being dragged, and certainly not the
+    // stationary one, which nobody touched. Two default slots landing on each
+    // other is the case nobody chose and nobody can see coming -- a closed file
+    // keeping its slot while a new file is handed the same one.
+    let mut taken: Vec<(egui::Pos2, bool)> = Vec::new();
     let mut resolved: Vec<Option<egui::Pos2>> = Vec::with_capacity(drawn.len());
     for section in &drawn {
         let saved = section
@@ -224,15 +269,23 @@ pub(crate) fn nodes_for_sections(
             .as_ref()
             .and_then(|path| positions.get(path.0.as_str()).copied());
         match saved {
-            // Exactly equal, not merely overlapping. Dragging one card on top
-            // of another is a thing a person may deliberately do, and a rule
-            // that shuffled the card underneath would rearrange an arrangement
-            // somebody had just made by hand. Two cards at the *same
-            // coordinates* is the case nothing but a reused default slot
-            // produces, and the case where one is perfectly hidden.
-            Some(position) if !taken.contains(&position) => {
-                taken.push(position);
-                resolved.push(Some(position));
+            // A position a person chose is kept, whatever it overlaps.
+            //
+            // Dragging one card onto another is something people do on purpose,
+            // and nothing here may undo it -- not the card being dragged, and
+            // not the stationary card underneath, which moving would be worse
+            // still, since nobody touched that one at all.
+            Some(saved) if saved.placed_by_person => {
+                taken.push((saved.position, true));
+                resolved.push(Some(saved.position));
+            }
+            // A position the layout chose is kept only while nothing is drawn
+            // over it. Geometry, not equality: a closed card nudged to (10, 10)
+            // and a new one at (0, 0) are 320-unit cards covering each other
+            // almost entirely, and an equality test sees no collision there.
+            Some(saved) if !overlaps_automatic(saved.position, &taken) => {
+                taken.push((saved.position, false));
+                resolved.push(Some(saved.position));
             }
             _ => resolved.push(None),
         }
@@ -247,10 +300,10 @@ pub(crate) fn nodes_for_sections(
         if slot.is_some() {
             continue;
         }
-        let free = first_free_slot(next_slot, &taken);
+        let free = first_free_slot(origin, next_slot, &taken);
         next_slot = free + 1;
-        let position = slot_position(free);
-        taken.push(position);
+        let position = slot_position_from(origin, free);
+        taken.push((position, false));
         *slot = Some(position);
     }
 
@@ -266,7 +319,7 @@ pub(crate) fn nodes_for_sections(
             // keep describing two cards in one place.
             let placed = positions
                 .get(path.0.as_str())
-                .is_some_and(|saved| *saved == position);
+                .is_some_and(|saved| saved.position == position);
             let available = section.lines.len();
             let lines: Vec<String> = section
                 .lines
@@ -345,6 +398,11 @@ pub(crate) const SCENE_RECT_ID: &str = "legion-canvas-scene-rect";
 /// egui id under which an in-progress connection is kept.
 pub(crate) const PENDING_EDGE_ID: &str = "legion-canvas-pending-edge";
 
+/// The viewport a person last panned to, if they have panned at all.
+fn saved_scene_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data_mut(|data| data.get_temp::<egui::Rect>(egui::Id::new(SCENE_RECT_ID)))
+}
+
 /// Read the saved scene viewport, or a first view that contains `nodes`.
 ///
 /// Pan and zoom live in egui's temp store and do not survive a restart, while
@@ -356,17 +414,8 @@ pub(crate) const PENDING_EDGE_ID: &str = "legion-canvas-pending-edge";
 /// The opening view is derived from the cards instead: their bounding box, with
 /// a margin, and never smaller than the default so a single card does not open
 /// zoomed to fill the screen.
-fn scene_rect(ctx: &egui::Context, nodes: &[CanvasNode]) -> egui::Rect {
-    if let Some(saved) =
-        ctx.data_mut(|data| data.get_temp::<egui::Rect>(egui::Id::new(SCENE_RECT_ID)))
-    {
-        return saved;
-    }
-    default_scene_rect(nodes)
-}
-
 /// The view a canvas opens at when nothing has panned it yet.
-pub(crate) fn default_scene_rect(nodes: &[CanvasNode]) -> egui::Rect {
+pub(crate) fn default_scene_rect(nodes: &[CanvasNode], panel: egui::Vec2) -> egui::Rect {
     const MARGIN: f32 = 40.0;
     let fallback =
         egui::Rect::from_min_size(egui::pos2(-MARGIN, -MARGIN), egui::vec2(1200.0, 800.0));
@@ -384,13 +433,30 @@ pub(crate) fn default_scene_rect(nodes: &[CanvasNode]) -> egui::Rect {
     let bounds = bounds.expand(MARGIN);
     // Never smaller than the default. A lone card would otherwise open filling
     // the screen, which is a different kind of disorienting from an empty one.
-    egui::Rect::from_min_size(
+    let fitted = egui::Rect::from_min_size(
         bounds.min,
         egui::vec2(
             bounds.width().max(fallback.width()),
             bounds.height().max(fallback.height()),
         ),
-    )
+    );
+
+    // And never wider than the zoom range can draw.
+    //
+    // `Scene` fits the rect it is given by scaling, and the scale is clamped at
+    // `ZOOM_MIN`. Cards spread across ten thousand units therefore did not fit
+    // however carefully the rectangle was computed: egui refused to zoom out
+    // far enough, and the canvas opened on empty space between them. Showing
+    // the first card at a readable size is worth more than a view that promises
+    // to contain everything and delivers nothing.
+    let widest = panel / ZOOM_MIN;
+    if panel.x > 0.0 && panel.y > 0.0 && (fitted.width() > widest.x || fitted.height() > widest.y) {
+        let anchor = nodes.first().map_or(fitted.min, |node| {
+            node_rect(node).min - egui::vec2(MARGIN, MARGIN)
+        });
+        return egui::Rect::from_min_size(anchor, fallback.size());
+    }
+    fitted
 }
 
 /// Draw the canvas, and return the rect it occupied.
@@ -402,12 +468,17 @@ pub(crate) fn default_scene_rect(nodes: &[CanvasNode]) -> egui::Rect {
 pub(crate) fn render_canvas_workspace(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
-    positions: &BTreeMap<String, egui::Pos2>,
+    positions: &BTreeMap<String, SavedPosition>,
     edges: &[(String, String)],
     actions: &mut Vec<DesktopAction>,
 ) -> egui::Rect {
     let outer = ui.available_rect_before_wrap();
-    let nodes = nodes_for_snapshot(snapshot, positions);
+    // Where a card with no saved position goes: the top-left of whatever is on
+    // screen, not world zero. Read before the nodes are built, because the
+    // saved viewport is what decides it.
+    let saved_view = saved_scene_rect(ui.ctx());
+    let origin = saved_view.map_or(egui::Pos2::ZERO, |view| view.min + egui::vec2(40.0, 40.0));
+    let nodes = nodes_for_snapshot(snapshot, positions, origin);
 
     if nodes.is_empty() {
         ui.label(theme::muted(
@@ -416,7 +487,7 @@ pub(crate) fn render_canvas_workspace(
         return outer;
     }
 
-    let mut rect = scene_rect(ui.ctx(), &nodes);
+    let mut rect = saved_view.unwrap_or_else(|| default_scene_rect(&nodes, outer.size()));
     let ctx = ui.ctx().clone();
 
     egui::Scene::new()
@@ -733,6 +804,49 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     }
 }
 
+/// The titles a card is connected to, in one direction.
+///
+/// Titles rather than paths, because that is what the cards themselves are
+/// named by, and a description naming something differently from the control
+/// beside it is a description nobody can follow.
+fn connection_titles(
+    edges: &[(String, String)],
+    by_path: &BTreeMap<&str, &CanvasNode>,
+    path: &str,
+    outgoing: bool,
+) -> Vec<String> {
+    edges
+        .iter()
+        .filter_map(|(from, to)| {
+            let (own, other) = if outgoing { (from, to) } else { (to, from) };
+            if own != path {
+                return None;
+            }
+            Some(
+                by_path
+                    .get(other.as_str())
+                    .map(|node| node.title.clone())
+                    // An edge to a file that is no longer open is still real,
+                    // and saying so is better than omitting it: the connection
+                    // comes back when the file does.
+                    .unwrap_or_else(|| format!("{other} (not open)")),
+            )
+        })
+        .collect()
+}
+
+/// A description of a card's connections, or of their absence.
+///
+/// "No connections" rather than an empty description: silence is how a surface
+/// that has nothing to say and one that is broken sound identical.
+fn describe_connections(titles: &[String], verb: &str) -> String {
+    if titles.is_empty() {
+        "No connections".to_string()
+    } else {
+        format!("{verb} {}", titles.join(", "))
+    }
+}
+
 /// The action drawing `from` to `to` implies, given the edges that already exist.
 ///
 /// Repeating a connection removes it. `DisconnectCanvasNodes` existed with no
@@ -781,9 +895,16 @@ fn render_ports(
         let out_bounds = global_rect(ui, out_rect);
         ui.painter()
             .circle_filled(out_pos, PORT_RADIUS, tokens.accent.orange);
+        let outgoing = connection_titles(existing_edges, by_path, &node.path.0, true);
         ui.ctx().accesskit_node_builder(out.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect from {}", node.title));
+            // What this card is already connected to, on the control that
+            // changes it. A painted curve says nothing to anyone reading the
+            // tree, so activating a port was a step whose result could not be
+            // checked -- and the gesture toggles, so "did that connect or
+            // disconnect?" had no answer available.
+            builder.set_description(describe_connections(&outgoing, "Connects to"));
             set_bounds(builder, out_bounds);
         });
 
@@ -806,9 +927,11 @@ fn render_ports(
             PORT_RADIUS,
             egui::Stroke::new(1.5_f32, tokens.accent.cyan),
         );
+        let incoming = connection_titles(existing_edges, by_path, &node.path.0, false);
         ui.ctx().accesskit_node_builder(input.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect to {}", node.title));
+            builder.set_description(describe_connections(&incoming, "Connected from"));
             set_bounds(builder, in_bounds);
         });
         if input.clicked() {
@@ -885,6 +1008,22 @@ mod canvas_layout_rules {
     use legion_ui::ui::ExcerptSurfaceSectionProjection;
     use std::collections::BTreeMap;
 
+    /// A position somebody dragged a card to, which nothing may move.
+    fn by_person(position: egui::Pos2) -> super::SavedPosition {
+        super::SavedPosition {
+            position,
+            placed_by_person: true,
+        }
+    }
+
+    /// A position the layout assigned, which collision repair may reassign.
+    fn by_layout(position: egui::Pos2) -> super::SavedPosition {
+        super::SavedPosition {
+            position,
+            placed_by_person: false,
+        }
+    }
+
     fn section(path: &str) -> ExcerptSurfaceSectionProjection {
         ExcerptSurfaceSectionProjection {
             excerpt_id: format!("excerpt:{path}"),
@@ -910,7 +1049,7 @@ mod canvas_layout_rules {
     #[test]
     fn one_file_is_one_card_even_if_the_projection_repeats_it() {
         let sections = vec![section("a.rs"), section("a.rs"), section("b.rs")];
-        let nodes = nodes_for_sections(&sections, &BTreeMap::new());
+        let nodes = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO);
         assert_eq!(nodes.len(), 2, "a repeated path produced a duplicate card");
         assert_eq!(nodes[0].path.0, "a.rs");
         assert_eq!(nodes[1].path.0, "b.rs");
@@ -926,9 +1065,9 @@ mod canvas_layout_rules {
     fn a_default_slot_is_reported_as_unplaced() {
         let sections = vec![section("a.rs"), section("b.rs")];
         let mut positions = BTreeMap::new();
-        positions.insert("a.rs".to_string(), egui::pos2(10.0, 20.0));
+        positions.insert("a.rs".to_string(), by_person(egui::pos2(10.0, 20.0)));
 
-        let nodes = nodes_for_sections(&sections, &positions);
+        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO);
         assert!(nodes[0].placed, "a.rs has a saved position");
         assert!(
             !nodes[1].placed,
@@ -946,24 +1085,24 @@ mod canvas_layout_rules {
     #[test]
     fn removing_a_tab_does_not_move_the_cards_that_remain() {
         let all = vec![section("a.rs"), section("b.rs"), section("c.rs")];
-        let first_pass = nodes_for_sections(&all, &BTreeMap::new());
+        let first_pass = nodes_for_sections(&all, &BTreeMap::new(), egui::Pos2::ZERO);
 
         // What the renderer persists on that first frame.
-        let saved: BTreeMap<String, egui::Pos2> = first_pass
+        let saved: BTreeMap<String, super::SavedPosition> = first_pass
             .iter()
-            .map(|node| (node.path.0.clone(), node.position))
+            .map(|node| (node.path.0.clone(), by_layout(node.position)))
             .collect();
 
         // The middle tab closes.
         let remaining = vec![section("a.rs"), section("c.rs")];
-        let second_pass = nodes_for_sections(&remaining, &saved);
+        let second_pass = nodes_for_sections(&remaining, &saved, egui::Pos2::ZERO);
 
         assert_eq!(
-            second_pass[0].position, saved["a.rs"],
+            second_pass[0].position, saved["a.rs"].position,
             "a.rs moved when b.rs was closed"
         );
         assert_eq!(
-            second_pass[1].position, saved["c.rs"],
+            second_pass[1].position, saved["c.rs"].position,
             "c.rs moved when b.rs was closed — the defect this numbering fixes"
         );
     }
@@ -974,16 +1113,76 @@ mod canvas_layout_rules {
     /// one card gaining a position stopped the counter and moved every later
     /// card a slot to the left -- possibly onto the one just placed.
     #[test]
+    fn a_card_dropped_on_another_moves_neither_of_them() {
+        // Two cards a person put in the same place, on purpose. Repairing that
+        // moves a card nobody asked to move -- and the earlier equality rule
+        // moved whichever came second in tab order, so dragging card A onto
+        // card B relocated *B*, which nobody had touched at all.
+        let mut positions = BTreeMap::new();
+        positions.insert("alpha.rs".to_string(), by_person(egui::pos2(120.0, 80.0)));
+        positions.insert("beta.rs".to_string(), by_person(egui::pos2(120.0, 80.0)));
+
+        let nodes = nodes_for_sections(
+            &[section("alpha.rs"), section("beta.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+        );
+
+        for node in &nodes {
+            assert_eq!(
+                node.position,
+                egui::pos2(120.0, 80.0),
+                "{} was moved out of an overlap a person created deliberately",
+                node.path.0
+            );
+            assert!(
+                node.placed,
+                "a position a person chose must not be rewritten as a new default"
+            );
+        }
+    }
+
+    #[test]
+    fn reused_default_slots_are_repaired_even_when_they_only_nearly_coincide() {
+        // A closed card nudged slightly off its slot, and a new file that took
+        // the slot. Neither position was chosen by a person, and the cards are
+        // 320 units wide, so `(0, 0)` and `(10, 10)` cover each other almost
+        // entirely -- while an equality test sees no collision at all.
+        let mut positions = BTreeMap::new();
+        positions.insert("closed.rs".to_string(), by_layout(egui::pos2(10.0, 10.0)));
+        positions.insert("fresh.rs".to_string(), by_layout(egui::pos2(0.0, 0.0)));
+
+        let nodes = nodes_for_sections(
+            &[section("fresh.rs"), section("closed.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+        );
+
+        assert_eq!(nodes.len(), 2, "both files must be drawn");
+        let separation = (nodes[0].position - nodes[1].position).abs();
+        assert!(
+            separation.x >= DEFAULT_STRIDE || separation.y >= DEFAULT_STRIDE,
+            "two automatically placed cards are still on top of each other at {:?} and {:?}",
+            nodes[0].position,
+            nodes[1].position
+        );
+    }
+
+    #[test]
     fn a_reopened_file_does_not_land_on_the_card_that_took_its_slot() {
         // The cost of not reserving slots for closed files. Close the card in
         // slot 0, open a new file into the vacancy, reopen the first: both are
         // saved at the same coordinates, and one is drawn underneath the other
         // where it cannot be reached without moving the one on top.
         let mut positions = BTreeMap::new();
-        positions.insert("closed.rs".to_string(), egui::pos2(0.0, 0.0));
-        positions.insert("fresh.rs".to_string(), egui::pos2(0.0, 0.0));
+        positions.insert("closed.rs".to_string(), by_layout(egui::pos2(0.0, 0.0)));
+        positions.insert("fresh.rs".to_string(), by_layout(egui::pos2(0.0, 0.0)));
 
-        let nodes = nodes_for_sections(&[section("fresh.rs"), section("closed.rs")], &positions);
+        let nodes = nodes_for_sections(
+            &[section("fresh.rs"), section("closed.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+        );
 
         assert_eq!(nodes.len(), 2, "both files must be drawn");
         assert_ne!(
@@ -1016,14 +1215,14 @@ mod canvas_layout_rules {
         for index in 0..6 {
             positions.insert(
                 format!("closed{index}.rs"),
-                egui::pos2(
+                by_layout(egui::pos2(
                     (index % 3) as f32 * DEFAULT_STRIDE,
                     (index / 3) as f32 * DEFAULT_STRIDE,
-                ),
+                )),
             );
         }
 
-        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions);
+        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions, egui::Pos2::ZERO);
 
         let fresh = nodes
             .first()
@@ -1044,11 +1243,18 @@ mod canvas_layout_rules {
         // no minimap and no fit-to-content control, "empty" cannot be told from
         // "broken".
         let mut positions = BTreeMap::new();
-        positions.insert("far.rs".to_string(), egui::pos2(-4000.0, 2500.0));
-        positions.insert("near.rs".to_string(), egui::pos2(-3600.0, 2500.0));
+        positions.insert("far.rs".to_string(), by_person(egui::pos2(-4000.0, 2500.0)));
+        positions.insert(
+            "near.rs".to_string(),
+            by_person(egui::pos2(-3600.0, 2500.0)),
+        );
 
-        let nodes = nodes_for_sections(&[section("far.rs"), section("near.rs")], &positions);
-        let view = super::default_scene_rect(&nodes);
+        let nodes = nodes_for_sections(
+            &[section("far.rs"), section("near.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+        );
+        let view = super::default_scene_rect(&nodes, egui::vec2(1200.0, 800.0));
 
         for node in &nodes {
             assert!(
@@ -1064,8 +1270,8 @@ mod canvas_layout_rules {
     fn the_opening_view_of_a_lone_card_is_not_a_single_card() {
         // The other direction. Fitting exactly to one card opens zoomed to fill
         // the screen with it, which is a different kind of disorienting.
-        let nodes = nodes_for_sections(&[section("only.rs")], &BTreeMap::new());
-        let view = super::default_scene_rect(&nodes);
+        let nodes = nodes_for_sections(&[section("only.rs")], &BTreeMap::new(), egui::Pos2::ZERO);
+        let view = super::default_scene_rect(&nodes, egui::vec2(1200.0, 800.0));
 
         assert!(
             view.width() >= 1200.0 && view.height() >= 800.0,
@@ -1086,9 +1292,16 @@ mod canvas_layout_rules {
         // and lands on top of it. The card underneath cannot be reached without
         // first moving the one covering it.
         let mut positions = BTreeMap::new();
-        positions.insert("alpha.rs".to_string(), egui::pos2(DEFAULT_STRIDE, 0.0));
+        positions.insert(
+            "alpha.rs".to_string(),
+            by_person(egui::pos2(DEFAULT_STRIDE, 0.0)),
+        );
 
-        let nodes = nodes_for_sections(&[section("alpha.rs"), section("beta.rs")], &positions);
+        let nodes = nodes_for_sections(
+            &[section("alpha.rs"), section("beta.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+        );
 
         let alpha = nodes
             .iter()
@@ -1116,12 +1329,16 @@ mod canvas_layout_rules {
         // and the count agrees only by coincidence here. What it must not do is
         // stop at the first free-looking number without checking the second.
         let mut positions = BTreeMap::new();
-        positions.insert("alpha.rs".to_string(), egui::pos2(0.0, 0.0));
-        positions.insert("beta.rs".to_string(), egui::pos2(DEFAULT_STRIDE, 0.0));
+        positions.insert("alpha.rs".to_string(), by_layout(egui::pos2(0.0, 0.0)));
+        positions.insert(
+            "beta.rs".to_string(),
+            by_layout(egui::pos2(DEFAULT_STRIDE, 0.0)),
+        );
 
         let nodes = nodes_for_sections(
             &[section("alpha.rs"), section("beta.rs"), section("gamma.rs")],
             &positions,
+            egui::Pos2::ZERO,
         );
 
         let gamma = nodes
@@ -1140,13 +1357,13 @@ mod canvas_layout_rules {
     fn a_saved_position_does_not_reshuffle_the_unplaced_cards() {
         let sections = vec![section("a.rs"), section("b.rs"), section("c.rs")];
 
-        let untouched = nodes_for_sections(&sections, &BTreeMap::new());
+        let untouched = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO);
         let b_before = untouched[1].position;
         let c_before = untouched[2].position;
 
         let mut positions = BTreeMap::new();
-        positions.insert("a.rs".to_string(), egui::pos2(-900.0, 900.0));
-        let after = nodes_for_sections(&sections, &positions);
+        positions.insert("a.rs".to_string(), by_person(egui::pos2(-900.0, 900.0)));
+        let after = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO);
 
         assert_eq!(
             after[1].position, b_before,

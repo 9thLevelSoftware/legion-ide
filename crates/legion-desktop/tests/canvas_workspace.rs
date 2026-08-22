@@ -14,7 +14,9 @@
 use std::path::Path;
 
 mod common;
-use common::{TempWorkspace, click_at, clickable_center, full_frame_input, rendered_text};
+use common::{
+    TempWorkspace, click_at, clickable_center, full_frame_input, node_description, rendered_text,
+};
 
 use legion_desktop::workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime};
 
@@ -936,5 +938,56 @@ fn escape_on_the_canvas_does_not_clear_cursors_in_the_hidden_buffer() {
         cursor_count(&app),
         cursors_before,
         "Escape on the canvas cleared extra cursors in a buffer that was not on screen"
+    );
+}
+
+#[test]
+fn a_connection_is_readable_from_the_accessibility_tree() {
+    // The ports can be activated, and until now the only report of what that
+    // did was a painted curve. A screen reader could press a port and had no
+    // way to learn whether it had connected or disconnected the cards, or what
+    // was already connected to what -- and the gesture toggles, so the question
+    // matters every single time.
+    let workspace = workspace_with_files("legion_desktop_canvas_edge_a11y");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    // Nothing connected yet: the ports must say so rather than say nothing.
+    assert_eq!(
+        node_description(&canvas, "Connect from alpha.rs").as_deref(),
+        Some("No connections"),
+        "an unconnected port must report that, or silence is indistinguishable from a \
+         surface that has stopped working"
+    );
+
+    let source = accesskit_id(&canvas, "Connect from alpha.rs")
+        .expect("each card must publish an outgoing connection port");
+    let armed = activate(&mut app, source);
+    let target = accesskit_id(&armed, "Connect to beta.rs")
+        .expect("each card must publish an incoming connection port");
+    let connected = activate(&mut app, target);
+
+    assert_eq!(
+        node_description(&connected, "Connect from alpha.rs").as_deref(),
+        Some("Connects to beta.rs"),
+        "after connecting, the outgoing port must name what it connects to"
+    );
+    assert_eq!(
+        node_description(&connected, "Connect to beta.rs").as_deref(),
+        Some("Connected from alpha.rs"),
+        "the other end must report the connection too, from its own direction"
+    );
+
+    // And repeating the gesture removes it, which must be just as legible.
+    let source = accesskit_id(&connected, "Connect from alpha.rs").expect("port must persist");
+    let armed = activate(&mut app, source);
+    let target = accesskit_id(&armed, "Connect to beta.rs").expect("port must persist");
+    let disconnected = activate(&mut app, target);
+
+    assert_eq!(
+        node_description(&disconnected, "Connect from alpha.rs").as_deref(),
+        Some("No connections"),
+        "after disconnecting, the port must report that it no longer connects to anything"
     );
 }
