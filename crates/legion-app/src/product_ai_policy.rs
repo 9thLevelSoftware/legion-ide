@@ -945,6 +945,61 @@ mod org_ceiling {
             legion_protocol::AssistedAiSupportLabel::Supported,
             "a loopback call really is air-gap safe"
         );
+
+        // The arm nobody has taught this function about. A provider id it does
+        // not recognise used to be relabelled "Deterministic local provider",
+        // which is the half-coverage that let the original hard-coding through
+        // review: the two ids the test exercised were the two the match knew.
+        let hosted = super::phase4_provider_capability(
+            legion_protocol::AssistedAiProviderClass::HostedRemote,
+            "acme-hosted",
+            None,
+        );
+        assert_eq!(hosted.provider_id, "acme-hosted");
+        assert!(
+            hosted.provider_label.contains("acme-hosted"),
+            "an unfamiliar provider was relabelled as somebody else: {:?}",
+            hosted.provider_label
+        );
+        assert_ne!(
+            hosted.cost_budget_label, "local.free",
+            "a hosted remote provider must not be presented as free"
+        );
+        assert_eq!(
+            hosted.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Unsupported,
+            "a hosted remote provider is not air-gap safe"
+        );
+
+        // An unrecognised *class* counts as remote, because guessing "local and
+        // free" is the expensive way to be wrong.
+        let unknown = super::phase4_provider_capability(
+            legion_protocol::AssistedAiProviderClass::Unknown,
+            "mystery",
+            None,
+        );
+        assert_ne!(
+            unknown.cost_budget_label, "local.free",
+            "a provider class nothing recognises must not be assumed free"
+        );
+        assert_eq!(
+            unknown.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Unsupported,
+            "a provider class nothing recognises must not be assumed air-gap safe"
+        );
+
+        // A local provider that is not ollama is still local.
+        let vendor = super::phase4_provider_capability(
+            legion_protocol::AssistedAiProviderClass::Local,
+            "vendor-local",
+            None,
+        );
+        assert_eq!(vendor.provider_id, "vendor-local");
+        assert_eq!(
+            vendor.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Supported,
+            "a local provider is air-gap safe whatever it is called"
+        );
     }
 
     #[test]

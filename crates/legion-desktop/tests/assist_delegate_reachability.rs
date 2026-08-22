@@ -231,6 +231,80 @@ fn assist_without_a_buffer_blocks_on_the_buffer_and_offers_to_open_one() {
     );
 }
 
+/// A block nobody can resolve does not offer a button.
+///
+/// The Assist prerequisite card rendered every resolution as a control that
+/// opens the file palette, because the only block it once had was a missing
+/// buffer. Gating `Predict` on the build added a second one, and "Unavailable"
+/// became a button that promised nothing and then opened an unrelated palette.
+/// A resolution the app cannot perform reads as text, the way the Delegate rail
+/// already presents one.
+#[cfg(not(any(feature = "ai", feature = "offline")))]
+#[test]
+fn a_block_the_app_cannot_resolve_offers_no_control() {
+    let workspace = fixture("legion_desktop_assist_unresolvable_block");
+    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
+    switch_mode(&mut app, "Assist");
+
+    let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let text = rendered_text(&frame);
+    assert!(
+        text.iter()
+            .any(|line| line == "This build has no inline prediction provider."),
+        "the block must still say what is missing; frame was {text:?}"
+    );
+    assert!(
+        clickable_center(&frame, "Unavailable").is_none(),
+        "\"Unavailable\" is a state, not a step -- it must not be pressable;          frame was {text:?}"
+    );
+}
+
+/// Predict is offered only where something can answer it.
+///
+/// A build with neither `ai` nor `offline` compiles `legion-app`'s
+/// `not(any(...))` inline prediction provider, which answers every request with
+/// "AI feature is disabled". The proposal controls already accounted for that
+/// build; this gate did not, so an open buffer was enough to publish a control
+/// that could only fail.
+///
+/// The two halves are the same property read from either side, so the test is
+/// not vacuous in whichever build compiles it: where a provider exists the
+/// control must be there, and where none does it must not be. CI compiles the
+/// featureless configuration with `cargo check`, which does not build tests --
+/// the blocked half runs under
+/// `cargo test -p legion-desktop --no-default-features`, and is recorded here
+/// so the expectation is written down rather than remembered.
+#[test]
+fn predict_is_offered_only_where_a_provider_can_answer_it() {
+    let workspace = fixture("legion_desktop_assist_predict_gate");
+    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
+    switch_mode(&mut app, "Assist");
+
+    let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let text = rendered_text(&frame);
+
+    #[cfg(any(feature = "ai", feature = "offline"))]
+    {
+        assert!(
+            clickable_center(&frame, "Predict").is_some(),
+            "a build that has an inline prediction provider must offer Predict              with a file open; frame was {text:?}"
+        );
+    }
+
+    #[cfg(not(any(feature = "ai", feature = "offline")))]
+    {
+        assert!(
+            clickable_center(&frame, "Predict").is_none(),
+            "this build has no inline prediction provider, so Predict can only              fail; frame was {text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line == "This build has no inline prediction provider."),
+            "a blocked surface must say what is missing rather than going quiet;              frame was {text:?}"
+        );
+    }
+}
+
 // ─── Row 6: Assist Auto / Ollama ────────────────────────────────────────────
 
 /// A preference for a provider that is not installed must resolve, not hang,

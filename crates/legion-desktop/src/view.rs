@@ -5649,18 +5649,28 @@ fn render_assist_rail(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Assist", DesktopProductMode::Assist);
-    // The one thing Assist can be blocked on is having no buffer to predict
-    // into, and its resolution opens the file palette. Nothing else here is a
-    // prerequisite, so nothing else is offered as one.
+    // Assist blocks for two different reasons and only one of them has a
+    // resolution the app can perform. A missing buffer is fixed by opening one,
+    // so that resolution is a button. A build with no inline prediction
+    // provider is not fixed by anything on this screen, and rendering its
+    // resolution as a button gave "Unavailable" a click that opened the file
+    // palette -- a control that promises nothing and then does something
+    // unrelated. That case reads as text, the way the Delegate rail already
+    // presents a resolution nobody can press.
     if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
+        let resolvable_here = snapshot.active_buffer_projection.buffer_id.is_none();
         surface_card(ui, |ui| {
             ui.label(theme::body_strong(reason));
-            if soft_button(ui, resolution).clicked() {
-                actions.push(DesktopAction::OpenPalette {
-                    mode: PaletteMode::File,
-                    query: String::new(),
-                    scope: SearchScopeProjection::Workspace,
-                });
+            if resolvable_here {
+                if soft_button(ui, resolution).clicked() {
+                    actions.push(DesktopAction::OpenPalette {
+                        mode: PaletteMode::File,
+                        query: String::new(),
+                        scope: SearchScopeProjection::Workspace,
+                    });
+                }
+            } else {
+                ui.label(theme::muted(resolution));
             }
         });
         return;
