@@ -12459,21 +12459,49 @@ fn phase4_provider_capability(
     routed_provider_id: &str,
     refusal: Option<legion_protocol::AssistedAiRefusalMetadata>,
 ) -> legion_protocol::AssistedAiProviderCapability {
-    // Taken from the route request, which names the provider that was
-    // authorized and invoked. Earlier rounds made that field honest; this is
-    // the projection that was still describing something else.
-    let remote = routed_provider_id == "anthropic";
+    // Egress is a property of the provider *class*, which is typed, and not of
+    // its name, which is a string that happens to correlate today.
+    //
+    // Deriving `remote` from `routed_provider_id == "anthropic"` was the same
+    // drift this function exists to stop, one column over: a second BYOK route
+    // or any `HostedRemote` would be described to the reviewer as free,
+    // air-gap-safe and metadata-only while it shipped their buffer excerpt over
+    // the wire. `product_ai_route_fields` already decides the class; asking the
+    // name again is a second place for the same fact to live.
+    //
+    // `Unknown` is treated as remote deliberately. A class nothing recognises is
+    // exactly the case where guessing "local and free" is the expensive way to
+    // be wrong.
+    let remote = matches!(
+        provider_class,
+        legion_protocol::AssistedAiProviderClass::ByokRemote
+            | legion_protocol::AssistedAiProviderClass::HostedRemote
+            | legion_protocol::AssistedAiProviderClass::Gateway
+            | legion_protocol::AssistedAiProviderClass::Unknown
+    );
     let live = routed_provider_id != DETERMINISTIC_LOCAL_PROVIDER_ID;
-    let (provider_id, provider_label) = match routed_provider_id {
-        "ollama" => ("ollama".to_string(), "Ollama (local loopback)".to_string()),
-        "anthropic" => (
-            "anthropic".to_string(),
-            "Anthropic (BYOK remote)".to_string(),
-        ),
-        other => (
-            other.to_string(),
-            "Deterministic local provider".to_string(),
-        ),
+    let provider_id = routed_provider_id.to_string();
+    // The label names the class, so a provider nobody has taught this function
+    // about is still described by what it is rather than mislabelled.
+    let provider_label = match provider_class {
+        legion_protocol::AssistedAiProviderClass::Local => {
+            format!("{routed_provider_id} (local)")
+        }
+        legion_protocol::AssistedAiProviderClass::LocalLoopback => {
+            format!("{routed_provider_id} (local loopback)")
+        }
+        legion_protocol::AssistedAiProviderClass::ByokRemote => {
+            format!("{routed_provider_id} (BYOK remote)")
+        }
+        legion_protocol::AssistedAiProviderClass::HostedRemote => {
+            format!("{routed_provider_id} (hosted remote)")
+        }
+        legion_protocol::AssistedAiProviderClass::Gateway => {
+            format!("{routed_provider_id} (gateway)")
+        }
+        legion_protocol::AssistedAiProviderClass::Unknown => {
+            format!("{routed_provider_id} (unrecognised provider class)")
+        }
     };
     let supported = legion_protocol::AssistedAiSupportLabel::Supported;
     let unsupported = legion_protocol::AssistedAiSupportLabel::Unsupported;
@@ -15587,7 +15615,14 @@ impl AppComposition {
                 // opposite -- an audit trail that contradicts the artifact it
                 // describes is worse than one that says nothing.
                 if result.live_failed {
+                    // Every field that says how the run ended, not just the
+                    // outermost one. The nested decision is copied into the
+                    // reviewer-facing contract and the outcome label is what is
+                    // persisted, so leaving either at `Completed` reproduced the
+                    // contradiction one layer down.
                     job.route_response.invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                    job.route_response.route_decision.provider_invocation =
                         legion_protocol::AssistedAiProviderInvocationState::Failed;
                 }
                 match self.finish_assisted_edit_proposal_registration(job, proposal_source) {
@@ -25052,7 +25087,16 @@ impl AppComposition {
             &run_id,
             &route_id,
             route_response.invocation_state,
-            "phase4.provider.route.completed",
+            // The label follows the state rather than restating the happy path.
+            // Persisting `completed` beside a `Failed` invocation state is the
+            // same contradiction the state was corrected to remove.
+            if route_response.invocation_state
+                == legion_protocol::AssistedAiProviderInvocationState::Failed
+            {
+                "phase4.provider.route.failed"
+            } else {
+                "phase4.provider.route.completed"
+            },
             event_context,
             &replay_manifest,
         )?;
@@ -35964,17 +36008,17 @@ mod pkt_worker_tests {
     #[test]
     fn product_ai_stream_lane_rejects_reentrant_and_pending_result_begin() {
         let sink = LiveProductAiStreamSink::default();
-        assert!(
-            sink.try_begin("assist.proposal", "provider:a", "model:a")
-                .is_some()
-        );
+        let generation = sink
+            .try_begin("assist.proposal", "provider:a", "model:a")
+            .expect("the lane must be free to start");
         assert!(
             sink.try_begin("delegate.chat", "provider:b", "model:b")
                 .is_none()
         );
         assert_eq!(sink.snapshot().operation, "assist.proposal");
 
-        sink.finish_background(
+        sink.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
                 live_failed: false,
                 assistant_message_id: String::new(),
@@ -36075,16 +36119,16 @@ mod pkt_worker_tests {
     fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(
-            app.live_product_ai_stream
-                .try_begin("delegate.chat", "provider:test", "model:test")
-                .is_some()
-        );
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
 
         app.set_product_mode(AppProductMode::Assist);
         assert_eq!(app.product_mode(), AppProductMode::Delegate);
 
-        app.live_product_ai_stream.finish_background(
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
                 live_failed: false,
                 assistant_message_id: String::new(),
@@ -36126,12 +36170,12 @@ mod pkt_worker_tests {
     fn manual_mode_waits_until_completed_provider_result_is_merged() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(
-            app.live_product_ai_stream
-                .try_begin("delegate.chat", "provider:test", "model:test")
-                .is_some()
-        );
-        app.live_product_ai_stream.finish_background(
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
                 live_failed: false,
                 assistant_message_id: String::new(),

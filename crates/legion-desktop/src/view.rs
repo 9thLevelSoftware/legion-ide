@@ -889,7 +889,18 @@ impl ModeSurfaceModel {
             // zero configuration — sat behind the block. The panel names the
             // provider that actually answered, so the honest gate is the buffer.
             DesktopProductMode::Assist => {
-                let inspector = if snapshot.active_buffer_projection.buffer_id.is_none() {
+                // A build with neither `ai` nor `offline` has no inline
+                // prediction provider at all: `legion-app` compiles the
+                // `not(any(...))` implementation, which answers every request
+                // with "AI feature is disabled". The proposal controls account
+                // for that build and this gate did not, so `Predict` appeared
+                // and could only ever fail.
+                let inspector = if !cfg!(any(feature = "ai", feature = "offline")) {
+                    SurfaceAvailability::Blocked {
+                        reason: "This build has no inline prediction provider.".to_string(),
+                        resolution: "Unavailable".to_string(),
+                    }
+                } else if snapshot.active_buffer_projection.buffer_id.is_none() {
                     SurfaceAvailability::Blocked {
                         reason: "Open a file to enable predictions.".to_string(),
                         resolution: "Open file".to_string(),

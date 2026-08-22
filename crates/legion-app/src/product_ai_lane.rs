@@ -71,6 +71,15 @@ pub(crate) struct LiveProductAiStreamSink {
     pub(crate) in_flight: std::sync::atomic::AtomicBool,
     /// Which occupancy of the lane is current.
     ///
+    /// Guarded by `pending_results` rather than atomic on its own: an atomic
+    /// makes each read and each write indivisible and does nothing for the gap
+    /// *between* them, which is where the whole problem lives. A worker that
+    /// checks ownership and then publishes has, between those two lines, given
+    /// the app thread every opportunity to release the lane and somebody else
+    /// to take it. Both the check and the publish happen while this lock is
+    /// held, and the release takes the same lock to move the number, so there
+    /// is no moment for the answer to change in.
+    ///
     /// Incremented every time the lane is taken. A reservation records the
     /// value it was given and may only finish while it still matches, which
     /// closes a race a boolean cancellation flag cannot: the worker can read
@@ -79,7 +88,7 @@ pub(crate) struct LiveProductAiStreamSink {
     /// result would then land against somebody else's run and clear an
     /// in-flight flag that is not its own -- making a request that is still
     /// running look finished, and letting a third into the lane behind it.
-    pub(crate) generation: std::sync::atomic::AtomicU64,
+    pub(crate) generation: Mutex<u64>,
     /// Completed background chat results waiting to be applied on the app thread.
     pub(crate) pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
 }
@@ -134,7 +143,8 @@ impl ProductAiLaneReservation {
         completion: Option<&ProductChatCompletion>,
     ) {
         self.armed = false;
-        // Only while this reservation still holds the lane.
+        // Only while this reservation still holds the lane, checked and acted
+        // on under one lock.
         //
         // A cancelled worker can read "not cancelled", be pre-empted, and reach
         // here after the app thread released the lane and another operation
@@ -142,11 +152,8 @@ impl ProductAiLaneReservation {
         // else's run and clears an in-flight flag that is not this worker's --
         // so a request still in progress looks finished, and a third is let in
         // behind it.
-        if !self.sink.owns_lane(self.generation) {
-            return;
-        }
         self.sink
-            .finish_background(result, completion, self.operation);
+            .finish_background_owned(self.generation, result, completion, self.operation);
     }
 }
 
@@ -182,11 +189,16 @@ impl LiveProductAiStreamSink {
         {
             return None;
         }
-        // A new occupancy, taken under the same exchange that took the lane.
-        let generation = self
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            .wrapping_add(1);
+        // A new occupancy, taken while the result queue is held -- the same
+        // lock a publish has to take, so no worker can be mid-handoff here.
+        let Ok(mut generation_guard) = self.generation.lock() else {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return None;
+        };
+        *generation_guard = generation_guard.wrapping_add(1);
+        let generation = *generation_guard;
+        drop(generation_guard);
         let Ok(mut guard) = self.projection.lock() else {
             self.in_flight
                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -206,14 +218,51 @@ impl LiveProductAiStreamSink {
 
     /// Free the lane from the app thread and end the current occupancy.
     pub(crate) fn release_lane(&self) {
-        self.generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The queue lock first, so a worker cannot be between its ownership
+        // check and its publish while this runs.
+        let Ok(_queue) = self.pending_results.lock() else {
+            return;
+        };
+        if let Ok(mut generation) = self.generation.lock() {
+            *generation = generation.wrapping_add(1);
+        }
+        drop(_queue);
         self.finish(None, "");
     }
 
-    /// Whether `generation` is still the occupancy holding the lane.
-    pub(crate) fn owns_lane(&self, generation: u64) -> bool {
-        self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
+    /// Publish a background result, but only for the occupancy that holds the lane.
+    ///
+    /// The check and the publish share one lock. Splitting them -- check, then
+    /// publish -- left a window in which the lane could be released and retaken
+    /// between the two, which is the whole defect and not a smaller version of
+    /// it.
+    pub(crate) fn finish_background_owned(
+        &self,
+        generation: u64,
+        result: ProductAiBackgroundResult,
+        completion: Option<&ProductChatCompletion>,
+        operation: &str,
+    ) {
+        let Ok(mut queue) = self.pending_results.lock() else {
+            return;
+        };
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
+            return;
+        }
+        drop(current);
+        if let Ok(mut guard) = self.projection.lock() {
+            if let Some(completion) = completion {
+                *guard = product_stream_from_completion(completion, operation);
+            } else {
+                guard.in_flight = false;
+            }
+        }
+        queue.push_back(result);
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn push_delta(&self, delta: &str) {
@@ -271,31 +320,6 @@ impl LiveProductAiStreamSink {
             "assist.proposal" | "assist.inline_prediction" => mode.allows_assist(),
             _ => false,
         }
-    }
-
-    /// Publish the final stream projection and enqueue its app-thread result
-    /// before making the operation observable as no longer in flight. This
-    /// ordering closes the Manual-transition race between provider completion
-    /// and result handoff.
-    pub(crate) fn finish_background(
-        &self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-        operation: &str,
-    ) {
-        let Ok(mut queue) = self.pending_results.lock() else {
-            return;
-        };
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        queue.push_back(result);
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {

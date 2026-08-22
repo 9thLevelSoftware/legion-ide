@@ -113,14 +113,26 @@ fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
         .rsplit_once('@')
         .map_or(authority, |(_userinfo, host)| host);
     let mut parts = authority.rsplitn(2, ':');
+    // An IPv6 literal is written `[::1]` in a URL and `::1` everywhere else.
+    //
+    // Keeping the brackets meant the product allowlisted `[::1]` while an org
+    // bundle -- and the rest of this repository, and every operator writing a
+    // list by hand -- says `::1`, so the ceiling intersection removed a host
+    // both sides had permitted and denied a local provider outright. Brackets
+    // belong to URL syntax and not to the host.
+    let unbracket = |host: String| {
+        host.strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .map_or(host.clone(), str::to_string)
+    };
     let (host, port, port_was_explicit) = match (parts.next(), parts.next()) {
         // `rsplitn` yields the tail first, so a parsed port means an explicit
         // one; anything else is a bare host, including an IPv6 literal.
         (Some(tail), Some(head)) if tail.parse::<u16>().is_ok() => {
-            (head.to_string(), tail.parse::<u16>().ok(), true)
+            (unbracket(head.to_string()), tail.parse::<u16>().ok(), true)
         }
         _ => (
-            authority.to_string(),
+            unbracket(authority.to_string()),
             Some(if scheme == "http" { 80 } else { 443 }),
             false,
         ),
@@ -362,6 +374,29 @@ mod delegate_chat_route_honesty_tests {
             "https://api.anthropic.com",
             "an https URL must pass through exactly as written"
         );
+    }
+
+    /// An IPv6 host is recorded the way an allowlist is written.
+    ///
+    /// A URL spells the literal `[::1]` and every list written by hand -- and
+    /// the rest of this repository -- spells it `::1`. Keeping the brackets
+    /// made the ceiling intersection remove a host both the product and the org
+    /// had permitted, denying a local provider outright.
+    #[test]
+    fn a_bracketed_ipv6_host_is_stored_without_its_brackets() {
+        for (base, expected_host, expected_port) in [
+            ("http://[::1]:11434", "::1", Some(11434)),
+            ("http://[::1]", "::1", Some(80)),
+            ("https://[2001:db8::1]:8443", "2001:db8::1", Some(8443)),
+        ] {
+            let target = super::network_target_from_base_url(base, "api.anthropic.com");
+            assert_eq!(
+                target.host, expected_host,
+                "{base} kept URL bracket syntax in the host, where an allowlist entry \
+                 written {expected_host:?} can never match it"
+            );
+            assert_eq!(target.port, expected_port, "{base} lost or invented a port");
+        }
     }
 
     /// A port the operator wrote down survives, including port 80.
