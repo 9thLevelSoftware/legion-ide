@@ -1043,6 +1043,55 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// The budget evaluation names the proposal it is supposed to gate.
+///
+/// `permission_budget_gate` only considers refused evaluations whose action
+/// names the proposal being approved. The trust projections are built before
+/// the proposal exists, so their actions named none -- and a remote route's
+/// unresolved consent was evaluated, recorded, and then omitted from the one
+/// gate it exists to block. A refusal nobody is shown is the same as no refusal.
+#[test]
+fn the_permission_budget_evaluation_names_the_proposal_it_gates() {
+    let root = temp_workspace("assist_budget_proposal_link");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-budget".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    assert!(
+        !outcome.permission_budget_projection.evaluations.is_empty(),
+        "the run must evaluate its provider budget, or there is nothing to gate"
+    );
+    for evaluation in &outcome.permission_budget_projection.evaluations {
+        assert_eq!(
+            evaluation.action.proposal_id,
+            Some(proposal_id),
+            "a budget evaluation that names no proposal is skipped by the approval gate,              so any refusal in it is never shown"
+        );
+    }
+}
+
 /// An authorized run does not report itself blocked.
 ///
 /// The context manifest is built before the broker answers, so its provider
@@ -1101,7 +1150,7 @@ fn an_authorized_assist_run_records_the_permission_it_was_given() {
         .expect("the manifest must carry the provider permission it asked for");
     assert!(
         provider_permission.granted,
-        "the broker granted this run and the manifest still records the permission as          never given"
+        "the broker granted this run and the manifest still records the permission as never given"
     );
     assert!(
         provider_permission.decision_id.is_some(),
@@ -1176,7 +1225,7 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     let root = temp_workspace("chat");
     fs::write(
         root.join("lib.rs"),
-        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
+        "pub fn delegated_marker() -> u32 {\n 42\n}\n",
     )
     .expect("fixture file should be written");
     let mut app = AppComposition::new();

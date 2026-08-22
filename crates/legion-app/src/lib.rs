@@ -24462,7 +24462,6 @@ impl AppComposition {
             route_response: route_response.clone(),
             context_manifest_projection: context_manifest_projection.clone(),
             privacy_inspector_projection: privacy_inspector_projection.clone(),
-            permission_budget_projection: permission_budget_projection.clone(),
             generated_at,
             event_context,
             principal: context.principal.clone(),
@@ -24652,7 +24651,6 @@ impl AppComposition {
             route_response,
             context_manifest_projection,
             privacy_inspector_projection,
-            permission_budget_projection,
             generated_at,
             event_context,
             principal,
@@ -24662,6 +24660,25 @@ impl AppComposition {
         } = job;
 
         let proposal_id = self.proposal_coordinator.next_id();
+        // The trust projections were built before this proposal existed, so
+        // their actions named no proposal -- and `permission_budget_gate` only
+        // considers refused evaluations whose action names the proposal being
+        // approved. A remote route's unresolved consent was therefore
+        // evaluated, recorded, and then omitted from the one gate it exists to
+        // block. A refusal nobody is shown is the same as no refusal.
+        //
+        // Rebuilt rather than patched: the evaluation is derived from the
+        // manifest's permission and the action built from it, so setting the id
+        // in one place and leaving the derived record alone is how they come
+        // apart.
+        let mut context_manifest_projection = context_manifest_projection;
+        context_manifest_projection.manifest.proposal_id = Some(proposal_id);
+        let permission_budget_projection = phase4_permission_budget_projection(
+            &context_manifest_projection,
+            &run_id,
+            generated_at,
+            provider_class_sends_the_buffer(provider_class),
+        );
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),

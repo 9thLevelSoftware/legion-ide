@@ -538,7 +538,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 }
 
@@ -678,7 +678,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<&str, ProviderError> {
@@ -967,7 +967,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<Option<&str>, ProviderError> {
@@ -2079,7 +2079,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<&str, ProviderError> {
@@ -2681,6 +2681,27 @@ where
             blocks,
             stop_reason,
         })
+    }
+}
+
+/// A base URL with an API path appended *before* any query or fragment.
+///
+/// A configured base can carry a query -- `https://proxy.internal?token=...` is
+/// how several gateways pass credentials -- and appending the API path to the
+/// end of that string buries the path inside the query value. The request then
+/// goes to `/` with a longer token, which is a wrong endpoint that looks like a
+/// provider returning nonsense rather than like a misbuilt URL.
+fn endpoint_with_path(base_url: &str, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let split = base_url
+        .find(['?', '#'])
+        .filter(|index| *index >= base_url.find("://").map_or(0, |scheme| scheme + 3));
+    match split {
+        Some(index) => {
+            let (authority, tail) = base_url.split_at(index);
+            format!("{}/{}{}", authority.trim_end_matches('/'), path, tail)
+        }
+        None => format!("{}/{}", base_url.trim_end_matches('/'), path),
     }
 }
 
@@ -6335,5 +6356,47 @@ mod tests {
             final_response.blocks.len(),
             final_response.stop_reason
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_path_tests {
+    /// The API path goes before the query, not after it.
+    ///
+    /// A configured base URL can carry a query -- `?token=...` is how several
+    /// gateways pass credentials -- and appending `/v1/messages` to the end of
+    /// that string buries the path inside the token value. Every request then
+    /// goes to `/`, which looks like a provider returning nonsense rather than
+    /// like a URL this code built wrong.
+    #[test]
+    fn an_api_path_is_inserted_before_a_query_or_fragment() {
+        for (base, expected) in [
+            (
+                "https://proxy.internal?token=secret",
+                "https://proxy.internal/v1/messages?token=secret",
+            ),
+            (
+                "https://proxy.internal/anthropic?token=secret",
+                "https://proxy.internal/anthropic/v1/messages?token=secret",
+            ),
+            (
+                "https://proxy.internal#frag",
+                "https://proxy.internal/v1/messages#frag",
+            ),
+            (
+                "https://api.anthropic.com",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://api.anthropic.com/",
+                "https://api.anthropic.com/v1/messages",
+            ),
+        ] {
+            assert_eq!(
+                super::endpoint_with_path(base, "/v1/messages"),
+                expected,
+                "{base} produced an endpoint the request would not reach"
+            );
+        }
     }
 }

@@ -55,7 +55,6 @@ pub(crate) struct PendingAssistProposalJob {
     pub(crate) route_response: legion_protocol::AssistedAiProviderRouteResponse,
     pub(crate) context_manifest_projection: legion_protocol::ContextManifestProjection,
     pub(crate) privacy_inspector_projection: legion_protocol::PrivacyInspectorProjection,
-    pub(crate) permission_budget_projection: legion_protocol::PermissionBudgetProjection,
     pub(crate) generated_at: TimestampMillis,
     pub(crate) event_context: EventContext,
     pub(crate) principal: PrincipalId,

@@ -111,10 +111,32 @@ impl Phase4ContextAssemblyService {
                 },
             ],
             hashes: vec![snapshot_hash],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
+            // The excerpt from this buffer is what the prompt carries, so
+            // this record is the one a reviewer looks at to answer "did my code
+            // leave the machine". It said metadata-only, low risk and local
+            // while the route beside it said otherwise.
+            privacy_scope: Some(if sends_the_buffer {
+                legion_protocol::SemanticPrivacyScope::File
+            } else {
+                legion_protocol::SemanticPrivacyScope::MetadataOnly
+            }),
+            privacy_label: if sends_the_buffer {
+                legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata
+            } else {
+                legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+            },
+            risk_label: if sends_the_buffer {
+                route_risk
+            } else {
+                legion_protocol::ProposalRiskLabel::Low
+            },
+            // Unchanged for a local route: the excerpt does not leave, and
+            // `LocalOnly` is what this record has always said about that.
+            egress: if sends_the_buffer {
+                route_egress
+            } else {
+                legion_protocol::ContextManifestEgressStatus::LocalOnly
+            },
             freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
                 state: legion_protocol::SemanticFreshnessState::Fresh,
                 freshness_key_present: true,
@@ -557,6 +579,41 @@ mod tests {
             remote_permission.risk_label,
             legion_protocol::ProposalRiskLabel::Medium,
             "a run that uploads the buffer is not the same risk as one that does not"
+        );
+
+        // The record for the content that actually travels.
+        //
+        // The route and the permission became remote and this did not, so the
+        // inspector -- which copies item fields into its reviewer-facing records
+        // -- still showed the uploaded excerpt as having stayed on the machine.
+        // It is the item a reviewer looks at to answer "did my code leave", so
+        // it is the worst one to leave behind.
+        let remote_buffer = remote
+            .manifest
+            .items
+            .iter()
+            .find(|item| item.kind == legion_protocol::ContextManifestItemKind::Buffer)
+            .expect("the manifest must carry the buffer whose excerpt is sent");
+        assert_eq!(
+            remote_buffer.egress,
+            legion_protocol::ContextManifestEgressStatus::ExternalEgressMetadata,
+            "the uploaded excerpt is recorded as never having left the machine"
+        );
+        assert_eq!(
+            remote_buffer.privacy_scope,
+            Some(legion_protocol::SemanticPrivacyScope::File),
+            "the uploaded excerpt is recorded as metadata-only"
+        );
+        let local_buffer = local
+            .manifest
+            .items
+            .iter()
+            .find(|item| item.kind == legion_protocol::ContextManifestItemKind::Buffer)
+            .expect("the manifest must carry the buffer either way");
+        assert_eq!(
+            local_buffer.egress,
+            legion_protocol::ContextManifestEgressStatus::LocalOnly,
+            "a loopback route really does keep the excerpt local and must keep saying so"
         );
 
         // The inspector is derived from the manifest, so correcting the
