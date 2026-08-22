@@ -190,6 +190,37 @@ fn press_key(
     app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
+/// Hold a key across several frames, then let go.
+///
+/// The repeat flag is what a real key repeat carries, and it is the difference
+/// between a gesture and a sequence of gestures.
+fn hold_key(app: &mut DesktopEframeApp, key: egui::Key, repeats: usize) -> egui::FullOutput {
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]));
+    for _ in 0..repeats {
+        let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: true,
+            modifiers: egui::Modifiers::NONE,
+        }]));
+    }
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
 /// A flick: press on one frame, then move and release together on the next.
 ///
 /// This is not a slower drag with the same ending — it is the case egui reports
@@ -380,6 +411,88 @@ fn a_focused_card_can_be_moved_with_the_keyboard() {
     assert!(
         far.x - after.x > after.x - before.x,
         "Shift+ArrowRight moved the card no further than a plain press"
+    );
+}
+
+/// The view comes to a card the keyboard reached.
+///
+/// Focus can reach a card the view cannot: Tab walks every card in the
+/// arrangement, and an arrangement larger than the zoom floor cannot be shown
+/// at once however carefully it is fitted -- which is what stops "fit all
+/// cards" from being a complete answer on its own. Without this, tabbing to an
+/// off-screen card put the keyboard somewhere invisible, and the arrow keys
+/// then arranged a card nobody could see.
+#[test]
+fn focusing_a_card_off_screen_brings_the_view_to_it() {
+    let workspace = workspace_with_files("legion_desktop_canvas_focus_follows");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    // Put a card far outside any view the canvas would choose on its own.
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let centre = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let _ = drag(&mut app, centre, centre + egui::vec2(0.0, 400.0));
+    for _ in 0..12 {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        let Some(now) = clickable_center(&frame, "Card alpha.rs") else {
+            break;
+        };
+        let _ = drag(&mut app, now, now + egui::vec2(0.0, 400.0));
+    }
+
+    let parked = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let where_it_went = clickable_center(&parked, "Card alpha.rs");
+    assert!(
+        where_it_went.is_none_or(|centre| !panel.contains(centre)),
+        "this test needs a card the view does not reach; it is still at {where_it_went:?}          inside {panel:?}"
+    );
+
+    let followed = focus(&mut app, card);
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let centre = clickable_center(&followed, "Card alpha.rs")
+        .expect("a focused card must be somewhere in the tree");
+    assert!(
+        panel.contains(centre),
+        "the keyboard reached a card at {centre:?} that the view never came to, outside          {panel:?} -- so the arrow keys would arrange a card nobody can see"
+    );
+}
+
+/// A held arrow key writes the arrangement once, at the end.
+///
+/// Every repeat frame emitted a settled move, and a settled move validates,
+/// `sync_all`s and atomically replaces the session file -- on the thread that
+/// has to keep drawing. Moving a card any distance therefore queued a durable
+/// write between every pair of frames. A pointer drag has always had the answer
+/// to this: stream the movement, persist the end of the gesture.
+#[test]
+fn holding_an_arrow_key_persists_the_arrangement_once() {
+    let workspace = workspace_with_files("legion_desktop_canvas_key_repeat");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let before = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let _ = focus(&mut app, card);
+
+    let saves_before = app.session_saves_for_test();
+    let held = hold_key(&mut app, egui::Key::ArrowRight, 8);
+    let saves = app.session_saves_for_test() - saves_before;
+
+    let after = clickable_center(&held, "Card alpha.rs").expect("the card must still be there");
+    assert!(
+        after.x > before.x,
+        "the held key moved nothing, so this measures the cost of doing nothing"
+    );
+    assert_eq!(
+        saves, 1,
+        "a single held-key gesture asked for {saves} durable session writes; each one          validates, syncs and atomically replaces the file on the drawing thread"
     );
 }
 

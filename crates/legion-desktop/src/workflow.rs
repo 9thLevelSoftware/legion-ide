@@ -639,6 +639,8 @@ pub struct DesktopRuntime {
     /// A `BTreeSet` so drawing the same connection twice is idempotent and the
     /// order a session is written in is stable.
     canvas_edges: BTreeSet<(String, String)>,
+    /// How many durable session writes have been asked for.
+    session_saves: u64,
     /// Which surface the centre shows.
     center_surface: crate::view::CenterSurface,
     dismissed_toast_ids: BTreeSet<u64>,
@@ -803,6 +805,7 @@ impl DesktopRuntime {
             explorer_expansion,
             canvas_nodes,
             canvas_edges,
+            session_saves: 0,
             center_surface: crate::view::CenterSurface::Editor,
             dismissed_toast_ids: BTreeSet::new(),
             panel_state,
@@ -3449,6 +3452,7 @@ impl DesktopRuntime {
     }
 
     fn persist_session_if_configured(&mut self) {
+        self.session_saves = self.session_saves.saturating_add(1);
         if let Err(error) = self.save_session_state() {
             self.set_status(
                 StatusSeverity::Warning,
@@ -3950,6 +3954,18 @@ impl DesktopEframeApp {
     #[doc(hidden)]
     pub fn runtime_mut_for_test(&mut self) -> &mut DesktopRuntime {
         &mut self.runtime
+    }
+
+    /// How many times a session save has been attempted.
+    ///
+    /// Counted rather than inferred from the file, because what matters is the
+    /// number of durable writes a gesture asks for -- a validated,
+    /// `sync_all`ed, atomically replaced file each time -- and two writes of
+    /// identical bytes are indistinguishable on disk and not at all
+    /// indistinguishable to the thread doing them.
+    #[doc(hidden)]
+    pub fn session_saves_for_test(&self) -> u64 {
+        self.runtime.session_saves
     }
 
     /// Return the real editor allocation recorded by the last full frame.

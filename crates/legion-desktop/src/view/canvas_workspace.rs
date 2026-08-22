@@ -627,6 +627,58 @@ fn within_zoom_floor(
 /// rectangle it was given, leaving the new card outside the view widened for
 /// it. The view keeps its size and travels the shortest distance that brings
 /// the card inside, so the cards around it stay the size they were.
+/// egui id under which a focused card asks the view to come to it.
+///
+/// Written inside the scene, where the focused card is drawn, and read outside
+/// it, where the view for the next frame is decided. A card cannot move the
+/// view it is being drawn into.
+const FOCUS_REQUEST_ID: &str = "legion-canvas-focus-request";
+
+/// Move `view` so that a card asking to be seen is inside it.
+///
+/// Focus can reach a card the view cannot: Tab walks every card in the
+/// arrangement, and an arrangement larger than the zoom floor cannot be shown
+/// at once however it is fitted. Without this, tabbing to an off-screen card
+/// moved the keyboard somewhere invisible, and arrow keys then arranged a card
+/// nobody could see.
+fn view_following_focus(
+    view: egui::Rect,
+    focused: Option<egui::Rect>,
+    panel: egui::Vec2,
+) -> egui::Rect {
+    let Some(focused) = focused else {
+        return view;
+    };
+    if view.contains_rect(focused) {
+        return view;
+    }
+    view_moved_to(view, focused, panel)
+}
+
+/// `view`, moved the shortest distance that puts `target` inside it.
+fn view_moved_to(view: egui::Rect, target: egui::Rect, panel: egui::Vec2) -> egui::Rect {
+    // A card too big for the view cannot be contained by moving; its top-left
+    // is the part worth showing.
+    if target.width() > view.width() || target.height() > view.height() {
+        return within_zoom_floor(
+            egui::Rect::from_min_size(target.min, view.size()),
+            target,
+            view.size(),
+            panel,
+        );
+    }
+    // Nothing on the axes that already reach, and just enough on the ones that
+    // do not.
+    let dx = (target.min.x - view.min.x).min(0.0) + (target.max.x - view.max.x).max(0.0);
+    let dy = (target.min.y - view.min.y).min(0.0) + (target.max.y - view.max.y).max(0.0);
+    within_zoom_floor(
+        view.translate(egui::vec2(dx, dy)),
+        target,
+        view.size(),
+        panel,
+    )
+}
+
 fn view_reaching_new_cards(
     view: egui::Rect,
     nodes: &[CanvasNode],
@@ -643,22 +695,35 @@ fn view_reaching_new_cards(
     if view.contains_rect(newest) {
         return view;
     }
-    // A card too big for the view cannot be contained by moving; its top-left
-    // is the part worth showing.
-    if newest.width() > view.width() || newest.height() > view.height() {
-        return within_zoom_floor(
-            egui::Rect::from_min_size(newest.min, view.size()),
-            newest,
-            view.size(),
-            panel,
-        );
+    view_moved_to(view, newest, panel)
+}
+
+/// The widest view of `nodes` that `Scene` can actually draw.
+///
+/// What "fit all cards" means when the arrangement is larger than the zoom
+/// floor allows. [`default_scene_rect`] deliberately falls back to a
+/// *readable* view in that case, because an opening view zoomed to a quarter
+/// scale is a wall of unreadable cards -- but somebody who presses a control
+/// named for fitting everything is asking for the overview and should get as
+/// much of it as exists.
+///
+/// When even the floor cannot hold the arrangement, this still cannot show it
+/// all. That is why focus brings a card into view (see [`render_node`]): Tab
+/// reaches every card whether or not any single view can contain them.
+pub(crate) fn fit_scene_rect(nodes: &[CanvasNode], panel: egui::Vec2) -> egui::Rect {
+    let fitted = default_scene_rect(nodes, panel);
+    let bounds = nodes
+        .iter()
+        .map(|node| node_rect(node).expand(40.0))
+        .reduce(|left, right| left.union(right));
+    let (Some(bounds), true) = (bounds, panel.x > 0.0 && panel.y > 0.0) else {
+        return fitted;
+    };
+    let widest = panel / ZOOM_MIN;
+    if bounds.width() <= widest.x && bounds.height() <= widest.y {
+        return bounds;
     }
-    // The shortest translation that contains it: nothing on the axes that
-    // already reach, and just enough on the ones that do not.
-    let dx = (newest.min.x - view.min.x).min(0.0) + (newest.max.x - view.max.x).max(0.0);
-    let dy = (newest.min.y - view.min.y).min(0.0) + (newest.max.y - view.max.y).max(0.0);
-    let moved = view.translate(egui::vec2(dx, dy));
-    within_zoom_floor(moved, newest, view.size(), panel)
+    within_zoom_floor(bounds, bounds, widest, panel)
 }
 
 /// The view a canvas opens at when nothing has panned it yet.
@@ -731,6 +796,16 @@ pub(crate) fn render_canvas_workspace(
     let mut rect = saved_view.unwrap_or_else(|| default_scene_rect(&nodes, outer.size()));
 
     rect = view_reaching_new_cards(rect, &nodes, outer.size());
+    // A card the keyboard reached last frame, if it is not already in view.
+    // Taken rather than read: the view moves to it once, and panning away from
+    // a card that still has focus must not be undone every frame.
+    let focused = ui.ctx().data_mut(|data| {
+        let id = egui::Id::new(FOCUS_REQUEST_ID);
+        let requested: Option<egui::Rect> = data.get_temp(id);
+        data.remove::<egui::Rect>(id);
+        requested
+    });
+    rect = view_following_focus(rect, focused, outer.size());
     let ctx = ui.ctx().clone();
 
     egui::Scene::new()
@@ -834,7 +909,7 @@ pub(crate) fn render_canvas_workspace(
         .fixed_pos(outer.min + egui::vec2(12.0, 12.0))
         .show(&ctx, |ui| {
             if ui.button("Fit all cards").clicked() {
-                let fitted = default_scene_rect(&nodes, outer.size());
+                let fitted = fit_scene_rect(&nodes, outer.size());
                 ui.ctx()
                     .data_mut(|data| data.insert_temp(egui::Id::new(SCENE_RECT_ID), fitted));
             }
@@ -933,6 +1008,25 @@ fn nudged_position(ui: &egui::Ui, from: egui::Pos2) -> Option<egui::Pos2> {
     Some(from + delta)
 }
 
+/// Whether an arrow key finished being held this frame.
+///
+/// The end of a keyboard gesture, and the only frame of it worth persisting.
+/// A held arrow repeats every frame; writing the arrangement on each repeat put
+/// a validated, `sync_all`ed, atomically replaced session file between every
+/// pair of frames, on the thread that has to keep drawing them.
+fn nudge_settled(ui: &egui::Ui) -> bool {
+    ui.input(|input| {
+        [
+            egui::Key::ArrowLeft,
+            egui::Key::ArrowRight,
+            egui::Key::ArrowUp,
+            egui::Key::ArrowDown,
+        ]
+        .iter()
+        .any(|key| input.key_released(*key))
+    })
+}
+
 /// One card: header you can drag, and the file's text under it.
 fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAction>) {
     let rect = node_rect(node);
@@ -1024,22 +1118,25 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     if !header.is_pointer_button_down_on() {
         ui.ctx().data_mut(|data| data.remove::<egui::Vec2>(grab_id));
     }
-    // The same move, from a keyboard.
+    // The same move, from a keyboard, with the same two halves a drag has.
     //
-    // Each press is a finished gesture rather than a frame of one, so it
-    // persists like a released drag: a keyboard user who nudges a card and
-    // closes the window finds it where they left it, which is the whole point
-    // of the arrangement being saved.
-    // The arrow keys belong to the focused card, not to focus navigation.
+    // The arrow keys have to be taken deliberately: egui reads an unmodified
+    // arrow as "move focus in that direction" (`memory/mod.rs`), so the first
+    // nudge moved the card and then handed focus to whatever lay that way, and
+    // the second arranged something else. A widget declares otherwise by
+    // locking the filter, which is the mechanism egui provides for this and the
+    // reason `TextEdit` can use arrows at all. Tab stays unlocked, because
+    // leaving a card has to remain possible from the keyboard that arrived.
     //
-    // egui reads an unmodified arrow as "move focus in that direction"
-    // (`memory/mod.rs`), so the first nudge moved the card and then handed
-    // focus to whatever lay that way -- the second press arranged something
-    // else, or nothing. A widget declares otherwise by locking the filter,
-    // which is the mechanism egui provides for exactly this and the reason
-    // `TextEdit` can use arrows at all. Tab is deliberately not locked: leaving
-    // a card has to stay possible from the keyboard that arrived on it.
+    // The movement then streams and the *end of the gesture* persists. A held
+    // arrow repeats every frame, and writing the arrangement on each repeat put
+    // a validated, `sync_all`ed, atomically replaced session file between every
+    // pair of frames -- on the thread drawing them. Releasing the key is the
+    // release of the button.
     if header.has_focus() {
+        // Where the keyboard is, in world space, for the next frame's view.
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), rect));
         ui.memory_mut(|memory| {
             memory.set_focus_lock_filter(
                 header.id,
@@ -1051,16 +1148,23 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
                 },
             );
         });
-    }
-    if header.has_focus()
-        && let Some(nudged) = nudged_position(ui, node.position)
-    {
-        actions.push(DesktopAction::MoveCanvasNode {
-            path: node.path.clone(),
-            x: crate::bridge::WorldCoord::new(nudged.x),
-            y: crate::bridge::WorldCoord::new(nudged.y),
-            settled: true,
-        });
+        // One move per frame, settled or not, and never both.
+        //
+        // A tap short enough to press and release inside one frame produces
+        // each -- and pushing them separately made the settled one land at
+        // `node.position`, which is still the position *before* this frame's
+        // nudge, because queued actions apply on the next frame. The card moved
+        // and then a durable write put it back.
+        let settled = nudge_settled(ui);
+        let target = nudged_position(ui, node.position).or(settled.then_some(node.position));
+        if let Some(target) = target {
+            actions.push(DesktopAction::MoveCanvasNode {
+                path: node.path.clone(),
+                x: crate::bridge::WorldCoord::new(target.x),
+                y: crate::bridge::WorldCoord::new(target.y),
+                settled,
+            });
+        }
     }
 
     if header.clicked()
@@ -2021,6 +2125,65 @@ mod canvas_layout_rules {
             reached.min.x, view.min.x,
             "the view moved along an axis that already reached the card"
         );
+    }
+
+    /// Fitting shows as much of the arrangement as can be drawn.
+    ///
+    /// The control is named for fitting everything, and it was calling the
+    /// *opening* view -- which deliberately falls back to a small readable
+    /// rectangle around the first card once the arrangement outgrows the zoom
+    /// floor. Pressing "Fit all cards" therefore did not fit them, and on an
+    /// arrangement that large it left blind panning as the way to find the
+    /// rest.
+    #[test]
+    fn fitting_shows_as_much_of_the_arrangement_as_can_be_drawn() {
+        let panel = egui::vec2(1200.0, 800.0);
+        let mut positions = BTreeMap::new();
+        let mut sections = Vec::new();
+        // Deliberately wider than `panel / ZOOM_MIN` (4800 x 3200), so the
+        // opening view takes its readable fallback and a fit must not.
+        for (index, x) in [0.0_f32, 3000.0, 6000.0].iter().enumerate() {
+            let path = format!("far{index}.rs");
+            positions.insert(path.clone(), by_person(egui::pos2(*x, 0.0)));
+            sections.push(section(&path));
+        }
+        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO, None);
+
+        let opening = super::default_scene_rect(&nodes, panel);
+        let fitted = super::fit_scene_rect(&nodes, panel);
+        let drawable = panel / super::ZOOM_MIN;
+
+        assert!(
+            fitted.width() > opening.width(),
+            "fitting showed no more than the opening view ({fitted:?} against              {opening:?}), so the control named for fitting everything did nothing"
+        );
+        assert!(
+            fitted.width() <= drawable.x && fitted.height() <= drawable.y,
+            "fitting asked for {fitted:?}, past the {drawable:?} `Scene` can draw --              egui clamps and shows less than this, so the fit would be a lie"
+        );
+        assert!(
+            fitted.width() >= drawable.x - 1.0,
+            "an arrangement wider than the floor allows should fill what the floor              allows; it used {fitted:?}"
+        );
+
+        // And an arrangement that does fit is shown whole, not merely widened.
+        let mut near = BTreeMap::new();
+        near.insert("a.rs".to_string(), by_person(egui::pos2(0.0, 0.0)));
+        near.insert("b.rs".to_string(), by_person(egui::pos2(500.0, 0.0)));
+        let nodes = nodes_for_sections(
+            &[section("a.rs"), section("b.rs")],
+            &near,
+            egui::Pos2::ZERO,
+            None,
+        );
+        let fitted = super::fit_scene_rect(&nodes, panel);
+        for node in &nodes {
+            assert!(
+                fitted.contains_rect(super::node_rect(node)),
+                "{} is outside the fitted view {fitted:?}, and the whole arrangement                  fits inside what can be drawn",
+                node.path.0
+            );
+        }
     }
 
     #[test]

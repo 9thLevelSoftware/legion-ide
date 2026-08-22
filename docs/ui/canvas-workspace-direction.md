@@ -9,6 +9,12 @@ arrangement surface and nothing else in this document.
 No product-readiness ledger row: `PR-UI-001` is Manual mode's evidence and this
 surface is not part of it, so nothing here is claimed as readiness evidence and
 the canvas is not on any promotion path yet.
+Owner: the repository owner, who directed the pivot to this direction and
+carries the surface. Recorded here because
+`plans/dependency-policy.md` requires an owner in the active plan or evidence
+before an activated surface may be treated as complete, and this document is
+`P6.F5.T1`'s evidence. There is one maintainer of this repository; naming a team
+that does not exist would be the sort of record that reads well and is false.
 Source: Claude Design project `Application UI review and redesign`
 (`b0839227-4e52-4aee-b1a2-8a56a825ff57`), file `Legion Canvas Workspace.dc.html`.
 
