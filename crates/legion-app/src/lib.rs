@@ -6616,15 +6616,8 @@ impl LanguageToolingWorkflow {
             && self.projection.buffer_id == Some(input.buffer_id)
             && self.projection.file_id == Some(input.metadata.identity.file_id);
         if !same_identity {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            self.projection = projection;
+            self.projection =
+                language_projection_for_new_identity(&self.projection, input.workspace_id);
         }
 
         self.projection.workspace_id = Some(input.workspace_id);
@@ -6707,15 +6700,7 @@ impl LanguageToolingWorkflow {
         let mut projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(&self.projection, input.workspace_id)
         };
 
         projection.workspace_id = Some(input.workspace_id);
@@ -6786,15 +6771,7 @@ impl LanguageToolingWorkflow {
         let previous_projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(&self.projection, input.workspace_id)
         };
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let document = SourceDocument::with_versions(
@@ -6867,7 +6844,93 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
-        let quick_fixes = language_quick_fixes_for_problems(&problems);
+        // Merge into the panel rather than replace it.
+        //
+        // This assignment used to hand `problems` straight to the projection,
+        // so the index leg's answer became the entire Problems panel. The leg
+        // runs on hover and completion, it only ever produces rows for the
+        // buffer being read, and it produces none at all when the index has
+        // nothing to say -- so a single hover replaced every LSP diagnostic in
+        // the workspace with an empty list, and nothing republished them until
+        // that file's server spoke again. The panel simply emptied while the
+        // errors were still in the code.
+        //
+        // `ingest_lsp_diagnostics` already states the rule for a shared
+        // multi-file list: replace only the rows this producer owns for this
+        // file, and leave everything else alone. This is the same rule read
+        // from the other side.
+        let problems = {
+            let mut merged = previous_projection.problems.clone();
+            // Every index-owned row goes, not just this file's.
+            //
+            // A row may only outlive the read that made it if something can
+            // later retire it. An LSP row has that: the server that published
+            // it publishes an empty list for the same file when it goes away,
+            // and `ingest_lsp_diagnostics` acts on that. An index row has
+            // nothing of the kind -- it is computed as a by-product of reading
+            // a buffer, no producer ever retracts it, and neither closing a tab
+            // nor deleting or renaming the file through the proposal flow
+            // clears it. Retaining those workspace-wide would leave the panel
+            // listing, and offering to navigate to, paths that no longer exist.
+            //
+            // So index rows live exactly as long as the file being read. The
+            // defect this merge exists to fix is unaffected: a read still
+            // leaves every LSP diagnostic in the workspace alone, which is
+            // what emptied the panel.
+            //
+            // The identity reset below states the same rule, and on every path
+            // that reaches here a file change has already fired it -- so either
+            // one alone is sufficient today. Both are kept because the rule
+            // belongs to whoever carries a row forward, and a future caller
+            // that carries without resetting would otherwise inherit the bug
+            // silently. `index_problems_do_not_survive_a_read_in_another_file`
+            // fails only when both are removed, which is what defence in depth
+            // means and is worth saying rather than implying each is
+            // load-bearing on its own.
+            merged.retain(|existing| existing.source_label.as_deref() != Some("legion-index"));
+            merged.extend(problems);
+            merged
+        };
+        // Deliberately not sorted.
+        //
+        // Sorting the merged list by file and line reads better and is wrong
+        // here: `DesktopRuntime` holds the Problems panel's keyboard selection
+        // as a bare index into this list, so reordering moves the highlight to
+        // a different diagnostic without the user touching anything, and the
+        // next `ProblemActivate` opens a file they did not choose. Appending
+        // keeps every row a reader has already seen at the index it was at.
+        //
+        // The underlying fragility -- a selection identified by position in a
+        // list that other code edits -- is older than this function and is not
+        // fixed here; this only refuses to make it worse.
+
+        // Quick fixes see the active file first, because they are capped.
+        //
+        // `language_quick_fixes_for_problems` takes the first 50 rows. Before
+        // this merge it only ever saw the buffer being read, so the cap was
+        // about one file's diagnostics. Feeding it the workspace-wide list
+        // changed what the cap cuts: the rows for the file under the cursor are
+        // appended last, so a workspace already carrying 50 problems would lose
+        // every fix for the file actually being edited. The list itself keeps
+        // its order -- the panel's selection indexes into it -- and only this
+        // view of it is reordered.
+        let quick_fixes = {
+            let active = input.metadata.identity.file_id;
+            let mut ordered = Vec::with_capacity(problems.len());
+            ordered.extend(
+                problems
+                    .iter()
+                    .filter(|problem| problem.file_id == Some(active))
+                    .cloned(),
+            );
+            ordered.extend(
+                problems
+                    .iter()
+                    .filter(|problem| problem.file_id != Some(active))
+                    .cloned(),
+            );
+            language_quick_fixes_for_problems(&ordered)
+        };
         let locations = response
             .results
             .iter()
@@ -8529,6 +8592,60 @@ fn language_quick_fixes_for_problems(
             }
         })
         .collect()
+}
+
+/// The projection a language read builds on when it names a different buffer.
+///
+/// Everything the previous buffer's reads produced is dropped -- its hover, its
+/// completions, its outline, its call hierarchy -- because none of it describes
+/// the buffer this result is about, and showing one file's outline against
+/// another is worse than showing none.
+///
+/// `problems` is the exception, and deliberately so. The Problems panel is a
+/// workspace-wide list: `ingest_lsp_diagnostics` curates it that way, retaining
+/// every row that belongs to a *different* file and replacing only the rows for
+/// the file whose diagnostics just arrived. Dropping the list here contradicted
+/// that directly -- a single hover emptied the panel of every diagnostic in the
+/// workspace, including the ones the hover had nothing to do with, and nothing
+/// republished them until the server happened to send that file's diagnostics
+/// again. Quick fixes are rebuilt from the rows that survive, because a fix
+/// offered for a problem that is no longer listed is an action with no subject.
+///
+/// "Workspace-wide" is the whole of the exception, and `workspace` is what
+/// bounds it. Opening workspace B keeps this same workflow, so B's first read
+/// arrives here holding A's rows; carrying them over would republish A's
+/// diagnostics under B, and a problem row records no workspace of its own --
+/// so the per-file replacement that normally retires a stale row could never
+/// find them, and clicking one would send the reader at a path outside the
+/// workspace they are in. A different workspace is a different list.
+fn language_projection_for_new_identity(
+    previous: &LanguageToolingProjection,
+    workspace: WorkspaceId,
+) -> LanguageToolingProjection {
+    let mut projection = LanguageToolingProjection::empty();
+    projection.operations = previous.operations.clone();
+    projection.cancellation_count = previous.cancellation_count;
+    projection.stale_result_count = if previous.buffer_id.is_some() {
+        previous.stale_result_count.saturating_add(1)
+    } else {
+        previous.stale_result_count
+    };
+    if previous
+        .workspace_id
+        .is_none_or(|previous| previous == workspace)
+    {
+        // Index-owned rows are dropped here for the same reason the read leg
+        // drops them: nothing retracts them, so a row kept past the buffer it
+        // was computed for is a row that can never leave.
+        projection.problems = previous
+            .problems
+            .iter()
+            .filter(|problem| problem.source_label.as_deref() != Some("legion-index"))
+            .cloned()
+            .collect();
+        projection.quick_fixes = language_quick_fixes_for_problems(&projection.problems);
+    }
+    projection
 }
 
 fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
