@@ -1273,6 +1273,73 @@ fn a_background_delegate_turn_records_its_ending() {
     );
 }
 
+/// The transcript can show where a turn's request went.
+///
+/// The route survived only in the command outcome, which the desktop reads for
+/// its citation count and drops -- so a turn that may have uploaded an excerpt
+/// left nothing a reviewer could read about the destination. The audit record
+/// answers an auditor later; this answers the person reading the reply now.
+#[test]
+fn a_delegate_turn_shows_its_route_in_the_projection() {
+    let root = temp_workspace("delegate_route_projection");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-route-projection".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+
+    let route = outcome
+        .projection
+        .provider_routes
+        .last()
+        .expect("the projection must carry the route the turn used");
+    assert_eq!(
+        route.route_id, outcome.provider_route_request.route_id,
+        "the projected route is not the one the turn was authorized against"
+    );
+    assert!(
+        !route.destination_label.is_empty() && !route.egress_label.is_empty(),
+        "a route a reviewer cannot read tells them nothing: {route:?}"
+    );
+
+    // Metadata only, like everything else on this surface.
+    let rendered = format!("{route:?}");
+    assert!(
+        !rendered.contains("marker") && !rendered.contains("explain"),
+        "the route record carries prompt or buffer text: {rendered}"
+    );
+
+    // And it survives into the next snapshot, not just this outcome.
+    let later = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert!(
+        later
+            .delegated_task_projection
+            .provider_routes
+            .iter()
+            .any(|projected| projected.route_id == route.route_id),
+        "the route vanished after the turn returned, which is the defect: the outcome is          read once and dropped"
+    );
+}
+
 /// A Delegate turn keeps the route it was authorized against.
 ///
 /// The route request was built accurately, used for the broker decision, and

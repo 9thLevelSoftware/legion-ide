@@ -5828,6 +5828,24 @@ fn render_delegate_chat_section(
                 ui.label(theme::muted(format!("+{skip} earlier turns")));
             }
         });
+        // Where the last turn's request went.
+        //
+        // The transcript is what somebody reads to decide whether to trust a
+        // reply, and it said nothing about the destination -- a Delegate turn
+        // could upload a buffer excerpt and leave no reviewer-visible evidence
+        // of where. Assist carries that in its proposal; this is the same
+        // evidence for the path that has no proposal.
+        if let Some(route) = snapshot.delegated_task_projection.provider_routes.last() {
+            ui.add_space(4.0);
+            ui.label(theme::muted(format!(
+                "Route: {} ({}) · {} · {} · {:?}",
+                route.provider_id,
+                route.model_label,
+                route.destination_label,
+                route.egress_label,
+                route.invocation_state
+            )));
+        }
     }
     // The app requires an active buffer to build chat context, so say that
     // instead of offering a Send that would only return an error.

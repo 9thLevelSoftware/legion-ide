@@ -285,6 +285,42 @@ fn predict_is_offered_only_where_a_provider_can_answer_it() {
     }
 }
 
+/// The Delegate transcript says where the last turn's request went.
+///
+/// A Delegate turn can upload a buffer excerpt, and the surface that ran it
+/// showed nothing about the destination -- the route lived in a command outcome
+/// the desktop reads for its citation count and then drops. Assist carries that
+/// evidence in its proposal; this is the same evidence for the path that has no
+/// proposal.
+#[test]
+fn the_delegate_transcript_names_the_route_its_turn_used() {
+    let workspace = fixture("legion_desktop_delegate_route_visible");
+    let mut runtime = runtime_with_open_file(workspace.path());
+    // Pinned to the deterministic route for the same reason the send test is:
+    // otherwise this makes a real provider call on a machine that has one.
+    let _ = runtime.handle_action(DesktopAction::SetPreferredAiProvider {
+        provider_id: "deterministic".to_string(),
+    });
+    let mut app = DesktopEframeApp::new(runtime);
+    switch_mode(&mut app, "Delegate");
+
+    let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let field = clickable_center(&frame, "Ask Delegate").expect("Delegate must offer a chat field");
+    let _ = click_at(&mut app, field);
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Text(
+        "explain this file".to_string(),
+    )]));
+    let typed = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let send = clickable_center(&typed, "Send").expect("Send must become clickable once typed");
+    let after = click_at(&mut app, send);
+
+    let text = rendered_text(&after);
+    assert!(
+        text.iter().any(|line| line.starts_with("Route: ")),
+        "the transcript shows no route for the turn that just ran, so nothing on screen          says where the excerpt went; frame was {text:?}"
+    );
+}
+
 // ─── Row 6: Assist Auto / Ollama ────────────────────────────────────────────
 
 /// A preference for a provider that is not installed must resolve, not hang,

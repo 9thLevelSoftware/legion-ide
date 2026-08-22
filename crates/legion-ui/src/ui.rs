@@ -5370,6 +5370,7 @@ fn empty_delegated_task_projection() -> DelegatedTaskProjection {
         runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
         chat_messages: Vec::new(),
         context_citations: Vec::new(),
+        provider_routes: Vec::new(),
         proposal_reviews: Vec::new(),
         tool_permission_requests: Vec::new(),
         chat_message_count: 0,
