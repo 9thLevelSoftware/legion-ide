@@ -1043,6 +1043,72 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// An authorized run does not report itself blocked.
+///
+/// The context manifest is built before the broker answers, so its provider
+/// permission starts ungranted -- true until the broker grants, and a record of
+/// a permission never given after that. The privacy inspector reads an ungranted
+/// model-provider permission as a denial and turns it into a refusal, so the
+/// approval checklist reported blockers on every Assist proposal that had in
+/// fact been authorized. A reviewer who sees blockers on a run nothing blocked
+/// learns to click past them, which is the opposite of what a checklist is for.
+#[test]
+fn an_authorized_assist_run_records_the_permission_it_was_given() {
+    let root = temp_workspace("assist_granted_permission");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-granted".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+
+    // The inspector is a projection of the manifest, so it is what a reviewer
+    // actually reads -- and an ungranted model-provider permission becomes a
+    // denied record and a refusal there. Asked of the counts, not of the debug
+    // text: `denied_record_count: 0` contains the word "denied".
+    assert_eq!(
+        outcome.privacy_inspector_projection.denied_record_count, 0,
+        "the privacy inspector counts a denial for a run the broker authorized"
+    );
+    assert!(
+        outcome.privacy_inspector_projection.refusal.is_none(),
+        "the privacy inspector carries a refusal for a run nothing refused: {:?}",
+        outcome.privacy_inspector_projection.refusal
+    );
+
+    let provider_permission = outcome
+        .context_manifest_projection
+        .manifest
+        .permissions
+        .iter()
+        .find(|permission| permission.capability.0 == "ai.provider.invoke")
+        .expect("the manifest must carry the provider permission it asked for");
+    assert!(
+        provider_permission.granted,
+        "the broker granted this run and the manifest still records the permission as          never given"
+    );
+    assert!(
+        provider_permission.decision_id.is_some(),
+        "a granted permission must name the decision that granted it"
+    );
+}
+
 /// A refused worker leaves an answered turn, not a question hanging.
 ///
 /// The spawn is attempted after the user message, its citations and the

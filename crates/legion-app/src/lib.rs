@@ -24118,27 +24118,28 @@ impl AppComposition {
             route_privacy,
         ) = product_ai_route_fields(live_backend);
         let sends_the_buffer = provider_class_sends_the_buffer(route_provider_class);
-        let context_manifest_projection = Phase4ContextAssemblyService::assemble_context_manifest(
-            &context,
-            &run_id,
-            &route_id,
-            snapshot.snapshot_id,
-            snapshot.buffer_version,
-            snapshot_hash,
-            snapshot.byte_len as u64,
-            snapshot.line_count.min(u32::MAX as usize) as u32,
-            generated_at,
-            instruction_bundle.manifest_items,
-            sends_the_buffer,
-        );
-        let privacy_inspector_projection =
+        let mut context_manifest_projection =
+            Phase4ContextAssemblyService::assemble_context_manifest(
+                &context,
+                &run_id,
+                &route_id,
+                snapshot.snapshot_id,
+                snapshot.buffer_version,
+                snapshot_hash,
+                snapshot.byte_len as u64,
+                snapshot.line_count.min(u32::MAX as usize) as u32,
+                generated_at,
+                instruction_bundle.manifest_items,
+                sends_the_buffer,
+            );
+        let mut privacy_inspector_projection =
             legion_protocol::privacy_inspector_from_context_manifest_projection(
                 &context_manifest_projection,
                 format!("phase4:privacy:{}", run_id.0),
                 generated_at,
                 1,
             );
-        let permission_budget_projection = phase4_permission_budget_projection(
+        let mut permission_budget_projection = phase4_permission_budget_projection(
             &context_manifest_projection,
             &run_id,
             generated_at,
@@ -24265,6 +24266,44 @@ impl AppComposition {
                 decision,
                 CapabilityResponse::Decision(ref d) if d.granted
             ) || matches!(decision, CapabilityResponse::Granted(_));
+            // The manifest is built before the broker answers, so its provider
+            // permission starts as ungranted with no decision behind it. That
+            // is true right up until the broker grants, and then it is a record
+            // of a permission that was never given -- which
+            // `privacy_inspector_from_context_manifest_projection` reads as a
+            // denial and turns into a refusal, so the approval checklist
+            // reported blockers on every Assist proposal that had in fact been
+            // authorized. A reviewer who sees blockers on a run nothing blocked
+            // learns to click past them.
+            if granted {
+                let decision_id = match &decision {
+                    CapabilityResponse::Decision(decision) => Some(decision.decision_id),
+                    CapabilityResponse::Granted(grant) => Some(grant.decision_id),
+                    CapabilityResponse::Denied(_) => None,
+                };
+                for permission in &mut context_manifest_projection.manifest.permissions {
+                    if permission.capability.0 == "ai.provider.invoke" {
+                        permission.granted = true;
+                        permission.decision_id = decision_id;
+                    }
+                }
+                // Rebuilt from the corrected manifest rather than patched: the
+                // inspector is a projection of the manifest, and two ways to
+                // change it is how they come apart.
+                privacy_inspector_projection =
+                    legion_protocol::privacy_inspector_from_context_manifest_projection(
+                        &context_manifest_projection,
+                        format!("phase4:privacy:{}", run_id.0),
+                        generated_at,
+                        1,
+                    );
+                permission_budget_projection = phase4_permission_budget_projection(
+                    &context_manifest_projection,
+                    &run_id,
+                    generated_at,
+                    sends_the_buffer,
+                );
+            }
             if !granted {
                 let event_sequence = provider_route_request.event_sequence;
                 let refusal = legion_protocol::AssistedAiRefusalMetadata {
