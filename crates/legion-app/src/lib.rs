@@ -52,8 +52,10 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 
 /// Live product-AI completions: which backend answers, and what it returns.
 mod product_ai_completion;
+mod product_ai_lane;
 mod product_ai_policy;
 use product_ai_completion::*;
+use product_ai_lane::*;
 use product_ai_policy::*;
 
 /// Where a product AI chat turn's bytes actually go, and what the audit says.
@@ -1965,253 +1967,6 @@ fn ollama_model_label_offline_safe() -> String {
     #[cfg(not(feature = "ai"))]
     {
         "llama3.2".to_string()
-    }
-}
-
-/// Background job result for non-blocking product AI generation.
-#[derive(Debug, Clone)]
-struct ProductAiBackgroundResult {
-    /// Delegate chat assistant message to finalize; empty when this is Assist.
-    assistant_message_id: String,
-    content_label: String,
-    stream: Option<ProductAiStreamProjection>,
-    /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
-    assist_proposal: Option<AssistedEditProposalSource>,
-    /// Whether a selected live provider was invoked and did not answer.
-    ///
-    /// The proposal says so in its own summary, and the route record has to
-    /// agree: it was built with `Completed` before the worker ran, and
-    /// persisting that while the proposal reports a failure leaves the audit
-    /// and the artifact contradicting each other about the same run. Which one
-    /// a reader believes then depends on which one they happen to open.
-    live_failed: bool,
-    /// When set, a live inline prediction finished on a worker thread.
-    ///
-    /// Ghost text is the smallest of these operations and was the only one that
-    /// ran its provider call inline on the UI thread. The transport allows a
-    /// request 120 seconds, and for all of it eframe could neither repaint nor
-    /// read input -- so the `request_in_flight` state the projection already
-    /// modelled, and the Cancel control that depends on it, could never be seen.
-    inline_prediction: Option<InlinePredictionResult>,
-}
-
-/// Context retained while a live Assist proposal streams on a worker thread.
-///
-/// Authorization and agent Planning→Proposing run on the UI thread; completion
-/// text arrives later so the renderer can poll progressive deltas and remain
-/// responsive. Proposal registration happens on poll after the worker finishes.
-#[derive(Debug, Clone)]
-struct PendingAssistProposalJob {
-    run_id: legion_protocol::AgentRunId,
-    route_id: String,
-    operation_class: legion_protocol::AssistedAiOperationClass,
-    provider_class: legion_protocol::AssistedAiProviderClass,
-    provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
-    route_response: legion_protocol::AssistedAiProviderRouteResponse,
-    context_manifest_projection: legion_protocol::ContextManifestProjection,
-    privacy_inspector_projection: legion_protocol::PrivacyInspectorProjection,
-    permission_budget_projection: legion_protocol::PermissionBudgetProjection,
-    generated_at: TimestampMillis,
-    event_context: EventContext,
-    principal: PrincipalId,
-    file_id: FileId,
-    preconditions: ProposalVersionPreconditions,
-    agent: AgentRuntime,
-}
-
-/// Shared live stream sink updated as SSE deltas arrive (background or progressive).
-#[derive(Debug, Default)]
-struct LiveProductAiStreamSink {
-    projection: Mutex<ProductAiStreamProjection>,
-    in_flight: std::sync::atomic::AtomicBool,
-    /// Completed background chat results waiting to be applied on the app thread.
-    pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
-}
-
-struct ProductAiLaneReservation {
-    sink: Arc<LiveProductAiStreamSink>,
-    operation: &'static str,
-    armed: bool,
-}
-
-impl ProductAiLaneReservation {
-    fn try_acquire(
-        sink: Arc<LiveProductAiStreamSink>,
-        operation: &'static str,
-        provider_hint: &str,
-        model_hint: &str,
-    ) -> Option<Self> {
-        if !sink.try_begin(operation, provider_hint, model_hint) {
-            return None;
-        }
-        Some(Self {
-            sink,
-            operation,
-            armed: true,
-        })
-    }
-
-    fn sink(&self) -> Arc<LiveProductAiStreamSink> {
-        self.sink.clone()
-    }
-
-    /// Give the lane up without finishing it, because somebody else already has.
-    ///
-    /// A cancelled prediction releases the lane from the app thread so the rest
-    /// of the product is not blocked behind a provider call nobody is waiting
-    /// for. The worker still holds this reservation until its request returns,
-    /// and it must not release the lane a second time -- by then it may belong
-    /// to another operation.
-    fn abandon(mut self) {
-        self.armed = false;
-    }
-
-    fn finish(mut self, completion: Option<&ProductChatCompletion>) {
-        self.armed = false;
-        self.sink.finish(completion, self.operation);
-    }
-
-    fn finish_background(
-        mut self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-    ) {
-        self.armed = false;
-        self.sink
-            .finish_background(result, completion, self.operation);
-    }
-}
-
-impl Drop for ProductAiLaneReservation {
-    fn drop(&mut self) {
-        if self.armed {
-            self.sink.finish(None, self.operation);
-        }
-    }
-}
-
-impl LiveProductAiStreamSink {
-    fn try_begin(&self, operation: &str, provider_hint: &str, model_hint: &str) -> bool {
-        let Ok(pending) = self.pending_results.lock() else {
-            return false;
-        };
-        if !pending.is_empty()
-            || self
-                .in_flight
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_err()
-        {
-            return false;
-        }
-        let Ok(mut guard) = self.projection.lock() else {
-            self.in_flight
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            return false;
-        };
-        *guard = ProductAiStreamProjection {
-            provider_id: provider_hint.to_string(),
-            model: model_hint.to_string(),
-            operation: operation.to_string(),
-            chunks: Vec::new(),
-            streamed: false,
-            in_flight: true,
-            text_preview: String::new(),
-        };
-        true
-    }
-
-    fn push_delta(&self, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-        if let Ok(mut guard) = self.projection.lock() {
-            guard.chunks.push(delta.to_string());
-            guard.streamed = guard.chunks.len() > 1 || guard.streamed;
-            guard.in_flight = true;
-            let joined = guard.chunks.join("");
-            guard.text_preview = joined.chars().take(480).collect();
-        }
-    }
-
-    fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn snapshot(&self) -> ProductAiStreamProjection {
-        self.projection
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
-
-    fn is_in_flight(&self) -> bool {
-        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn has_pending_results(&self) -> bool {
-        self.pending_results
-            .lock()
-            .map(|queue| !queue.is_empty())
-            .unwrap_or(true)
-    }
-
-    fn mode_allows_active_operation(&self, mode: AppProductMode) -> bool {
-        if !self.is_in_flight() && !self.has_pending_results() {
-            return true;
-        }
-        let Ok(guard) = self.projection.lock() else {
-            return false;
-        };
-        match guard.operation.as_str() {
-            "delegate.chat" => mode.allows_delegate(),
-            "assist.proposal" | "assist.inline_prediction" => mode.allows_assist(),
-            _ => false,
-        }
-    }
-
-    /// Publish the final stream projection and enqueue its app-thread result
-    /// before making the operation observable as no longer in flight. This
-    /// ordering closes the Manual-transition race between provider completion
-    /// and result handoff.
-    fn finish_background(
-        &self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-        operation: &str,
-    ) {
-        let Ok(mut queue) = self.pending_results.lock() else {
-            return;
-        };
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        queue.push_back(result);
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
-        self.pending_results
-            .lock()
-            .map(|mut queue| queue.drain(..).collect())
-            .unwrap_or_default()
     }
 }
 
@@ -24757,7 +24512,7 @@ impl AppComposition {
                         // is never compared against the org's cap, so a bundle
                         // capping tokens per request had nothing to cap.
                         budget_request_tokens: Some(declared_request_tokens(
-                            ASSIST_PROMPT_MAX_CHARS,
+                            ASSIST_PROMPT_MAX_BYTES,
                             crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                         )),
                         budget_request_cost_cents: live_backend
@@ -24888,13 +24643,16 @@ impl AppComposition {
 
         // Live completion only after the capability/network decision above.
         // Uses the authorized backend only (no silent Ollama→Anthropic fallback).
-        let buffer_excerpt = self
-            .editor
-            .text(context.buffer_id)
-            .unwrap_or("")
-            .chars()
-            .take(4_000)
-            .collect::<String>();
+        // Bounded in bytes by the constant the broker is told about.
+        //
+        // A `4_000` here and an `ASSIST_EXCERPT_MAX_BYTES` in the declaration
+        // are two numbers that happen to agree, and taking characters while
+        // declaring bytes made them disagree for anything but ASCII: four
+        // thousand emoji are four thousand `char`s and sixteen thousand bytes.
+        let buffer_excerpt = bounded_by_bytes(
+            self.editor.text(context.buffer_id).unwrap_or(""),
+            ASSIST_EXCERPT_MAX_BYTES,
+        );
         let preconditions = ProposalVersionPreconditions {
             file_version: Some(context.metadata.file_content_version),
             buffer_version: Some(snapshot.buffer_version),
@@ -27349,7 +27107,8 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
-        let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
+        // The same bound the Delegate declaration counts, in the same unit.
+        let buffer_excerpt = bounded_by_bytes(&input.text, ASSIST_EXCERPT_MAX_BYTES);
         // Resolved before the route request so the capability decision, the
         // audit record and the bytes all describe the same destination.
         // The backend is resolved once and drives three things that have to
@@ -27543,7 +27302,7 @@ impl AppComposition {
                     // caller does not apply is the shape of defect this whole
                     // sequence has been about.
                     budget_request_tokens: Some(declared_request_tokens(
-                        ASSIST_PROMPT_MAX_CHARS,
+                        ASSIST_PROMPT_MAX_BYTES,
                         crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                     )),
                     budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
@@ -27604,7 +27363,7 @@ impl AppComposition {
             // is nothing for it to re-resolve, so the destination it contacts is
             // the one the broker approved above and cannot become another.
             // Bounded by the same constant the declaration counts, like the
-            // Assist worker. The Delegate lane declares `ASSIST_PROMPT_MAX_CHARS`
+            // Assist worker. The Delegate lane declares `ASSIST_PROMPT_MAX_BYTES`
             // and was cloning the path unbounded, so a deeply nested file or a
             // Windows long path sent more than the broker had been told about.
             let file_path = bounded_assist_path(&input.metadata.identity.canonical_path.0);
@@ -28011,8 +27770,11 @@ impl AppComposition {
         };
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
         if self.live_product_ai_stream.snapshot().operation.as_str() == "assist.inline_prediction" {
-            self.live_product_ai_stream
-                .finish(None, "assist.inline_prediction");
+            // Ends this occupancy as well as freeing the lane, so the worker's
+            // own generation check refuses to publish whatever it eventually
+            // returns -- the flag alone cannot, because the worker may have
+            // read it before this line ran.
+            self.live_product_ai_stream.release_lane();
         }
     }
 
@@ -36071,11 +35833,11 @@ mod pkt_worker_tests {
     fn manual_mode_is_refused_while_product_provider_stream_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         app.set_product_mode(AppProductMode::Manual);
 
@@ -36087,11 +35849,74 @@ mod pkt_worker_tests {
         assert_eq!(app.product_mode(), AppProductMode::Manual);
     }
 
+    /// A reservation cannot finish a lane somebody else now holds.
+    ///
+    /// The cancellation flag alone cannot close this: a worker can read "not
+    /// cancelled", be pre-empted, and reach `finish_background` after the app
+    /// thread released the lane and another operation took it. Its stale result
+    /// would then land against the new run and clear an in-flight flag that is
+    /// not its own -- so a request still in progress looks finished, and a
+    /// third is let in behind it.
+    #[test]
+    fn a_stale_reservation_cannot_finish_a_reused_lane() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let stale = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "assist.inline_prediction",
+            "provider:a",
+            "model:a",
+        )
+        .expect("the lane must be free to start");
+
+        // The app thread cancels: the lane is released and this occupancy ends.
+        sink.release_lane();
+        let _current = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "delegate.chat",
+            "provider:b",
+            "model:b",
+        )
+        .expect("the released lane must be available to the next operation");
+        assert!(
+            sink.is_in_flight(),
+            "the new operation must hold the lane for this test to mean anything"
+        );
+
+        // The old worker finally returns.
+        stale.finish_background(
+            ProductAiBackgroundResult {
+                live_failed: false,
+                assistant_message_id: String::new(),
+                content_label: String::new(),
+                stream: None,
+                assist_proposal: None,
+                inline_prediction: None,
+            },
+            None,
+        );
+
+        assert!(
+            sink.is_in_flight(),
+            "a stale reservation cleared the in-flight flag of an operation that is still \
+             running, which makes it look finished and lets another request in behind it"
+        );
+        assert!(
+            sink.take_background_results().is_empty(),
+            "a stale reservation published its result against somebody else's run"
+        );
+    }
+
     #[test]
     fn product_ai_stream_lane_rejects_reentrant_and_pending_result_begin() {
         let sink = LiveProductAiStreamSink::default();
-        assert!(sink.try_begin("assist.proposal", "provider:a", "model:a"));
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("assist.proposal", "provider:a", "model:a")
+                .is_some()
+        );
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.snapshot().operation, "assist.proposal");
 
         sink.finish_background(
@@ -36106,9 +35931,15 @@ mod pkt_worker_tests {
             None,
             "assist.proposal",
         );
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.take_background_results().len(), 1);
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -36124,7 +35955,10 @@ mod pkt_worker_tests {
 
         drop(reservation);
 
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -36146,6 +35980,7 @@ mod pkt_worker_tests {
         assert!(
             app.live_product_ai_stream
                 .try_begin("delegate.chat", "provider:a", "model:a")
+                .is_some()
         );
         app.live_product_ai_stream.push_delta("stream-a");
 
@@ -36185,11 +36020,11 @@ mod pkt_worker_tests {
     fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("delegate.chat", "provider:test", "model:test")
+                .is_some()
+        );
 
         app.set_product_mode(AppProductMode::Assist);
         assert_eq!(app.product_mode(), AppProductMode::Delegate);
@@ -36217,11 +36052,11 @@ mod pkt_worker_tests {
     fn manual_dispatch_does_not_report_mode_changed_while_provider_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         let outcome = app.dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
             mode: DockMode::Manual,
@@ -36236,11 +36071,11 @@ mod pkt_worker_tests {
     fn manual_mode_waits_until_completed_provider_result_is_merged() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("delegate.chat", "provider:test", "model:test")
+                .is_some()
+        );
         app.live_product_ai_stream.finish_background(
             ProductAiBackgroundResult {
                 live_failed: false,

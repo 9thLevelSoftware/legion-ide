@@ -14,10 +14,10 @@
 use super::*;
 
 /// Characters of workspace text an Assist operation may send.
-pub(crate) const ASSIST_EXCERPT_MAX_CHARS: usize = 4_000;
+pub(crate) const ASSIST_EXCERPT_MAX_BYTES: usize = 4_000;
 
 /// Characters of workspace text an inline prediction may send.
-pub(crate) const INLINE_PREDICTION_EXCERPT_MAX_CHARS: usize = 2_000;
+pub(crate) const INLINE_PREDICTION_EXCERPT_MAX_BYTES: usize = 2_000;
 
 /// Completion tokens an inline prediction may return.
 pub(crate) const INLINE_PREDICTION_COMPLETION_MAX_TOKENS: u32 = 128;
@@ -29,7 +29,7 @@ pub(crate) const INLINE_PREDICTION_COMPLETION_MAX_TOKENS: u32 = 128;
 /// the excerpt alone understated the request by all of it, which is the same
 /// defect the Assist declaration had -- a cap set between the declared size and
 /// the real one admits the request it was configured to refuse.
-pub(crate) const INLINE_PREDICTION_FRAMING_MAX_CHARS: usize = 512;
+pub(crate) const INLINE_PREDICTION_FRAMING_MAX_BYTES: usize = 512;
 
 /// The inline total must be every part of its prompt, like the Assist one.
 ///
@@ -37,14 +37,14 @@ pub(crate) const INLINE_PREDICTION_FRAMING_MAX_CHARS: usize = 512;
 /// others -- and because a test asserting it is a constant expression, which is
 /// a lint rather than a guarantee.
 const _: () = assert!(
-    INLINE_PREDICTION_PROMPT_MAX_CHARS
-        == INLINE_PREDICTION_EXCERPT_MAX_CHARS + INLINE_PREDICTION_FRAMING_MAX_CHARS,
+    INLINE_PREDICTION_PROMPT_MAX_BYTES
+        == INLINE_PREDICTION_EXCERPT_MAX_BYTES + INLINE_PREDICTION_FRAMING_MAX_BYTES,
     "the inline declared prompt total must be the sum of every bounded part"
 );
 
 /// Every character an inline prediction prompt can carry.
-pub(crate) const INLINE_PREDICTION_PROMPT_MAX_CHARS: usize =
-    INLINE_PREDICTION_EXCERPT_MAX_CHARS + INLINE_PREDICTION_FRAMING_MAX_CHARS;
+pub(crate) const INLINE_PREDICTION_PROMPT_MAX_BYTES: usize =
+    INLINE_PREDICTION_EXCERPT_MAX_BYTES + INLINE_PREDICTION_FRAMING_MAX_BYTES;
 
 /// Characters of caller-supplied instruction an Assist operation may send.
 ///
@@ -55,7 +55,7 @@ pub(crate) const INLINE_PREDICTION_PROMPT_MAX_CHARS: usize =
 /// between the declared size and the real one permitted exactly the request it
 /// was meant to refuse. A budget declaration is only as honest as the smallest
 /// bound on what it describes.
-pub(crate) const ASSIST_INSTRUCTION_MAX_CHARS: usize = 2_000;
+pub(crate) const ASSIST_INSTRUCTION_MAX_BYTES: usize = 2_000;
 
 /// Characters of file path an Assist prompt may carry.
 ///
@@ -63,23 +63,23 @@ pub(crate) const ASSIST_INSTRUCTION_MAX_CHARS: usize = 2_000;
 /// file's canonical path, which has no length of its own, so a declaration
 /// allowing for a nominal path understated any request against a deeply nested
 /// one. Long enough for any path somebody works in, short enough to be a bound.
-pub(crate) const ASSIST_PATH_MAX_CHARS: usize = 512;
+pub(crate) const ASSIST_PATH_MAX_BYTES: usize = 512;
 
 /// Characters of fixed prompt framing: system preamble and delimiters.
 ///
 /// A generous allowance rather than a measurement of the template, so that
 /// editing the prompt cannot silently shrink what was declared.
-pub(crate) const ASSIST_PROMPT_FRAMING_MAX_CHARS: usize = 1_000;
+pub(crate) const ASSIST_PROMPT_FRAMING_MAX_BYTES: usize = 1_000;
 
 /// Every character an Assist prompt can carry: excerpt, instruction, path, framing.
 ///
 /// One number, so the four bounds and the declaration cannot drift apart -- and
 /// the compile-time assertion below holds them to it, which is what stops a term
 /// being added here and forgotten in the sum.
-pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize = ASSIST_EXCERPT_MAX_CHARS
-    + ASSIST_INSTRUCTION_MAX_CHARS
-    + ASSIST_PATH_MAX_CHARS
-    + ASSIST_PROMPT_FRAMING_MAX_CHARS;
+pub(crate) const ASSIST_PROMPT_MAX_BYTES: usize = ASSIST_EXCERPT_MAX_BYTES
+    + ASSIST_INSTRUCTION_MAX_BYTES
+    + ASSIST_PATH_MAX_BYTES
+    + ASSIST_PROMPT_FRAMING_MAX_BYTES;
 
 /// The declared total must *be* every part, not merely exceed some of them.
 ///
@@ -90,11 +90,11 @@ pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize = ASSIST_EXCERPT_MAX_CHARS
 /// A compile-time check rather than a test: this cannot be true at some times
 /// and false at others, and a test asserting it would only restate arithmetic.
 const _: () = assert!(
-    ASSIST_PROMPT_MAX_CHARS
-        == ASSIST_EXCERPT_MAX_CHARS
-            + ASSIST_INSTRUCTION_MAX_CHARS
-            + ASSIST_PATH_MAX_CHARS
-            + ASSIST_PROMPT_FRAMING_MAX_CHARS,
+    ASSIST_PROMPT_MAX_BYTES
+        == ASSIST_EXCERPT_MAX_BYTES
+            + ASSIST_INSTRUCTION_MAX_BYTES
+            + ASSIST_PATH_MAX_BYTES
+            + ASSIST_PROMPT_FRAMING_MAX_BYTES,
     "the declared prompt total must be the sum of every bounded part"
 );
 
@@ -104,10 +104,10 @@ const _: () = assert!(
 /// from the front would leave every deeply nested file looking like the same
 /// prefix.
 pub(crate) fn bounded_assist_path(path: &str) -> String {
-    if path.len() <= ASSIST_PATH_MAX_CHARS {
+    if path.len() <= ASSIST_PATH_MAX_BYTES {
         return path.to_string();
     }
-    let mut start = path.len() - ASSIST_PATH_MAX_CHARS;
+    let mut start = path.len() - ASSIST_PATH_MAX_BYTES;
     while start < path.len() && !path.is_char_boundary(start) {
         start += 1;
     }
@@ -119,7 +119,7 @@ pub(crate) fn bounded_assist_path(path: &str) -> String {
 /// Declaring a bound and not enforcing it is the same defect as declaring
 /// nothing: the cap is compared against a number the request is free to exceed.
 pub(crate) fn bounded_assist_instruction(instruction: &str) -> String {
-    bounded_by_bytes(instruction, ASSIST_INSTRUCTION_MAX_CHARS)
+    bounded_by_bytes(instruction, ASSIST_INSTRUCTION_MAX_BYTES)
 }
 
 /// Trim to a byte budget without splitting a character.
@@ -412,12 +412,16 @@ impl AppComposition {
         &self,
         metadata: &InlinePredictionRequestMetadata,
     ) -> String {
-        self.editor
-            .text(metadata.buffer_id)
-            .unwrap_or("")
-            .chars()
-            .take(INLINE_PREDICTION_EXCERPT_MAX_CHARS)
-            .collect::<String>()
+        // Bounded in bytes, because that is the unit the declaration is in.
+        //
+        // Taking characters and declaring bytes was the same understatement one
+        // layer along: two thousand emoji are two thousand `char`s and eight
+        // thousand bytes, so the excerpt sailed past a bound the broker had
+        // been told was the whole request.
+        bounded_by_bytes(
+            self.editor.text(metadata.buffer_id).unwrap_or(""),
+            INLINE_PREDICTION_EXCERPT_MAX_BYTES,
+        )
     }
 
     /// Whether policy permits this backend to be invoked for ghost text.
@@ -445,7 +449,7 @@ impl AppComposition {
                     // Declared, or the org bundle's token cap is compared
                     // against nothing and a capped request runs uncapped.
                     budget_request_tokens: Some(declared_request_tokens(
-                        INLINE_PREDICTION_PROMPT_MAX_CHARS,
+                        INLINE_PREDICTION_PROMPT_MAX_BYTES,
                         INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
                     )),
                     budget_request_cost_cents: declared_request_cost_cents(backend),
@@ -628,7 +632,7 @@ mod org_ceiling {
         // the org's cap and does nothing at all with `None`, so an
         // undeclared request runs uncapped however low the cap is set.
         let declared = super::declared_request_tokens(
-            super::ASSIST_EXCERPT_MAX_CHARS,
+            super::ASSIST_EXCERPT_MAX_BYTES,
             crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
         );
         assert!(
@@ -716,10 +720,10 @@ mod org_ceiling {
         // permitted exactly the request it was meant to refuse.
         // And the bound is enforced, not merely declared. A bound nothing
         // applies is a number the request is free to exceed.
-        let long = "x".repeat(super::ASSIST_INSTRUCTION_MAX_CHARS * 3);
+        let long = "x".repeat(super::ASSIST_INSTRUCTION_MAX_BYTES * 3);
         assert_eq!(
             super::bounded_assist_instruction(&long).chars().count(),
-            super::ASSIST_INSTRUCTION_MAX_CHARS,
+            super::ASSIST_INSTRUCTION_MAX_BYTES,
             "an instruction longer than the declared bound was not trimmed"
         );
         assert_eq!(
@@ -734,13 +738,13 @@ mod org_ceiling {
         // several provider tokens; trimming by characters while declaring by
         // bytes would let a prompt of emoji pass the trim and exceed the
         // declaration, which is the same understatement one layer along.
-        let emoji = "\u{1F600}".repeat(super::ASSIST_INSTRUCTION_MAX_CHARS);
+        let emoji = "\u{1F600}".repeat(super::ASSIST_INSTRUCTION_MAX_BYTES);
         let trimmed = super::bounded_assist_instruction(&emoji);
         assert!(
-            trimmed.len() <= super::ASSIST_INSTRUCTION_MAX_CHARS,
+            trimmed.len() <= super::ASSIST_INSTRUCTION_MAX_BYTES,
             "a multi-byte instruction was trimmed to {} bytes against a bound of {}",
             trimmed.len(),
-            super::ASSIST_INSTRUCTION_MAX_CHARS
+            super::ASSIST_INSTRUCTION_MAX_BYTES
         );
         assert!(
             !trimmed.is_empty(),
@@ -753,7 +757,7 @@ mod org_ceiling {
         let bounded = super::bounded_assist_path(&deep);
         assert_eq!(
             bounded.chars().count(),
-            super::ASSIST_PATH_MAX_CHARS,
+            super::ASSIST_PATH_MAX_BYTES,
             "a path longer than the declared bound was not trimmed, so a deeply nested file \
              makes the declaration understate the request"
         );
@@ -772,14 +776,14 @@ mod org_ceiling {
         // still be valid UTF-8 rather than a split scalar.
         let deep_unicode = format!(
             "/{}/main.rs",
-            "\u{00E9}".repeat(super::ASSIST_PATH_MAX_CHARS)
+            "\u{00E9}".repeat(super::ASSIST_PATH_MAX_BYTES)
         );
         let bounded_unicode = super::bounded_assist_path(&deep_unicode);
         assert!(
-            bounded_unicode.len() <= super::ASSIST_PATH_MAX_CHARS,
+            bounded_unicode.len() <= super::ASSIST_PATH_MAX_BYTES,
             "a multi-byte path was trimmed to {} bytes against a bound of {}",
             bounded_unicode.len(),
-            super::ASSIST_PATH_MAX_CHARS
+            super::ASSIST_PATH_MAX_BYTES
         );
         assert!(
             bounded_unicode.ends_with("main.rs"),
@@ -845,6 +849,55 @@ mod org_ceiling {
         assert_eq!(
             failed.replacement, offline.replacement,
             "the fallback content itself is unchanged; only what it claims about itself is"
+        );
+    }
+
+    /// A failed Delegate provider is not reported as an answer.
+    ///
+    /// The fixture reply said an answer was "ready" and then advised enabling
+    /// the very backend that had just been selected and failed. Same defect as
+    /// the Assist path had, in the lane that shows its text to somebody who
+    /// asked a question.
+    #[cfg(feature = "ai")]
+    #[test]
+    fn a_failed_delegate_provider_says_so_in_its_reply() {
+        let (offline, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
+            None,
+            "what does this do?",
+            "fn main() {}",
+            "src/main.rs",
+            0,
+            "route-1",
+            &[],
+            None,
+        );
+        let (failed, stream) = crate::product_ai_completion::resolve_delegate_chat_reply(
+            Some(super::ProductAiLiveBackend::Anthropic),
+            "what does this do?",
+            "fn main() {}",
+            "src/main.rs",
+            0,
+            "route-1",
+            &[],
+            None,
+        );
+
+        assert!(
+            stream.is_none(),
+            "the fixture needs the live call to fail, or this asserts nothing"
+        );
+        assert_ne!(
+            failed, offline,
+            "a failed provider run must not read the same as an ordinary offline one"
+        );
+        assert!(
+            failed.contains("did not answer"),
+            "the reply must say the provider did not answer, got {failed:?}"
+        );
+        assert!(
+            !failed.contains("enable Ollama loopback"),
+            "advising somebody to enable the backend that just failed them is worse than \
+             saying nothing, got {failed:?}"
         );
     }
 

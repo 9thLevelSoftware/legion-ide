@@ -33,7 +33,29 @@ fn anthropic_base_url() -> String {
 /// that is the port the HTTP client will actually connect to. Substituting a
 /// service's conventional port here would name a destination the request never
 /// reaches.
+/// A base URL as parsed, with the detail `NetworkTarget` has nowhere to put.
+///
+/// A local type rather than a field on the protocol DTO: whether a port was
+/// written down is a fact about the *text*, useful only while rewriting it, and
+/// nothing downstream of the route descriptor has any use for it.
+struct ParsedBaseUrl {
+    target: legion_protocol::NetworkTarget,
+    /// Whether the URL named a port, rather than one being supplied for the scheme.
+    port_was_explicit: bool,
+}
+
+/// The network target a base URL addresses.
 fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_protocol::NetworkTarget {
+    parse_base_url(base, fallback_host).target
+}
+
+/// The one URL parser in this module.
+///
+/// Everything that needs a piece of authority context reads it from here.
+/// Asking the text a second question meant a second copy of the same eight
+/// lines -- trim, find the scheme, cut at `/`, `?` or `#`, drop userinfo, split
+/// the port -- which is how a third gets written and how two end up disagreeing.
+fn parse_base_url(base: &str, fallback_host: &str) -> ParsedBaseUrl {
     let trimmed = base.trim();
     // Schemes are case-insensitive per RFC 3986, and a case-sensitive check here
     // was a way past the TLS enforcement rather than a cosmetic gap:
@@ -83,18 +105,19 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
         .rsplit_once('@')
         .map_or(authority, |(_userinfo, host)| host);
     let mut parts = authority.rsplitn(2, ':');
-    let (host, port) = match (parts.next(), parts.next()) {
+    let (host, port, port_was_explicit) = match (parts.next(), parts.next()) {
         // `rsplitn` yields the tail first, so a parsed port means an explicit
         // one; anything else is a bare host, including an IPv6 literal.
         (Some(tail), Some(head)) if tail.parse::<u16>().is_ok() => {
-            (head.to_string(), tail.parse::<u16>().ok())
+            (head.to_string(), tail.parse::<u16>().ok(), true)
         }
         _ => (
             authority.to_string(),
             Some(if scheme == "http" { 80 } else { 443 }),
+            false,
         ),
     };
-    legion_protocol::NetworkTarget {
+    let target = legion_protocol::NetworkTarget {
         scheme: scheme.to_string(),
         host: if host.is_empty() {
             fallback_host.to_string()
@@ -102,6 +125,10 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
             host
         },
         port,
+    };
+    ParsedBaseUrl {
+        target,
+        port_was_explicit,
     }
 }
 
@@ -134,29 +161,9 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// request fails visibly, which is the right outcome for a credential-bearing
 /// call. Loopback keeps `http` -- it never leaves the machine, and demanding TLS
 /// there would break local proxies for nothing.
-/// Whether the URL text itself names a port.
-///
-/// Read from the text rather than from the parsed target, because parsing has
-/// already replaced an omitted port with the scheme's default and the two are
-/// indistinguishable afterwards.
-fn port_is_explicit(base_url: &str) -> bool {
-    let trimmed = base_url.trim();
-    let rest = trimmed
-        .find("://")
-        .map_or(trimmed, |scheme_end| &trimmed[scheme_end + "://".len()..]);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_userinfo, host)| host);
-    // `rsplitn` yields the tail first, and a tail that parses as a port is one
-    // -- which is also how an IPv6 literal avoids being read as host and port.
-    authority
-        .rsplit_once(':')
-        .is_some_and(|(_head, tail)| tail.parse::<u16>().is_ok())
-}
-
 pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
-    let target = network_target_from_base_url(base_url, "api.anthropic.com");
+    let parsed = parse_base_url(base_url, "api.anthropic.com");
+    let target = &parsed.target;
     if target.scheme != "http" || is_loopback_host(&target.host) {
         return base_url.trim().to_string();
     }
@@ -170,10 +177,11 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     // the client somewhere nothing is listening.
     //
     // Asked of the URL text instead, where the difference is still visible.
-    let port = if port_is_explicit(base_url) {
-        target.port
+    // Whether the port was written down comes from the parser that read it.
+    let port = if parsed.port_was_explicit {
+        target.port.unwrap_or(443)
     } else {
-        Some(443)
+        443
     };
     // The path survives the rewrite, and the prefix is matched the same way the
     // scheme is.
@@ -196,10 +204,7 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
             format!("/{path}")
         })
         .unwrap_or_default();
-    match port {
-        Some(port) => format!("https://{}:{}{}", target.host, port, path),
-        None => format!("https://{}{}", target.host, path),
-    }
+    format!("https://{}:{}{}", target.host, port, path)
 }
 
 /// The Anthropic endpoint this build will actually contact.

@@ -372,12 +372,25 @@ Do not invent file paths. Keep the reply under ~800 characters.";
             let stream = product_stream_from_completion(&completion, "delegate.chat");
             (bounded_label(completion.text, 1_200), Some(stream))
         }
+        // No completion. Which of the two reasons matters to whoever reads the
+        // reply, exactly as it does on the Assist path.
+        //
+        // Reporting an answer "ready" from the fixture told somebody their
+        // question had been answered when the provider they had selected never
+        // replied -- and then advised them to enable the very backend that was
+        // already selected and had just failed.
         None => (
-            format!(
-                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
-                route_labels.join(","),
-                backend.map_or("none", live_backend_label)
-            ),
+            match backend {
+                Some(backend) => format!(
+                    "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
+                    live_backend_label(backend),
+                    route_labels.join(",")
+                ),
+                None => format!(
+                    "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
+                    route_labels.join(",")
+                ),
+            },
             None,
         ),
     }
