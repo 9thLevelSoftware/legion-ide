@@ -506,6 +506,13 @@ fn panning_away_from_a_focused_card_is_not_undone() {
     let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
     let focused = focus(&mut app, card);
     let before = clickable_center(&focused, "Card alpha.rs").expect("the card must be on screen");
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    assert!(
+        panel.contains(before),
+        "the focused card must start inside the view, or panning it out proves nothing"
+    );
 
     // Pan far enough that the focused card leaves the view entirely: that is
     // the case the reveal reacts to, and a pan that keeps it on screen proves
