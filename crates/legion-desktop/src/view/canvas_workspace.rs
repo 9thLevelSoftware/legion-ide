@@ -127,17 +127,26 @@ fn disambiguate_names(mut nodes: Vec<CanvasNode>) -> Vec<CanvasNode> {
     for node in &nodes {
         *counts.entry(node.title.as_str()).or_default() += 1;
     }
-    let ambiguous: std::collections::BTreeSet<String> = counts
+    let ambiguous: std::collections::BTreeSet<&str> = counts
         .into_iter()
         .filter(|(_, count)| *count > 1)
-        .map(|(title, _)| title.to_string())
+        .map(|(title, _)| title)
         .collect();
-    for node in &mut nodes {
-        node.accessible_name = if ambiguous.contains(&node.title) {
-            format!("{} ({})", node.title, node.path.0)
-        } else {
-            node.title.clone()
-        };
+    // Names are decided before the borrow ends, then applied. The titles the
+    // set borrows live in `nodes`, so nothing may be mutated while it is held.
+    let names: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            if ambiguous.contains(node.title.as_str()) {
+                format!("{} ({})", node.title, node.path.0)
+            } else {
+                node.title.clone()
+            }
+        })
+        .collect();
+    drop(ambiguous);
+    for (node, name) in nodes.iter_mut().zip(names) {
+        node.accessible_name = name;
     }
     nodes
 }
@@ -156,6 +165,21 @@ fn slot_position_from(origin: egui::Pos2, slot: usize) -> egui::Pos2 {
     )
 }
 
+/// The space a card needs, before its contents are known.
+///
+/// The tallest a card can be, since the slot is chosen before the excerpt is
+/// read. Reserving the maximum means a slot that is accepted can hold whatever
+/// lands in it; reserving less means accepting slots that cannot.
+///
+/// Every term `node_height` adds, including the truncation footer and the
+/// padding. Counting only the header and the lines left a card that had been
+/// truncated needing 306 units in a slot judged on 280 -- so a slot with room
+/// between those two numbers was accepted, and the footer and the last of the
+/// body were persisted off screen.
+fn slot_card_rect(position: egui::Pos2) -> egui::Rect {
+    egui::Rect::from_min_size(position, egui::vec2(NODE_WIDTH, MAX_NODE_HEIGHT))
+}
+
 /// The first grid slot at or after `from` that no *drawn* card is sitting on.
 ///
 /// A slot is taken when a saved position falls inside its cell -- strictly
@@ -170,21 +194,6 @@ fn slot_position_from(origin: egui::Pos2, slot: usize) -> egui::Pos2 {
 /// The search is bounded: each drawn card can block at most four cells, so a
 /// free one always exists within `4 * rendered.len() + 1` of the start, and the
 /// bound is a guard rather than a limit anybody can reach.
-/// The space a card needs, before its contents are known.
-///
-/// The tallest a card can be, since the slot is chosen before the excerpt is
-/// read. Reserving the maximum means a slot that is accepted can hold whatever
-/// lands in it; reserving less means accepting slots that cannot.
-fn slot_card_rect(position: egui::Pos2) -> egui::Rect {
-    egui::Rect::from_min_size(
-        position,
-        egui::vec2(
-            NODE_WIDTH,
-            HEADER_HEIGHT + MAX_NODE_LINES as f32 * LINE_HEIGHT,
-        ),
-    )
-}
-
 fn first_free_slot(
     origin: egui::Pos2,
     visible: Option<egui::Rect>,
@@ -422,6 +431,13 @@ pub(crate) fn nodes_for_sections(
 }
 
 /// Height of a node, given how many lines it draws.
+/// The tallest a card can be: header, every line, the footer, and padding.
+///
+/// Defined next to `node_height` so the two cannot drift. A fit rectangle that
+/// understates this accepts slots a card does not fit in.
+const MAX_NODE_HEIGHT: f32 =
+    HEADER_HEIGHT + MAX_NODE_LINES as f32 * LINE_HEIGHT + LINE_HEIGHT + 12.0;
+
 fn node_height(node: &CanvasNode) -> f32 {
     let body = (node.lines.len() as f32) * LINE_HEIGHT;
     let footer = if node.lines_truncated {
@@ -825,7 +841,13 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         // went to the trouble of transforming bounds and hoisting body text
         // should not then ship half a tree.
         builder.set_role(egui::accesskit::Role::Button);
-        builder.set_label(format!("Card {title}"));
+        // The disambiguated name, like the ports and the body.
+        //
+        // The header was the one place still using the display title, so two
+        // `index.ts` cards published "Card index.ts" twice -- on the control
+        // that *selects* a card, which makes it the worst of the three to leave
+        // ambiguous.
+        builder.set_label(format!("Card {}", node.accessible_name));
         if node.dirty {
             builder.set_description("Unsaved changes");
         }
@@ -1270,6 +1292,34 @@ mod canvas_layout_rules {
             "two automatically placed cards are still on top of each other at {:?} and {:?}",
             nodes[0].position,
             nodes[1].position
+        );
+    }
+
+    #[test]
+    fn the_slot_reservation_fits_the_tallest_card_there_can_be() {
+        // The slot is chosen before the excerpt is read, so the reservation has
+        // to cover the worst case. Counting only the header and the lines left
+        // a truncated card needing 306 units judged on 280 -- and a slot with
+        // room between those two numbers was accepted, putting the footer and
+        // the last of the body off screen for good.
+        let tallest = super::CanvasNode {
+            path: CanonicalPath("tall.rs".to_string()),
+            placed: false,
+            buffer_id: None,
+            title: "tall.rs".to_string(),
+            accessible_name: "tall.rs".to_string(),
+            dirty: false,
+            lines_truncated: true,
+            lines: vec!["x".to_string(); super::MAX_NODE_LINES],
+            position: egui::Pos2::ZERO,
+        };
+
+        assert!(
+            super::slot_card_rect(egui::Pos2::ZERO).height() >= super::node_height(&tallest),
+            "a slot reserves {} units and the tallest card needs {}, so a slot with room \
+             between the two is accepted and the card does not fit it",
+            super::slot_card_rect(egui::Pos2::ZERO).height(),
+            super::node_height(&tallest)
         );
     }
 

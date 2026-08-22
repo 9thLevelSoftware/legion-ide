@@ -200,14 +200,22 @@ fn the_canvas_is_reachable_and_shows_every_open_file() {
 
     let canvas = show_canvas(&mut app);
     let labels = rendered_text(&canvas);
-
-    for name in ["alpha.rs", "beta.rs", "gamma.rs"] {
-        assert!(
-            clickable_center(&canvas, &format!("Card {name}")).is_some(),
-            "every open file must appear as a card on the canvas; {name} is missing. \
-             Frame showed {labels:?}"
-        );
-    }
+    // Non-vacuity first: with one card open there is no ambiguity to resolve
+    // and "Card index.ts" is the correct label, so an absence proves nothing
+    // until two cards exist.
+    let cards: Vec<&String> = labels
+        .iter()
+        .filter(|line| line.starts_with("Card "))
+        .collect();
+    assert!(
+        cards.len() >= 2,
+        "the fixture must open two cards sharing a name, got {cards:?}"
+    );
+    assert!(
+        !cards.iter().any(|line| line.as_str() == "Card index.ts"),
+        "two files share a name and their card headers are announced identically, so a \
+         screen-reader user cannot tell which card activation will select; headers were {cards:?}"
+    );
 }
 
 #[test]
@@ -1051,4 +1059,86 @@ fn a_file_opened_after_the_canvas_is_showing_appears_on_screen() {
              cannot be reached at all"
         );
     }
+}
+
+/// Every clickable node carrying a label, not just the first.
+///
+/// Two files with the same name produce two explorer rows with the same name,
+/// and `clickable_center` answers with whichever comes first -- so clicking it
+/// twice opens one file twice, and a test built on it would compare a card
+/// against itself.
+fn clickable_centers(output: &egui::FullOutput, label: &str) -> Vec<egui::Pos2> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|update| {
+            update
+                .nodes
+                .iter()
+                .filter(|(_id, node)| {
+                    node.label() == Some(label)
+                        && node.supports_action(egui::accesskit::Action::Click)
+                })
+                .filter_map(|(_id, node)| node.bounds())
+                .map(|bounds| {
+                    egui::pos2(
+                        ((bounds.x0 + bounds.x1) * 0.5) as f32,
+                        ((bounds.y0 + bounds.y1) * 0.5) as f32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn cards_sharing_a_file_name_are_distinguishable_on_every_control() {
+    // The card header, which is the control that *selects* a card, was the one
+    // place still using the display title after the first disambiguation pass.
+    let workspace = TempWorkspace::new("legion_desktop_canvas_same_name");
+    workspace.write("src/index.ts", "export const a = 1;\n");
+    workspace.write("tests/index.ts", "export const b = 2;\n");
+
+    let mut app = open_app(workspace.path(), None);
+    for folder in ["src", "tests"] {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        let row = clickable_center(&frame, folder)
+            .unwrap_or_else(|| panic!("the explorer must offer {folder} as a row"));
+        let _ = click_at(&mut app, row);
+    }
+
+    // Both rows now exist and are named the same, so they are taken by position
+    // rather than by name.
+    let expanded = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let rows = clickable_centers(&expanded, "index.ts");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the fixture needs both files listed before either is opened, got {rows:?}"
+    );
+    for row in rows {
+        let _ = click_at(&mut app, row);
+    }
+
+    let canvas = show_canvas(&mut app);
+    let headers: Vec<String> = rendered_text(&canvas)
+        .into_iter()
+        .filter(|line| line.starts_with("Card "))
+        .collect();
+
+    // Non-vacuity first: with one card open there is no ambiguity to resolve
+    // and "Card index.ts" is the right label, so an absence proves nothing
+    // until two cards exist.
+    assert_eq!(
+        headers.len(),
+        2,
+        "the fixture must open two cards sharing a name, got {headers:?}"
+    );
+    assert!(
+        !headers.iter().any(|line| line == "Card index.ts"),
+        "two files share a name and their card headers are announced identically, so a \
+         screen-reader user cannot tell which card activation will select; headers were \
+         {headers:?}"
+    );
 }
