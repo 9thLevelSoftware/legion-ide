@@ -204,7 +204,6 @@ impl LiveProductAiStreamSink {
         Some(generation)
     }
 
-    /// Whether `generation` is still the occupancy holding the lane.
     /// Free the lane from the app thread and end the current occupancy.
     pub(crate) fn release_lane(&self) {
         self.generation
@@ -212,6 +211,7 @@ impl LiveProductAiStreamSink {
         self.finish(None, "");
     }
 
+    /// Whether `generation` is still the occupancy holding the lane.
     pub(crate) fn owns_lane(&self, generation: u64) -> bool {
         self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
     }

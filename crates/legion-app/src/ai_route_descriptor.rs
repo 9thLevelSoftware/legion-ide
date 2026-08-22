@@ -49,6 +49,14 @@ fn network_target_from_base_url(base: &str, fallback_host: &str) -> legion_proto
     parse_base_url(base, fallback_host).target
 }
 
+/// A base URL with its scheme written out, if it was only implied.
+fn normalized_with_scheme(base_url: &str, scheme: &str) -> String {
+    if base_url.contains("://") {
+        return base_url.to_string();
+    }
+    format!("{scheme}://{base_url}")
+}
+
 /// The one URL parser in this module.
 ///
 /// Everything that needs a piece of authority context reads it from here.
@@ -165,7 +173,15 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     let parsed = parse_base_url(base_url, "api.anthropic.com");
     let target = &parsed.target;
     if target.scheme != "http" || is_loopback_host(&target.host) {
-        return base_url.trim().to_string();
+        // Whatever the caller wrote, with the scheme the parser inferred.
+        //
+        // A scheme-less `proxy.internal:8443` is authorized as
+        // `https://proxy.internal:8443` -- the parser defaults to HTTPS -- and
+        // was then handed to the client unchanged, so reqwest received
+        // `proxy.internal:8443/v1/messages` and every request failed against a
+        // destination policy had already approved. Returning the text as
+        // written is only correct while the text names a scheme.
+        return normalized_with_scheme(base_url.trim(), &target.scheme);
     }
     // A port written down is a choice; a port supplied for the scheme is not.
     //
@@ -317,6 +333,35 @@ mod delegate_chat_route_honesty_tests {
                 "{base} must authorize the host the client actually connects to"
             );
         }
+    }
+
+    /// A scheme-less base URL is handed to the client with its scheme.
+    ///
+    /// `proxy.internal:8443` is an explicitly supported form: the parser infers
+    /// HTTPS and the broker authorizes `https://proxy.internal:8443`. Returning
+    /// the text unchanged handed reqwest `proxy.internal:8443/v1/messages`, so
+    /// every request failed against a destination policy had already approved
+    /// -- a failure that looks like the provider being down and is not.
+    #[test]
+    fn a_scheme_less_base_url_is_normalized_for_the_client() {
+        for base in ["proxy.internal:8443", "proxy.internal", "api.anthropic.com"] {
+            let normalized = super::enforce_https_for_remote(base);
+            assert!(
+                normalized.starts_with("https://"),
+                "{base} reached the client without a scheme, as {normalized:?}"
+            );
+            assert!(
+                normalized.contains(base),
+                "{base} lost part of itself in normalization, becoming {normalized:?}"
+            );
+        }
+
+        // A URL that already names its scheme is untouched.
+        assert_eq!(
+            super::enforce_https_for_remote("https://api.anthropic.com"),
+            "https://api.anthropic.com",
+            "an https URL must pass through exactly as written"
+        );
     }
 
     /// A port the operator wrote down survives, including port 80.

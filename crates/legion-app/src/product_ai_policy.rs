@@ -901,6 +901,52 @@ mod org_ceiling {
         );
     }
 
+    /// The capability a reviewer reads describes the provider that ran.
+    ///
+    /// It was hard-coded to the deterministic local one, so a proposal produced
+    /// by Anthropic -- which had uploaded the buffer excerpt -- was presented as
+    /// a free, offline, air-gap-safe local run with metadata-only retention.
+    /// This projection is what somebody consults to decide whether to accept an
+    /// edit, which makes it the worst possible place for an invented answer.
+    #[test]
+    fn the_provider_capability_describes_the_routed_provider() {
+        let remote = super::phase4_provider_capability(
+            legion_protocol::AssistedAiProviderClass::ByokRemote,
+            "anthropic",
+            None,
+        );
+        assert_eq!(remote.provider_id, "anthropic");
+        assert_ne!(
+            remote.cost_budget_label, "local.free",
+            "a metered remote call must not be presented as free"
+        );
+        assert_ne!(
+            remote.privacy_retention_label, "metadata-only",
+            "a call that sends the excerpt itself must not claim metadata-only retention"
+        );
+        assert_eq!(
+            remote.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Unsupported,
+            "a remote provider is not air-gap safe"
+        );
+
+        let local = super::phase4_provider_capability(
+            legion_protocol::AssistedAiProviderClass::LocalLoopback,
+            "ollama",
+            None,
+        );
+        assert_eq!(local.provider_id, "ollama");
+        assert_eq!(
+            local.cost_budget_label, "local.free",
+            "a loopback call really is free and should say so"
+        );
+        assert_eq!(
+            local.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Supported,
+            "a loopback call really is air-gap safe"
+        );
+    }
+
     #[test]
     fn no_bundle_imposes_no_ceiling() {
         // Non-vacuity: the refusals above must be the bundle talking, not

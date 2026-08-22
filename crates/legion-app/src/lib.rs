@@ -12446,29 +12446,80 @@ fn command_descriptor(input: AppCommandDescriptorInput<'_>) -> legion_protocol::
     }
 }
 
+/// The provider capability a proposal is reviewed against.
+///
+/// Built from the backend that was actually resolved, not from the shape of the
+/// deterministic one. Hard-coding `deterministic-local`, `local.free` and
+/// `metadata-only` described an Anthropic run that had uploaded workspace text
+/// as a free, offline, air-gap-safe local run -- and this projection is what a
+/// reviewer reads to decide whether to accept an edit, so it was the one place
+/// the truth mattered most and the one place it was invented.
 fn phase4_provider_capability(
     provider_class: legion_protocol::AssistedAiProviderClass,
+    routed_provider_id: &str,
     refusal: Option<legion_protocol::AssistedAiRefusalMetadata>,
 ) -> legion_protocol::AssistedAiProviderCapability {
+    // Taken from the route request, which names the provider that was
+    // authorized and invoked. Earlier rounds made that field honest; this is
+    // the projection that was still describing something else.
+    let remote = routed_provider_id == "anthropic";
+    let live = routed_provider_id != DETERMINISTIC_LOCAL_PROVIDER_ID;
+    let (provider_id, provider_label) = match routed_provider_id {
+        "ollama" => ("ollama".to_string(), "Ollama (local loopback)".to_string()),
+        "anthropic" => (
+            "anthropic".to_string(),
+            "Anthropic (BYOK remote)".to_string(),
+        ),
+        other => (
+            other.to_string(),
+            "Deterministic local provider".to_string(),
+        ),
+    };
+    let supported = legion_protocol::AssistedAiSupportLabel::Supported;
+    let unsupported = legion_protocol::AssistedAiSupportLabel::Unsupported;
     legion_protocol::AssistedAiProviderCapability {
-        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-        provider_label: "Deterministic local provider".to_string(),
+        provider_id,
+        provider_label,
         provider_class,
         supported_operations: vec![
             legion_protocol::AssistedAiOperationClass::Explain,
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
         ],
-        model_capability_labels: vec!["deterministic".to_string()],
+        model_capability_labels: vec![if live {
+            "live".to_string()
+        } else {
+            "deterministic".to_string()
+        }],
         tool_capability_labels: Vec::new(),
         context_window_label: "small".to_string(),
-        cost_budget_label: "local.free".to_string(),
-        risk_budget_label: "low".to_string(),
-        privacy_retention_label: "metadata-only".to_string(),
-        byok_support: legion_protocol::AssistedAiSupportLabel::Unsupported,
-        local_execution_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        offline_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        air_gap_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        redaction_requirements: vec!["metadata-only".to_string()],
+        // A remote call is not free and a reviewer should not be told it is.
+        cost_budget_label: if remote {
+            "remote.metered".to_string()
+        } else {
+            "local.free".to_string()
+        },
+        risk_budget_label: if remote {
+            "elevated".to_string()
+        } else {
+            "low".to_string()
+        },
+        // Metadata-only is a promise about what leaves the machine. It is true
+        // of the deterministic and loopback routes and false of a remote one,
+        // which sends the excerpt itself.
+        privacy_retention_label: if remote {
+            "provider-retained".to_string()
+        } else {
+            "metadata-only".to_string()
+        },
+        byok_support: if remote { supported } else { unsupported },
+        local_execution_support: if remote { unsupported } else { supported },
+        offline_support: if remote { unsupported } else { supported },
+        air_gap_support: if remote { unsupported } else { supported },
+        redaction_requirements: vec![if remote {
+            "prompt-and-metadata".to_string()
+        } else {
+            "metadata-only".to_string()
+        }],
         consent_requirements: vec!["proposal-review".to_string()],
         availability: if refusal.is_some() {
             legion_protocol::AssistedAiProviderAvailabilityState::Refused
@@ -24942,7 +24993,8 @@ impl AppComposition {
                 generated_at,
                 1,
             );
-        let provider_capability = phase4_provider_capability(provider_class, None);
+        let provider_capability =
+            phase4_provider_capability(provider_class, &provider_route_request.provider_id, None);
         let request_contract = assisted_ai_request_contract_from_metadata(
             output.request_id.clone(),
             &provider_capability,
@@ -25105,8 +25157,11 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        let provider_capability =
-            phase4_provider_capability(provider_class, route_response.refusal.clone());
+        let provider_capability = phase4_provider_capability(
+            provider_class,
+            &provider_route_request.provider_id,
+            route_response.refusal.clone(),
+        );
         let approval_checklist_projection = empty_approval_checklist_projection();
         let checkpoint_rollback_projection = empty_checkpoint_rollback_projection();
         let request_contract = assisted_ai_request_contract_from_metadata(
