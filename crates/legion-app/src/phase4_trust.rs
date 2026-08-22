@@ -410,6 +410,18 @@ pub(crate) fn phase4_permission_budget_projection(
     run_id: &legion_protocol::AgentRunId,
     generated_at: TimestampMillis,
     sends_the_buffer: bool,
+    // Whether the capability broker has already granted this invocation.
+    //
+    // Consent for remote egress is asked and answered *before* the call, by the
+    // broker -- there is no later moment at which a person could give it, since
+    // the excerpt is uploaded before any proposal exists to review. So a
+    // granted run records the requirement as met; an ungranted one records it as
+    // outstanding, and that run does not reach a provider at all.
+    //
+    // Marking a granted remote run `Required` produced a permanent
+    // `RefusedConsentRequired` evaluation that blocked nothing, arrived after
+    // the upload, and taught a reviewer that this refusal is noise.
+    consent_granted: bool,
 ) -> legion_protocol::PermissionBudgetProjection {
     let budget = legion_protocol::PermissionBudgetContract {
         budget_id: format!("phase4:budget:{}", run_id.0),
@@ -434,7 +446,7 @@ pub(crate) fn phase4_permission_budget_projection(
         // Consent is "not required" only because a metadata-only local call
         // asks nothing of anybody. Sending the excerpt to a remote provider
         // does, and the proposal review is where that consent is given.
-        consent_requirement_label: if sends_the_buffer {
+        consent_requirement_label: if sends_the_buffer && !consent_granted {
             legion_protocol::PermissionBudgetConsentRequirementLabel::Required
         } else {
             legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired
@@ -444,10 +456,12 @@ pub(crate) fn phase4_permission_budget_projection(
         } else {
             legion_protocol::ProposalRiskLabel::Low
         },
-        reasons: vec![if sends_the_buffer {
-            "phase4.remote_provider.budget_allowed".to_string()
-        } else {
-            "phase4.local_provider.budget_allowed".to_string()
+        reasons: vec![match (sends_the_buffer, consent_granted) {
+            // Named so the record says *how* consent was obtained rather than
+            // leaving a reader to assume nobody was asked.
+            (true, true) => "phase4.remote_provider.consent_granted_by_capability".to_string(),
+            (true, false) => "phase4.remote_provider.consent_required".to_string(),
+            (false, _) => "phase4.local_provider.budget_allowed".to_string(),
         }],
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
@@ -637,7 +651,8 @@ mod tests {
         );
 
         let remote_budget =
-            phase4_permission_budget_projection(&remote, &run_id, TimestampMillis::now(), true);
+            // Before the broker answers: the requirement is outstanding.
+            phase4_permission_budget_projection(&remote, &run_id, TimestampMillis::now(), true, false);
         assert_eq!(
             remote_budget.budgets[0].consent_requirement_label,
             legion_protocol::PermissionBudgetConsentRequirementLabel::Required,
@@ -652,8 +667,45 @@ mod tests {
             remote_budget.budgets[0].reasons
         );
 
-        let local_budget =
-            phase4_permission_budget_projection(&local, &run_id, TimestampMillis::now(), false);
+        // And once the broker has answered: consent was obtained where it could
+        // be obtained, which is before the excerpt was sent. Recording it as
+        // still required after the upload is a refusal that blocks nothing and
+        // teaches a reviewer to ignore the next one.
+        let granted_budget = phase4_permission_budget_projection(
+            &remote,
+            &run_id,
+            TimestampMillis::now(),
+            true,
+            true,
+        );
+        assert_eq!(
+            granted_budget.budgets[0].consent_requirement_label,
+            legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
+            "a granted remote run still reports consent as outstanding, so its evaluation              refuses forever and after the fact"
+        );
+        assert!(
+            granted_budget.budgets[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("consent_granted_by_capability")),
+            "the record must say how consent was obtained: {:?}",
+            granted_budget.budgets[0].reasons
+        );
+        assert!(
+            granted_budget
+                .evaluations
+                .iter()
+                .all(|evaluation| evaluation.allowed),
+            "a granted remote run must not carry a refused evaluation"
+        );
+
+        let local_budget = phase4_permission_budget_projection(
+            &local,
+            &run_id,
+            TimestampMillis::now(),
+            false,
+            false,
+        );
         assert_eq!(
             local_budget.budgets[0].consent_requirement_label,
             legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,

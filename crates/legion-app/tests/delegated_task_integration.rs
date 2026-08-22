@@ -1148,6 +1148,19 @@ fn a_delegate_turn_keeps_the_route_it_was_authorized_against() {
         "a turn that produced an answer must not report its route as anything else"
     );
 
+    // And a turn whose worker never started reports that, rather than reporting
+    // the broker grant as if it were the ending.
+    app.inject_delegate_chat_spawn_failure_for_test();
+    let refused = app
+        .send_delegate_chat("try again")
+        .expect("a refused worker must not fail the turn");
+    assert_eq!(
+        refused.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Failed,
+        "a turn whose worker never started recorded its route as {:?}, while the          assistant message says no answer was produced",
+        refused.invocation_state
+    );
+
     // And the audit trail holds it, which is what survives the session.
     let manifest = app
         .replay_ai_run(legion_protocol::AgentRunId(format!(

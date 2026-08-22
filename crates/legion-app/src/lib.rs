@@ -24171,6 +24171,8 @@ impl AppComposition {
             &run_id,
             generated_at,
             sends_the_buffer,
+            // Not yet: the broker has not been asked at this point.
+            false,
         );
 
         let mut agent = AgentRuntime::new(run_id.clone());
@@ -24329,6 +24331,7 @@ impl AppComposition {
                     &run_id,
                     generated_at,
                     sends_the_buffer,
+                    true,
                 );
             }
             if !granted {
@@ -24696,6 +24699,8 @@ impl AppComposition {
             &run_id,
             generated_at,
             provider_class_sends_the_buffer(provider_class),
+            // Reaching this point means the broker granted the invocation.
+            true,
         );
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
@@ -27220,6 +27225,15 @@ impl AppComposition {
                 schema_version: 1,
             });
 
+        // What the provider invocation actually did, as opposed to what policy
+        // allowed it to do.
+        //
+        // The broker grant is the beginning of the story and was being recorded
+        // as its end: a live provider that failed, answered with nothing, or
+        // whose worker never started still persisted
+        // `phase4.provider.route.completed` beside an assistant message saying
+        // no answer was produced.
+        let mut invocation_state = legion_protocol::AssistedAiProviderInvocationState::Refused;
         let assistant_content_label = if !route_completed {
             lane_reservation.finish(None);
             format!(
@@ -27292,25 +27306,31 @@ impl AppComposition {
             let spawned = std::thread::Builder::new()
                 .name("legion-delegate-chat".to_string())
                 .spawn(worker);
-            spawned.map_or_else(
-                |error| {
-                    // A failed spawn used to return an error from here, and
-                    // by here the turn is half written: the question, its
-                    // citations and the permission record are already in
-                    // the transcript, and the assistant message that
-                    // answers them is added below. Returning left the
-                    // question standing with no reply and no explanation,
-                    // and asking again appended a second copy of all of it.
+            match spawned {
+                Err(error) => {
+                    // A failed spawn used to return an error from here, and by
+                    // here the turn is half written: the question, its citations
+                    // and the permission record are already in the transcript,
+                    // and the assistant message that answers them is added
+                    // below. Returning left the question standing with no reply
+                    // and no explanation, and asking again appended a second
+                    // copy of all of it.
                     //
-                    // The lane frees itself: the reservation was moved into
-                    // the closure the spawn refused, so dropping it fires
-                    // the release. Without that the next turn would be
-                    // rejected as "already in flight" by a run that never
-                    // started.
+                    // The lane frees itself: the reservation was moved into the
+                    // closure the spawn refused, so dropping it fires the
+                    // release. Without that the next turn would be rejected as
+                    // "already in flight" by a run that never started.
+                    invocation_state = legion_protocol::AssistedAiProviderInvocationState::Failed;
                     format!("Delegate could not start a worker for this turn: {error}")
-                },
-                |_handle| "Streaming response…".to_string(),
-            )
+                }
+                Ok(_handle) => {
+                    // The worker owns the ending from here; the terminal state
+                    // arrives with its result.
+                    invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Streaming;
+                    "Streaming response…".to_string()
+                }
+            }
         } else {
             let sink_delta = lane_reservation.delta_writer();
             let mut on_delta = move |delta: &str| sink_delta.push(delta);
@@ -27325,6 +27345,7 @@ impl AppComposition {
                 Some(&mut on_delta),
             );
             if let Some(stream) = stream {
+                invocation_state = legion_protocol::AssistedAiProviderInvocationState::Completed;
                 lane_reservation.finish(Some(&ProductChatCompletion {
                     provider_id: stream.provider_id.clone(),
                     model: stream.model.clone(),
@@ -27334,6 +27355,18 @@ impl AppComposition {
                 }));
                 self.last_product_ai_stream = Some(stream);
             } else {
+                // No stream is not the same as no answer.
+                //
+                // The deterministic fixture answers without one, and that turn
+                // completed. A *live* backend that returns no stream is the
+                // failure the label already reports ("did not answer; showing
+                // the offline reply instead") and the route record used to
+                // contradict.
+                invocation_state = if live_backend.is_some() {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
                 lane_reservation.finish(None);
             }
             label
@@ -27355,16 +27388,12 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
-        // The route this turn actually took, kept rather than dropped.
-        //
-        // A refused route is recorded as refused, a completed one as completed,
-        // and the audit record names the destination either way -- which is the
+        // The route this turn actually took, kept rather than dropped -- the
         // evidence the Assist path already keeps and this one did not.
-        let invocation_state = if route_completed {
-            legion_protocol::AssistedAiProviderInvocationState::Completed
-        } else {
-            legion_protocol::AssistedAiProviderInvocationState::Refused
-        };
+        //
+        // `Streaming` is the honest state for a background turn at this point:
+        // the worker exists and its result has not arrived. Recording
+        // `Completed` here would be the same contradiction, one path over.
         let delegate_run_id = legion_protocol::AgentRunId(format!(
             "delegate-chat-run:{}",
             event_context.correlation_id.0
@@ -27385,10 +27414,17 @@ impl AppComposition {
             &delegate_run_id,
             &provider_route_request.route_id,
             invocation_state,
-            if route_completed {
-                "phase4.provider.route.completed"
-            } else {
-                "phase4.provider.route.refused"
+            match invocation_state {
+                legion_protocol::AssistedAiProviderInvocationState::Completed => {
+                    "phase4.provider.route.completed"
+                }
+                legion_protocol::AssistedAiProviderInvocationState::Streaming => {
+                    "phase4.provider.route.streaming"
+                }
+                legion_protocol::AssistedAiProviderInvocationState::Failed => {
+                    "phase4.provider.route.failed"
+                }
+                _ => "phase4.provider.route.refused",
             },
             event_context,
             &replay_manifest,
