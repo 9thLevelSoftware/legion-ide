@@ -1205,6 +1205,18 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         let settled = nudge_settled(ui) && (moved.is_some() || unsaved);
         let target = moved.or(settled.then_some(node.position));
         if let Some(target) = target {
+            // A nudge that leaves the viewport asks the view to follow.
+            //
+            // The reveal is otherwise one-shot, on the frame focus arrives --
+            // which is right for a card sitting still and wrong for one being
+            // moved: it walked off the edge while keeping the keyboard, and
+            // every further press moved a card nobody could see.
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new(FOCUS_REQUEST_ID),
+                    egui::Rect::from_min_size(target, rect.size()),
+                )
+            });
             actions.push(DesktopAction::MoveCanvasNode {
                 path: node.path.clone(),
                 x: crate::bridge::WorldCoord::new(target.x),
@@ -1584,7 +1596,17 @@ fn render_ports(
             // a source is waiting. Describing only the persisted edges left the
             // second half of the gesture undocumented on the control that
             // performs it.
+            // A card cannot connect to itself, and the activation rejects it --
+            // so describing the armed source's own input port as "activating
+            // connects X to X" published a control that promises an action it
+            // will not perform, to exactly the reader who cannot see that
+            // nothing happened.
+            let is_armed_source = armed_source.as_deref() == Some(node.path.0.as_str());
             builder.set_description(match armed_title.as_deref() {
+                Some(_) if is_armed_source => {
+                    "This card is the connection source. Choose a different card, or press                      Escape to cancel."
+                        .to_string()
+                }
                 Some(source) => format!(
                     "Activating connects {source} to {}, or removes that connection if it                      already exists. {}",
                     node.accessible_name,

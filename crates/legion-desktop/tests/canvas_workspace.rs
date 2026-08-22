@@ -489,6 +489,55 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// Nudging a card past the edge brings the view with it.
+///
+/// The reveal is one-shot, on the frame focus arrives -- right for a card
+/// sitting still and wrong for one being moved. It walked off the edge while
+/// keeping the keyboard, and every further press moved a card nobody could see.
+#[test]
+fn nudging_a_card_past_the_edge_keeps_it_in_view() {
+    let workspace = workspace_with_files("legion_desktop_canvas_nudge_reveal");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let _ = focus(&mut app, card);
+
+    // Enough coarse nudges to cross the panel, in one direction.
+    //
+    // Movement is measured in the *arrangement*, not on screen: once the view
+    // follows a card being nudged, its screen position stops changing, which is
+    // the behaviour under test rather than a stalled gesture.
+    let world_x = |app: &mut DesktopEframeApp| {
+        app.capture_session_record()
+            .expect("record")
+            .canvas_nodes
+            .iter()
+            .find(|node| node.path.0.ends_with("alpha.rs"))
+            .map(|node| node.x)
+            .expect("alpha.rs must be on the canvas")
+    };
+    let mut moved = world_x(&mut app);
+    for _ in 0..14 {
+        let frame = press_key(&mut app, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+        let panel = app
+            .last_editor_rect_for_test()
+            .expect("the canvas must report the region it drew into");
+        let centre = clickable_center(&frame, "Card alpha.rs").expect("the card must still exist");
+        assert!(
+            panel.contains(centre),
+            "a nudged card left the view at {centre:?}, outside {panel:?}, while still              holding the keyboard -- every press after this moves a card nobody sees"
+        );
+        let now = world_x(&mut app);
+        assert!(
+            now > moved,
+            "the nudge stopped moving the card: {now} after {moved}"
+        );
+        moved = now;
+    }
+}
+
 /// Panning away from a focused card is not undone the next frame.
 ///
 /// The reveal was requested for as long as focus lasted rather than when it
@@ -1929,6 +1978,20 @@ fn arming_a_connection_source_is_announced_in_the_tree() {
         description.contains("Escape"),
         "the armed port must say how to give up on the connection; it said {description:?}"
     );
+    // The armed card's own target says it cannot complete the connection, since
+    // the activation rejects a self-edge: a control that promises an action it
+    // will not perform is worse than one that says it is unavailable, and worst
+    // for the reader who cannot see that nothing happened.
+    let itself = node_description(&armed, "Connect to alpha.rs").unwrap_or_default();
+    assert!(
+        !itself.contains("Activating connects"),
+        "the armed card's own target offers a connection the activation refuses: {itself:?}"
+    );
+    assert!(
+        itself.contains("connection source"),
+        "the armed card's own target must say why it cannot be chosen: {itself:?}"
+    );
+
     let target = node_description(&armed, "Connect to beta.rs").unwrap_or_default();
     assert!(
         target.contains("alpha.rs"),
