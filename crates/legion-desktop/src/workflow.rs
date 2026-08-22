@@ -3930,6 +3930,18 @@ impl DesktopEframeApp {
         self.ctx.clone()
     }
 
+    /// Test-only mutable access to the wrapped runtime.
+    ///
+    /// Exists so a rendered-UI test can put the runtime into a state the UI has
+    /// no control for -- injecting an LSP completion response, for one, which a
+    /// test with no language server cannot otherwise reach. A test that cannot
+    /// reach the state it is written about passes without exercising anything,
+    /// which is worse than not having it.
+    #[doc(hidden)]
+    pub fn runtime_mut_for_test(&mut self) -> &mut DesktopRuntime {
+        &mut self.runtime
+    }
+
     /// Return the real editor allocation recorded by the last full frame.
     #[doc(hidden)]
     pub fn last_editor_rect_for_test(&self) -> Option<egui::Rect> {

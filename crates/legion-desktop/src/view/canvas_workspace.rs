@@ -1017,6 +1017,22 @@ fn render_ports(
 ) {
     let tokens = theme::tokens();
     let ctx = ui.ctx().clone();
+
+    // Escape gives up on a connection somebody started.
+    //
+    // Activating an output port arms a source and the only ways to clear it
+    // were choosing a target or releasing a pointer -- neither of which a
+    // keyboard user does. So a source armed and then thought better of stayed
+    // armed across surface switches, and the next port activated, whenever that
+    // happened, silently toggled an edge nobody was in the middle of drawing.
+    //
+    // Escape rather than a control, because that is what Escape means
+    // everywhere else in this shell, and a half-drawn connection is exactly the
+    // kind of thing it undoes.
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        ctx.data_mut(|data| data.remove::<String>(egui::Id::new(PENDING_EDGE_ID)));
+    }
+
     // Which port, if any, was activated this frame rather than dragged.
     let mut activated_source: Option<String> = None;
     let mut activated_target: Option<CanonicalPath> = None;
@@ -1262,7 +1278,7 @@ mod canvas_layout_rules {
         // The reopen collision, closed at source. A card somebody positioned is
         // closed; a new file is opened. If the new file were handed that place,
         // reopening the first would put two cards in one cell and whichever
-        // rule fired next would have to move one of them -- either the person'''s
+        // rule fired next would have to move one of them -- either the person's
         // card, or a card nobody touched. Neither is acceptable, so the place
         // stays reserved while the file is closed.
         let mut positions = BTreeMap::new();

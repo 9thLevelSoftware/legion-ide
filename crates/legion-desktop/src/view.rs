@@ -1842,17 +1842,18 @@ impl ProjectionView {
         }
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
-        render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
         render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
         // Only over the editor.
         //
-        // The find bar is an overlay on the central region, and its Replace and
-        // Replace All controls dispatch buffer mutations. Switching to the
-        // canvas changed the centre surface and left the overlay drawn, so
-        // opening replace in the editor, toggling Canvas and pressing Replace
-        // edited a file that was not on screen -- past the input gate, because
-        // it is a button rather than a key.
+        // Both are overlays on the central region that dispatch buffer
+        // mutations, and both are reached by controls rather than by keys --
+        // the find bar's Replace and Replace All, and the completion popup's
+        // Enter, Tab and row click. Switching to the canvas changed the centre
+        // surface and left them drawn, so accepting a completion or pressing
+        // Replace edited a file that was not on screen, past a gate that only
+        // ever looked at key events.
         if state.center_surface == CenterSurface::Editor {
+            render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
             render_find_bar(ui.ctx(), snapshot, &mut actions);
         }
         if let Some(origin) = self.utility_restore_focus.take() {

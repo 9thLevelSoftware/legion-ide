@@ -116,12 +116,6 @@ pub(crate) fn action_label_to_desktop_action(
     }
 }
 
-/// Central keyboard dispatch from `default_keymap()`.
-///
-/// Reads the keymap bindings and checks each combo against egui's current
-/// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
-/// hardcoded key checks so the keymap takes precedence for non-context-dependent
-/// actions.
 /// Whether an action's whole effect happens inside the editor view.
 ///
 /// These mutate the active buffer or move a cursor through it, and none of it
@@ -158,6 +152,12 @@ pub(crate) fn action_is_editor_scoped(action: &DesktopAction) -> bool {
     )
 }
 
+/// Central keyboard dispatch from `default_keymap()`.
+///
+/// Reads the keymap bindings and checks each combo against egui's current
+/// input.  Matched actions are pushed to `actions`.  This runs BEFORE existing
+/// hardcoded key checks so the keymap takes precedence for non-context-dependent
+/// actions.
 pub(crate) fn dispatch_keybindings(
     ctx: &egui::Context,
     snapshot: &ShellProjectionSnapshot,

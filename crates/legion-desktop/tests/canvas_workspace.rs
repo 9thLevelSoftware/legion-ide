@@ -1182,3 +1182,134 @@ fn the_find_bar_is_not_drawn_over_the_canvas() {
          a buffer nobody is looking at"
     );
 }
+
+#[test]
+fn escape_gives_up_on_a_half_drawn_connection() {
+    // Activating an output port arms a source, and the only ways to clear it
+    // were choosing a target or releasing a pointer -- neither of which a
+    // keyboard user does. A source armed and then thought better of stayed
+    // armed, and the next port activated, whenever that happened, silently
+    // toggled an edge nobody was in the middle of drawing.
+    let workspace = workspace_with_files("legion_desktop_canvas_escape_edge");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let source = accesskit_id(&canvas, "Connect from alpha.rs")
+        .expect("each card must publish an outgoing connection port");
+    let armed = activate(&mut app, source);
+    assert_eq!(
+        node_description(&armed, "Connect from alpha.rs").as_deref(),
+        Some("No connections"),
+        "the fixture must start with nothing connected, or this proves nothing"
+    );
+
+    // Changed their mind.
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: Some(egui::Key::Escape),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    }]));
+    let cleared = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    // A later target activation must now do nothing, rather than complete a
+    // connection begun some time ago.
+    let target = accesskit_id(&cleared, "Connect to beta.rs")
+        .expect("each card must publish an incoming connection port");
+    let _ = activate(&mut app, target);
+
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+    assert!(
+        record.canvas_edges.is_empty(),
+        "activating a target after Escape completed a connection nobody was drawing; edges \
+         were {:?}",
+        record
+            .canvas_edges
+            .iter()
+            .map(|edge| (&edge.from_path.0, &edge.to_path.0))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_completion_popup_is_not_drawn_over_the_canvas() {
+    // Its Enter, Tab and row-click paths dispatch `CompletionAccept`, which
+    // applies to the active buffer. Like the find bar, they are controls rather
+    // than keys, so the canvas input gate never saw them.
+    //
+    // Completions are injected rather than waited for: the first version of
+    // this test pressed the completion binding with no language server running,
+    // so there was no popup to be drawn anywhere and it passed with the gate
+    // removed.
+    let workspace = workspace_with_files("legion_desktop_canvas_no_completion");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("a buffer must be open to complete into");
+    let items: Vec<serde_json::Value> = ["zzz_completion_one", "zzz_completion_two"]
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            serde_json::json!({
+                "label": label,
+                "kind": 2,
+                "detail": format!("fn {label}() detail"),
+                "sortText": format!("{index:04}"),
+            })
+        })
+        .collect();
+    app.runtime_mut_for_test()
+        .app_mut_for_test()
+        .ingest_lsp_completion_response_for_buffer(
+            buffer_id,
+            &serde_json::json!({ "items": items, "isIncomplete": false }),
+            None,
+        )
+        .expect("inject completions");
+    // The projection is what the popup reads, so it has to be rebuilt after the
+    // injection; the flag alone renders nothing.
+    app.runtime_mut_for_test()
+        .dispatch_ui_action(legion_desktop::bridge::DesktopAction::RefreshOutline);
+    app.runtime_mut_for_test()
+        .set_completion_popup_open_for_test(true);
+    assert!(
+        !app.runtime_snapshot()
+            .language_tooling_projection
+            .completions
+            .is_empty(),
+        "the injected completions must reach the projection the popup reads"
+    );
+
+    // Non-vacuity: the popup has to be on screen in the editor first.
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        rendered_text(&editor)
+            .iter()
+            .any(|line| line.contains("zzz_completion_one")),
+        "the fixture must put a completion popup on screen before the canvas is shown; \
+         frame was {:?}",
+        rendered_text(&editor)
+    );
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+    assert!(
+        !rendered_text(&canvas)
+            .iter()
+            .any(|line| line.contains("zzz_completion_one")),
+        "the completion popup is still on screen over the canvas, where accepting a row \
+         edits a buffer nobody is looking at; frame was {:?}",
+        rendered_text(&canvas)
+    );
+}
