@@ -15106,15 +15106,19 @@ impl AppComposition {
                     // The result that carries this ending is consumed here and
                     // nowhere else, so dropping the failure leaves the route
                     // recorded as `Streaming` for good. Kept for the next poll.
-                    self.phase4_projection_state
-                        .pending_route_audits
-                        .push(PendingRouteAudit {
-                            run_id: route.run_id.clone(),
-                            route_id: route.route_id.clone(),
-                            state,
-                            outcome_label,
-                            event_context: route.event_context,
-                        });
+                    self.queue_route_audit(PendingRouteAudit {
+                        run_id: route.run_id.clone(),
+                        route_id: route.route_id.clone(),
+                        state,
+                        outcome_label,
+                        event_context: route.event_context,
+                    });
+                } else {
+                    // The ending is on disk. A `Streaming` record queued when
+                    // this run started writes to the same audit id, so leaving
+                    // it queued would overwrite the ending on the next poll and
+                    // a finished turn would read as permanently in flight.
+                    self.forget_queued_route_audit(&route.run_id, &route.route_id);
                 }
                 changed = true;
             }
@@ -15214,6 +15218,29 @@ impl AppComposition {
         })
     }
 
+    /// Queue a route record for retry, replacing any older one for the same run.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place: a `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight. There is
+    /// one true answer per run, and it is the most recent.
+    fn queue_route_audit(&mut self, audit: PendingRouteAudit) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != audit.run_id || queued.route_id != audit.route_id);
+        self.phase4_projection_state
+            .pending_route_audits
+            .push(audit);
+    }
+
+    /// Drop any queued record that a written one has superseded.
+    fn forget_queued_route_audit(&mut self, run_id: &legion_protocol::AgentRunId, route_id: &str) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != *run_id || queued.route_id != route_id);
+    }
+
     /// Try again to write the terminal route records that failed.
     ///
     /// One attempt per poll, in order, and a record stays queued until it is
@@ -15250,9 +15277,7 @@ impl AppComposition {
                 )
                 .is_err()
             {
-                self.phase4_projection_state
-                    .pending_route_audits
-                    .push(audit);
+                self.queue_route_audit(audit);
             } else {
                 changed = true;
             }
@@ -27445,15 +27470,13 @@ impl AppComposition {
             )
             .is_err()
         {
-            self.phase4_projection_state
-                .pending_route_audits
-                .push(PendingRouteAudit {
-                    run_id: delegate_run_id.clone(),
-                    route_id: provider_route_request.route_id.clone(),
-                    state: invocation_state,
-                    outcome_label,
-                    event_context,
-                });
+            self.queue_route_audit(PendingRouteAudit {
+                run_id: delegate_run_id.clone(),
+                route_id: provider_route_request.route_id.clone(),
+                state: invocation_state,
+                outcome_label,
+                event_context,
+            });
         }
 
         // The same evidence, kept where the transcript can show it.
@@ -36198,6 +36221,61 @@ mod pkt_worker_tests {
 
         assert!(error.to_string().contains("belongs to workflow"));
         assert!(!flag.is_cancelled());
+    }
+
+    /// A stale queued record cannot overwrite the ending that replaced it.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place. A `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight.
+    #[test]
+    fn a_queued_streaming_record_does_not_outlive_the_ending() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:coalesce".to_string());
+        let route_id = "delegate-chat-route:coalesce".to_string();
+        let event_context = app.next_event_context();
+
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+            outcome_label: "phase4.provider.route.completed",
+            event_context,
+        });
+
+        let queued = &app.phase4_projection_state.pending_route_audits;
+        assert_eq!(
+            queued.len(),
+            1,
+            "two records for one run write to the same audit id, so the older one is a              stale answer waiting to overwrite the newer: {queued:?}"
+        );
+        assert_eq!(
+            queued[0].state,
+            legion_protocol::AssistedAiProviderInvocationState::Completed,
+            "the surviving record must be the ending, not the beginning"
+        );
+
+        // And a record written directly clears anything still queued for it.
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.forget_queued_route_audit(&run_id, &route_id);
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a queued record survived the write that superseded it"
+        );
     }
 
     /// A terminal route record that failed to write is written later.

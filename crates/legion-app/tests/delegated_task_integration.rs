@@ -1087,7 +1087,7 @@ fn an_assist_proposal_can_be_approved_from_the_surface_that_created_it() {
             legion_protocol::ProposalResponse::Approved(_),
         ) => {}
         other => panic!(
-            "the surface offers an Approve whose only outcome is {other:?}, which is the              lifecycle gap the dogfood journal recorded"
+            "the surface offers an Approve whose only outcome is {other:?}, which is the lifecycle gap the dogfood journal recorded"
         ),
     }
 }
@@ -1269,7 +1269,7 @@ fn a_background_delegate_turn_records_its_ending() {
     assert_ne!(
         outcome.invocation_state,
         legion_protocol::AssistedAiProviderInvocationState::Streaming,
-        "a finished turn is still recorded as streaming, so nothing downstream can tell          a completed remote call from one that never came back"
+        "a finished turn is still recorded as streaming, so nothing downstream can tell a completed remote call from one that never came back"
     );
 }
 
@@ -1336,7 +1336,7 @@ fn a_delegate_turn_shows_its_route_in_the_projection() {
             .provider_routes
             .iter()
             .any(|projected| projected.route_id == route.route_id),
-        "the route vanished after the turn returned, which is the defect: the outcome is          read once and dropped"
+        "the route vanished after the turn returned, which is the defect: the outcome is read once and dropped"
     );
 }
 
