@@ -489,6 +489,68 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// Navigating to a control buys one activation, not tenure.
+///
+/// The provenance is recomputed only when focus *changes*, so a control tabbed
+/// to and then activated stayed classified as intentionally focused. If its
+/// action returned to the editor, the next leading space was swallowed again
+/// and could press the same control a second time.
+#[test]
+fn activating_a_focused_control_spends_its_keyboard_claim() {
+    let workspace = workspace_with_files("legion_desktop_canvas_provenance");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let control = accesskit_id(&editor, "Canvas").expect("the rail must publish a Canvas control");
+    let _ = focus(&mut app, control);
+
+    // Space opens the canvas, spending the claim that navigation gave it.
+    let opened = press_key(&mut app, egui::Key::Space, egui::Modifiers::NONE);
+    assert!(
+        clickable_center(&opened, "Card alpha.rs").is_some(),
+        "Space must still press a control the keyboard navigated to"
+    );
+
+    // A modified chord belongs to whoever documented it: Alt+Enter applies a
+    // review hunk from the shell handler, and eating it here stopped that
+    // working whenever a control happened to hold the keyboard. It must not
+    // read as a plain activation either -- the canvas stays open.
+    let _ = focus(&mut app, control);
+    let modified = press_key(&mut app, egui::Key::Enter, egui::Modifiers::ALT);
+    assert!(
+        clickable_center(&modified, "Card alpha.rs").is_some(),
+        "Alt+Enter toggled the surface, so the modified chord was read as a plain activation"
+    );
+
+    // Back to the editor through the same control, then type a leading space.
+    let _ = press_key(&mut app, egui::Key::Space, egui::Modifiers::NONE);
+    let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let before = app.runtime_snapshot().active_buffer_projection.dirty;
+    assert!(!before, "the fixture must return to a clean editor");
+
+    let _ = app.run_headless_full_frame(full_frame_input(vec![
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Text(" ".to_string()),
+    ]));
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        app.runtime_snapshot().active_buffer_projection.dirty,
+        "a leading space was swallowed by a control whose activation was already spent"
+    );
+    assert!(
+        clickable_center(&after, "Card alpha.rs").is_none(),
+        "the swallowed space pressed the control again"
+    );
+}
+
 /// The card whose buffer the app is acting on says so.
 ///
 /// Activating a card switches the active buffer, and Next/Previous Tab changes

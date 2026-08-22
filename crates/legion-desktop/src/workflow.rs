@@ -4250,6 +4250,32 @@ impl DesktopEframeApp {
             pressable_control_focused = false;
         }
 
+        // A modified chord reaches the shell's handlers and must not *also*
+        // press whatever control holds the keyboard.
+        //
+        // egui activates a focused button on Enter whatever the modifiers are,
+        // so Alt+Enter would apply a review hunk and toggle a surface in the
+        // same frame. The cloned input above still carries the chord for the
+        // handler that documented it; this removes it from egui's own input,
+        // the way the palette consumes Escape.
+        //
+        // Outside the provenance gate deliberately: a modified chord is never a
+        // control's activation, however that control came to hold focus.
+        if focused_now.is_some() && !ui.ctx().text_edit_focused() {
+            ui.input_mut(|state| {
+                state.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Enter | egui::Key::Space,
+                            modifiers,
+                            ..
+                        } if modifiers.any()
+                    )
+                });
+            });
+        }
+
         if pressable_control_focused {
             // A real window backend reports a Space press as *both* a key event
             // and a text event, so removing only the key left the space to be
@@ -4257,6 +4283,12 @@ impl DesktopEframeApp {
             // character into the file it then covered. The accompanying text is
             // dropped with it -- one per press, so a space typed for any other
             // reason in the same frame still arrives.
+            // Unmodified only. A modified chord is somebody else's shortcut --
+            // Alt+Enter applies a proposal review hunk from the shell handler,
+            // and eating it here stopped that working whenever a card or rail
+            // control happened to hold the keyboard, while the chord could still
+            // press the control during rendering.
+            let unmodified = |modifiers: &egui::Modifiers| !modifiers.any();
             let space_presses = input
                 .events
                 .iter()
@@ -4266,19 +4298,24 @@ impl DesktopEframeApp {
                         egui::Event::Key {
                             key: egui::Key::Space,
                             pressed: true,
+                            modifiers,
                             ..
-                        }
+                        } if unmodified(modifiers)
                     )
                 })
                 .count();
+            let mut activation_consumed = false;
             input.events.retain(|event| {
-                !matches!(
+                let is_activation = matches!(
                     event,
                     egui::Event::Key {
                         key: egui::Key::Enter | egui::Key::Space,
+                        modifiers,
                         ..
-                    }
-                )
+                    } if unmodified(modifiers)
+                );
+                activation_consumed |= is_activation;
+                !is_activation
             });
             let mut remaining = space_presses;
             input.events.retain(|event| match event {
@@ -4288,6 +4325,16 @@ impl DesktopEframeApp {
                 }
                 _ => true,
             });
+            // Provenance is spent by the press it authorised.
+            //
+            // It is only recomputed when focus *changes*, so a control tabbed
+            // to and then activated stayed "intentionally focused" -- and if its
+            // action returned to the editor, the next leading space was
+            // swallowed again and could press the same control a second time.
+            // Navigating to a control buys one activation, not tenure.
+            if activation_consumed {
+                self.focus_arrived_by_tab = false;
+            }
         }
         let input = input;
         let command = input.modifiers.command;
