@@ -14,6 +14,14 @@
 use super::*;
 
 /// Background job result for non-blocking product AI generation.
+/// What a background Delegate turn needs in order to record how it ended.
+#[derive(Debug, Clone)]
+pub(crate) struct DelegateRouteRecord {
+    pub(crate) run_id: legion_protocol::AgentRunId,
+    pub(crate) route_id: String,
+    pub(crate) event_context: EventContext,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProductAiBackgroundResult {
     /// Delegate chat assistant message to finalize; empty when this is Assist.
@@ -22,6 +30,13 @@ pub(crate) struct ProductAiBackgroundResult {
     pub(crate) stream: Option<ProductAiStreamProjection>,
     /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
     pub(crate) assist_proposal: Option<AssistedEditProposalSource>,
+    /// The Delegate route this result belongs to, when it has one.
+    ///
+    /// A background Delegate turn persists `Streaming` when its worker starts,
+    /// and the terminal state is only knowable here. Without the route travelling
+    /// with the result, every background turn -- successful, empty or failed --
+    /// stayed audited as streaming forever.
+    pub(crate) delegate_route: Option<DelegateRouteRecord>,
     /// Whether a selected live provider was invoked and did not answer.
     ///
     /// The proposal says so in its own summary, and the route record has to

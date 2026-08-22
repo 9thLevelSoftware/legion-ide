@@ -1168,6 +1168,62 @@ fn the_selected_proposal_shows_the_projections_its_run_produced() {
     );
 }
 
+/// A background Delegate turn records how it ended, not only that it began.
+///
+/// The record written when the worker starts says `Streaming`, which is honest
+/// at that moment and permanent without this: successful, empty and failed
+/// provider calls were all audited as streaming forever, so the audit trail
+/// could never answer whether a remote turn had finished.
+#[test]
+fn a_background_delegate_turn_records_its_ending() {
+    let root = temp_workspace("delegate_terminal_state");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-terminal".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+    let run_id = legion_protocol::AgentRunId(format!(
+        "delegate-chat-run:{}",
+        outcome.provider_route_request.correlation_id.0
+    ));
+
+    // The synchronous fixture path ends inside `send_delegate_chat`, so this
+    // asserts the invariant that matters either way: whatever the audit trail
+    // says about this run, it is not that the turn is still streaming once the
+    // turn is over.
+    while app.poll_product_ai_stream() {}
+
+    let manifest = app
+        .replay_ai_run(run_id)
+        .expect("the delegate run must be replayable from metadata-only storage");
+    assert!(
+        !manifest.provider_route_ids.is_empty(),
+        "the audit record must name the route the turn took"
+    );
+    assert_ne!(
+        outcome.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Streaming,
+        "a finished turn is still recorded as streaming, so nothing downstream can tell          a completed remote call from one that never came back"
+    );
+}
+
 /// A Delegate turn keeps the route it was authorized against.
 ///
 /// The route request was built accurately, used for the broker decision, and

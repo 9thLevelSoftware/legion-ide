@@ -410,17 +410,19 @@ pub(crate) fn phase4_permission_budget_projection(
     run_id: &legion_protocol::AgentRunId,
     generated_at: TimestampMillis,
     sends_the_buffer: bool,
-    // Whether the capability broker has already granted this invocation.
+    // Whether a person chose this remote destination, as opposed to policy
+    // having allowed it.
     //
-    // Consent for remote egress is asked and answered *before* the call, by the
-    // broker -- there is no later moment at which a person could give it, since
-    // the excerpt is uploaded before any proposal exists to review. So a
-    // granted run records the requirement as met; an ungranted one records it as
-    // outstanding, and that run does not reach a provider at all.
+    // A capability grant is not consent: `DenyByDefaultBroker` decides from
+    // policy and receives no consent state at all, so treating every grant as
+    // consent would record an answer nobody gave. What a person does give is the
+    // provider selection -- `Auto` never routes remotely, so a remote route
+    // exists only because somebody picked one.
     //
-    // Marking a granted remote run `Required` produced a permanent
-    // `RefusedConsentRequired` evaluation that blocked nothing, arrived after
-    // the upload, and taught a reviewer that this refusal is noise.
+    // The other direction matters too: marking a chosen remote route `Required`
+    // produced a permanent `RefusedConsentRequired` evaluation that blocked
+    // nothing and arrived after the upload, which teaches a reviewer that this
+    // refusal is noise.
     consent_granted: bool,
 ) -> legion_protocol::PermissionBudgetProjection {
     let budget = legion_protocol::PermissionBudgetContract {
@@ -459,7 +461,7 @@ pub(crate) fn phase4_permission_budget_projection(
         reasons: vec![match (sends_the_buffer, consent_granted) {
             // Named so the record says *how* consent was obtained rather than
             // leaving a reader to assume nobody was asked.
-            (true, true) => "phase4.remote_provider.consent_granted_by_capability".to_string(),
+            (true, true) => "phase4.remote_provider.consent_by_explicit_selection".to_string(),
             (true, false) => "phase4.remote_provider.consent_required".to_string(),
             (false, _) => "phase4.local_provider.budget_allowed".to_string(),
         }],
@@ -687,7 +689,7 @@ mod tests {
             granted_budget.budgets[0]
                 .reasons
                 .iter()
-                .any(|reason| reason.contains("consent_granted_by_capability")),
+                .any(|reason| reason.contains("consent_by_explicit_selection")),
             "the record must say how consent was obtained: {:?}",
             granted_budget.budgets[0].reasons
         );

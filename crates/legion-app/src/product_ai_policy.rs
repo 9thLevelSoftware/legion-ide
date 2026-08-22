@@ -378,6 +378,7 @@ impl AppComposition {
                     stream: None,
                     assist_proposal: None,
                     inline_prediction: prediction,
+                    delegate_route: None,
                 },
                 None,
             );

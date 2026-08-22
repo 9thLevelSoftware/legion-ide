@@ -15212,6 +15212,45 @@ impl AppComposition {
             changed = true;
         }
         for result in self.live_product_ai_stream.take_background_results() {
+            // How a background Delegate turn ended, written where it becomes
+            // known.
+            //
+            // The record persisted when the worker started says `Streaming`,
+            // which is honest at that moment and permanent without this: a
+            // successful turn, an empty one and a failed one were all audited as
+            // streaming forever.
+            if let Some(route) = result.delegate_route.clone() {
+                let state = if result.live_failed {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
+                let replay_manifest = legion_protocol::AgentReplayManifest {
+                    run_id: route.run_id.clone(),
+                    transitions: Vec::new(),
+                    context_manifests: Vec::new(),
+                    provider_route_ids: vec![route.route_id.clone()],
+                    proposal_ids: Vec::new(),
+                    correlation_id: route.event_context.correlation_id,
+                    causality_id: route.event_context.causality_id,
+                    event_sequence: self.event_sequence_generator.next(),
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let _ = self.persist_phase4_runtime_records(
+                    &route.run_id,
+                    &route.route_id,
+                    state,
+                    if result.live_failed {
+                        "phase4.provider.route.failed"
+                    } else {
+                        "phase4.provider.route.completed"
+                    },
+                    route.event_context,
+                    &replay_manifest,
+                );
+                changed = true;
+            }
             if let Some(stream) = result.stream {
                 self.last_product_ai_stream = Some(stream);
             }
@@ -24331,7 +24370,13 @@ impl AppComposition {
                     &run_id,
                     generated_at,
                     sends_the_buffer,
-                    true,
+                    // The person picked this destination; the broker only
+                    // allowed it. `Auto` never routes remotely, so a remote
+                    // route exists because somebody selected one.
+                    matches!(
+                        self.preferred_ai_provider,
+                        ProductAiProviderPreference::Anthropic
+                    ),
                 );
             }
             if !granted {
@@ -24583,6 +24628,7 @@ impl AppComposition {
                         stream,
                         assist_proposal: Some(proposal_source),
                         inline_prediction: None,
+                        delegate_route: None,
                     },
                     completion.as_ref(),
                 );
@@ -24697,8 +24743,11 @@ impl AppComposition {
             &run_id,
             generated_at,
             provider_class_sends_the_buffer(provider_class),
-            // Reaching this point means the broker granted the invocation.
-            true,
+            // As above: chosen, not merely permitted.
+            matches!(
+                self.preferred_ai_provider,
+                ProductAiProviderPreference::Anthropic
+            ),
         );
         // Everything derived from the manifest, not just the budget.
         //
@@ -27272,6 +27321,14 @@ impl AppComposition {
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
+            // Copies for the worker: the terminal route record is written when
+            // its result is polled, and by then none of this is in scope.
+            let worker_run_id = legion_protocol::AgentRunId(format!(
+                "delegate-chat-run:{}",
+                event_context.correlation_id.0
+            ));
+            let worker_route_id = provider_route_request.route_id.clone();
+            let worker_event_context = event_context;
             let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push(delta);
@@ -27296,10 +27353,19 @@ impl AppComposition {
                     ProductAiBackgroundResult {
                         assistant_message_id: assistant_id,
                         content_label: label,
-                        live_failed: false,
+                        // A live backend that produced no stream did not answer.
+                        live_failed: stream.is_none(),
                         stream,
                         assist_proposal: None,
                         inline_prediction: None,
+                        // How this turn ended is only knowable here, and the
+                        // route record persisted at spawn says `Streaming`
+                        // until somebody writes the ending.
+                        delegate_route: Some(crate::product_ai_lane::DelegateRouteRecord {
+                            run_id: worker_run_id,
+                            route_id: worker_route_id,
+                            event_context: worker_event_context,
+                        }),
                     },
                     completion.as_ref(),
                 );
@@ -28950,34 +29016,6 @@ impl AppComposition {
             .iter()
             .find(|row| row.proposal_id == selected_proposal_id)?;
         let lifecycle_state = row.lifecycle.state;
-        let context_manifest_projection = legion_protocol::ContextManifestProjection {
-            manifest: legion_protocol::context_manifest_from_proposal(
-                &proposal,
-                format!("proposal:{}:context-details", selected_proposal_id.0),
-                self.active_documents.active_workspace_trust.clone(),
-                row.privacy_label,
-                row.risk_label,
-                generated_at,
-                1,
-            ),
-            selected_item_id: None,
-            generated_at,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let privacy_inspector_projection =
-            legion_protocol::privacy_inspector_from_context_manifest_projection(
-                &context_manifest_projection,
-                format!("proposal:{}:privacy-details", selected_proposal_id.0),
-                generated_at,
-                1,
-            );
-        let permission_budget_projection = Self::selected_proposal_permission_budget_projection(
-            &proposal,
-            &context_manifest_projection,
-            row.risk_label,
-            generated_at,
-        );
         let causality_id = self
             .proposal_coordinator
             .proposal_contexts
@@ -29015,11 +29053,45 @@ impl AppComposition {
                 stored.privacy_inspector_projection,
                 stored.permission_budget_projection,
             ),
-            None => (
-                context_manifest_projection,
-                privacy_inspector_projection,
-                permission_budget_projection,
-            ),
+            // Built only when there is nothing stored to build *instead of*.
+            // Three protocol calls and a budget projection, on every shell
+            // snapshot, for a value the arm above discards.
+            None => {
+                let context_manifest_projection = legion_protocol::ContextManifestProjection {
+                    manifest: legion_protocol::context_manifest_from_proposal(
+                        &proposal,
+                        format!("proposal:{}:context-details", selected_proposal_id.0),
+                        self.active_documents.active_workspace_trust.clone(),
+                        row.privacy_label,
+                        row.risk_label,
+                        generated_at,
+                        1,
+                    ),
+                    selected_item_id: None,
+                    generated_at,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let privacy_inspector_projection =
+                    legion_protocol::privacy_inspector_from_context_manifest_projection(
+                        &context_manifest_projection,
+                        format!("proposal:{}:privacy-details", selected_proposal_id.0),
+                        generated_at,
+                        1,
+                    );
+                let permission_budget_projection =
+                    Self::selected_proposal_permission_budget_projection(
+                        &proposal,
+                        &context_manifest_projection,
+                        row.risk_label,
+                        generated_at,
+                    );
+                (
+                    context_manifest_projection,
+                    privacy_inspector_projection,
+                    permission_budget_projection,
+                )
+            }
         };
         let approval_checklist_projection =
             legion_protocol::approval_checklist_from_trust_projections(
@@ -35918,6 +35990,7 @@ mod pkt_worker_tests {
                 stream: None,
                 assist_proposal: None,
                 inline_prediction: None,
+                delegate_route: None,
             },
             None,
         );
@@ -35954,6 +36027,7 @@ mod pkt_worker_tests {
                 stream: None,
                 assist_proposal: None,
                 inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "assist.proposal",
@@ -36064,6 +36138,7 @@ mod pkt_worker_tests {
                 stream: None,
                 assist_proposal: None,
                 inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
@@ -36111,6 +36186,7 @@ mod pkt_worker_tests {
                 stream: None,
                 assist_proposal: None,
                 inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
