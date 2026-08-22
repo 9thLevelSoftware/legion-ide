@@ -807,6 +807,55 @@ fn holding_an_arrow_key_persists_the_arrangement_once() {
     );
 }
 
+/// Space presses the control without also typing into the file.
+///
+/// A real window backend reports a Space press as both a key event and the text
+/// it produces. Filtering only the key left the space to be typed -- so opening
+/// the canvas with Space put an invisible character into the file the canvas
+/// then covered, which is the hardest kind of edit to notice.
+#[test]
+fn opening_the_canvas_with_space_does_not_type_into_the_open_file() {
+    let workspace = workspace_with_files("legion_desktop_canvas_space_route");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let control = accesskit_id(&editor, "Canvas").expect("the rail must publish a Canvas control");
+    assert!(
+        !app.runtime_snapshot().active_buffer_projection.dirty,
+        "the fixture must start clean, or a typed space cannot be detected"
+    );
+
+    let _ = focus(&mut app, control);
+    let _ = app.run_headless_full_frame(full_frame_input(vec![
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Text(" ".to_string()),
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]));
+    let opened = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        !app.runtime_snapshot().active_buffer_projection.dirty,
+        "Space on the focused Canvas control typed a space into the open file"
+    );
+    assert!(
+        clickable_center(&opened, "Card alpha.rs").is_some(),
+        "Space must still press the control; withholding the character is only half of          what it is for"
+    );
+}
+
 /// The keyboard route into the canvas does not edit the file it replaces.
 ///
 /// Tab to the Canvas rail control and press Enter: the editor keyboard handler

@@ -4169,6 +4169,26 @@ impl DesktopEframeApp {
         let pressable_control_focused =
             ui.memory(|memory| memory.focused().is_some()) && !ui.ctx().text_edit_focused();
         if pressable_control_focused {
+            // A real window backend reports a Space press as *both* a key event
+            // and a text event, so removing only the key left the space to be
+            // typed: opening the canvas with Space inserted an invisible
+            // character into the file it then covered. The accompanying text is
+            // dropped with it -- one per press, so a space typed for any other
+            // reason in the same frame still arrives.
+            let space_presses = input
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                })
+                .count();
             input.events.retain(|event| {
                 !matches!(
                     event,
@@ -4177,6 +4197,14 @@ impl DesktopEframeApp {
                         ..
                     }
                 )
+            });
+            let mut remaining = space_presses;
+            input.events.retain(|event| match event {
+                egui::Event::Text(text) if remaining > 0 && text == " " => {
+                    remaining -= 1;
+                    false
+                }
+                _ => true,
             });
         }
         let input = input;
