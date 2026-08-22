@@ -612,40 +612,53 @@ fn within_zoom_floor(
     }
 }
 
-/// Widen `view` to reach cards placed this frame, without leaving what can be drawn.
+/// Move `view` to reach cards placed this frame, keeping the zoom it has.
 ///
 /// Preferring a visible slot is not always possible -- with the grid full
 /// inside the current view, every free slot is outside it, and the search has
-/// to put the card somewhere. Growing the view is what stops "somewhere"
-/// meaning "nowhere you can see". Only newly placed cards count: expanding to
-/// reach a card somebody deliberately dragged far away would undo their pan
-/// every frame.
+/// to put the card somewhere. Reaching it is what stops "somewhere" meaning
+/// "nowhere you can see". Only newly placed cards count: chasing a card
+/// somebody deliberately dragged far away would undo their pan every frame.
 ///
-/// The widened view then goes through [`within_zoom_floor`], because growing
-/// past what `Scene` can draw does not fail loudly. egui clamps the scale and
-/// shows a smaller window into the rectangle, so the card the expansion existed
-/// to reach ends up outside the view widened for it -- with no minimap and no
-/// fit control to find it with. Roughly forty saved cards and an 800-unit-high
-/// panel is enough to get there.
+/// Moved rather than widened. Growing the rectangle is how `Scene` is asked to
+/// zoom out, so opening one file just past a full grid shrank every card
+/// already on screen -- and past `panel / ZOOM_MIN` the growth stops being
+/// honoured at all: egui clamps the scale and shows a smaller window than the
+/// rectangle it was given, leaving the new card outside the view widened for
+/// it. The view keeps its size and travels the shortest distance that brings
+/// the card inside, so the cards around it stay the size they were.
 fn view_reaching_new_cards(
     view: egui::Rect,
     nodes: &[CanvasNode],
     panel: egui::Vec2,
 ) -> egui::Rect {
-    let mut widened = view;
-    let mut newest: Option<egui::Rect> = None;
-    for node in nodes.iter().filter(|node| !node.placed) {
-        let rect = node_rect(node).expand(40.0);
-        widened = widened.union(rect);
-        newest = Some(rect);
+    let Some(newest) = nodes
+        .iter()
+        .filter(|node| !node.placed)
+        .map(|node| node_rect(node).expand(40.0))
+        .next_back()
+    else {
+        return view;
+    };
+    if view.contains_rect(newest) {
+        return view;
     }
-    match newest {
-        // The size somebody was already working at, moved to where the card
-        // went. Zooming them out to a quarter scale to keep the old view in
-        // frame as well trades a card they can read for two they cannot.
-        Some(newest) => within_zoom_floor(widened, newest, view.size(), panel),
-        None => widened,
+    // A card too big for the view cannot be contained by moving; its top-left
+    // is the part worth showing.
+    if newest.width() > view.width() || newest.height() > view.height() {
+        return within_zoom_floor(
+            egui::Rect::from_min_size(newest.min, view.size()),
+            newest,
+            view.size(),
+            panel,
+        );
     }
+    // The shortest translation that contains it: nothing on the axes that
+    // already reach, and just enough on the ones that do not.
+    let dx = (newest.min.x - view.min.x).min(0.0) + (newest.max.x - view.max.x).max(0.0);
+    let dy = (newest.min.y - view.min.y).min(0.0) + (newest.max.y - view.max.y).max(0.0);
+    let moved = view.translate(egui::vec2(dx, dy));
+    within_zoom_floor(moved, newest, view.size(), panel)
 }
 
 /// The view a canvas opens at when nothing has panned it yet.
@@ -795,6 +808,37 @@ pub(crate) fn render_canvas_workspace(
         });
 
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(SCENE_RECT_ID), rect));
+
+    // The way back to a card that is no longer on screen.
+    //
+    // A canvas keeps the zoom somebody is working at, which means opening files
+    // eventually puts one behind the edge of the view -- and on an infinite
+    // surface a card off screen with nothing pointing at it is a card that is
+    // gone. Panning finds it only if you know which direction to pan. This is
+    // the fit-to-content control whose absence made "empty" and "broken" the
+    // same picture; the arrangement is untouched, only the view moves.
+    //
+    // In its own foreground area rather than put into this `Ui`.
+    //
+    // `Scene` draws into a sublayer of its own that sits above anything placed
+    // in the parent afterwards, so a button added here was published to the
+    // accessibility tree, found by name, painted where it said it was -- and
+    // never received the click, because the scene's own pan sense took every
+    // press over the whole panel first. An overlay has to be an overlay.
+    //
+    // `outer` is what the shell stores as the central panel rect, so the
+    // control is positioned rather than laid out: nothing about the region the
+    // canvas reports may depend on whether this button exists.
+    egui::Area::new(egui::Id::new("legion-canvas-fit"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(outer.min + egui::vec2(12.0, 12.0))
+        .show(&ctx, |ui| {
+            if ui.button("Fit all cards").clicked() {
+                let fitted = default_scene_rect(&nodes, outer.size());
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new(SCENE_RECT_ID), fitted));
+            }
+        });
     outer
 }
 
@@ -845,6 +889,48 @@ fn set_bounds(builder: &mut egui::accesskit::Node, rect: egui::Rect) {
         x1: rect.max.x.into(),
         y1: rect.max.y.into(),
     });
+}
+
+/// How far one arrow-key press moves a focused card.
+///
+/// Small enough to place a card precisely, large enough that crossing the
+/// canvas is not a career. Shift multiplies it by [`NUDGE_COARSE`].
+const NUDGE_STEP: f32 = 24.0;
+
+/// The multiplier Shift applies to [`NUDGE_STEP`].
+const NUDGE_COARSE: f32 = 5.0;
+
+/// Where a focused card is asked to go, if a key asked it to move at all.
+///
+/// Arranging cards was a pointer-only operation: every move came from
+/// `dragged()` or `drag_stopped()`, so a canvas that publishes its cards and
+/// ports as controls and invites a keyboard to reach them had nothing for that
+/// keyboard to do once it arrived. Activation switched tabs and that was all.
+fn nudged_position(ui: &egui::Ui, from: egui::Pos2) -> Option<egui::Pos2> {
+    let (mut delta, coarse) = ui.input(|input| {
+        let mut delta = egui::Vec2::ZERO;
+        if input.key_pressed(egui::Key::ArrowLeft) {
+            delta.x -= 1.0;
+        }
+        if input.key_pressed(egui::Key::ArrowRight) {
+            delta.x += 1.0;
+        }
+        if input.key_pressed(egui::Key::ArrowUp) {
+            delta.y -= 1.0;
+        }
+        if input.key_pressed(egui::Key::ArrowDown) {
+            delta.y += 1.0;
+        }
+        (delta, input.modifiers.shift)
+    });
+    if delta == egui::Vec2::ZERO {
+        return None;
+    }
+    delta *= NUDGE_STEP;
+    if coarse {
+        delta *= NUDGE_COARSE;
+    }
+    Some(from + delta)
 }
 
 /// One card: header you can drag, and the file's text under it.
@@ -938,6 +1024,45 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     if !header.is_pointer_button_down_on() {
         ui.ctx().data_mut(|data| data.remove::<egui::Vec2>(grab_id));
     }
+    // The same move, from a keyboard.
+    //
+    // Each press is a finished gesture rather than a frame of one, so it
+    // persists like a released drag: a keyboard user who nudges a card and
+    // closes the window finds it where they left it, which is the whole point
+    // of the arrangement being saved.
+    // The arrow keys belong to the focused card, not to focus navigation.
+    //
+    // egui reads an unmodified arrow as "move focus in that direction"
+    // (`memory/mod.rs`), so the first nudge moved the card and then handed
+    // focus to whatever lay that way -- the second press arranged something
+    // else, or nothing. A widget declares otherwise by locking the filter,
+    // which is the mechanism egui provides for exactly this and the reason
+    // `TextEdit` can use arrows at all. Tab is deliberately not locked: leaving
+    // a card has to stay possible from the keyboard that arrived on it.
+    if header.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                header.id,
+                egui::EventFilter {
+                    tab: false,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: false,
+                },
+            );
+        });
+    }
+    if header.has_focus()
+        && let Some(nudged) = nudged_position(ui, node.position)
+    {
+        actions.push(DesktopAction::MoveCanvasNode {
+            path: node.path.clone(),
+            x: crate::bridge::WorldCoord::new(nudged.x),
+            y: crate::bridge::WorldCoord::new(nudged.y),
+            settled: true,
+        });
+    }
+
     if header.clicked()
         && let Some(buffer_id) = node.buffer_id
     {
@@ -970,8 +1095,15 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         // that *selects* a card, which makes it the worst of the three to leave
         // ambiguous.
         builder.set_label(format!("Card {}", node.accessible_name));
+        // A capability nobody is told about is a capability nobody uses, and
+        // this one has no visible affordance at all: the card looks the same
+        // focused as unfocused, and arranging it was a pointer gesture until
+        // now.
+        let arrangement = "Arrow keys move this card, Shift for larger steps";
         if node.dirty {
-            builder.set_description("Unsaved changes");
+            builder.set_description(format!("Unsaved changes. {arrangement}"));
+        } else {
+            builder.set_description(arrangement);
         }
         set_bounds(builder, header_bounds);
     });
@@ -1837,6 +1969,57 @@ mod canvas_layout_rules {
             widened.size(),
             view.size(),
             "the view changed zoom to reach a new card; it should have moved"
+        );
+    }
+
+    /// One card just past the edge does not shrink the ones already on screen.
+    ///
+    /// The ordinary case, and the one that reached a person first: a full grid
+    /// and one more file opened. The union of the view and that card is still
+    /// inside what `Scene` can draw, so a floor check alone lets it through --
+    /// and `Scene` fits the larger rectangle by zooming out, so opening a file
+    /// shrinks every card already visible. Nothing about the new card being
+    /// slightly outside justifies rescaling the ones that were not.
+    #[test]
+    fn a_card_just_past_the_edge_moves_the_view_rather_than_zooming_it_out() {
+        let panel = egui::vec2(1200.0, 800.0);
+        let view = egui::Rect::from_min_size(egui::Pos2::ZERO, panel);
+        let mut positions = BTreeMap::new();
+        positions.insert("saved.rs".to_string(), by_person(egui::pos2(20.0, 20.0)));
+        // Just below the bottom edge: the union is 1200x1100 or so, well inside
+        // the 4800x3200 the zoom floor allows.
+        let nodes = nodes_for_sections(
+            &[section("saved.rs"), section("newest.rs")],
+            &positions,
+            egui::pos2(40.0, 900.0),
+            Some(view),
+        );
+        let newest = nodes
+            .iter()
+            .find(|node| node.path.0 == "newest.rs")
+            .expect("the newly opened file must be on the canvas");
+        assert!(
+            !view.contains_rect(super::node_rect(newest)),
+            "this test needs a card outside the view; it is at {:?} inside {view:?}",
+            super::node_rect(newest)
+        );
+
+        let reached = super::view_reaching_new_cards(view, &nodes, panel);
+        assert_eq!(
+            reached.size(),
+            view.size(),
+            "the view was resized to include a card just past its edge, which              makes every card already on screen smaller"
+        );
+        assert!(
+            reached.contains_rect(super::node_rect(newest)),
+            "the card at {:?} is still outside the view {reached:?}",
+            super::node_rect(newest)
+        );
+        // And no further than it had to go: the card was below, so the view
+        // moves down and not sideways.
+        assert_eq!(
+            reached.min.x, view.min.x,
+            "the view moved along an axis that already reached the card"
         );
     }
 

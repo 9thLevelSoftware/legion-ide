@@ -146,6 +146,50 @@ fn activate(app: &mut DesktopEframeApp, target: egui::accesskit::NodeId) -> egui
     app.run_headless_full_frame(full_frame_input(Vec::new()))
 }
 
+/// Give a control keyboard focus the way a screen reader does.
+///
+/// `Action::Focus` is the tree's own way of saying "the keyboard is here now",
+/// and it involves no pointer at all -- which is the whole point: a canvas
+/// reachable only by dragging is one a keyboard cannot arrange.
+fn focus(app: &mut DesktopEframeApp, target: egui::accesskit::NodeId) -> egui::FullOutput {
+    let request = egui::accesskit::ActionRequest {
+        action: egui::accesskit::Action::Focus,
+        target_tree: egui::accesskit::TreeId::ROOT,
+        target_node: target,
+        data: None,
+    };
+    let _ =
+        app.run_headless_full_frame(full_frame_input(vec![egui::Event::AccessKitActionRequest(
+            request,
+        )]));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
+/// Press one key, then settle.
+fn press_key(
+    app: &mut DesktopEframeApp,
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> egui::FullOutput {
+    let _ = app.run_headless_full_frame(full_frame_input(vec![
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        },
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        },
+    ]));
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
 /// A flick: press on one frame, then move and release together on the next.
 ///
 /// This is not a slower drag with the same ending — it is the case egui reports
@@ -277,6 +321,237 @@ fn dragging_a_card_moves_it_and_the_runtime_records_where() {
         "a recorded position must be a real place, got ({}, {})",
         placed.x,
         placed.y
+    );
+}
+
+/// A card can be arranged without a pointer.
+///
+/// Every move came from `dragged()` or `drag_stopped()`, so the canvas
+/// published its cards as controls a keyboard can reach and then had nothing
+/// for that keyboard to do on arrival: activation switched tabs, and
+/// arrangement -- the surface's entire reason to exist -- was pointer-only.
+#[test]
+fn a_focused_card_can_be_moved_with_the_keyboard() {
+    let workspace = workspace_with_files("legion_desktop_canvas_keyboard_move");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let before = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let focused = focus(&mut app, card);
+    assert!(
+        clickable_center(&focused, "Card alpha.rs").is_some(),
+        "focusing a card must not remove it"
+    );
+
+    let moved = press_key(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    let after = clickable_center(&moved, "Card alpha.rs")
+        .expect("the card must still be on the canvas after a keyboard move");
+    assert!(
+        after.x > before.x,
+        "ArrowRight left the card at {after:?} from {before:?}; a canvas whose cards          can be focused and not moved is one a keyboard cannot arrange"
+    );
+    assert_eq!(
+        after.y, before.y,
+        "a horizontal nudge moved the card vertically as well"
+    );
+
+    // A card moving on screen is not an arrangement being kept: a keyboard user
+    // who nudges a card and closes the window has to find it where they left it.
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+    let placed = record
+        .canvas_nodes
+        .iter()
+        .find(|node| node.path.0.ends_with("alpha.rs"))
+        .expect("a keyboard move must be recorded like a released drag");
+    assert!(
+        placed.x.is_finite() && placed.y.is_finite(),
+        "a recorded position must be a real place, got ({}, {})",
+        placed.x,
+        placed.y
+    );
+
+    // And Shift moves further, so crossing the canvas is not a career.
+    let coarse = press_key(&mut app, egui::Key::ArrowRight, egui::Modifiers::SHIFT);
+    let far = clickable_center(&coarse, "Card alpha.rs").expect("the card must still be there");
+    assert!(
+        far.x - after.x > after.x - before.x,
+        "Shift+ArrowRight moved the card no further than a plain press"
+    );
+}
+
+/// Enter on the canvas, with nothing focused, still belongs to the canvas.
+///
+/// The card test above cannot see this on its own: Enter on a focused card
+/// switches to that card's file, which lands on the active buffer after the
+/// diagnostic navigation does and hides it. With nothing focused there is no
+/// second writer, so what `ProblemActivate` did is visible -- it opened the
+/// diagnosed file and moved the cursor there, behind a surface somebody was
+/// arranging.
+#[test]
+fn enter_on_the_canvas_with_nothing_focused_does_not_navigate_to_a_diagnostic() {
+    let workspace = workspace_with_files("legion_desktop_canvas_enter_unfocused");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let gamma = workspace.path().join("gamma.rs");
+    let uri = format!(
+        "file:///{}",
+        gamma
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let app_ref = app.runtime_mut_for_test().app_mut_for_test();
+    app_ref
+        .open_file(gamma.to_string_lossy())
+        .expect("gamma.rs must open");
+    let diagnosed = app_ref
+        .active_buffer_id()
+        .expect("gamma.rs must have a buffer");
+    app_ref
+        .ingest_lsp_publish_diagnostics_for_buffer(
+            diagnosed,
+            &serde_json::json!({
+                "uri": uri,
+                "diagnostics": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1}
+                    },
+                    "severity": 1,
+                    "message": "something is wrong in gamma.rs"
+                }]
+            }),
+            false,
+            None,
+        )
+        .expect("diagnostics must be ingested");
+
+    // Alpha last, so the diagnosed file is not already the active one -- a
+    // navigation that lands where the cursor already is proves nothing.
+    let alpha = workspace.path().join("alpha.rs");
+    app.runtime_mut_for_test()
+        .app_mut_for_test()
+        .open_file(alpha.to_string_lossy())
+        .expect("alpha.rs must open");
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing"
+    );
+    assert!(
+        !app.runtime_snapshot()
+            .language_tooling_projection
+            .problems
+            .is_empty(),
+        "the fixture must carry a problem, or Enter has nothing to collide with"
+    );
+    let before = app
+        .capture_session_record()
+        .expect("record")
+        .active_buffer
+        .expect("a file is open");
+
+    let _ = press_key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+
+    let after = app
+        .capture_session_record()
+        .expect("record")
+        .active_buffer
+        .expect("a file is still open");
+    assert_eq!(
+        before, after,
+        "Enter on the canvas opened the diagnosed file; nothing on this surface          asked for that, and the file somebody was working in is now behind it"
+    );
+}
+
+/// Enter on the canvas belongs to the canvas.
+///
+/// `!editor_input_enabled` was standing in for "the Problems list has the
+/// keyboard", and the canvas turns editor input off by design -- so Enter on a
+/// focused card also activated whichever diagnostic happened to be selected,
+/// opening its file and moving the cursor behind the surface being arranged.
+/// Enter on a card means that card: it switches to the file the card is for,
+/// and to nothing else.
+#[test]
+fn pressing_enter_on_the_canvas_activates_the_card_and_not_a_diagnostic() {
+    let workspace = workspace_with_files("legion_desktop_canvas_enter_problem");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    // Diagnostics, or the binding under test never fires and the assertions
+    // below hold for a canvas that has nothing to collide with.
+    let gamma = workspace.path().join("gamma.rs");
+    let uri = format!(
+        "file:///{}",
+        gamma
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
+    let app_ref = app.runtime_mut_for_test().app_mut_for_test();
+    app_ref
+        .open_file(gamma.to_string_lossy())
+        .expect("gamma.rs must open");
+    let diagnosed = app_ref
+        .active_buffer_id()
+        .expect("gamma.rs must have a buffer");
+    app_ref
+        .ingest_lsp_publish_diagnostics_for_buffer(
+            diagnosed,
+            &serde_json::json!({
+                "uri": uri,
+                "diagnostics": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 1}
+                    },
+                    "severity": 1,
+                    "message": "something is wrong in gamma.rs"
+                }]
+            }),
+            false,
+            None,
+        )
+        .expect("diagnostics must be ingested");
+
+    let canvas = show_canvas(&mut app);
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let _ = focus(&mut app, card);
+    assert!(
+        !app.runtime_snapshot()
+            .language_tooling_projection
+            .problems
+            .is_empty(),
+        "the fixture must carry a problem, or Enter has nothing to collide with and          this test passes whatever the gate does"
+    );
+    let after_frame = press_key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+    let record = app
+        .capture_session_record()
+        .expect("the runtime must be able to capture a session record");
+
+    let active = record
+        .active_buffer
+        .expect("a file is open, so something must be active");
+    let path = record
+        .open_tabs
+        .iter()
+        .find(|tab| tab.buffer_id == Some(active))
+        .and_then(|tab| tab.path.as_ref())
+        .map(|path| path.0.clone())
+        .expect("the active buffer must belong to an open tab with a path");
+    assert!(
+        path.ends_with("alpha.rs"),
+        "Enter on the card for alpha.rs made {path} the active file; the canvas was          arranging one thing and something else navigated"
+    );
+    assert!(
+        clickable_center(&after_frame, "Card alpha.rs").is_some(),
+        "the canvas must still be on screen after Enter"
     );
 }
 
@@ -1048,14 +1323,37 @@ fn a_file_opened_after_the_canvas_is_showing_appears_on_screen() {
     let panel = app
         .last_editor_rect_for_test()
         .expect("the canvas must report the region it drew into");
+    let last = names.last().expect("the fixture opens files");
+    let newest = clickable_center(&settled, &format!("Card {last}"))
+        .unwrap_or_else(|| panic!("{last} is open and has no card at all"));
+    assert!(
+        panel.contains(newest),
+        "{last} was opened while the canvas was showing and its card sits at {newest:?}, \
+         outside the canvas region {panel:?}; the file somebody just opened is the one \
+         they are looking for"
+    );
+
+    // The rest are placed and reachable rather than all on screen at once.
+    //
+    // They cannot all be on screen at once: eight cards of this size do not fit
+    // a panel this size at any zoom somebody can read, and the view used to grow
+    // to hold them -- which shrank every card already there each time a file was
+    // opened. What has to be true is that no card is lost, so the fit control,
+    // which is the answer to "where did it go", brings every one of them back.
+    let fit = clickable_center(&settled, "Fit all cards")
+        .expect("a canvas that can put a card off screen must offer a way back to it");
+    let after_fit = click_at(&mut app, fit);
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
     for name in &names {
-        let centre = clickable_center(&settled, &format!("Card {name}"))
+        let centre = clickable_center(&after_fit, &format!("Card {name}"))
             .unwrap_or_else(|| panic!("{name} is open and has no card at all"));
         assert!(
             panel.contains(centre),
-            "{name} was opened while the canvas was showing and its card sits at {centre:?}, \
-             outside the canvas region {panel:?}; a card that is placed, saved and off screen \
-             cannot be reached at all"
+            "after fitting the view to the arrangement, {name} is still at {centre:?}, \
+             outside {panel:?} -- the control that answers \"where did my card go\" \
+             did not answer it"
         );
     }
 }

@@ -2209,6 +2209,16 @@ impl DesktopRuntime {
         }
     }
 
+    /// Whether the editor is the centre surface, whatever else is going on.
+    ///
+    /// Deliberately narrower than [`Self::editor_input_enabled`], which also
+    /// answers "and is nothing else swallowing keys". Bindings that belong to
+    /// the editor shell rather than to the buffer need this question, and
+    /// asking the other one gave the canvas the Problems list's keys.
+    pub(crate) fn center_surface_is_editor(&self) -> bool {
+        self.center_surface == crate::view::CenterSurface::Editor
+    }
+
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
         // The centre has to be the editor for editor keys to mean anything.
         //
@@ -4267,7 +4277,23 @@ impl DesktopEframeApp {
             {
                 let view_state = self.runtime.projection_view_state();
                 let problems_non_empty = !snapshot.language_tooling_projection.problems.is_empty();
-                if problems_non_empty && !view_state.completion_popup_open {
+                // Not while another centre surface owns the keyboard.
+                //
+                // `!editor_input_enabled` was standing in for "the Problems
+                // list has the keyboard", and it is not the same question. The
+                // canvas turns editor input off by design, so Enter on a
+                // focused card also activated whichever diagnostic happened to
+                // be selected -- changing the open file and the cursor behind a
+                // surface the person was arranging. Arrow keys had the same
+                // problem from the other direction: they moved the diagnostic
+                // selection while somebody was moving a card with them.
+                //
+                // There is no panel-focus state in this shell to ask instead,
+                // so this asks the narrower question it can answer honestly:
+                // these are the editor shell's bindings, and they belong to the
+                // editor shell.
+                let editor_shell = self.runtime.center_surface_is_editor();
+                if problems_non_empty && !view_state.completion_popup_open && editor_shell {
                     if input.key_pressed(egui::Key::ArrowDown) {
                         actions.push(DesktopAction::ProblemNext);
                     }
