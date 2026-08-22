@@ -1427,6 +1427,20 @@ fn render_ports(
         ctx.data_mut(|data| data.remove::<String>(egui::Id::new(PENDING_EDGE_ID)));
     }
 
+    // The source somebody has already chosen, if the edge is half drawn.
+    //
+    // Read before the ports are published, because it changes what they are:
+    // the armed port is a step that succeeded, and every input port is now the
+    // second half of a connection rather than an unrelated control. The rubber
+    // band that says so is drawn to the pointer, which is exactly what a
+    // keyboard user does not have.
+    let armed_source: Option<String> =
+        ctx.data_mut(|data| data.get_temp::<String>(egui::Id::new(PENDING_EDGE_ID)));
+    let armed_title = armed_source
+        .as_ref()
+        .and_then(|path| by_path.get(path.as_str()))
+        .map(|node| node.accessible_name.clone());
+
     // Which port, if any, was activated this frame rather than dragged.
     let mut activated_source: Option<String> = None;
     let mut activated_target: Option<CanonicalPath> = None;
@@ -1440,15 +1454,41 @@ fn render_ports(
         ui.painter()
             .circle_filled(out_pos, PORT_RADIUS, tokens.accent.orange);
         let outgoing = connection_titles(existing_edges, by_path, &node.path.0, true);
+        let is_armed = armed_source.as_deref() == Some(node.path.0.as_str());
+        if is_armed {
+            // Visible too, for somebody who is looking at the screen and using
+            // a keyboard: the rubber band is drawn to a pointer they do not
+            // have, so without this the armed port looks like every other one.
+            ui.painter().circle_stroke(
+                out_pos,
+                PORT_RADIUS + 3.0,
+                egui::Stroke::new(2.0_f32, tokens.accent.orange),
+            );
+        }
         ui.ctx().accesskit_node_builder(out.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect from {}", node.accessible_name));
+            // Armed is a state, and it was published nowhere.
+            //
+            // Activating this port is the first half of a two-step gesture, and
+            // the tree said nothing about the step having taken -- so a screen
+            // reader user could not tell a successful first step from a control
+            // that did nothing, which is the same question the ports had before
+            // they answered activation at all.
+            builder.set_selected(is_armed);
             // What this card is already connected to, on the control that
             // changes it. A painted curve says nothing to anyone reading the
             // tree, so activating a port was a step whose result could not be
             // checked -- and the gesture toggles, so "did that connect or
             // disconnect?" had no answer available.
-            builder.set_description(describe_connections(&outgoing, "Connects to"));
+            builder.set_description(if is_armed {
+                format!(
+                    "Armed as the connection source. Choose a target port, or press Escape                      to cancel. {}",
+                    describe_connections(&outgoing, "Connects to")
+                )
+            } else {
+                describe_connections(&outgoing, "Connects to")
+            });
             set_bounds(builder, out_bounds);
         });
 
@@ -1475,7 +1515,18 @@ fn render_ports(
         ui.ctx().accesskit_node_builder(input.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
             builder.set_label(format!("Connect to {}", node.accessible_name));
-            builder.set_description(describe_connections(&incoming, "Connected from"));
+            // What activating this port will do *now*, which depends on whether
+            // a source is waiting. Describing only the persisted edges left the
+            // second half of the gesture undocumented on the control that
+            // performs it.
+            builder.set_description(match armed_title.as_deref() {
+                Some(source) => format!(
+                    "Activating connects {source} to {}, or removes that connection if it                      already exists. {}",
+                    node.accessible_name,
+                    describe_connections(&incoming, "Connected from")
+                ),
+                None => describe_connections(&incoming, "Connected from"),
+            });
             set_bounds(builder, in_bounds);
         });
         if input.clicked() {

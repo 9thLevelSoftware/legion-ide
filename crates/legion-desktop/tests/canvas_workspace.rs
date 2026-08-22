@@ -1480,6 +1480,75 @@ fn escape_on_the_canvas_does_not_clear_cursors_in_the_hidden_buffer() {
     );
 }
 
+/// Whether the node with this label reports itself as selected.
+fn node_is_selected(output: &egui::FullOutput, label: &str) -> Option<bool> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .and_then(|update| {
+            update
+                .nodes
+                .iter()
+                .find_map(|(_, node)| (node.label() == Some(label)).then(|| node.is_selected()))
+        })
+        .flatten()
+}
+
+/// Arming a connection source is announced, not just drawn.
+///
+/// Activating an output port is the first half of a two-step gesture, and the
+/// only report that it took was a rubber band drawn to the pointer -- which is
+/// exactly what a keyboard or screen-reader user does not have. So the first
+/// step was indistinguishable from a control that did nothing, and nothing on
+/// the target ports said that activating one would now complete a connection.
+#[test]
+fn arming_a_connection_source_is_announced_in_the_tree() {
+    let workspace = workspace_with_files("legion_desktop_canvas_armed_a11y");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    assert_eq!(
+        node_is_selected(&canvas, "Connect from alpha.rs"),
+        Some(false),
+        "a port that has not been armed must not report itself as selected"
+    );
+
+    let source = accesskit_id(&canvas, "Connect from alpha.rs")
+        .expect("each card must publish an outgoing connection port");
+    let armed = activate(&mut app, source);
+
+    assert_eq!(
+        node_is_selected(&armed, "Connect from alpha.rs"),
+        Some(true),
+        "the armed source does not report the state it is in, so a successful first          step reads exactly like a control that did nothing"
+    );
+    let description = node_description(&armed, "Connect from alpha.rs").unwrap_or_default();
+    assert!(
+        description.contains("Escape"),
+        "the armed port must say how to give up on the connection; it said {description:?}"
+    );
+    let target = node_description(&armed, "Connect to beta.rs").unwrap_or_default();
+    assert!(
+        target.contains("alpha.rs"),
+        "a target port must say what activating it will now do, and which card it would          connect; it said {target:?}"
+    );
+
+    // And Escape puts it back, rather than leaving a state nobody can clear.
+    let cleared = press_key(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(
+        node_is_selected(&cleared, "Connect from alpha.rs"),
+        Some(false),
+        "Escape cleared the armed edge without clearing what the tree says about it"
+    );
+    let target = node_description(&cleared, "Connect to beta.rs").unwrap_or_default();
+    assert!(
+        !target.contains("Activating connects"),
+        "a target port still offers to complete a connection nobody is drawing: {target:?}"
+    );
+}
+
 #[test]
 fn a_connection_is_readable_from_the_accessibility_tree() {
     // The ports can be activated, and until now the only report of what that
@@ -1753,10 +1822,12 @@ fn escape_gives_up_on_a_half_drawn_connection() {
     let source = accesskit_id(&canvas, "Connect from alpha.rs")
         .expect("each card must publish an outgoing connection port");
     let armed = activate(&mut app, source);
-    assert_eq!(
-        node_description(&armed, "Connect from alpha.rs").as_deref(),
-        Some("No connections"),
-        "the fixture must start with nothing connected, or this proves nothing"
+    // The armed port now leads with the state it is in, so the fixture check is
+    // on the connection half of what it says.
+    let description = node_description(&armed, "Connect from alpha.rs").unwrap_or_default();
+    assert!(
+        description.ends_with("No connections"),
+        "the fixture must start with nothing connected, or this proves nothing; the port          said {description:?}"
     );
 
     // Changed their mind.
