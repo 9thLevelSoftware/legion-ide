@@ -181,7 +181,16 @@ impl ProductAiDeltaWriter {
 impl Drop for ProductAiLaneReservation {
     fn drop(&mut self) {
         if self.armed {
-            self.sink.finish(None, self.operation);
+            // Only if this occupancy still holds the lane.
+            //
+            // A worker that panics or unwinds never reaches `abandon` or
+            // `finish_background`, so its armed reservation is dropped here --
+            // and if the app thread released the lane meanwhile, an
+            // unconditional finish cleared the projection and the in-flight
+            // flag of whichever run had taken it. That is the same stale-worker
+            // race the results and the deltas are fenced against, arriving
+            // through the one path that runs when nothing else did.
+            self.sink.finish_owned(self.generation, self.operation);
         }
     }
 }
@@ -316,6 +325,22 @@ impl LiveProductAiStreamSink {
         }
     }
 
+    /// Give up the lane, but only if `generation` still holds it.
+    ///
+    /// For the drop path, which runs when a worker unwound and cannot say
+    /// whether it still owns anything. Checked under the same lock the publish
+    /// takes, so the answer cannot change between reading it and acting on it.
+    pub(crate) fn finish_owned(&self, generation: u64, operation: &str) {
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
+            return;
+        }
+        drop(current);
+        self.finish(None, operation);
+    }
+
     pub(crate) fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
         if let Ok(mut guard) = self.projection.lock() {
             if let Some(completion) = completion {
@@ -371,6 +396,52 @@ impl LiveProductAiStreamSink {
 #[cfg(test)]
 mod lane_ownership_tests {
     use super::*;
+
+    /// A reservation dropped after cancellation does not end the next run.
+    ///
+    /// A worker that panics or unwinds never reaches `abandon` or
+    /// `finish_background`; its armed reservation is dropped instead. If the
+    /// app thread released the lane meanwhile, the unconditional finish in that
+    /// drop cleared the projection and the in-flight flag of whichever run had
+    /// taken the lane -- so a request still in progress looked finished and a
+    /// third was let in behind it.
+    #[test]
+    fn a_dropped_reservation_does_not_finish_the_run_that_replaced_it() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let cancelled = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "assist.predict",
+            "provider:a",
+            "model:a",
+        )
+        .expect("the lane starts free");
+
+        // The app thread cancels while the worker is still in its transport
+        // call, and a new operation takes the lane.
+        sink.release_lane();
+        let second = sink
+            .try_begin("delegate.chat", "provider:b", "model:b")
+            .expect("a released lane must be free to take");
+        sink.push_delta_owned(second, "answer for b");
+
+        // The worker then unwinds: no `abandon`, no publish, just a drop.
+        drop(cancelled);
+
+        assert!(
+            sink.in_flight.load(std::sync::atomic::Ordering::SeqCst),
+            "the dropped reservation cleared the in-flight flag of the run that              replaced it, so a request still in progress looks finished"
+        );
+        let projection = sink.snapshot();
+        assert_eq!(
+            projection.chunks,
+            vec!["answer for b".to_string()],
+            "the dropped reservation wiped the replacing run's projection: {projection:?}"
+        );
+        assert!(
+            projection.in_flight,
+            "the replacing run was marked finished by somebody else's drop"
+        );
+    }
 
     /// A cancelled worker's deltas do not appear under the next run.
     ///
