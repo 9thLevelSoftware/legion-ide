@@ -101,6 +101,69 @@ pub enum PatchResolution {
 
 /// Apply one exact-match edit to `file_content`.
 pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchResolution {
+    match resolve_edit_span(file_content, old_str, new_str) {
+        PatchSpan::Resolved {
+            start,
+            end,
+            replacement,
+            outcome,
+        } => PatchResolution::Applied {
+            content: {
+                let mut content = String::with_capacity(file_content.len() + replacement.len());
+                content.push_str(&file_content[..start]);
+                content.push_str(&replacement);
+                content.push_str(&file_content[end..]);
+                content
+            },
+            outcome,
+        },
+        PatchSpan::NoMatch(diagnostic) => PatchResolution::NoMatch(diagnostic),
+        PatchSpan::Ambiguous { occurrences } => PatchResolution::Ambiguous { occurrences },
+        PatchSpan::ValidationError { reason } => PatchResolution::ValidationError { reason },
+    }
+}
+
+/// Where an edit lands, as a byte span in the file it was resolved against.
+///
+/// The same decision as [`PatchResolution`], reported as a span instead of a
+/// rewritten file. A caller that has to produce a reviewable edit needs the
+/// span: a `TextEdit` covering the whole file says "everything changed", which
+/// is both false and unreadable in a diff, and it makes a one-line change
+/// impossible to approve on sight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchSpan {
+    /// The edit resolved to `file_content[start..end]`.
+    Resolved {
+        /// Byte offset the replacement starts at.
+        start: usize,
+        /// Byte offset the replacement ends at.
+        end: usize,
+        /// Text to put in that span, with the trailing-newline rule applied.
+        replacement: String,
+        /// How the match was obtained.
+        outcome: EditResolutionOutcome,
+    },
+    /// `old_str` was not present.
+    NoMatch(ResolutionDiagnostic),
+    /// `old_str` matched more than once, so the target is ambiguous.
+    Ambiguous {
+        /// Number of occurrences found.
+        occurrences: usize,
+    },
+    /// The edit itself was malformed.
+    ValidationError {
+        /// What was wrong.
+        reason: String,
+    },
+}
+
+/// Resolve one edit to the span it occupies in `file_content`.
+///
+/// This is the search; [`apply_edit`] is this plus a splice. Written in that
+/// order rather than the reverse because two copies of "exact, then
+/// whitespace-tolerant, then refuse" is one copy that eventually disagrees
+/// with the other about what counts as a match.
+pub fn resolve_edit_span(file_content: &str, old_str: &str, new_str: &str) -> PatchSpan {
     if old_str.is_empty() {
         // An empty anchor is only meaningful for a file that does not exist
         // yet. Against existing content it would mean "replace everything" —
@@ -108,23 +171,33 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
         // would silently destroy the file. Whole-file rewrites must say so by
         // using `replacement`.
         if !file_content.is_empty() {
-            return PatchResolution::ValidationError {
+            return PatchSpan::ValidationError {
                 reason: "`old_str` is empty, which would replace the file's entire contents. \
                          Quote the exact text to replace, or pass `replacement` to rewrite the \
                          whole file deliberately."
                     .to_string(),
             };
         }
-        return PatchResolution::Applied {
-            content: new_str.to_string(),
+        return PatchSpan::Resolved {
+            start: 0,
+            end: 0,
+            replacement: new_str.to_string(),
             outcome: EditResolutionOutcome::WholeFileFallback,
         };
     }
     match count_overlapping(file_content, old_str) {
-        1 => PatchResolution::Applied {
-            content: file_content.replacen(old_str, new_str, 1),
-            outcome: EditResolutionOutcome::Exact,
-        },
+        1 => {
+            let start = file_content
+                .find(old_str)
+                .expect("a single counted occurrence must be findable");
+            let end = start + old_str.len();
+            PatchSpan::Resolved {
+                start,
+                end,
+                replacement: newline_adjusted(file_content, start, end, new_str),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        }
         0 => {
             // Exact matching failed. Before refusing, try again ignoring
             // indentation and inter-token spacing: the anchor is written from
@@ -133,15 +206,52 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
             // file's, so the edit remains exact — only the search was
             // tolerant.
             match find_whitespace_insensitive(file_content, old_str) {
-                Some((start, end)) => PatchResolution::Applied {
-                    content: splice_replacement(file_content, start, end, new_str),
+                Some((start, end)) => PatchSpan::Resolved {
+                    start,
+                    end,
+                    replacement: newline_adjusted(file_content, start, end, new_str),
                     outcome: EditResolutionOutcome::Fuzzy,
                 },
-                None => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
+                None => PatchSpan::NoMatch(no_match_diagnostic(file_content, old_str)),
             }
         }
-        many => PatchResolution::Ambiguous { occurrences: many },
+        many => PatchSpan::Ambiguous { occurrences: many },
     }
+}
+
+/// Resolve an edit to a span from a tool call's raw arguments.
+///
+/// The span-returning twin of [`apply_edit_from_arguments`], sharing its
+/// argument-spelling tolerance.
+pub fn resolve_edit_span_from_arguments(file_content: &str, arguments: &Value) -> PatchSpan {
+    match edit_arguments(arguments) {
+        Ok((old_str, new_str)) => resolve_edit_span(file_content, &old_str, &new_str),
+        Err(reason) => PatchSpan::ValidationError { reason },
+    }
+}
+
+/// The trailing-newline rule, applied to the replacement rather than at splice
+/// time so a caller holding only the span still gets faithful text.
+///
+/// Replacing a span that ended a line with text that does not would silently
+/// join it to the following line.
+///
+/// An empty replacement is exempt, and that exemption is the whole subtlety.
+/// Empty means "delete this span", and a deletion that ended a line takes the
+/// line ending with it -- re-adding one leaves a blank line where the text was.
+/// The rule used to live only in `splice_replacement`, which the exact-match
+/// path never called, so exact deletions came out clean and whitespace-tolerant
+/// ones silently left the blank line behind. One rule now, and it knows the
+/// difference between replacing and deleting.
+fn newline_adjusted(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
+    let mut replacement = new_str.to_string();
+    if !new_str.is_empty()
+        && !new_str.ends_with('\n')
+        && file_content[start..end].ends_with('\n')
+    {
+        replacement.push('\n');
+    }
+    replacement
 }
 
 /// Replace `file_content[start..end]` with `new_str`.
@@ -151,12 +261,10 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
 /// following line. Two copies of that rule is one copy that eventually
 /// forgets it.
 pub fn splice_replacement(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
-    let mut content = String::with_capacity(file_content.len() + new_str.len());
+    let replacement = newline_adjusted(file_content, start, end, new_str);
+    let mut content = String::with_capacity(file_content.len() + replacement.len());
     content.push_str(&file_content[..start]);
-    content.push_str(new_str);
-    if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
-        content.push('\n');
-    }
+    content.push_str(&replacement);
     content.push_str(&file_content[end..]);
     content
 }
@@ -196,10 +304,16 @@ fn count_overlapping(haystack: &str, needle: &str) -> usize {
 /// number where a string belongs, and that is a different failure from "the
 /// text was not found" — the model needs to be told which.
 pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> PatchResolution {
+    match edit_arguments(arguments) {
+        Ok((old_str, new_str)) => apply_edit(file_content, &old_str, &new_str),
+        Err(reason) => PatchResolution::ValidationError { reason },
+    }
+}
+
+/// Read `old_str`/`new_str` out of a tool call's arguments.
+fn edit_arguments(arguments: &Value) -> Result<(String, String), String> {
     let Value::Object(object) = arguments else {
-        return PatchResolution::ValidationError {
-            reason: "edit arguments must be an object".to_string(),
-        };
+        return Err("edit arguments must be an object".to_string());
     };
     // Accept the spellings models actually use: `old_str`/`new_str`,
     // `old_string`/`new_string`, and Aider-style `search`/`replace`.
@@ -209,16 +323,8 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
         .or_else(|| object.get("search"))
     {
         Some(Value::String(text)) => text.clone(),
-        Some(_) => {
-            return PatchResolution::ValidationError {
-                reason: "`old_str` must be a string".to_string(),
-            };
-        }
-        None => {
-            return PatchResolution::ValidationError {
-                reason: "`old_str` is required".to_string(),
-            };
-        }
+        Some(_) => return Err("`old_str` must be a string".to_string()),
+        None => return Err("`old_str` is required".to_string()),
     };
     let new_str = match object
         .get("new_str")
@@ -226,18 +332,10 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
         .or_else(|| object.get("replace"))
     {
         Some(Value::String(text)) => text.clone(),
-        Some(_) => {
-            return PatchResolution::ValidationError {
-                reason: "`new_str` must be a string".to_string(),
-            };
-        }
-        None => {
-            return PatchResolution::ValidationError {
-                reason: "`new_str` is required".to_string(),
-            };
-        }
+        Some(_) => return Err("`new_str` must be a string".to_string()),
+        None => return Err("`new_str` is required".to_string()),
     };
-    apply_edit(file_content, &old_str, &new_str)
+    Ok((old_str, new_str))
 }
 
 /// Build the refusal diagnostic for a fragment that was not found.
