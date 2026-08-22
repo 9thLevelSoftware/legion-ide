@@ -489,6 +489,52 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// The same for a port, which traversal reaches just as readily.
+///
+/// Only card headers asked the view to follow, and Tab walks the ports too --
+/// so traversal past the last visible card focused connection controls on cards
+/// that were off screen: operable, and invisible.
+#[test]
+fn focusing_a_port_off_screen_brings_the_view_to_it() {
+    let workspace = workspace_with_files("legion_desktop_canvas_port_follows");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let port = accesskit_id(&canvas, "Connect from alpha.rs")
+        .expect("each card must publish an outgoing connection port");
+    let card = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let _ = drag(&mut app, card, card + egui::vec2(0.0, 400.0));
+    for _ in 0..12 {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        let Some(now) = clickable_center(&frame, "Card alpha.rs") else {
+            break;
+        };
+        let _ = drag(&mut app, now, now + egui::vec2(0.0, 400.0));
+    }
+
+    let parked = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let parked_port = clickable_center(&parked, "Connect from alpha.rs");
+    assert!(
+        parked_port.is_none_or(|centre| !panel.contains(centre)),
+        "this test needs a port the view does not reach; it is still at {parked_port:?}          inside {panel:?}"
+    );
+
+    let followed = focus(&mut app, port);
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let centre = clickable_center(&followed, "Connect from alpha.rs")
+        .expect("a focused port must be somewhere in the tree");
+    assert!(
+        panel.contains(centre),
+        "the keyboard reached a connection port at {centre:?} that the view never came          to, outside {panel:?} -- an operable control nobody can see"
+    );
+}
+
 /// Strokes painted around a rect, with their width and colour.
 ///
 /// Read from the paint output rather than the accessibility tree, because a

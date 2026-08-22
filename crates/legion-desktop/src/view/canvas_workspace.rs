@@ -1475,6 +1475,18 @@ fn render_ports(
         let out_bounds = global_rect(ui, out_rect);
         ui.painter()
             .circle_filled(out_pos, PORT_RADIUS, tokens.accent.orange);
+        // A port the keyboard reached is a control that has to be visible.
+        //
+        // Only card headers asked the view to come to them, and traversal
+        // reaches every port too -- so tabbing past the last visible card
+        // focused connection controls on cards that were off screen, operable
+        // and invisible. The card's rect rather than the port's, because a port
+        // alone tells you nothing about which card you are on.
+        if out.has_focus() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
+            });
+        }
         let outgoing = connection_titles(existing_edges, by_path, &node.path.0, true);
         let is_armed = armed_source.as_deref() == Some(node.path.0.as_str());
         if is_armed {
@@ -1533,6 +1545,11 @@ fn render_ports(
             PORT_RADIUS,
             egui::Stroke::new(1.5_f32, tokens.accent.cyan),
         );
+        if input.has_focus() {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
+            });
+        }
         let incoming = connection_titles(existing_edges, by_path, &node.path.0, false);
         ui.ctx().accesskit_node_builder(input.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
