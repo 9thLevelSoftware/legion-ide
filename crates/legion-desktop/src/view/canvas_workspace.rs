@@ -241,8 +241,13 @@ fn overlaps(candidate: egui::Pos2, taken: &[(egui::Pos2, bool)]) -> bool {
 
 /// Whether a card at `candidate` would cover one the *layout* placed.
 ///
-/// A card somebody dragged there is not a collision to repair, whatever it
-/// overlaps: they can see it and they meant it.
+/// Person placements are ignored here on purpose. Dragging one card onto
+/// another is something people do deliberately, and moving the card underneath
+/// -- which nobody touched -- would rearrange an arrangement somebody had just
+/// made by hand. The overlap that *is* worth repairing is two automatic
+/// positions, and the reopen case that used to mix the two is prevented at
+/// source: a deliberately chosen place is reserved even while its file is
+/// closed, so nothing is ever handed it.
 fn overlaps_automatic(candidate: egui::Pos2, taken: &[(egui::Pos2, bool)]) -> bool {
     taken
         .iter()
@@ -349,32 +354,47 @@ pub(crate) fn nodes_for_sections(
     // other is the case nobody chose and nobody can see coming -- a closed file
     // keeping its slot while a new file is handed the same one.
     let mut taken: Vec<(egui::Pos2, bool)> = Vec::new();
-    let mut resolved: Vec<Option<egui::Pos2>> = Vec::with_capacity(drawn.len());
-    for section in &drawn {
-        let saved = section
+    let mut resolved: Vec<Option<egui::Pos2>> = vec![None; drawn.len()];
+
+    // A place somebody chose stays theirs, even while the file is closed.
+    //
+    // This is where the reopen collision comes from, and closing it here beats
+    // repairing it later. Releasing *every* closed card's slot let a new file
+    // take a position somebody had deliberately put a card in; reopening that
+    // file then put two cards in one cell, and whichever rule fires next has to
+    // move one of them -- either the person's card, or a card nobody touched.
+    //
+    // Only deliberate positions are held. A default slot is the layout's guess
+    // and is released the moment its card is closed, which is what stops six
+    // closed files pushing the next one off the bottom of the screen.
+    for saved in positions.values().filter(|saved| saved.placed_by_person) {
+        taken.push((saved.position, true));
+    }
+
+    let saved_for = |section: &legion_ui::ui::ExcerptSurfaceSectionProjection| {
+        section
             .file_path
             .as_ref()
-            .and_then(|path| positions.get(path.0.as_str()).copied());
+            .and_then(|path| positions.get(path.0.as_str()).copied())
+    };
+    for (index, section) in drawn.iter().enumerate() {
+        let saved = saved_for(section);
         match saved {
-            // A position a person chose is kept, whatever it overlaps.
-            //
-            // Dragging one card onto another is something people do on purpose,
-            // and nothing here may undo it -- not the card being dragged, and
-            // not the stationary card underneath, which moving would be worse
-            // still, since nobody touched that one at all.
+            // Already reserved above; the card simply takes it.
             Some(saved) if saved.placed_by_person => {
-                taken.push((saved.position, true));
-                resolved.push(Some(saved.position));
+                resolved[index] = Some(saved.position);
             }
             // A position the layout chose is kept only while nothing is drawn
-            // over it. Geometry, not equality: a closed card nudged to (10, 10)
-            // and a new one at (0, 0) are 320-unit cards covering each other
-            // almost entirely, and an equality test sees no collision there.
+            // over it -- including the person placements reserved above.
+            //
+            // Geometry, not equality: a closed card nudged to (10, 10) and a
+            // new one at (0, 0) are 320-unit cards covering each other almost
+            // entirely, and an equality test sees no collision there.
             Some(saved) if !overlaps_automatic(saved.position, &taken) => {
                 taken.push((saved.position, false));
-                resolved.push(Some(saved.position));
+                resolved[index] = Some(saved.position);
             }
-            _ => resolved.push(None),
+            _ => {}
         }
     }
 
@@ -382,7 +402,7 @@ pub(crate) fn nodes_for_sections(
     //
     // Numbering starts after the cards that kept a saved position, which is
     // what stops an unplaced card sliding left when some *other* card moves.
-    let mut next_slot = taken.len();
+    let mut next_slot = resolved.iter().filter(|slot| slot.is_some()).count();
     for slot in resolved.iter_mut() {
         if slot.is_some() {
             continue;
@@ -430,7 +450,6 @@ pub(crate) fn nodes_for_sections(
     disambiguate_names(nodes)
 }
 
-/// Height of a node, given how many lines it draws.
 /// The tallest a card can be: header, every line, the footer, and padding.
 ///
 /// Defined next to `node_height` so the two cannot drift. A fit rectangle that
@@ -438,6 +457,7 @@ pub(crate) fn nodes_for_sections(
 const MAX_NODE_HEIGHT: f32 =
     HEADER_HEIGHT + MAX_NODE_LINES as f32 * LINE_HEIGHT + LINE_HEIGHT + 12.0;
 
+/// Height of a node, given how many lines it draws.
 fn node_height(node: &CanvasNode) -> f32 {
     let body = (node.lines.len() as f32) * LINE_HEIGHT;
     let footer = if node.lines_truncated {
@@ -1237,6 +1257,53 @@ mod canvas_layout_rules {
     /// Default slots used to come from a running count of *unplaced* cards, so
     /// one card gaining a position stopped the counter and moved every later
     /// card a slot to the left -- possibly onto the one just placed.
+    #[test]
+    fn a_place_somebody_chose_is_not_handed_to_another_file() {
+        // The reopen collision, closed at source. A card somebody positioned is
+        // closed; a new file is opened. If the new file were handed that place,
+        // reopening the first would put two cards in one cell and whichever
+        // rule fired next would have to move one of them -- either the person'''s
+        // card, or a card nobody touched. Neither is acceptable, so the place
+        // stays reserved while the file is closed.
+        let mut positions = BTreeMap::new();
+        positions.insert("closed.rs".to_string(), by_person(egui::pos2(0.0, 0.0)));
+
+        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions, egui::Pos2::ZERO, None);
+
+        let fresh = nodes.first().expect("the new file must have a card");
+        assert_ne!(
+            fresh.position,
+            egui::pos2(0.0, 0.0),
+            "a new file was handed the place somebody had put a closed card in"
+        );
+
+        // And reopening it finds its place still free.
+        let both = nodes_for_sections(
+            &[section("fresh.rs"), section("closed.rs")],
+            &positions,
+            egui::Pos2::ZERO,
+            None,
+        );
+        let reopened = both
+            .iter()
+            .find(|node| node.path.0 == "closed.rs")
+            .expect("the reopened file must have a card");
+        assert_eq!(
+            reopened.position,
+            egui::pos2(0.0, 0.0),
+            "the reopened card must come back where it was left"
+        );
+        for other in both.iter().filter(|node| node.path.0 != "closed.rs") {
+            assert!(
+                (other.position.x - reopened.position.x).abs() >= DEFAULT_STRIDE
+                    || (other.position.y - reopened.position.y).abs() >= DEFAULT_STRIDE,
+                "{} is drawn over the reopened card at {:?}",
+                other.path.0,
+                reopened.position
+            );
+        }
+    }
+
     #[test]
     fn a_card_dropped_on_another_moves_neither_of_them() {
         // Two cards a person put in the same place, on purpose. Repairing that

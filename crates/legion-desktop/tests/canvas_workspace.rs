@@ -200,22 +200,21 @@ fn the_canvas_is_reachable_and_shows_every_open_file() {
 
     let canvas = show_canvas(&mut app);
     let labels = rendered_text(&canvas);
-    // Non-vacuity first: with one card open there is no ambiguity to resolve
-    // and "Card index.ts" is the correct label, so an absence proves nothing
-    // until two cards exist.
-    let cards: Vec<&String> = labels
-        .iter()
-        .filter(|line| line.starts_with("Card "))
-        .collect();
-    assert!(
-        cards.len() >= 2,
-        "the fixture must open two cards sharing a name, got {cards:?}"
-    );
-    assert!(
-        !cards.iter().any(|line| line.as_str() == "Card index.ts"),
-        "two files share a name and their card headers are announced identically, so a \
-         screen-reader user cannot tell which card activation will select; headers were {cards:?}"
-    );
+
+    // Every file by name, not a count.
+    //
+    // A count is weaker in the direction that matters: two of three files
+    // vanishing leaves a count of one, which "at least two" would have caught
+    // only by accident and "at least one" not at all. This test is the
+    // regression gate for cards existing; the disambiguation rules have tests
+    // of their own.
+    for name in ["alpha.rs", "beta.rs", "gamma.rs"] {
+        assert!(
+            clickable_center(&canvas, &format!("Card {name}")).is_some(),
+            "every open file must appear as a card on the canvas; {name} is missing. \
+             Frame showed {labels:?}"
+        );
+    }
 }
 
 #[test]
@@ -1140,5 +1139,46 @@ fn cards_sharing_a_file_name_are_distinguishable_on_every_control() {
         "two files share a name and their card headers are announced identically, so a \
          screen-reader user cannot tell which card activation will select; headers were \
          {headers:?}"
+    );
+}
+
+#[test]
+fn the_find_bar_is_not_drawn_over_the_canvas() {
+    // Its Replace and Replace All controls dispatch buffer mutations, and they
+    // are buttons rather than keys — so the keyboard gate never saw them.
+    // Opening replace in the editor, toggling Canvas and pressing Replace
+    // edited a file that was not on screen.
+    let workspace = workspace_with_files("legion_desktop_canvas_no_find_bar");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    // Ctrl/Cmd+H, the published binding for the find bar.
+    let modifiers = egui::Modifiers {
+        command: true,
+        ctrl: true,
+        ..Default::default()
+    };
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::H,
+        physical_key: Some(egui::Key::H),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }]));
+    let opened = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        clickable_center(&opened, "Replace").is_some(),
+        "the fixture needs the replace controls on screen before the canvas is shown"
+    );
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing for this test to mean anything"
+    );
+    assert!(
+        clickable_center(&canvas, "Replace").is_none(),
+        "the replace controls are still on screen over the canvas, where pressing one edits \
+         a buffer nobody is looking at"
     );
 }

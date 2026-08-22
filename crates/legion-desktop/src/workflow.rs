@@ -906,6 +906,12 @@ impl DesktopRuntime {
                 if from_path.0 != to_path.0 {
                     self.canvas_edges.insert((from_path.0, to_path.0));
                     self.persist_session_if_configured();
+                    // Same reason the settled move refreshes: a failed save
+                    // writes a warning into `last_status` and nothing else, so
+                    // without a rebuild the person is not told their connection
+                    // will be gone after a restart until some unrelated action
+                    // happens to refresh the projection.
+                    self.refresh_projection()?;
                 }
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
@@ -913,6 +919,7 @@ impl DesktopRuntime {
             DesktopAction::DisconnectCanvasNodes { from_path, to_path } => {
                 self.canvas_edges.remove(&(from_path.0, to_path.0));
                 self.persist_session_if_configured();
+                self.refresh_projection()?;
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 Ok(DesktopWorkflowOutcome::Noop)
             }
