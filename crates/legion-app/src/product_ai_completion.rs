@@ -281,8 +281,46 @@ no markdown fences, no explanation.";
                 Some(stream),
             )
         }
-        None => (deterministic_assisted_edit_proposal(), None),
+        // No completion. Which of the two reasons matters to whoever reads the
+        // proposal.
+        //
+        // With no live backend selected, the deterministic proposal is the
+        // product working as configured. With a backend selected and failing --
+        // an unreachable Ollama, an Anthropic stream that broke after emitting
+        // deltas -- the same fixture arrived labelled as though a provider had
+        // produced it, and the partial text that had already reached the screen
+        // was replaced by unrelated content with nothing saying why.
+        None => (
+            match backend {
+                Some(backend) => failed_live_assisted_edit_proposal(backend),
+                None => deterministic_assisted_edit_proposal(),
+            },
+            None,
+        ),
     }
+}
+
+/// The proposal to register when a selected live backend failed to answer.
+///
+/// Deterministic content, and honest about being it. The alternative -- what
+/// this replaces -- is a fixture wearing a provider's name, which is worse than
+/// a failure: a person reviewing it has no way to know the provider never
+/// answered, and the details they would check say the opposite.
+#[cfg(feature = "ai")]
+pub(crate) fn failed_live_assisted_edit_proposal(
+    backend: ProductAiLiveBackend,
+) -> AssistedEditProposalSource {
+    let label = match backend {
+        ProductAiLiveBackend::Ollama => "ollama",
+        ProductAiLiveBackend::Anthropic => "anthropic",
+    };
+    let mut source = deterministic_assisted_edit_proposal();
+    source.summary = format!("Offline fallback: the {label} provider did not answer");
+    source.details.insert(
+        0,
+        format!("live_backend={label} outcome=failed; this text is the offline fallback"),
+    );
+    source
 }
 
 #[cfg(not(feature = "ai"))]

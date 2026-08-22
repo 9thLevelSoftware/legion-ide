@@ -47,9 +47,11 @@ pub(crate) const ASSIST_PATH_MAX_CHARS: usize = 512;
 /// editing the prompt cannot silently shrink what was declared.
 pub(crate) const ASSIST_PROMPT_FRAMING_MAX_CHARS: usize = 1_000;
 
-/// Every character an Assist prompt can carry: excerpt, instruction, framing.
+/// Every character an Assist prompt can carry: excerpt, instruction, path, framing.
 ///
-/// One number, so the three bounds and the declaration cannot drift apart.
+/// One number, so the four bounds and the declaration cannot drift apart -- and
+/// the compile-time assertion below holds them to it, which is what stops a term
+/// being added here and forgotten in the sum.
 pub(crate) const ASSIST_PROMPT_MAX_CHARS: usize = ASSIST_EXCERPT_MAX_CHARS
     + ASSIST_INSTRUCTION_MAX_CHARS
     + ASSIST_PATH_MAX_CHARS
@@ -696,6 +698,67 @@ mod org_ceiling {
             super::bounded_assist_path("src/lib.rs"),
             "src/lib.rs",
             "an ordinary path must be left exactly as written"
+        );
+    }
+
+    /// A failed live backend is not reported as a deterministic run.
+    ///
+    /// Both cases used to produce the same proposal: no live backend selected,
+    /// and a live backend that failed. The second is a fixture wearing a
+    /// provider'''s name -- a person reviewing it has no way to know the
+    /// provider never answered, and the details they would check say the
+    /// opposite.
+    #[cfg(feature = "ai")]
+    #[test]
+    fn a_failed_live_backend_says_so_in_its_proposal() {
+        // Through `resolve_assisted_edit_proposal_text`, not the helper it calls.
+        //
+        // Asserting against the helper directly proves only that the helper
+        // works: removing its call site left this test passing while the
+        // product collapsed failures back into the offline path, which is the
+        // exact defect being fixed.
+        let (offline, _) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
+            None,
+            "tidy this",
+            "fn main() {}",
+            "src/main.rs",
+            None,
+        );
+        // Anthropic with no credential resolvable in the test environment: the
+        // backend is selected and the call cannot succeed, which is the shape
+        // of a live failure.
+        let (failed, stream) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
+            Some(super::ProductAiLiveBackend::Anthropic),
+            "tidy this",
+            "fn main() {}",
+            "src/main.rs",
+            None,
+        );
+        assert!(
+            stream.is_none(),
+            "the fixture needs the live call to fail, or this asserts nothing"
+        );
+
+        assert_ne!(
+            failed.summary, offline.summary,
+            "a failed provider run must not be summarised as an ordinary offline one"
+        );
+        assert!(
+            failed.summary.contains("anthropic"),
+            "the summary must name the backend that failed, got {:?}",
+            failed.summary
+        );
+        assert!(
+            failed
+                .details
+                .iter()
+                .any(|line| line.contains("outcome=failed")),
+            "the details a reviewer checks must record the failure, got {:?}",
+            failed.details
+        );
+        assert_eq!(
+            failed.replacement, offline.replacement,
+            "the fallback content itself is unchanged; only what it claims about itself is"
         );
     }
 
