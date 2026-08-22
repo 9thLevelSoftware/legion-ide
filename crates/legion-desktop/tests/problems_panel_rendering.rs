@@ -486,3 +486,55 @@ fn the_selection_follows_its_problem_when_rows_move() {
         rendered_text(&after)
     );
 }
+
+/// The selection nobody chose is still the reader's selection.
+///
+/// Row 0 renders as selected the moment diagnostics appear. Until something is
+/// remembered about it there is nothing for the resolver to hold on to, so a
+/// republish that inserts a diagnostic *ahead* of it leaves the index at 0, the
+/// highlight moves to the new row, and the next activation opens it. Nothing
+/// the reader did caused that and nothing on screen said it happened.
+///
+/// The previous selection test moves to the second row before mutating the
+/// list, so it never exercised this: it proved a chosen selection is durable
+/// while the default one still was not.
+#[test]
+fn the_default_selection_survives_a_diagnostic_arriving_ahead_of_it() {
+    let workspace = TempWorkspace::new("legion_desktop_problems_panel");
+    let (mut app, file) =
+        app_with_diagnostics(&workspace, &[(5, "first problem"), (9, "second problem")]);
+
+    // No navigation at all: this is the selection the reader was given.
+    let panel = show_problems_panel(&mut app, 2);
+    assert!(
+        row_is_selected(&panel, "main.rs:5"),
+        "the first row starts selected; rendered text was {:?}",
+        rendered_text(&panel)
+    );
+
+    // The server republishes with a new diagnostic ahead of the selected one.
+    publish_diagnostics(
+        app.runtime_mut_for_test(),
+        &file,
+        &[
+            (2, "newly arrived problem"),
+            (5, "first problem"),
+            (9, "second problem"),
+        ],
+    );
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        row_is_selected(&after, "main.rs:5"),
+        "the default selection must stay on its problem when one arrives ahead \
+         of it -- a highlight that slides onto a row the reader has never seen \
+         opens it on the next activation; rendered text was {:?}",
+        rendered_text(&after)
+    );
+    assert!(
+        !row_is_selected(&after, "main.rs:2"),
+        "the newly arrived diagnostic must not steal the selection; rendered \
+         text was {:?}",
+        rendered_text(&after)
+    );
+}

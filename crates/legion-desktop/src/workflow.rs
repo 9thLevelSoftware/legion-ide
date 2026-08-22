@@ -3526,6 +3526,19 @@ impl DesktopRuntime {
             .status_messages
             .extend(self.last_status_details.iter().cloned());
         self.shell.replace_projection_snapshot(snapshot);
+        // The default selection is a selection too.
+        //
+        // Row 0 renders as selected the moment diagnostics appear, and until
+        // something is remembered about it the resolver has nothing to hold on
+        // to: a republish that inserts a diagnostic ahead of it leaves the
+        // index at 0, the highlight silently moves to the new row, and
+        // `ProblemActivate` opens it. Nothing the reader did caused that, and
+        // nothing on screen said it happened. Capturing the key the first time
+        // a non-empty list is seen makes the default as durable as a chosen
+        // one.
+        if self.problems_selected_key.is_none() {
+            self.remember_selected_problem();
+        }
         Ok(())
     }
 
