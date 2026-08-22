@@ -1161,9 +1161,17 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     // pair of frames -- on the thread drawing them. Releasing the key is the
     // release of the button.
     if header.has_focus() {
-        // Where the keyboard is, in world space, for the next frame's view.
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), rect));
+        // Requested when focus *arrives*, not for as long as it stays.
+        //
+        // Rewriting the request every frame meant the next frame kept moving
+        // the view back, so panning away from a focused card was undone
+        // immediately and the rest of the canvas could not be looked at until
+        // focus moved elsewhere. Taking the request was never enough while the
+        // writer put it straight back.
+        if header.gained_focus() {
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), rect));
+        }
         ui.memory_mut(|memory| {
             memory.set_focus_lock_filter(
                 header.id,
@@ -1483,9 +1491,11 @@ fn render_ports(
         // and invisible. The card's rect rather than the port's, because a port
         // alone tells you nothing about which card you are on.
         if out.has_focus() {
-            ui.ctx().data_mut(|data| {
-                data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
-            });
+            if out.gained_focus() {
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
+                });
+            }
             // Which port has the keyboard, for somebody who is looking at the
             // screen. Bringing the card into view says which *card*; the two
             // ports are eight pixels apart and Enter does opposite things on
@@ -1555,9 +1565,11 @@ fn render_ports(
             egui::Stroke::new(1.5_f32, tokens.accent.cyan),
         );
         if input.has_focus() {
-            ui.ctx().data_mut(|data| {
-                data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
-            });
+            if input.gained_focus() {
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
+                });
+            }
             ui.painter().circle_stroke(
                 in_pos,
                 PORT_RADIUS + 3.0,

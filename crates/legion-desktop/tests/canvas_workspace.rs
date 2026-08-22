@@ -489,6 +489,56 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// Panning away from a focused card is not undone the next frame.
+///
+/// The reveal was requested for as long as focus lasted rather than when it
+/// arrived, so every frame put the request back and the frame after moved the
+/// view to the card again. Looking at another part of the canvas was impossible
+/// until focus moved somewhere else -- and focus is exactly what a keyboard user
+/// has no reason to move.
+#[test]
+fn panning_away_from_a_focused_card_is_not_undone() {
+    let workspace = workspace_with_files("legion_desktop_canvas_focus_pan");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let focused = focus(&mut app, card);
+    let before = clickable_center(&focused, "Card alpha.rs").expect("the card must be on screen");
+
+    // Pan far enough that the focused card leaves the view entirely: that is
+    // the case the reveal reacts to, and a pan that keeps it on screen proves
+    // nothing about the reveal being reissued.
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let empty = egui::pos2(panel.right() - 40.0, panel.bottom() - 40.0);
+    for _ in 0..6 {
+        let _ = drag(&mut app, empty, empty + egui::vec2(-300.0, -200.0));
+    }
+    let panned = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let moved = clickable_center(&panned, "Card alpha.rs");
+    assert!(
+        moved.is_none_or(|centre| !panel.contains(centre)),
+        "the pan left the focused card on screen at {moved:?}, so nothing here exercises the reveal"
+    );
+
+    // And it stays gone: no request is reissued while focus merely persists.
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    let after = clickable_center(&settled, "Card alpha.rs");
+    assert!(
+        after.is_none_or(|centre| !panel.contains(centre)),
+        "the view snapped back to the focused card at {after:?}, so panning away from it is impossible while it holds the keyboard"
+    );
+}
+
 /// The same for a port, which traversal reaches just as readily.
 ///
 /// Only card headers asked the view to follow, and Tab walks the ports too --
