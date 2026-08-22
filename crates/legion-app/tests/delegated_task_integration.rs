@@ -1043,6 +1043,68 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// A refused worker leaves an answered turn, not a question hanging.
+///
+/// The spawn is attempted after the user message, its citations and the
+/// permission record are already in the transcript. Returning an error there
+/// left the question standing with no reply and no explanation on screen, and
+/// asking again appended a second copy of all of it -- so the record of what
+/// was asked stopped matching what happened.
+#[test]
+fn a_delegate_turn_whose_worker_cannot_start_is_still_answered() {
+    let root = temp_workspace("chat_spawn_failure");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-chat-spawn".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    app.inject_delegate_chat_spawn_failure_for_test();
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("a refused worker must not fail the turn; the question is already recorded");
+
+    assert_eq!(
+        outcome.projection.chat_message_count, 2,
+        "the question was recorded and its answer was not, so the transcript ends on          an unanswered turn"
+    );
+    let answer = outcome
+        .projection
+        .chat_messages
+        .iter()
+        .rfind(|message| message.role == legion_protocol::DelegatedTaskChatRole::Assistant)
+        .expect("the turn must have an assistant message");
+    assert!(
+        answer.content_label.contains("could not start a worker"),
+        "the answer must say what happened; it said {:?}",
+        answer.content_label
+    );
+
+    // And the lane is free: a run that never started must not refuse the next
+    // one as already in flight.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+    let second = app
+        .send_delegate_chat("try again")
+        .expect("the lane must be free after a spawn that never happened");
+    assert_eq!(
+        second.projection.chat_message_count, 4,
+        "the retry did not produce a turn of its own, so the lane is still held by a          worker that does not exist"
+    );
+}
+
 #[test]
 fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     let root = temp_workspace("chat");

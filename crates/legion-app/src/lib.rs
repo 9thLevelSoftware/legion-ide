@@ -14513,6 +14513,12 @@ pub struct AppComposition {
     injected_delegated_spawn_failure: bool,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_assist_spawn_failure: bool,
+    /// Force the Delegate chat worker spawn to fail, for tests.
+    ///
+    /// Separate from the Assist seam because the two paths fail differently:
+    /// Assist publishes nothing until the worker exists, and a Delegate turn is
+    /// already half written by the time the spawn is attempted.
+    injected_delegate_chat_spawn_failure: bool,
     /// Test-only interruption seam after a Pending proposal observation is
     /// durable but before its proposals are published to the live ledger.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -14867,6 +14873,7 @@ impl AppComposition {
             injected_delegated_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_assist_spawn_failure: false,
+            injected_delegate_chat_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
@@ -16086,6 +16093,11 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_assist_spawn_failure_for_test(&mut self) {
         self.injected_assist_spawn_failure = true;
+    }
+
+    /// Make the next Delegate chat worker spawn fail.
+    pub fn inject_delegate_chat_spawn_failure_for_test(&mut self) {
+        self.injected_delegate_chat_spawn_failure = true;
     }
 
     /// Test-only: report whether an Assist proposal job remains app-owned.
@@ -27420,10 +27432,29 @@ impl AppComposition {
         let route_completed = refusal_reason.is_none()
             && (matches!(decision, CapabilityResponse::Decision(ref d) if d.granted)
                 || matches!(decision, CapabilityResponse::Granted(_)));
+        // Read before either `use_background_live` binding, and outside both,
+        // so the `#[cfg]` below stays attached to the binding it describes.
+        // Placed between them it silently became the gated item and the binding
+        // it was meant to gate became unconditional -- which the no-`ai` build
+        // catches and the ordinary one does not.
+        let inject_delegate_chat_spawn_failure = {
+            #[cfg(any(test, feature = "test-helpers"))]
+            {
+                std::mem::take(&mut self.injected_delegate_chat_spawn_failure)
+            }
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            {
+                false
+            }
+        };
         #[cfg(feature = "ai")]
-        let use_background_live = route_completed && live_backend.is_some();
+        let use_background_live =
+            route_completed && (live_backend.is_some() || inject_delegate_chat_spawn_failure);
         #[cfg(not(feature = "ai"))]
-        let use_background_live = false;
+        let use_background_live = {
+            let _ = inject_delegate_chat_spawn_failure;
+            false
+        };
         let user_message_id = self
             .delegate_workflow
             .next_message_id(DelegatedTaskChatRole::User);
@@ -27475,45 +27506,70 @@ impl AppComposition {
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
             let sink_delta = lane_reservation.sink();
-            std::thread::Builder::new()
+            let worker = move || {
+                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let (label, stream) = resolve_delegate_chat_reply(
+                    live_backend,
+                    &prompt_for_worker,
+                    &excerpt_for_worker,
+                    &file_path,
+                    citation_count,
+                    &route_id,
+                    &route_labels,
+                    Some(&mut on_delta),
+                );
+                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
+                });
+                lane_reservation.finish_background(
+                    ProductAiBackgroundResult {
+                        assistant_message_id: assistant_id,
+                        content_label: label,
+                        live_failed: false,
+                        stream,
+                        assist_proposal: None,
+                        inline_prediction: None,
+                    },
+                    completion.as_ref(),
+                );
+            };
+            #[cfg(any(test, feature = "test-helpers"))]
+            let spawned = if inject_delegate_chat_spawn_failure {
+                Err(std::io::Error::other(
+                    "injected Delegate chat worker spawn failure",
+                ))
+            } else {
+                std::thread::Builder::new()
+                    .name("legion-delegate-chat".to_string())
+                    .spawn(worker)
+            };
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            let spawned = std::thread::Builder::new()
                 .name("legion-delegate-chat".to_string())
-                .spawn(move || {
-                    let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-                    let (label, stream) = resolve_delegate_chat_reply(
-                        live_backend,
-                        &prompt_for_worker,
-                        &excerpt_for_worker,
-                        &file_path,
-                        citation_count,
-                        &route_id,
-                        &route_labels,
-                        Some(&mut on_delta),
-                    );
-                    let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-                        provider_id: stream.provider_id.clone(),
-                        model: stream.model.clone(),
-                        text: stream.text_preview.clone(),
-                        stream_chunks: stream.chunks.clone(),
-                        streamed: stream.streamed,
-                    });
-                    lane_reservation.finish_background(
-                        ProductAiBackgroundResult {
-                            assistant_message_id: assistant_id,
-                            content_label: label,
-                            live_failed: false,
-                            stream,
-                            assist_proposal: None,
-                            inline_prediction: None,
-                        },
-                        completion.as_ref(),
-                    );
-                })
-                .map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "failed to spawn Delegate chat worker: {error}"
-                    ))
-                })?;
-            "Streaming response…".to_string()
+                .spawn(worker);
+            spawned.map_or_else(
+                |error| {
+                    // A failed spawn used to return an error from here, and
+                    // by here the turn is half written: the question, its
+                    // citations and the permission record are already in
+                    // the transcript, and the assistant message that
+                    // answers them is added below. Returning left the
+                    // question standing with no reply and no explanation,
+                    // and asking again appended a second copy of all of it.
+                    //
+                    // The lane frees itself: the reservation was moved into
+                    // the closure the spawn refused, so dropping it fires
+                    // the release. Without that the next turn would be
+                    // rejected as "already in flight" by a run that never
+                    // started.
+                    format!("Delegate could not start a worker for this turn: {error}")
+                },
+                |_handle| "Streaming response…".to_string(),
+            )
         } else {
             let sink_delta = lane_reservation.sink();
             let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
