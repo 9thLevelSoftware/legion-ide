@@ -27514,9 +27514,25 @@ impl AppComposition {
                 } else {
                     "stays on this machine".to_string()
                 },
+                // The whole authority, port included, and IPv6 bracketed.
+                //
+                // `scheme://host` alone reported a different destination from
+                // the one authorized and contacted whenever a port was
+                // configured, and produced `http://::1` for a loopback literal
+                // -- a label that is neither a URL nor the address.
                 destination_label: provider_route_request.network_target.as_ref().map_or_else(
                     || "not encoded".to_string(),
-                    |target| format!("{}://{}", target.scheme, target.host),
+                    |target| {
+                        let host = if target.host.contains(':') && !target.host.starts_with('[') {
+                            format!("[{}]", target.host)
+                        } else {
+                            target.host.clone()
+                        };
+                        match target.port {
+                            Some(port) => format!("{}://{host}:{port}", target.scheme),
+                            None => format!("{}://{host}", target.scheme),
+                        }
+                    },
                 ),
                 invocation_state,
                 redaction_hints: vec![RedactionHint::MetadataOnly],

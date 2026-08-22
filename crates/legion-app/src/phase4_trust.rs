@@ -67,10 +67,30 @@ impl Phase4ContextAssemblyService {
                 .into_iter()
                 .collect(),
             hashes: vec![context.metadata.fingerprint.clone()],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
+            // The prompt says `File: {path}`, so the canonical path travels
+            // with the excerpt. It was recorded as having stayed local while
+            // the buffer beside it was corrected -- and a path is not nothing:
+            // it names a directory layout, a project, sometimes a person.
+            privacy_scope: Some(if sends_the_buffer {
+                legion_protocol::SemanticPrivacyScope::File
+            } else {
+                legion_protocol::SemanticPrivacyScope::MetadataOnly
+            }),
+            privacy_label: if sends_the_buffer {
+                legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata
+            } else {
+                legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+            },
+            risk_label: if sends_the_buffer {
+                route_risk
+            } else {
+                legion_protocol::ProposalRiskLabel::Low
+            },
+            egress: if sends_the_buffer {
+                route_egress
+            } else {
+                legion_protocol::ContextManifestEgressStatus::LocalOnly
+            },
             freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
                 state: legion_protocol::SemanticFreshnessState::Fresh,
                 freshness_key_present: true,
@@ -633,6 +653,31 @@ mod tests {
             remote_permission.risk_label,
             legion_protocol::ProposalRiskLabel::Medium,
             "a run that uploads the buffer is not the same risk as one that does not"
+        );
+
+        // The path travels too: the prompt says `File: {path}`, and a path
+        // names a directory layout, a project, sometimes a person.
+        let remote_file = remote
+            .manifest
+            .items
+            .iter()
+            .find(|item| item.kind == legion_protocol::ContextManifestItemKind::File)
+            .expect("the manifest must carry the file whose path is sent");
+        assert_eq!(
+            remote_file.egress,
+            legion_protocol::ContextManifestEgressStatus::ExternalEgressMetadata,
+            "the uploaded path is recorded as never having left the machine"
+        );
+        let local_file = local
+            .manifest
+            .items
+            .iter()
+            .find(|item| item.kind == legion_protocol::ContextManifestItemKind::File)
+            .expect("the manifest must carry the file either way");
+        assert_eq!(
+            local_file.egress,
+            legion_protocol::ContextManifestEgressStatus::LocalOnly,
+            "a loopback route really does keep the path local and must keep saying so"
         );
 
         // The record for the content that actually travels.
