@@ -1043,6 +1043,55 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// An Assist proposal can be approved from the surface that created it.
+///
+/// A rail command registers its proposal in `Created`, and the lifecycle only
+/// permits Created -> Validated -> Previewed -> Approved. If approval did not
+/// walk those steps, the panel would offer an Approve whose only outcome is a
+/// refusal -- which is the "approve turns into rejected" behaviour the dogfood
+/// journal recorded.
+#[test]
+fn an_assist_proposal_can_be_approved_from_the_surface_that_created_it() {
+    let root = temp_workspace("assist_approve_lifecycle");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-approve".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    match app
+        .dispatch_ui_intent(legion_ui::CommandDispatchIntent::ApproveProposal { proposal_id })
+        .expect("approving a freshly created proposal must not error")
+    {
+        legion_app::AppCommandOutcome::ProposalLifecycleUpdated(
+            legion_protocol::ProposalResponse::Approved(_),
+        ) => {}
+        other => panic!(
+            "the surface offers an Approve whose only outcome is {other:?}, which is the              lifecycle gap the dogfood journal recorded"
+        ),
+    }
+}
+
 /// A proposal that has moved on says so, while keeping what its run recorded.
 ///
 /// Storing the run's trust projections fixed the budget being discarded and
