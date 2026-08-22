@@ -7153,8 +7153,29 @@ fn render_problem_rows(
                 }
             })
             .unwrap_or_else(|| "<unknown>".to_string());
+        // The diagnostic code, when the server sent one.
+        //
+        // Not decoration: `message` is replaced by a per-severity placeholder
+        // before it reaches this projection, so without the code every error
+        // row in the panel reads identically and a reader cannot tell a
+        // mismatched type from a moved value. `E0308` is the one field that
+        // still distinguishes them, and it is a structured identifier rather
+        // than the server's prose -- the DIAGNOSTICS surface already renders
+        // it and the source label next to the message for that reason.
+        //
+        // This narrows the gap; it does not close it. A code names the class
+        // of error and not what is wrong in this line, and a server that sends
+        // no code leaves the row exactly as uninformative as before.
+        let code = problem
+            .code_label
+            .as_deref()
+            .map(|code| format!("{code} "))
+            .unwrap_or_default();
         let label = trim_middle(
-            &format!("{:?} {} {}", problem.severity, location, problem.message),
+            &format!(
+                "{:?} {} {}{}",
+                problem.severity, location, code, problem.message
+            ),
             110,
         );
         // Only clickable when the problem says where it is.

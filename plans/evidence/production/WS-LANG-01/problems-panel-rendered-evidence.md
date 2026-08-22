@@ -97,9 +97,19 @@ guard. `a_projected_diagnostic_is_visible_in_the_rendered_problems_panel` pins
 the behaviour as it stands, in both directions, so a future change to the policy
 has to be deliberate.
 
-Until that is decided, `PR-LANG-001` should not move to product-workflow
-validated on the strength of this file. The panel is now reachable, operable,
-accessible and honest about location; it is not yet informative.
+One thing that does not need that decision: the row now carries the diagnostic
+**code**. `E0308` is a structured identifier rather than the server's prose --
+the DIAGNOSTICS surface already renders it and the source label beside the
+message -- and it is the only field left that distinguishes a mismatched type
+from a moved value once the message has been replaced. It narrows the gap and
+does not close it: a code names the class of error and not what is wrong on
+this line, and a server that sends no code leaves the row exactly as
+uninformative as before.
+
+Until the message question is decided, `PR-LANG-001` should not move to
+product-workflow validated on the strength of this file. The panel is now
+reachable, operable, accessible and honest about location; it is not yet
+informative.
 
 ## Verification
 

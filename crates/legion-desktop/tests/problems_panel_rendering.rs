@@ -102,6 +102,7 @@ fn publish_diagnostics(runtime: &mut DesktopRuntime, path: &Path, messages: &[(u
                 },
                 "severity": 1,
                 "source": "rustc",
+                "code": "E0308",
                 "message": message
             })
         })
@@ -189,6 +190,13 @@ fn a_projected_diagnostic_is_visible_in_the_rendered_problems_panel() {
         "the server's own message must not reach the row while the redaction \
          stands -- if this fails the policy changed and this test should say so \
          out loud; rendered text was {:?}",
+        rendered_text(&output)
+    );
+    // The code is the only field left that distinguishes one error from
+    // another once the message has been replaced by its severity.
+    assert!(
+        frame_shows(&output, "E0308"),
+        "the row must carry the diagnostic code the server sent; rendered text was {:?}",
         rendered_text(&output)
     );
     let name = file
