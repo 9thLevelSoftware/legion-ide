@@ -220,16 +220,30 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     // the one configured. Half a URL parsed case-insensitively is not a
     // case-insensitive parser.
     let trimmed = base_url.trim();
+    // Everything after the authority, query and fragment included.
+    //
+    // Dropping the query was a mistake in the safer-looking direction: a
+    // gateway's token often *is* the query, so the upgraded URL reached the
+    // right host without the credential and every request failed. Nor is
+    // keeping it a leak: the query is already in the URL this rewrites, the
+    // authorized `NetworkTarget` is host and port only, and the client inserts
+    // its API path ahead of the query rather than after it.
     let path = trimmed
         .find("://")
         .map(|scheme_end| &trimmed[scheme_end + "://".len()..])
-        .and_then(|authority_and_path| authority_and_path.split_once('/'))
-        // Only the path, not a trailing query or fragment: those are not part
-        // of the endpoint being addressed and carrying them into the rewritten
-        // base URL would move a credential rather than drop it.
-        .map(|(_authority, path)| {
-            let path = path.split(['?', '#']).next().unwrap_or(path);
-            format!("/{path}")
+        .and_then(|authority_and_path| {
+            authority_and_path
+                .find(['/', '?', '#'])
+                .map(|index| &authority_and_path[index..])
+        })
+        .map(|rest| {
+            if rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                // A query or fragment with no path of its own still belongs
+                // after the root.
+                format!("/{rest}")
+            }
         })
         .unwrap_or_default();
     // Brackets come back for the URL, having been stripped for the policy.
@@ -418,6 +432,37 @@ mod delegate_chat_route_honesty_tests {
                  written {expected_host:?} can never match it"
             );
             assert_eq!(target.port, expected_port, "{base} lost or invented a port");
+        }
+    }
+
+    /// A gateway's query survives the upgrade to HTTPS.
+    ///
+    /// Dropping it was a mistake in the safer-looking direction: a gateway's
+    /// token often *is* the query, so the upgraded URL reached the right host
+    /// without the credential and every request failed against an endpoint
+    /// policy had authorized -- which reads as the provider rejecting the key.
+    #[test]
+    fn a_query_survives_the_upgrade_to_https() {
+        for (base, expected) in [
+            (
+                "http://proxy.internal/anthropic?token=secret",
+                "https://proxy.internal:443/anthropic?token=secret",
+            ),
+            (
+                "http://proxy.internal?token=secret",
+                "https://proxy.internal:443/?token=secret",
+            ),
+            (
+                "http://proxy.internal/anthropic",
+                "https://proxy.internal:443/anthropic",
+            ),
+            ("http://proxy.internal", "https://proxy.internal:443"),
+        ] {
+            assert_eq!(
+                super::enforce_https_for_remote(base),
+                expected,
+                "{base} lost part of itself in the upgrade"
+            );
         }
     }
 
