@@ -102,6 +102,15 @@ pub(crate) struct CanvasNode {
     pub lines: Vec<String>,
     /// Whether `lines` is shorter than the excerpt actually held.
     pub lines_truncated: bool,
+    /// One-based first and last source line drawn, when the projection said.
+    ///
+    /// The excerpt is built from the buffer's saved scroll, so a file somebody
+    /// has scrolled produces a section starting at line 100 rather than line 1.
+    /// Discarding each line's `line_number` and calling the result "first 18
+    /// lines" presented a mid-file excerpt as the opening of the file -- and
+    /// where the scrolled tail was short enough not to be truncated, said
+    /// nothing at all about the lines above it.
+    pub line_span: Option<(u32, u32)>,
     /// Where the card sits in world space.
     pub position: egui::Pos2,
 }
@@ -428,12 +437,15 @@ pub(crate) fn nodes_for_sections(
                 .get(path.0.as_str())
                 .is_some_and(|saved| saved.position == position);
             let available = section.lines.len();
-            let lines: Vec<String> = section
-                .lines
-                .iter()
-                .take(MAX_NODE_LINES)
-                .map(|line| line.visible_text.clone())
-                .collect();
+            let shown = &section.lines[..section.lines.len().min(MAX_NODE_LINES)];
+            let lines: Vec<String> = shown.iter().map(|line| line.visible_text.clone()).collect();
+            // `line_number` is zero-based in the projection and one-based
+            // everywhere a person reads it, including the status bar two panels
+            // over.
+            let line_span = match (shown.first(), shown.last()) {
+                (Some(first), Some(last)) => Some((first.line_number + 1, last.line_number + 1)),
+                _ => None,
+            };
             Some(CanvasNode {
                 path,
                 placed,
@@ -442,6 +454,7 @@ pub(crate) fn nodes_for_sections(
                 title: section.title.clone(),
                 dirty: section.dirty,
                 lines_truncated: available > lines.len(),
+                line_span,
                 lines,
                 position,
             })
@@ -457,10 +470,32 @@ pub(crate) fn nodes_for_sections(
 const MAX_NODE_HEIGHT: f32 =
     HEADER_HEIGHT + MAX_NODE_LINES as f32 * LINE_HEIGHT + LINE_HEIGHT + 12.0;
 
+/// What the card says about the lines it is not showing, if anything.
+///
+/// Two different omissions, and the old text acknowledged neither correctly.
+/// An excerpt built from a scrolled buffer starts partway down the file, and an
+/// excerpt longer than the card is cut off at the bottom; either can happen
+/// without the other. "first 18 lines" claimed the first line was line 1, which
+/// is exactly the fact the projection had already measured and this code threw
+/// away.
+fn excerpt_footer(node: &CanvasNode) -> Option<String> {
+    let (first, last) = node.line_span?;
+    if first <= 1 && !node.lines_truncated {
+        // The whole excerpt, starting where the file does. Nothing to disclose,
+        // and a card that says so anyway trains people to ignore the line.
+        return None;
+    }
+    Some(if node.lines_truncated {
+        format!("lines {first}-{last} of a longer excerpt")
+    } else {
+        format!("lines {first}-{last}")
+    })
+}
+
 /// Height of a node, given how many lines it draws.
 fn node_height(node: &CanvasNode) -> f32 {
     let body = (node.lines.len() as f32) * LINE_HEIGHT;
-    let footer = if node.lines_truncated {
+    let footer = if excerpt_footer(node).is_some() {
         LINE_HEIGHT
     } else {
         0.0
@@ -530,6 +565,76 @@ fn saved_scene_rect(ctx: &egui::Context) -> Option<egui::Rect> {
 /// The opening view is derived from the cards instead: their bounding box, with
 /// a margin, and never smaller than the default so a single card does not open
 /// zoomed to fill the screen.
+/// Shrink a view to something `Scene` can actually draw, keeping `anchor` in it.
+///
+/// `Scene` fits the rect it is handed by scaling, and the scale stops at
+/// `ZOOM_MIN`. A rect wider than `panel / ZOOM_MIN` is therefore not honoured:
+/// egui draws what the floor allows and the rest of the rectangle is off
+/// screen. A view that promises to contain a card and then does not is worse
+/// than one that never claimed to, because nothing on the canvas says which
+/// direction the card went.
+///
+/// So the view is capped at what the floor can draw and positioned around
+/// `anchor` -- the card the caller most needs visible. Everything else stays
+/// reachable by panning, which is what a canvas is for.
+fn within_zoom_floor(view: egui::Rect, anchor: egui::Rect, panel: egui::Vec2) -> egui::Rect {
+    if panel.x <= 0.0 || panel.y <= 0.0 {
+        return view;
+    }
+    let widest = panel / ZOOM_MIN;
+    if view.width() <= widest.x && view.height() <= widest.y {
+        return view;
+    }
+    let size = egui::vec2(view.width().min(widest.x), view.height().min(widest.y));
+    // Centred on the anchor, then pushed back inside the view we were given, so
+    // a card near the edge of the arrangement does not open half in empty space.
+    let mut min = anchor.center() - size / 2.0;
+    // `size` is never larger than `view`, so these bounds cannot cross.
+    min.x = min.x.clamp(view.min.x, view.max.x - size.x);
+    min.y = min.y.clamp(view.min.y, view.max.y - size.y);
+    let capped = egui::Rect::from_min_size(min, size);
+    // A card larger than the drawable area cannot be contained by anything;
+    // showing its top-left beats showing the space beside it.
+    if capped.contains_rect(anchor) {
+        capped
+    } else {
+        egui::Rect::from_min_size(anchor.min, size)
+    }
+}
+
+/// Widen `view` to reach cards placed this frame, without leaving what can be drawn.
+///
+/// Preferring a visible slot is not always possible -- with the grid full
+/// inside the current view, every free slot is outside it, and the search has
+/// to put the card somewhere. Growing the view is what stops "somewhere"
+/// meaning "nowhere you can see". Only newly placed cards count: expanding to
+/// reach a card somebody deliberately dragged far away would undo their pan
+/// every frame.
+///
+/// The widened view then goes through [`within_zoom_floor`], because growing
+/// past what `Scene` can draw does not fail loudly. egui clamps the scale and
+/// shows a smaller window into the rectangle, so the card the expansion existed
+/// to reach ends up outside the view widened for it -- with no minimap and no
+/// fit control to find it with. Roughly forty saved cards and an 800-unit-high
+/// panel is enough to get there.
+fn view_reaching_new_cards(
+    view: egui::Rect,
+    nodes: &[CanvasNode],
+    panel: egui::Vec2,
+) -> egui::Rect {
+    let mut widened = view;
+    let mut newest: Option<egui::Rect> = None;
+    for node in nodes.iter().filter(|node| !node.placed) {
+        let rect = node_rect(node).expand(40.0);
+        widened = widened.union(rect);
+        newest = Some(rect);
+    }
+    match newest {
+        Some(newest) => within_zoom_floor(widened, newest, panel),
+        None => widened,
+    }
+}
+
 /// The view a canvas opens at when nothing has panned it yet.
 pub(crate) fn default_scene_rect(nodes: &[CanvasNode], panel: egui::Vec2) -> egui::Rect {
     const MARGIN: f32 = 40.0;
@@ -557,22 +662,16 @@ pub(crate) fn default_scene_rect(nodes: &[CanvasNode], panel: egui::Vec2) -> egu
         ),
     );
 
-    // And never wider than the zoom range can draw.
-    //
-    // `Scene` fits the rect it is given by scaling, and the scale is clamped at
-    // `ZOOM_MIN`. Cards spread across ten thousand units therefore did not fit
-    // however carefully the rectangle was computed: egui refused to zoom out
-    // far enough, and the canvas opened on empty space between them. Showing
-    // the first card at a readable size is worth more than a view that promises
-    // to contain everything and delivers nothing.
-    let widest = panel / ZOOM_MIN;
-    if panel.x > 0.0 && panel.y > 0.0 && (fitted.width() > widest.x || fitted.height() > widest.y) {
-        let anchor = nodes.first().map_or(fitted.min, |node| {
-            node_rect(node).min - egui::vec2(MARGIN, MARGIN)
-        });
-        return egui::Rect::from_min_size(anchor, fallback.size());
-    }
-    fitted
+    // And never wider than the zoom range can draw. Cards spread across ten
+    // thousand units do not fit however carefully the rectangle is computed:
+    // egui refuses to zoom out far enough and the canvas opens on empty space
+    // between them. Showing the first card at a readable size is worth more
+    // than a view that promises to contain everything and delivers nothing.
+    let anchor = nodes.first().map_or(
+        egui::Rect::from_min_size(fitted.min, fallback.size()),
+        |node| node_rect(node).expand(MARGIN),
+    );
+    within_zoom_floor(fitted, anchor, panel)
 }
 
 /// Draw the canvas, and return the rect it occupied.
@@ -605,17 +704,7 @@ pub(crate) fn render_canvas_workspace(
 
     let mut rect = saved_view.unwrap_or_else(|| default_scene_rect(&nodes, outer.size()));
 
-    // A card placed this frame that the view does not reach: widen the view.
-    //
-    // Preferring a visible slot is not always possible -- with the grid full
-    // inside the current view, every free slot is outside it, and the search
-    // has to put the card somewhere. Growing the view is what stops "somewhere"
-    // meaning "nowhere you can see". Only newly placed cards count: expanding
-    // to reach a card somebody deliberately dragged far away would undo their
-    // pan every frame.
-    for node in nodes.iter().filter(|node| !node.placed) {
-        rect = rect.union(node_rect(node).expand(40.0));
-    }
+    rect = view_reaching_new_cards(rect, &nodes, outer.size());
     let ctx = ui.ctx().clone();
 
     egui::Scene::new()
@@ -927,14 +1016,29 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     }
 
     let painter = ui.painter();
-    if node.lines_truncated {
+    if let Some(footer) = excerpt_footer(node) {
         painter.text(
             egui::pos2(rect.left() + 8.0, y),
             egui::Align2::LEFT_TOP,
-            format!("first {MAX_NODE_LINES} lines"),
+            &footer,
             egui::FontId::proportional(10.0),
             tokens.text.muted,
         );
+        // Painted text is invisible to the accessibility tree, and this is the
+        // only statement of which lines the card holds. A screen reader that
+        // cannot reach it reads a mid-file excerpt as the whole file.
+        let footer_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), y),
+            egui::vec2(NODE_WIDTH, LINE_HEIGHT),
+        );
+        let footer_id = ui.id().with(("canvas-footer", node.path.0.as_str()));
+        let response = ui.interact(footer_rect, footer_id, egui::Sense::hover());
+        let bounds = global_rect(ui, footer_rect);
+        ui.ctx().accesskit_node_builder(response.id, |builder| {
+            builder.set_role(egui::accesskit::Role::Label);
+            builder.set_label(format!("{} shows {footer}", node.accessible_name));
+            set_bounds(builder, bounds);
+        });
     }
 }
 
@@ -1201,6 +1305,75 @@ mod canvas_layout_rules {
         }
     }
 
+    /// A section whose lines start at `first_line` (zero-based), `count` long.
+    fn scrolled_section(
+        path: &str,
+        first_line: u32,
+        count: u32,
+    ) -> ExcerptSurfaceSectionProjection {
+        let mut projection = section(path);
+        projection.lines = (0..count)
+            .map(|offset| legion_ui::ui::ExcerptSurfaceLineProjection {
+                line_number: first_line + offset,
+                visible_text: format!("line {}", first_line + offset + 1),
+                range: legion_protocol::Utf16Range {
+                    start: legion_protocol::Utf16Position {
+                        line: first_line + offset,
+                        character: 0,
+                    },
+                    end: legion_protocol::Utf16Position {
+                        line: first_line + offset,
+                        character: 0,
+                    },
+                },
+                truncation_state: legion_protocol::ViewportLineTruncationState::None,
+            })
+            .collect();
+        projection
+    }
+
+    /// A card says which lines it is showing, not which lines it wishes it were.
+    ///
+    /// The excerpt is built from the buffer's saved scroll, so a file somebody
+    /// has scrolled through produces a section starting partway down it. The
+    /// card discarded every `line_number` and labelled the result "first 18
+    /// lines", which presents a mid-file excerpt as the opening of the file --
+    /// and where the tail was short enough not to be truncated, said nothing
+    /// about the lines above it at all.
+    #[test]
+    fn a_card_names_the_lines_it_is_actually_showing() {
+        // Scrolled and longer than the card: both omissions at once.
+        let long = scrolled_section("scrolled.rs", 99, super::MAX_NODE_LINES as u32 + 20);
+        let nodes = nodes_for_sections(&[long], &BTreeMap::new(), egui::Pos2::ZERO, None);
+        let footer = super::excerpt_footer(&nodes[0])
+            .expect("a truncated mid-file excerpt has something to disclose");
+        assert!(
+            footer.contains("100-") && footer.contains("longer excerpt"),
+            "an excerpt starting at line 100 was labelled {footer:?}, which tells              the reader the card starts where the file does"
+        );
+
+        // Scrolled and short: nothing is cut off the bottom, and the old label
+        // did not appear at all, so the lines above went unmentioned.
+        let short = scrolled_section("tail.rs", 99, 4);
+        let nodes = nodes_for_sections(&[short], &BTreeMap::new(), egui::Pos2::ZERO, None);
+        assert_eq!(
+            super::excerpt_footer(&nodes[0]).as_deref(),
+            Some("lines 100-103"),
+            "a short excerpt from the middle of a file must still say where it              starts; nothing else on the card does"
+        );
+
+        // From the top and complete: nothing omitted, so nothing claimed. A
+        // card that discloses when there is nothing to disclose teaches people
+        // to skip the line that matters.
+        let whole = scrolled_section("whole.rs", 0, 4);
+        let nodes = nodes_for_sections(&[whole], &BTreeMap::new(), egui::Pos2::ZERO, None);
+        assert_eq!(
+            super::excerpt_footer(&nodes[0]),
+            None,
+            "a complete excerpt from line 1 has nothing to disclose"
+        );
+    }
+
     /// Two sections naming one file produce one card.
     ///
     /// Nothing upstream promises the sections are distinct by path. Two cards
@@ -1394,6 +1567,9 @@ mod canvas_layout_rules {
             dirty: false,
             lines_truncated: true,
             lines: vec!["x".to_string(); super::MAX_NODE_LINES],
+            // A span, because the footer that makes this the tallest card is
+            // only drawn when there is a range to name in it.
+            line_span: Some((1, super::MAX_NODE_LINES as u32)),
             position: egui::Pos2::ZERO,
         };
 
@@ -1590,6 +1766,56 @@ mod canvas_layout_rules {
                 node.path.0
             );
         }
+    }
+
+    /// Widening the view to reach a new card keeps it drawable.
+    ///
+    /// `Scene` honours the rect it is handed only down to `ZOOM_MIN`. Past
+    /// that it clamps the scale and draws a smaller window into the rectangle,
+    /// so a view grown to reach a card can be a view that no longer shows it --
+    /// silently, with no minimap and no fit control to recover with. The
+    /// oversize handling lived only in `default_scene_rect`, which this later
+    /// expansion does not go through.
+    #[test]
+    fn reaching_a_new_card_never_asks_for_more_than_the_zoom_floor_can_draw() {
+        // Enough saved cards that the next default slot is far below the view:
+        // the grid wraps every few columns, so forty cards is several thousand
+        // world units of rows.
+        let panel = egui::vec2(1200.0, 800.0);
+        let mut positions = BTreeMap::new();
+        let mut sections = Vec::new();
+        for index in 0..40 {
+            let path = format!("file{index}.rs");
+            positions.insert(
+                path.clone(),
+                by_person(super::slot_position_from(egui::Pos2::ZERO, index)),
+            );
+            sections.push(section(&path));
+        }
+        sections.push(section("newest.rs"));
+
+        let view = egui::Rect::from_min_size(egui::Pos2::ZERO, panel);
+        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO, Some(view));
+        let newest = nodes
+            .iter()
+            .find(|node| node.path.0 == "newest.rs")
+            .expect("the card just opened must be on the canvas");
+        assert!(
+            !newest.placed,
+            "this test is about a card the canvas placed itself; with a saved              position it would never widen the view and the assertion below              would hold for the wrong reason"
+        );
+
+        let widened = super::view_reaching_new_cards(view, &nodes, panel);
+        let drawable = panel / super::ZOOM_MIN;
+        assert!(
+            widened.width() <= drawable.x && widened.height() <= drawable.y,
+            "the view grew to {widened:?}, past the {drawable:?} that `Scene`              can draw at the zoom floor -- egui clamps and shows less than this"
+        );
+        assert!(
+            widened.contains_rect(super::node_rect(newest)),
+            "the card the view was widened for sits outside it at {:?}, which is              the failure the widening exists to prevent",
+            super::node_rect(newest)
+        );
     }
 
     #[test]
