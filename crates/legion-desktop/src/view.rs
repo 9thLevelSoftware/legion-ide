@@ -1842,17 +1842,22 @@ impl ProjectionView {
         }
 
         render_toast_overlay(ui.ctx(), &model, &mut actions);
-        render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
         // Only over the editor.
         //
-        // Both are overlays on the central region that dispatch buffer
-        // mutations, and both are reached by controls rather than by keys --
-        // the find bar's Replace and Replace All, and the completion popup's
-        // Enter, Tab and row click. Switching to the canvas changed the centre
-        // surface and left them drawn, so accepting a completion or pressing
-        // Replace edited a file that was not on screen, past a gate that only
-        // ever looked at key events.
+        // All three are overlays on the central region that belong to the
+        // buffer. Two of them dispatch mutations and are reached by controls
+        // rather than by keys -- the find bar's Replace and Replace All, and the
+        // completion popup's Enter, Tab and row click -- so switching to the
+        // canvas left them drawn and editing a file that was not on screen,
+        // past a gate that only ever looked at key events.
+        //
+        // The hover tooltip mutates nothing, and was left out of this gate for
+        // that reason. It still described a symbol in a file the canvas had
+        // replaced: a tooltip that survives the thing it points at is a label
+        // on the wrong object, and on this surface every card is a different
+        // file it could plausibly belong to.
         if state.center_surface == CenterSurface::Editor {
+            render_hover_tooltip(ui.ctx(), snapshot, state, &mut actions);
             render_completion_popup(ui.ctx(), snapshot, state, &mut actions);
             render_find_bar(ui.ctx(), snapshot, &mut actions);
         }

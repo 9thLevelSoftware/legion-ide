@@ -607,6 +607,111 @@ fn a_keyboard_move_survives_focus_leaving_mid_gesture() {
     );
 }
 
+/// A hover tooltip does not outlive the editor it describes.
+///
+/// The completion popup and the find bar were gated to the editor because they
+/// dispatch buffer mutations. The hover tooltip mutates nothing, and was left
+/// out for that reason -- but it still describes a symbol in a file the canvas
+/// has replaced. A tooltip that survives the thing it points at is a label on
+/// the wrong object, and here every card is a different file it could
+/// plausibly belong to.
+#[test]
+fn a_hover_tooltip_does_not_survive_the_switch_to_the_canvas() {
+    let workspace = workspace_with_files("legion_desktop_canvas_hover");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let snapshot = app.runtime_snapshot();
+    let buffer_id = snapshot
+        .active_buffer_projection
+        .buffer_id
+        .expect("a file is open");
+    app.runtime_mut_for_test()
+        .app_mut_for_test()
+        .ingest_lsp_hover_response_for_buffer(
+            buffer_id,
+            &serde_json::json!({
+                "contents": {"kind": "markdown", "value": "fn marker_from_the_editor"},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 3}
+                }
+            }),
+            None,
+        )
+        .expect("inject hover");
+    // The runtime caches its snapshot, so the injected hover has to be picked up
+    // by a refresh before any frame can draw it.
+    app.runtime_mut_for_test()
+        .handle_action(legion_desktop::bridge::DesktopAction::SetCenterSurface {
+            surface: legion_desktop::view::CenterSurface::Editor,
+        })
+        .expect("staying on the editor must refresh the projection");
+    // Visibility is its own flag, set when a hover gesture opens the tooltip.
+    app.runtime_mut_for_test()
+        .set_hover_tooltip_visible_for_test(true);
+
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        rendered_text(&editor)
+            .iter()
+            .any(|line| line == "Esc dismiss"),
+        "the fixture must show the tooltip over the editor first, or the assertion below          holds for a tooltip that was never there; frame was {:?}",
+        rendered_text(&editor)
+    );
+
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card alpha.rs").is_some(),
+        "the canvas must be showing"
+    );
+    assert!(
+        !rendered_text(&canvas)
+            .iter()
+            .any(|line| line == "Esc dismiss"),
+        "a tooltip describing a symbol in the hidden editor is still on screen over the          canvas; frame was {:?}",
+        rendered_text(&canvas)
+    );
+}
+
+/// A modified arrow belongs to whoever else claimed it.
+///
+/// `Alt+ArrowRight`/`Left` navigate proposal review hunks, dispatched from the
+/// shell's keyboard handler, which does not know that a card has focus. Reading
+/// the same chord as a nudge made a documented review shortcut move and persist
+/// an unrelated card as a side effect -- and the card had focus precisely
+/// because somebody had been arranging it, so the wrong card was the one they
+/// cared about.
+#[test]
+fn a_modified_arrow_does_not_move_a_focused_card() {
+    let workspace = workspace_with_files("legion_desktop_canvas_alt_arrow");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let card = accesskit_id(&canvas, "Card alpha.rs").expect("alpha.rs must have a card");
+    let before = clickable_center(&canvas, "Card alpha.rs").expect("the card must be on screen");
+    let _ = focus(&mut app, card);
+
+    for modifiers in [egui::Modifiers::ALT, egui::Modifiers::COMMAND] {
+        let frame = press_key(&mut app, egui::Key::ArrowRight, modifiers);
+        let after = clickable_center(&frame, "Card alpha.rs").expect("the card must still exist");
+        assert_eq!(
+            after, before,
+            "a modified arrow moved the focused card, so a shortcut belonging to another              surface rearranges this one as a side effect"
+        );
+    }
+
+    // Non-vacuity: the same key with no modifier still moves it, so this is a
+    // test about modifiers and not about a gesture that stopped working.
+    let plain = press_key(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    let moved = clickable_center(&plain, "Card alpha.rs").expect("the card must still exist");
+    assert!(
+        moved.x > before.x,
+        "an unmodified arrow no longer moves the card, so the guard above is measuring          a feature that is simply gone"
+    );
+}
+
 /// A held arrow key writes the arrangement once, at the end.
 ///
 /// Every repeat frame emitted a settled move, and a settled move validates,

@@ -983,6 +983,16 @@ const NUDGE_COARSE: f32 = 5.0;
 /// keyboard to do once it arrived. Activation switched tabs and that was all.
 fn nudged_position(ui: &egui::Ui, from: egui::Pos2) -> Option<egui::Pos2> {
     let (mut delta, coarse) = ui.input(|input| {
+        // Alt and Command arrows belong to somebody else.
+        //
+        // `Alt+ArrowRight`/`Left` navigate proposal review hunks, dispatched
+        // from the shell's keyboard handler, which does not know or care that a
+        // card has focus. Treating the same chord as a nudge made the
+        // documented review shortcut move and persist an unrelated card as a
+        // side effect. Shift stays allowed: it is this gesture's own modifier.
+        if input.modifiers.alt || input.modifiers.command || input.modifiers.ctrl {
+            return (egui::Vec2::ZERO, false);
+        }
         let mut delta = egui::Vec2::ZERO;
         if input.key_pressed(egui::Key::ArrowLeft) {
             delta.x -= 1.0;
