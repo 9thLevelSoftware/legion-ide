@@ -6410,6 +6410,23 @@ impl ActiveDocumentController {
         None
     }
 
+    /// Every file with an open buffer right now.
+    ///
+    /// The active buffer is included explicitly rather than assumed to be in
+    /// the map, mirroring `buffer_id_for_path`, which checks it first for the
+    /// same reason.
+    fn open_file_ids(&self) -> std::collections::HashSet<FileId> {
+        let mut ids: std::collections::HashSet<FileId> = self
+            .buffer_file_metadata
+            .values()
+            .map(|meta| meta.identity.file_id)
+            .collect();
+        if let Some(meta) = &self.active_file_metadata {
+            ids.insert(meta.identity.file_id);
+        }
+        ids
+    }
+
     fn require_workspace_context(&self) -> Result<ActiveWorkspaceContext, AppCompositionError> {
         let opened = self
             .opened_workspace
@@ -6485,6 +6502,19 @@ struct LanguageRequestInput {
     snapshot_id: legion_protocol::SnapshotId,
     buffer_version: legion_protocol::BufferVersion,
     event_context: EventContext,
+    /// Files with an open buffer at the moment this request was built.
+    ///
+    /// The Problems panel carries rows forward across reads, and a row is only
+    /// worth carrying while something can still retire it. A server publishes
+    /// diagnostics for open buffers and `ingest_lsp_diagnostic_batch` drops any
+    /// notification -- including a clear -- for a path with no open buffer, so
+    /// once a file is closed its rows can never be updated or withdrawn. Held
+    /// past that point they outlive deletes and renames too, and the panel goes
+    /// on offering to navigate to a path that is gone.
+    ///
+    /// The workflow that carries the rows has no view of open documents, so the
+    /// set travels with the request that reaches it.
+    open_files: std::collections::HashSet<FileId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6634,8 +6664,12 @@ impl LanguageToolingWorkflow {
             && self.projection.buffer_id == Some(input.buffer_id)
             && self.projection.file_id == Some(input.metadata.identity.file_id);
         if !same_identity {
-            self.projection =
-                language_projection_for_new_identity(&self.projection, input.workspace_id);
+            self.projection = language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            );
         }
 
         self.projection.workspace_id = Some(input.workspace_id);
@@ -6725,7 +6759,12 @@ impl LanguageToolingWorkflow {
         let mut projection = if same_identity {
             self.projection.clone()
         } else {
-            language_projection_for_new_identity(&self.projection, input.workspace_id)
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
 
         projection.workspace_id = Some(input.workspace_id);
@@ -6796,7 +6835,12 @@ impl LanguageToolingWorkflow {
         let previous_projection = if same_identity {
             self.projection.clone()
         } else {
-            language_projection_for_new_identity(&self.projection, input.workspace_id)
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let document = SourceDocument::with_versions(
@@ -6929,6 +6973,19 @@ impl LanguageToolingWorkflow {
                         spliced.extend(problems.iter().cloned());
                         placed = true;
                     }
+                    continue;
+                }
+                // A closed file's rows go the same way. The server publishes
+                // for open buffers, and the notification handler drops
+                // anything -- a clear included -- for a path with no open
+                // buffer, so once a file is closed its rows can never be
+                // updated or withdrawn. Held past that they survive deletes
+                // and renames too, and the panel keeps offering to navigate
+                // somewhere that is gone.
+                if existing
+                    .file_id
+                    .is_some_and(|file| !input.open_files.contains(&file))
+                {
                     continue;
                 }
                 spliced.push(existing.clone());
@@ -27701,6 +27758,7 @@ impl AppComposition {
             .active_principal_id
             .clone()
             .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        let open_files = self.active_documents.open_file_ids();
         Ok(LanguageRequestInput {
             workspace_id: metadata.identity.workspace_id,
             buffer_id,
@@ -27710,6 +27768,7 @@ impl AppComposition {
             snapshot_id,
             buffer_version,
             event_context,
+            open_files,
         })
     }
 

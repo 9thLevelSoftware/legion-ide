@@ -2230,6 +2230,28 @@ impl DesktopRuntime {
             .map_or(clamped, |(index, _)| index)
     }
 
+    /// Whether the remembered problem is still somewhere in the list.
+    ///
+    /// A key that names nothing is worse than no key at all. The resolver falls
+    /// back to the clamped index and the reader sees a sensible row selected --
+    /// but the key still names the diagnostic that vanished, so if the server
+    /// republishes it the highlight snaps back to it without the reader having
+    /// moved, and the next activation opens it. Adopting the fallback row's key
+    /// makes what the reader can see and what the code remembers the same
+    /// thing, which is the property this whole mechanism exists to hold.
+    fn remembered_problem_is_listed(&self) -> bool {
+        let problems = &self
+            .shell
+            .projection_snapshot()
+            .language_tooling_projection
+            .problems;
+        self.problems_selected_key.as_ref().is_some_and(|key| {
+            problems
+                .iter()
+                .any(|problem| SelectedProblemKey::of(problem) == *key)
+        })
+    }
+
     /// Record which problem the index currently points at.
     fn remember_selected_problem(&mut self) {
         self.problems_selected_key = self
@@ -3536,7 +3558,8 @@ impl DesktopRuntime {
         // nothing on screen said it happened. Capturing the key the first time
         // a non-empty list is seen makes the default as durable as a chosen
         // one.
-        if self.problems_selected_key.is_none() {
+        if !self.remembered_problem_is_listed() {
+            self.problems_selected_index = self.resolved_problems_selected_index();
             self.remember_selected_problem();
         }
         Ok(())

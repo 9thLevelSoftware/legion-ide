@@ -1159,3 +1159,94 @@ fn replacing_index_rows_leaves_the_other_rows_where_they_were() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// A closed file's diagnostics leave the panel with it.
+///
+/// A server publishes for open buffers, and `ingest_lsp_diagnostic_batch` drops
+/// every notification -- a clear included -- for a path with no open buffer. So
+/// once a file is closed its rows can never be updated or withdrawn by anyone.
+/// Carried forward regardless they outlive deletes and renames too, and the
+/// panel goes on listing, and offering to navigate to, a path that is gone.
+///
+/// This is the counterpart to the workspace rule: a row is worth keeping only
+/// while something can still retire it.
+#[test]
+fn problems_for_a_closed_file_leave_the_panel() {
+    let root = create_root();
+    let closing = root.join("closing.rs");
+    let staying = root.join("staying.rs");
+    std::fs::write(&closing, "fn closing() {}\n").expect("write closing.rs");
+    std::fs::write(&staying, "fn staying() {}\n").expect("write staying.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+
+    app.open_file(closing.to_string_lossy())
+        .expect("open closing.rs");
+    let closing_buffer = app.active_buffer_id().expect("closing.rs buffer");
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        closing_buffer,
+        &json!({
+            "uri": "file:///workspace/closing.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0005",
+                "source": "rustc",
+                "message": "a problem in closing.rs"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for closing.rs");
+
+    app.open_file(staying.to_string_lossy())
+        .expect("open staying.rs");
+    let staying_buffer = app.active_buffer_id().expect("staying.rs buffer");
+
+    let lists_closing = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0005"))
+    };
+    assert!(
+        lists_closing(&app),
+        "closing.rs's diagnostic must be listed while its buffer is open -- the \
+         panel spans open files and that is the rule this must not break"
+    );
+
+    app.close_tab(closing_buffer).expect("close closing.rs");
+
+    // Any read republishes the carried rows, which is where the rule applies.
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        staying_buffer,
+        &json!({"uri": "file:///workspace/staying.rs", "diagnostics": []}),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for staying.rs");
+
+    assert!(
+        !lists_closing(&app),
+        "a closed file's rows must leave -- nothing can update or withdraw them \
+         any more, so they outlive deletes and renames and send the reader at a \
+         path that may not exist; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

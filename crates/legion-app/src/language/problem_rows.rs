@@ -106,6 +106,8 @@ pub(crate) fn language_quick_fixes_for_problems(
 pub(crate) fn language_projection_for_new_identity(
     previous: &LanguageToolingProjection,
     workspace: WorkspaceId,
+    incoming: FileId,
+    open_files: &std::collections::HashSet<FileId>,
 ) -> LanguageToolingProjection {
     let mut projection = LanguageToolingProjection::empty();
     projection.operations = previous.operations.clone();
@@ -122,13 +124,28 @@ pub(crate) fn language_projection_for_new_identity(
         // Index-owned rows are dropped here for the same reason the read leg
         // drops them: nothing retracts them, so a row kept past the buffer it
         // was computed for is a row that can never leave.
+        //
+        // Closed files go for a version of the same reason. A server publishes
+        // for open buffers, and the notification handler drops anything --
+        // including a clear -- for a path with no open buffer, so a closed
+        // file's rows can never be updated or withdrawn either. Held past the
+        // close they survive deletes and renames as well, and the panel keeps
+        // offering to navigate somewhere that is gone.
         projection.problems = previous
             .problems
             .iter()
             .filter(|problem| problem.source_label.as_deref() != Some("legion-index"))
+            .filter(|problem| {
+                problem
+                    .file_id
+                    .is_none_or(|file| open_files.contains(&file))
+            })
             .cloned()
             .collect();
-        projection.quick_fixes = language_quick_fixes_for_problems(&projection.problems);
+        // Prioritised, like every other rebuild of this capped view. This one
+        // is reached by the asynchronous read-response path, which does not go
+        // through either leg that had learned to do it.
+        projection.quick_fixes = language_quick_fixes_prioritizing(&projection.problems, incoming);
     }
     projection
 }

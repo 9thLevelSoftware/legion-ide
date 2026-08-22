@@ -538,3 +538,56 @@ fn the_default_selection_survives_a_diagnostic_arriving_ahead_of_it() {
         rendered_text(&after)
     );
 }
+
+/// A vanished selection does not come back to claim the highlight.
+///
+/// When the selected diagnostic disappears the resolver falls back to the
+/// clamped index and the reader sees a sensible row selected. The remembered
+/// key still named the diagnostic that went away, though -- so republishing it
+/// snapped the highlight back to it without the reader moving, and the next
+/// activation opened it. What the reader can see and what the code remembers
+/// have to be the same thing; that is the entire point of remembering.
+#[test]
+fn a_returning_diagnostic_does_not_steal_the_highlight_back() {
+    let workspace = TempWorkspace::new("legion_desktop_problems_panel");
+    let (mut app, file) =
+        app_with_diagnostics(&workspace, &[(4, "first problem"), (8, "second problem")]);
+
+    let panel = show_problems_panel(&mut app, 2);
+    assert!(
+        row_is_selected(&panel, "main.rs:4"),
+        "the first row starts selected; rendered text was {:?}",
+        rendered_text(&panel)
+    );
+
+    // The selected diagnostic is fixed and disappears.
+    publish_diagnostics(app.runtime_mut_for_test(), &file, &[(8, "second problem")]);
+    let fixed = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        row_is_selected(&fixed, "main.rs:8"),
+        "the selection should fall back to the row that remains; rendered text \
+         was {:?}",
+        rendered_text(&fixed)
+    );
+
+    // It comes back -- reintroduced, or the server simply republishes it.
+    publish_diagnostics(
+        app.runtime_mut_for_test(),
+        &file,
+        &[(4, "first problem"), (8, "second problem")],
+    );
+    let returned = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        row_is_selected(&returned, "main.rs:8"),
+        "the highlight must stay where the reader last saw it; a diagnostic \
+         returning after the selection moved on must not reclaim it; rendered \
+         text was {:?}",
+        rendered_text(&returned)
+    );
+    assert!(
+        !row_is_selected(&returned, "main.rs:4"),
+        "the returning diagnostic must not be selected; rendered text was {:?}",
+        rendered_text(&returned)
+    );
+}
