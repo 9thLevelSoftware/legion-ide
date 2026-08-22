@@ -4000,6 +4000,17 @@ impl DesktopEframeApp {
         self.runtime.session_saves
     }
 
+    /// Whether a focus-traversal chord is waiting for the focus change it causes.
+    ///
+    /// Exposed because the rule it encodes -- that `Ctrl+Tab` is a tab shortcut
+    /// and not focus navigation -- cannot be observed through the rendered
+    /// surface: a click leaves no widget focused in the headless harness, so a
+    /// test driving it end to end passes whether or not the flag is armed.
+    #[doc(hidden)]
+    pub fn focus_navigation_pending_for_test(&self) -> bool {
+        self.focus_navigation_pending
+    }
+
     /// Return the real editor allocation recorded by the last full frame.
     #[doc(hidden)]
     pub fn last_editor_rect_for_test(&self) -> Option<egui::Rect> {
@@ -4195,7 +4206,16 @@ impl DesktopEframeApp {
         // loses the character *and* presses the control.
         // Tab, or an assistive technology asking for a control by name. Both are
         // somebody navigating to it; a click and a closing overlay are not.
-        if input.key_pressed(egui::Key::Tab)
+        // Unmodified Tab, or Shift+Tab going backwards: those are the chords
+        // egui itself treats as focus traversal.
+        //
+        // `Ctrl+Tab` is the published Next Tab shortcut and moves no widget
+        // focus at all, so latching it left the flag armed -- and the next focus
+        // change, from a click, was then misread as navigation. A leading space
+        // after that was swallowed as an activation.
+        let traversal_tab = input.key_pressed(egui::Key::Tab)
+            && (!input.modifiers.any() || input.modifiers.shift_only());
+        if traversal_tab
             || input.events.iter().any(|event| {
                 matches!(
                     event,

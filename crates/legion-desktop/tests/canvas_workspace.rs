@@ -489,6 +489,49 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// A shortcut that happens to use Tab is not focus navigation.
+///
+/// `Ctrl+Tab` is the published Next Tab shortcut and moves no widget focus at
+/// all. Latching it left the navigation flag armed, so the next focus change --
+/// from a click -- was misread as deliberate, and a leading space after that
+/// was swallowed as an activation instead of typed.
+///
+/// Asserted on the flag rather than through the surface: a click leaves no
+/// widget focused in this harness, so an end-to-end version passes whether or
+/// not the flag is armed, which is how the first attempt at this test fooled me.
+#[test]
+fn a_modified_tab_does_not_count_as_focus_navigation() {
+    let workspace = workspace_with_files("legion_desktop_canvas_modified_tab");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let _ = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    let _ = press_key(&mut app, egui::Key::Tab, egui::Modifiers::COMMAND);
+    assert!(
+        !app.focus_navigation_pending_for_test(),
+        "a tab *shortcut* armed focus navigation, so the next focus change from a click is misread as deliberate"
+    );
+
+    let _ = press_key(&mut app, egui::Key::Tab, egui::Modifiers::CTRL);
+    assert!(
+        !app.focus_navigation_pending_for_test(),
+        "Ctrl+Tab armed focus navigation"
+    );
+
+    // And the traversal chords still do, or the rule has swallowed the feature.
+    let _ = app.run_headless_full_frame(full_frame_input(vec![egui::Event::Key {
+        key: egui::Key::Tab,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]));
+    assert!(
+        app.focus_navigation_pending_for_test(),
+        "plain Tab is focus traversal and must still arm it"
+    );
+}
+
 /// Navigating to a control buys one activation, not tenure.
 ///
 /// The provenance is recomputed only when focus *changes*, so a control tabbed
