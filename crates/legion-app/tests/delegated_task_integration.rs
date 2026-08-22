@@ -1043,6 +1043,69 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// A Delegate turn keeps the route it was authorized against.
+///
+/// The route request was built accurately, used for the broker decision, and
+/// then dropped: nothing in the outcome, the projection, or the audit trail said
+/// where the turn went. So a reachable UI operation could upload the buffer
+/// excerpt with no retained evidence of the destination -- which is the evidence
+/// the Assist path keeps, and the reason it keeps it.
+#[test]
+fn a_delegate_turn_keeps_the_route_it_was_authorized_against() {
+    let root = temp_workspace("delegate_route_evidence");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-route".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+
+    assert!(
+        !outcome.provider_route_request.route_id.is_empty(),
+        "the turn must name the route it was authorized against"
+    );
+    assert!(
+        !outcome.provider_route_request.provider_id.is_empty(),
+        "the route must name the provider that answered"
+    );
+    assert_eq!(
+        outcome.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Completed,
+        "a turn that produced an answer must not report its route as anything else"
+    );
+
+    // And the audit trail holds it, which is what survives the session.
+    let manifest = app
+        .replay_ai_run(legion_protocol::AgentRunId(format!(
+            "delegate-chat-run:{}",
+            outcome.provider_route_request.correlation_id.0
+        )))
+        .expect("the delegate run must be replayable from metadata-only storage");
+    assert!(
+        manifest
+            .provider_route_ids
+            .contains(&outcome.provider_route_request.route_id),
+        "the audit record does not name the route the turn took: {:?}",
+        manifest.provider_route_ids
+    );
+}
+
 /// The budget evaluation names the proposal it is supposed to gate.
 ///
 /// `permission_budget_gate` only considers refused evaluations whose action

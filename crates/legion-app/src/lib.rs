@@ -2620,6 +2620,15 @@ pub struct AppDelegateChatOutcome {
     pub assistant_message_id: String,
     /// Number of retrieval citations attached to the assistant response.
     pub citation_count: usize,
+    /// The provider route this turn was authorized against.
+    ///
+    /// Delegate chat built an accurate route request, used it for the broker
+    /// decision, and dropped it -- so a reachable UI operation could upload the
+    /// buffer excerpt with nothing retained about the destination. Assist keeps
+    /// its route; this is the same evidence for the other path.
+    pub provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
+    /// How the provider invocation ended.
+    pub invocation_state: legion_protocol::AssistedAiProviderInvocationState,
 }
 
 #[derive(Debug, Clone)]
@@ -27320,12 +27329,53 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
+        // The route this turn actually took, kept rather than dropped.
+        //
+        // A refused route is recorded as refused, a completed one as completed,
+        // and the audit record names the destination either way -- which is the
+        // evidence the Assist path already keeps and this one did not.
+        let invocation_state = if route_completed {
+            legion_protocol::AssistedAiProviderInvocationState::Completed
+        } else {
+            legion_protocol::AssistedAiProviderInvocationState::Refused
+        };
+        let delegate_run_id = legion_protocol::AgentRunId(format!(
+            "delegate-chat-run:{}",
+            event_context.correlation_id.0
+        ));
+        let replay_manifest = legion_protocol::AgentReplayManifest {
+            run_id: delegate_run_id.clone(),
+            transitions: Vec::new(),
+            context_manifests: Vec::new(),
+            provider_route_ids: vec![provider_route_request.route_id.clone()],
+            proposal_ids: Vec::new(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        self.persist_phase4_runtime_records(
+            &delegate_run_id,
+            &provider_route_request.route_id,
+            invocation_state,
+            if route_completed {
+                "phase4.provider.route.completed"
+            } else {
+                "phase4.provider.route.refused"
+            },
+            event_context,
+            &replay_manifest,
+        )?;
+
         let projection = self.current_delegated_task_projection(TimestampMillis::now());
         Ok(AppDelegateChatOutcome {
             projection,
             user_message_id,
             assistant_message_id,
             citation_count: citation_ids.len(),
+            provider_route_request,
+            invocation_state,
         })
     }
 
