@@ -5649,14 +5649,9 @@ fn render_assist_rail(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Assist", DesktopProductMode::Assist);
-    // Assist blocks for two different reasons and only one of them has a
-    // resolution the app can perform. A missing buffer is fixed by opening one,
-    // so that resolution is a button. A build with no inline prediction
-    // provider is not fixed by anything on this screen, and rendering its
-    // resolution as a button gave "Unavailable" a click that opened the file
-    // palette -- a control that promises nothing and then does something
-    // unrelated. That case reads as text, the way the Delegate rail already
-    // presents a resolution nobody can press.
+    // Only the missing-buffer block has a resolution this screen can perform;
+    // every other resolution reads as text, the way the Delegate rail already
+    // presents one nobody can press.
     if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
         let resolvable_here = snapshot.active_buffer_projection.buffer_id.is_none();
         surface_card(ui, |ui| {

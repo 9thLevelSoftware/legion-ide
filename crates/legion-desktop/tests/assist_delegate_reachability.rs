@@ -231,34 +231,6 @@ fn assist_without_a_buffer_blocks_on_the_buffer_and_offers_to_open_one() {
     );
 }
 
-/// A block nobody can resolve does not offer a button.
-///
-/// The Assist prerequisite card rendered every resolution as a control that
-/// opens the file palette, because the only block it once had was a missing
-/// buffer. Gating `Predict` on the build added a second one, and "Unavailable"
-/// became a button that promised nothing and then opened an unrelated palette.
-/// A resolution the app cannot perform reads as text, the way the Delegate rail
-/// already presents one.
-#[cfg(not(any(feature = "ai", feature = "offline")))]
-#[test]
-fn a_block_the_app_cannot_resolve_offers_no_control() {
-    let workspace = fixture("legion_desktop_assist_unresolvable_block");
-    let mut app = DesktopEframeApp::new(runtime_with_open_file(workspace.path()));
-    switch_mode(&mut app, "Assist");
-
-    let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
-    let text = rendered_text(&frame);
-    assert!(
-        text.iter()
-            .any(|line| line == "This build has no inline prediction provider."),
-        "the block must still say what is missing; frame was {text:?}"
-    );
-    assert!(
-        clickable_center(&frame, "Unavailable").is_none(),
-        "\"Unavailable\" is a state, not a step -- it must not be pressable;          frame was {text:?}"
-    );
-}
-
 /// Predict is offered only where something can answer it.
 ///
 /// A build with neither `ai` nor `offline` compiles `legion-app`'s
@@ -301,6 +273,14 @@ fn predict_is_offered_only_where_a_provider_can_answer_it() {
             text.iter()
                 .any(|line| line == "This build has no inline prediction provider."),
             "a blocked surface must say what is missing rather than going quiet;              frame was {text:?}"
+        );
+        // The prerequisite card rendered every resolution as a button that
+        // opens the file palette, because a missing buffer had been its only
+        // block. Gating on the build added a second, and "Unavailable" became a
+        // control that promises nothing and then does something unrelated.
+        assert!(
+            clickable_center(&frame, "Unavailable").is_none(),
+            "\"Unavailable\" is a state, not a step -- it must not be pressable;              frame was {text:?}"
         );
     }
 }

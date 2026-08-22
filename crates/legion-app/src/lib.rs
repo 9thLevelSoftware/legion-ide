@@ -1592,10 +1592,12 @@ pub enum AppDelegatedTaskExecutionOutcome {
 /// Product-facing AI provider preference for Assist / Delegate composition paths.
 ///
 /// **Local-first default (`Auto`):** try Ollama loopback when a fast TCP probe
-/// succeeds, else Anthropic BYOK when credentials exist, else deterministic fixture.
+/// succeeds, else the deterministic fixture. `Auto` does not reach a remote
+/// provider: a metered upload of the buffer excerpt is a decision somebody
+/// makes, not a fallback they discover afterwards. Select `Anthropic` for that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProductAiProviderPreference {
-    /// Local-first auto routing (Ollama → Anthropic → fixture).
+    /// Local-first auto routing (Ollama → fixture; never remote).
     #[default]
     Auto,
     /// Force Ollama loopback when reachable; else fixture.

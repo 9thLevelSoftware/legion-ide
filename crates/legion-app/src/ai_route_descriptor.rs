@@ -232,7 +232,29 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
             format!("/{path}")
         })
         .unwrap_or_default();
-    format!("https://{}:{}{}", target.host, port, path)
+    // Brackets come back for the URL, having been stripped for the policy.
+    //
+    // The two representations are not the same string and never were: a policy
+    // list is written `::1`, and a URL authority has to be `[::1]` or the colons
+    // in the address are read as the port separator. Rebuilding
+    // `https://2001:db8::1:8080/v1` produces a URL nothing can parse, so every
+    // request fails against an endpoint policy had just authorized -- which
+    // reads as the provider being down.
+    format!(
+        "https://{}:{}{}",
+        url_authority_host(&target.host),
+        port,
+        path
+    )
+}
+
+/// A host as a URL authority writes it: an IPv6 literal wears its brackets.
+fn url_authority_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 /// The Anthropic endpoint this build will actually contact.
@@ -396,6 +418,37 @@ mod delegate_chat_route_honesty_tests {
                  written {expected_host:?} can never match it"
             );
             assert_eq!(target.port, expected_port, "{base} lost or invented a port");
+        }
+    }
+
+    /// An IPv6 host is bracketed again when it is written back into a URL.
+    ///
+    /// The policy representation and the URL representation are different
+    /// strings on purpose: an allowlist says `::1` and a URL authority has to
+    /// say `[::1]`, or the colons in the address are read as a port separator.
+    /// Normalizing for the first and then reusing it for the second built
+    /// `https://2001:db8::1:8080/v1`, which nothing can parse -- so every
+    /// request failed against an endpoint policy had just authorized.
+    #[test]
+    fn an_ipv6_host_is_bracketed_again_when_it_becomes_a_url() {
+        for (base, expected) in [
+            (
+                "http://[2001:db8::1]:8080/v1",
+                "https://[2001:db8::1]:8080/v1",
+            ),
+            // Loopback keeps its scheme -- and its brackets, which is the
+            // half of this the early return has always got right.
+            ("http://[::1]:11434", "http://[::1]:11434"),
+            (
+                "http://proxy.internal:8080/v1",
+                "https://proxy.internal:8080/v1",
+            ),
+        ] {
+            assert_eq!(
+                super::enforce_https_for_remote(base),
+                expected,
+                "{base} was rewritten into a URL the client cannot parse"
+            );
         }
     }
 
