@@ -1043,12 +1043,582 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// An Assist proposal can be approved from the surface that created it.
+///
+/// A rail command registers its proposal in `Created`, and the lifecycle only
+/// permits Created -> Validated -> Previewed -> Approved. If approval did not
+/// walk those steps, the panel would offer an Approve whose only outcome is a
+/// refusal -- which is the "approve turns into rejected" behaviour the dogfood
+/// journal recorded.
+#[test]
+fn an_assist_proposal_can_be_approved_from_the_surface_that_created_it() {
+    let root = temp_workspace("assist_approve_lifecycle");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-approve".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    match app
+        .dispatch_ui_intent(legion_ui::CommandDispatchIntent::ApproveProposal { proposal_id })
+        .expect("approving a freshly created proposal must not error")
+    {
+        legion_app::AppCommandOutcome::ProposalLifecycleUpdated(
+            legion_protocol::ProposalResponse::Approved(_),
+        ) => {}
+        other => panic!(
+            "the surface offers an Approve whose only outcome is {other:?}, which is the lifecycle gap the dogfood journal recorded"
+        ),
+    }
+}
+
+/// A proposal that has moved on says so, while keeping what its run recorded.
+///
+/// Storing the run's trust projections fixed the budget being discarded and
+/// created the opposite defect: the checklist and the checkpoint projection were
+/// captured at `Created` and served forever, so a proposal that had been
+/// approved or applied still reported `Created` with its lifecycle gate blocked
+/// -- next to a ledger row saying otherwise.
+#[test]
+fn a_proposal_that_moves_on_keeps_its_route_data_and_reports_its_state() {
+    let root = temp_workspace("assist_lifecycle_refresh");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-lifecycle".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    let created = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert_eq!(
+        created.approval_checklist_projection.lifecycle_state,
+        legion_protocol::ProposalLifecycleState::Created,
+        "the fixture must start at Created, or the assertion below proves nothing"
+    );
+
+    // Driven through the lifecycle seam rather than a UI path: what is under
+    // test is the projection following the ledger, not how it got there.
+    app.force_proposal_lifecycle_state_for_test(
+        proposal_id,
+        legion_protocol::ProposalLifecycleState::Approved,
+    );
+
+    let approved = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert_ne!(
+        approved.approval_checklist_projection.lifecycle_state,
+        legion_protocol::ProposalLifecycleState::Created,
+        "the checklist still reports Created after approval, so its lifecycle gate stays blocked while the ledger says the proposal has moved on"
+    );
+    assert_eq!(
+        approved.permission_budget_projection.projection_id,
+        outcome.permission_budget_projection.projection_id,
+        "refreshing the lifecycle threw away the run's own budget, which is the defect storing it was meant to fix"
+    );
+}
+
+/// The projections a reviewer sees are the ones the run built.
+///
+/// The selected-proposal path rebuilds trust projections from the proposal row,
+/// which carries no route -- so it cannot tell a remote run from a local one and
+/// hard-codes consent as never required. A run's own budget, with its
+/// proposal-linked evaluation, was therefore computed and then replaced on the
+/// one path that renders. Linking the evaluation to the proposal is worth
+/// nothing if the projection carrying it is discarded before anybody reads it.
+#[test]
+fn the_selected_proposal_shows_the_projections_its_run_produced() {
+    let root = temp_workspace("assist_selected_projection");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-selected".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    let rendered = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    let evaluations = &rendered.permission_budget_projection.evaluations;
+    assert!(
+        !evaluations.is_empty(),
+        "the rendered budget carries no evaluation at all, so there is nothing for the approval gate to read"
+    );
+    assert!(
+        evaluations
+            .iter()
+            .all(|evaluation| evaluation.action.proposal_id == Some(proposal_id)),
+        "the rendered budget was rebuilt without the proposal link the run established, so any refusal in it is invisible to the approval gate: {evaluations:?}"
+    );
+    assert_eq!(
+        rendered.permission_budget_projection.projection_id,
+        outcome.permission_budget_projection.projection_id,
+        "the projection on screen is not the one the run produced"
+    );
+}
+
+/// A background Delegate turn records how it ended, not only that it began.
+///
+/// The record written when the worker starts says `Streaming`, which is honest
+/// at that moment and permanent without this: successful, empty and failed
+/// provider calls were all audited as streaming forever, so the audit trail
+/// could never answer whether a remote turn had finished.
+#[test]
+fn a_background_delegate_turn_records_its_ending() {
+    let root = temp_workspace("delegate_terminal_state");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-terminal".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+    let run_id = legion_protocol::AgentRunId(format!(
+        "delegate-chat-run:{}",
+        outcome.provider_route_request.correlation_id.0
+    ));
+
+    // The synchronous fixture path ends inside `send_delegate_chat`, so this
+    // asserts the invariant that matters either way: whatever the audit trail
+    // says about this run, it is not that the turn is still streaming once the
+    // turn is over.
+    while app.poll_product_ai_stream() {}
+
+    let manifest = app
+        .replay_ai_run(run_id)
+        .expect("the delegate run must be replayable from metadata-only storage");
+    assert!(
+        !manifest.provider_route_ids.is_empty(),
+        "the audit record must name the route the turn took"
+    );
+    assert_ne!(
+        outcome.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Streaming,
+        "a finished turn is still recorded as streaming, so nothing downstream can tell a completed remote call from one that never came back"
+    );
+}
+
+/// The transcript can show where a turn's request went.
+///
+/// The route survived only in the command outcome, which the desktop reads for
+/// its citation count and drops -- so a turn that may have uploaded an excerpt
+/// left nothing a reviewer could read about the destination. The audit record
+/// answers an auditor later; this answers the person reading the reply now.
+#[test]
+fn a_delegate_turn_shows_its_route_in_the_projection() {
+    let root = temp_workspace("delegate_route_projection");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-route-projection".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+
+    let route = outcome
+        .projection
+        .provider_routes
+        .last()
+        .expect("the projection must carry the route the turn used");
+    assert_eq!(
+        route.route_id, outcome.provider_route_request.route_id,
+        "the projected route is not the one the turn was authorized against"
+    );
+    assert!(
+        !route.destination_label.is_empty() && !route.egress_label.is_empty(),
+        "a route a reviewer cannot read tells them nothing: {route:?}"
+    );
+    // The whole authority, so the label names the destination that was actually
+    // contacted rather than a different one that happens to share a host.
+    if let Some(target) = outcome.provider_route_request.network_target.as_ref() {
+        if let Some(port) = target.port {
+            assert!(
+                route.destination_label.ends_with(&format!(":{port}")),
+                "the projected destination omits the port, so it names a different endpoint from the one authorized: {:?}",
+                route.destination_label
+            );
+        }
+        if target.host.contains(':') {
+            assert!(
+                route
+                    .destination_label
+                    .contains(&format!("[{}]", target.host)),
+                "an IPv6 destination must be bracketed or the label is not an address: {:?}",
+                route.destination_label
+            );
+        }
+    }
+
+    // Metadata only, like everything else on this surface.
+    let rendered = format!("{route:?}");
+    assert!(
+        !rendered.contains("marker") && !rendered.contains("explain"),
+        "the route record carries prompt or buffer text: {rendered}"
+    );
+
+    // And it survives into the next snapshot, not just this outcome.
+    let later = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert!(
+        later
+            .delegated_task_projection
+            .provider_routes
+            .iter()
+            .any(|projected| projected.route_id == route.route_id),
+        "the route vanished after the turn returned, which is the defect: the outcome is read once and dropped"
+    );
+}
+
+/// A Delegate turn keeps the route it was authorized against.
+///
+/// The route request was built accurately, used for the broker decision, and
+/// then dropped: nothing in the outcome, the projection, or the audit trail said
+/// where the turn went. So a reachable UI operation could upload the buffer
+/// excerpt with no retained evidence of the destination -- which is the evidence
+/// the Assist path keeps, and the reason it keeps it.
+#[test]
+fn a_delegate_turn_keeps_the_route_it_was_authorized_against() {
+    let root = temp_workspace("delegate_route_evidence");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-route".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("delegate chat should complete");
+
+    assert!(
+        !outcome.provider_route_request.route_id.is_empty(),
+        "the turn must name the route it was authorized against"
+    );
+    assert!(
+        !outcome.provider_route_request.provider_id.is_empty(),
+        "the route must name the provider that answered"
+    );
+    assert_eq!(
+        outcome.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Completed,
+        "a turn that produced an answer must not report its route as anything else"
+    );
+
+    // And a turn whose worker never started reports that, rather than reporting
+    // the broker grant as if it were the ending.
+    app.inject_delegate_chat_spawn_failure_for_test();
+    let refused = app
+        .send_delegate_chat("try again")
+        .expect("a refused worker must not fail the turn");
+    assert_eq!(
+        refused.invocation_state,
+        legion_protocol::AssistedAiProviderInvocationState::Failed,
+        "a turn whose worker never started recorded its route as {:?}, while the assistant message says no answer was produced",
+        refused.invocation_state
+    );
+
+    // And the audit trail holds it, which is what survives the session.
+    let manifest = app
+        .replay_ai_run(legion_protocol::AgentRunId(format!(
+            "delegate-chat-run:{}",
+            outcome.provider_route_request.correlation_id.0
+        )))
+        .expect("the delegate run must be replayable from metadata-only storage");
+    assert!(
+        manifest
+            .provider_route_ids
+            .contains(&outcome.provider_route_request.route_id),
+        "the audit record does not name the route the turn took: {:?}",
+        manifest.provider_route_ids
+    );
+}
+
+/// The budget evaluation names the proposal it is supposed to gate.
+///
+/// `permission_budget_gate` only considers refused evaluations whose action
+/// names the proposal being approved. The trust projections are built before
+/// the proposal exists, so their actions named none -- and a remote route's
+/// unresolved consent was evaluated, recorded, and then omitted from the one
+/// gate it exists to block. A refusal nobody is shown is the same as no refusal.
+#[test]
+fn the_permission_budget_evaluation_names_the_proposal_it_gates() {
+    let root = temp_workspace("assist_budget_proposal_link");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-budget".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    assert!(
+        !outcome.permission_budget_projection.evaluations.is_empty(),
+        "the run must evaluate its provider budget, or there is nothing to gate"
+    );
+    for evaluation in &outcome.permission_budget_projection.evaluations {
+        assert_eq!(
+            evaluation.action.proposal_id,
+            Some(proposal_id),
+            "a budget evaluation that names no proposal is skipped by the approval gate, so any refusal in it is never shown"
+        );
+    }
+}
+
+/// An authorized run does not report itself blocked.
+///
+/// The context manifest is built before the broker answers, so its provider
+/// permission starts ungranted -- true until the broker grants, and a record of
+/// a permission never given after that. The privacy inspector reads an ungranted
+/// model-provider permission as a denial and turns it into a refusal, so the
+/// approval checklist reported blockers on every Assist proposal that had in
+/// fact been authorized. A reviewer who sees blockers on a run nothing blocked
+/// learns to click past them, which is the opposite of what a checklist is for.
+#[test]
+fn an_authorized_assist_run_records_the_permission_it_was_given() {
+    let root = temp_workspace("assist_granted_permission");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-granted".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+
+    // The inspector is a projection of the manifest, so it is what a reviewer
+    // actually reads -- and an ungranted model-provider permission becomes a
+    // denied record and a refusal there. Asked of the counts, not of the debug
+    // text: `denied_record_count: 0` contains the word "denied".
+    assert_eq!(
+        outcome.privacy_inspector_projection.denied_record_count, 0,
+        "the privacy inspector counts a denial for a run the broker authorized"
+    );
+    assert!(
+        outcome.privacy_inspector_projection.refusal.is_none(),
+        "the privacy inspector carries a refusal for a run nothing refused: {:?}",
+        outcome.privacy_inspector_projection.refusal
+    );
+
+    let provider_permission = outcome
+        .context_manifest_projection
+        .manifest
+        .permissions
+        .iter()
+        .find(|permission| permission.capability.0 == "ai.provider.invoke")
+        .expect("the manifest must carry the provider permission it asked for");
+    assert!(
+        provider_permission.granted,
+        "the broker granted this run and the manifest still records the permission as never given"
+    );
+    assert!(
+        provider_permission.decision_id.is_some(),
+        "a granted permission must name the decision that granted it"
+    );
+}
+
+/// A refused worker leaves an answered turn, not a question hanging.
+///
+/// The spawn is attempted after the user message, its citations and the
+/// permission record are already in the transcript. Returning an error there
+/// left the question standing with no reply and no explanation on screen, and
+/// asking again appended a second copy of all of it -- so the record of what
+/// was asked stopped matching what happened.
+#[test]
+fn a_delegate_turn_whose_worker_cannot_start_is_still_answered() {
+    let root = temp_workspace("chat_spawn_failure");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("delegate-chat-spawn".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Delegate);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    app.inject_delegate_chat_spawn_failure_for_test();
+    let outcome = app
+        .send_delegate_chat("explain marker")
+        .expect("a refused worker must not fail the turn; the question is already recorded");
+
+    assert_eq!(
+        outcome.projection.chat_message_count, 2,
+        "the question was recorded and its answer was not, so the transcript ends on an unanswered turn"
+    );
+    let answer = outcome
+        .projection
+        .chat_messages
+        .iter()
+        .rfind(|message| message.role == legion_protocol::DelegatedTaskChatRole::Assistant)
+        .expect("the turn must have an assistant message");
+    assert!(
+        answer.content_label.contains("could not start a worker"),
+        "the answer must say what happened; it said {:?}",
+        answer.content_label
+    );
+
+    // And the lane is free: a run that never started must not refuse the next
+    // one as already in flight.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+    let second = app
+        .send_delegate_chat("try again")
+        .expect("the lane must be free after a spawn that never happened");
+    assert_eq!(
+        second.projection.chat_message_count, 4,
+        "the retry did not produce a turn of its own, so the lane is still held by a worker that does not exist"
+    );
+}
+
 #[test]
 fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     let root = temp_workspace("chat");
     fs::write(
         root.join("lib.rs"),
-        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
+        "pub fn delegated_marker() -> u32 {\n 42\n}\n",
     )
     .expect("fixture file should be written");
     let mut app = AppComposition::new();

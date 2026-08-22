@@ -18,7 +18,7 @@ pub(crate) fn render_preferred_provider_picker(
 ) {
     ui.add_space(4.0);
     ui.label(theme::muted(format!(
-        "Preferred AI provider: {active_preference}. Auto tries providers available on this computer before remote providers."
+        "Preferred AI provider: {active_preference}. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
     )));
     ui.horizontal_wrapped(|ui| {
         for (label, id) in [
@@ -346,7 +346,15 @@ pub(crate) fn render_delegate_task_draft(
             ))
             .margin(egui::Margin::symmetric(4, 8)),
     );
+    let field_id = response.id;
     response.labelled_by(label.id);
+    // Named, not merely related. `labelled_by` records a relation and leaves the
+    // node anonymous, which was tolerable while this was the only multiline
+    // field on the surface; the Delegate chat composer is a second one, so an
+    // unnamed box is now ambiguous to a screen reader and to anything driving
+    // the accessibility tree.
+    ui.ctx()
+        .accesskit_node_builder(field_id, |node| node.set_label("Task description"));
     draft = bounded_delegate_task_draft(&draft).into_owned();
     let ready = canonical_scope_available && !draft.trim().is_empty();
     let submitted = ui
@@ -365,6 +373,63 @@ pub(crate) fn render_delegate_task_draft(
     }
     ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
     task
+}
+
+/// Render the adapter-local, unsent Delegate chat prompt.
+///
+/// Returns the trimmed prompt only when the user activates Send with a
+/// non-empty draft and the surface is ready to accept one. Bounded by the same
+/// draft budget as the task description, because both end up in a display-safe
+/// projected label.
+pub(crate) fn render_delegate_chat_draft(ui: &mut egui::Ui, ready: bool) -> Option<String> {
+    let draft_id = egui::Id::new("legion-delegate-chat-draft-value");
+    let mut draft = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<String>(draft_id).unwrap_or_default());
+    let label = ui
+        .push_id("legion-delegate-chat-label", |ui| {
+            ui.label(theme::label("Ask Delegate"))
+        })
+        .inner;
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut draft)
+            .id_source("legion-delegate-chat-draft")
+            // The chat prompt limit, not the task-draft limit. This field used
+            // to accept 4096 characters while `send_delegate_chat` bounds the
+            // prompt to 240 and then the composer cleared the whole draft, so
+            // everything past 240 was lost without a word. Capping here means
+            // the field cannot accept text the request will not carry.
+            .char_limit(legion_app::DELEGATE_CHAT_PROMPT_MAX_CHARS)
+            .desired_rows(2)
+            .desired_width(ui.available_width())
+            .hint_text("Ask about the open file")
+            .min_size(egui::vec2(
+                f32::from(theme::tokens().control_height.compact),
+                f32::from(theme::tokens().control_height.compact),
+            ))
+            .margin(egui::Margin::symmetric(4, 8)),
+    );
+    let field_id = response.id;
+    response.labelled_by(label.id);
+    // `labelled_by` records a relation; it does not name the node. Without an
+    // explicit name the field reaches assistive technology — and any test that
+    // drives one — as an anonymous text box next to some text.
+    ui.ctx()
+        .accesskit_node_builder(field_id, |node| node.set_label("Ask Delegate"));
+    let sendable = ready && !draft.trim().is_empty();
+    let submitted = ui
+        .push_id("legion-delegate-chat-send", |ui| {
+            super::primary_button_enabled(ui, "Send", theme::tokens().accent.blue, sendable)
+                .on_hover_text("Send a Delegate chat turn with workspace context")
+                .clicked()
+        })
+        .inner;
+    let prompt = (submitted && sendable).then(|| draft.trim().to_string());
+    if prompt.is_some() {
+        draft.clear();
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(draft_id, draft));
+    prompt
 }
 
 /// Return the longest valid UTF-8 prefix inside both Delegate draft budgets.

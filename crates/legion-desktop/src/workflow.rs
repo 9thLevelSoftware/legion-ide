@@ -1415,8 +1415,19 @@ impl DesktopRuntime {
 
     /// Return the latest shell projection snapshot.
     /// Poll progressive product AI stream state into the app projection cache.
+    ///
+    /// Refreshes the shell projection when something merged, exactly as
+    /// [`Self::poll_delegated_task`] does. Without it the app state moved and
+    /// the snapshot every surface reads did not: a worker result -- a streamed
+    /// delta, a registered Assist proposal, an inline prediction settling --
+    /// landed in the app and stayed invisible until some unrelated action
+    /// happened to rebuild the projection.
     pub fn poll_product_ai_stream(&mut self) -> bool {
-        self.app.poll_product_ai_stream()
+        let changed = self.app.poll_product_ai_stream();
+        if changed {
+            let _ = self.refresh_projection();
+        }
+        changed
     }
 
     /// Return the delay until app-owned proposal observation delivery retries.
@@ -1453,6 +1464,11 @@ impl DesktopRuntime {
     /// Whether a product AI stream is currently receiving deltas.
     pub fn product_ai_stream_in_flight(&self) -> bool {
         self.app.product_ai_stream_in_flight()
+    }
+
+    /// Whether the audit trail still owes a route record a write.
+    pub fn has_pending_route_audits(&self) -> bool {
+        self.app.has_pending_route_audits()
     }
 
     /// Current shell projection snapshot for rendering and tests.
@@ -4094,7 +4110,14 @@ impl DesktopEframeApp {
         }
         // Progressive product AI stream: merge live SSE sink into projection and
         // keep repainting while deltas are in flight.
-        if self.runtime.poll_product_ai_stream() || self.runtime.product_ai_stream_in_flight() {
+        // Also while an audit write is owed: a failed one is retried by the next
+        // poll, and a poll only happens on a repaint, so without this the queue
+        // could sit untouched until unrelated input arrived -- and a finished
+        // turn would read as `Streaming` for as long as that took.
+        if self.runtime.poll_product_ai_stream()
+            || self.runtime.product_ai_stream_in_flight()
+            || self.runtime.has_pending_route_audits()
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -6468,7 +6491,7 @@ mod tests {
                 assert_eq!(actions.len(), 1);
                 assert!(
                     matches!(actions[0], DesktopAction::VimKey { key: 'j', .. }),
-                    "a `j` that both moved the cursor and typed a `j` is the                      loudest possible bug in this feature: {:?}",
+                    "a `j` that both moved the cursor and typed a `j` is the loudest possible bug in this feature: {:?}",
                     actions[0]
                 );
                 assert!(
@@ -6514,7 +6537,7 @@ mod tests {
                         ctrl: true
                     }
                 ),
-                "the parser reads `ctrl` to tell redo from replace-char, so a                  Ctrl+R arriving as a plain `r` replaces a character instead of                  undoing an undo: {:?}",
+                "the parser reads `ctrl` to tell redo from replace-char, so a Ctrl+R arriving as a plain `r` replaces a character instead of undoing an undo: {:?}",
                 actions[0]
             );
         });

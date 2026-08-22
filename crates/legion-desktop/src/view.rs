@@ -24,6 +24,8 @@ use source_control::{
 };
 use tab_strip::render_tab_strip;
 
+use proposal_cards::render_proposal_cards;
+
 /// Agent communication row parsing and rendering.
 pub mod agent_comm;
 /// Files as draggable cards in an infinite 2D space.
@@ -31,6 +33,7 @@ pub mod canvas_workspace;
 mod keymap_dispatch;
 pub(crate) use keymap_dispatch::*;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
+pub mod assist_rail_commands;
 pub mod cloud_lane;
 pub mod extensions_panel;
 /// Projection-backed Legion workflow board.
@@ -45,7 +48,8 @@ pub(crate) mod interactive_fields;
 pub mod manifest_panel;
 /// Editable plan editor projection.
 pub mod plan_editor;
-
+/// The proposal ledger rendered as Approve / Review / Reject cards.
+pub mod proposal_cards;
 /// Proposal review and checkpoint timeline view models.
 pub mod proposal_review;
 /// Risk strip view model and row projections for proposal review surfaces.
@@ -104,10 +108,10 @@ use legion_protocol::{
     DelegatedTaskToolPermissionDecision, FileId, LanguageInlayHintProjection,
     LanguageLocationProjection, LanguageProblemProjection, LegionToolKind, LineWrappingPolicy,
     PluginCommandDescriptor, PluginContribution, PluginContributionProjection,
-    PrivacyInspectorRedactionState, ProposalCancellationReason, ProposalId, ProposalLifecycleState,
-    ProposalRejectionReason, ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange,
-    TextCoordinate, ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll,
-    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    PrivacyInspectorRedactionState, ProposalId, ProposalLifecycleState, ProposalRejectionReason,
+    ProposalRiskLabel, ProtocolDiagnosticSeverity, ProtocolTextRange, TextCoordinate,
+    ViewportLineTruncationState, ViewportProjectionMode, ViewportScroll, ViewportSemanticTokenKind,
+    ViewportSemanticTokenOverlay,
 };
 use legion_ui::{
     ActiveBufferProjection, DebugStepKindProjection, DockLayout, DockMode, DockSide,
@@ -137,6 +141,8 @@ pub const DELEGATE_TASK_DRAFT_MAX_CHARS: usize = 4_096;
 /// Four bytes per scalar keeps this consistent with [`DELEGATE_TASK_DRAFT_MAX_CHARS`]
 /// while making the dispatch boundary explicit.
 pub const DELEGATE_TASK_DRAFT_MAX_BYTES: usize = DELEGATE_TASK_DRAFT_MAX_CHARS * 4;
+/// Chat turns kept visible in the Delegate rail before older ones are counted.
+const DELEGATE_CHAT_VISIBLE_TURNS: usize = 8;
 
 /// Action emitted by the top-bar `Command` control.
 pub fn command_palette_control_action() -> DesktopAction {
@@ -880,23 +886,32 @@ impl ModeSurfaceModel {
                 inspector: SurfaceAvailability::Hidden,
                 delegate_lifecycle: None,
             },
+            // Assist's inspector is the inline-prediction panel, and inline
+            // prediction routes through the always-registered deterministic
+            // local provider: it needs a buffer and nothing else.
+            //
+            // This arm used to block on `assisted_ai_projection.providers`
+            // being empty, with the resolution "Settings". That projection
+            // describes a *Phase-4 assisted-AI run* and is populated only as a
+            // side effect of one, so in the shipped app it is empty until a run
+            // happens — and no rendered control starts a run. Worse, the
+            // resolution it named could not clear it: setting a preferred AI
+            // provider in Settings never touches that list. Assist mode was
+            // therefore blocked forever behind a card telling the user to do
+            // something that would not help, while `Predict` — which works with
+            // zero configuration — sat behind the block. The panel names the
+            // provider that actually answered, so the honest gate is the buffer.
             DesktopProductMode::Assist => {
-                let inspector = if snapshot.assisted_ai_projection.providers.is_empty() {
+                // A build with neither `ai` nor `offline` has no inline
+                // prediction provider at all: `legion-app` compiles the
+                // `not(any(...))` implementation, which answers every request
+                // with "AI feature is disabled". The proposal controls account
+                // for that build and this gate did not, so `Predict` appeared
+                // and could only ever fail.
+                let inspector = if !cfg!(any(feature = "ai", feature = "offline")) {
                     SurfaceAvailability::Blocked {
-                        reason: "Choose an AI provider to enable predictions.".to_string(),
-                        resolution: "Settings".to_string(),
-                    }
-                } else if !snapshot
-                    .assisted_ai_projection
-                    .providers
-                    .iter()
-                    .any(|provider| {
-                        provider.availability == AssistedAiProviderAvailabilityState::Available
-                    })
-                {
-                    SurfaceAvailability::Blocked {
-                        reason: "No AI provider is ready for predictions.".to_string(),
-                        resolution: "Settings".to_string(),
+                        reason: "This build has no inline prediction provider.".to_string(),
+                        resolution: "Unavailable".to_string(),
                     }
                 } else if snapshot.active_buffer_projection.buffer_id.is_none() {
                     SurfaceAvailability::Blocked {
@@ -5578,32 +5593,65 @@ fn render_assist_rail(
     actions: &mut Vec<DesktopAction>,
 ) {
     inspector_header(ui, "Assist", DesktopProductMode::Assist);
+    // Only the missing-buffer block has a resolution this screen can perform;
+    // every other resolution reads as text, the way the Delegate rail already
+    // presents one nobody can press.
     if let SurfaceAvailability::Blocked { reason, resolution } = &model.mode_surface.inspector {
+        let resolvable_here = snapshot.active_buffer_projection.buffer_id.is_none();
         surface_card(ui, |ui| {
             ui.label(theme::body_strong(reason));
-            if soft_button(ui, resolution).clicked() {
-                if resolution == "Open file" {
+            if resolvable_here {
+                if soft_button(ui, resolution).clicked() {
                     actions.push(DesktopAction::OpenPalette {
                         mode: PaletteMode::File,
                         query: String::new(),
                         scope: SearchScopeProjection::Workspace,
                     });
-                } else {
-                    actions.push(DesktopAction::OpenSettings);
-                    view.utility_surface = Some(UtilitySurface::Settings);
-                    view.settings_section = SettingsSection::AiProviders;
-                    view.utility_overlay_needs_focus = true;
-                    view.utility_overlay_focus_bounds = None;
                 }
+            } else {
+                ui.label(theme::muted(resolution));
             }
         });
         return;
+    }
+    assist_rail_commands::render_assist_rail_commands(
+        ui,
+        snapshot,
+        model.product_ai_stream_in_flight,
+        actions,
+    );
+    // A proposal created here has to be reviewable here. `render_proposal_cards`
+    // is a complete Approve/Reject/Cancel surface and was called only from the
+    // Workflows rail, so an Assist user could start a proposal and had nowhere
+    // to act on it -- the checklist row asks for a proposal to *appear*, not
+    // merely to exist in a ledger.
+    if !snapshot.proposal_ledger_projection.rows.is_empty() {
+        components::section_header(ui, "Proposals", Some(theme::tokens().accent.green));
+        render_proposal_cards(ui, snapshot, actions);
     }
     render_assisted_suggestion_panel(ui, snapshot, model, actions);
     ui.add_space(6.0);
     ui.label(theme::muted(
         "Assist never writes to the workspace until you accept a suggestion.",
     ));
+    // Route discoverability, without blocking on it. A remote provider is an
+    // upgrade, not a prerequisite, and this line is the only place Assist says
+    // so. It names the fallback rather than claiming the local route always
+    // answers: with a reachable Ollama the preferred route answers, and a
+    // sentence saying otherwise would contradict the route named beside it.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(theme::muted(format!(
+            "Route: {}. Falls back to a local deterministic route if that is unavailable.",
+            model.preferred_ai_provider
+        )));
+        if soft_button(ui, "AI provider settings").clicked() {
+            actions.push(DesktopAction::OpenSettings);
+            view.utility_surface = Some(UtilitySurface::Settings);
+            view.settings_section = SettingsSection::AiProviders;
+            view.utility_overlay_needs_focus = true;
+            view.utility_overlay_focus_bounds = None;
+        }
+    });
 }
 
 fn render_delegate_prerequisite_rail(ui: &mut egui::Ui, model: &DesktopProjectionViewModel) {
@@ -5634,6 +5682,8 @@ fn render_delegate_draft_rail(
     {
         actions.push(action);
     }
+
+    render_delegate_chat_section(ui, snapshot, model, actions);
 
     section_label(ui, "Readiness", Some(theme::tokens().accent.green));
     match &model.mode_surface.inspector {
@@ -5676,6 +5726,92 @@ fn render_delegate_draft_rail(
     ui.label(theme::muted("Sandbox starts after the task is submitted."));
 }
 
+/// Delegate's chat transcript and composer.
+///
+/// `send_delegate_chat` — retrieval-backed, citation-carrying, and able to
+/// stream a live reply — has been implemented in the app since Phase 5 and had
+/// no rendered control: `DesktopAction::SendDelegateChat` was pushed by exactly
+/// nothing, so the only way to reach it was the `:delegate-chat` shell verb,
+/// which the desktop command palette does not offer either. The transcript was
+/// equally invisible; chat messages reached the projection and were rendered
+/// only as a debug row. Checklist row 7 ("Delegate chat: Streaming… then
+/// reply") could not be exercised because there was nowhere to type.
+///
+/// The composer is shown by both Delegate rails, because chat is useful before
+/// a task is submitted as well as during one.
+fn render_delegate_chat_section(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    model: &DesktopProjectionViewModel,
+    actions: &mut Vec<DesktopAction>,
+) {
+    section_label(ui, "Chat", Some(theme::tokens().accent.cyan));
+    let messages = &snapshot.delegated_task_projection.chat_messages;
+    if messages.is_empty() {
+        ui.label(theme::muted("No chat turns yet."));
+    } else {
+        theme::small_card_frame().show(ui, |ui| {
+            let skip = messages.len().saturating_sub(DELEGATE_CHAT_VISIBLE_TURNS);
+            for message in messages.iter().skip(skip) {
+                let (who, color) = match message.role {
+                    legion_protocol::DelegatedTaskChatRole::User => {
+                        ("You", theme::tokens().accent.blue)
+                    }
+                    legion_protocol::DelegatedTaskChatRole::Assistant => {
+                        ("Delegate", theme::tokens().accent.cyan)
+                    }
+                    legion_protocol::DelegatedTaskChatRole::System => {
+                        ("System", theme::tokens().accent.violet)
+                    }
+                };
+                ui.label(theme::accent(who, color));
+                ui.label(theme::muted(&message.content_label));
+                ui.add_space(4.0);
+            }
+            if skip > 0 {
+                ui.label(theme::muted(format!("+{skip} earlier turns")));
+            }
+        });
+        // Where the last turn's request went.
+        //
+        // The transcript is what somebody reads to decide whether to trust a
+        // reply, and it said nothing about the destination -- a Delegate turn
+        // could upload a buffer excerpt and leave no reviewer-visible evidence
+        // of where. Assist carries that in its proposal; this is the same
+        // evidence for the path that has no proposal.
+        if let Some(route) = snapshot.delegated_task_projection.provider_routes.last() {
+            ui.add_space(4.0);
+            ui.label(theme::muted(format!(
+                "Route: {} ({}) · {} · {} · {:?}",
+                route.provider_id,
+                route.model_label,
+                route.destination_label,
+                route.egress_label,
+                route.invocation_state
+            )));
+        }
+    }
+    // The app requires an active buffer to build chat context, so say that
+    // instead of offering a Send that would only return an error.
+    let has_buffer = snapshot.active_buffer_projection.buffer_id.is_some();
+    if model.product_ai_stream_in_flight {
+        ui.label(theme::accent("Streaming…", theme::tokens().accent.amber));
+    }
+    if let Some(prompt) = interactive_fields::render_delegate_chat_draft(
+        ui,
+        has_buffer && !model.product_ai_stream_in_flight,
+    ) {
+        actions.push(DesktopAction::SendDelegateChat {
+            prompt_label: prompt,
+        });
+    }
+    if !has_buffer {
+        ui.label(theme::muted(
+            "Open a file to give Delegate something to talk about.",
+        ));
+    }
+}
+
 fn render_delegation_console(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -5689,6 +5825,11 @@ fn render_delegation_console(
             ui.label(theme::body_strong(reason));
             ui.label(theme::muted(resolution));
         });
+        // Chat survives the block. `send_delegate_chat` needs Delegate mode and
+        // an open buffer, neither of which a blocked *task* affects -- so the
+        // early return took away the one surface that still worked, exactly
+        // when a user asking "why is this blocked?" would reach for it.
+        render_delegate_chat_section(ui, snapshot, model, actions);
         return;
     }
     let lifecycle = model
@@ -5699,6 +5840,7 @@ fn render_delegation_console(
     theme::small_card_frame().show(ui, |ui| {
         ui.label(theme::body_strong(current_objective(snapshot)));
     });
+    render_delegate_chat_section(ui, snapshot, model, actions);
     section_label(ui, "Readiness", Some(theme::tokens().accent.green));
     let (readiness, detail, ready) = match lifecycle {
         DelegateLifecycle::Draft => (
@@ -6070,91 +6212,6 @@ fn user_facing_protocol_label(raw: &str) -> String {
         first.make_ascii_uppercase();
     }
     label
-}
-
-fn render_proposal_cards(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let ledger = &snapshot.proposal_ledger_projection;
-    if ledger.rows.is_empty() {
-        ui.label(theme::muted("No pending proposals"));
-        return;
-    }
-    const PROPOSAL_CARD_LIMIT: usize = 4;
-    for row in ledger.rows.iter().take(PROPOSAL_CARD_LIMIT) {
-        // Only proposals still awaiting a decision should expose Approve/Reject;
-        // terminal/applied/denied proposals render the controls disabled so a
-        // dropped click cannot re-trigger a lifecycle action.
-        let actionable = matches!(
-            row.lifecycle.state,
-            ProposalLifecycleState::Created
-                | ProposalLifecycleState::Validated
-                | ProposalLifecycleState::Previewed
-        );
-        let cancellable = matches!(
-            row.lifecycle.state,
-            ProposalLifecycleState::Created
-                | ProposalLifecycleState::Validated
-                | ProposalLifecycleState::Previewed
-                | ProposalLifecycleState::Approved
-        );
-        theme::card_frame_tinted(
-            theme::tokens().bg.card,
-            theme::dim(theme::tokens().accent.orange, 48),
-        )
-        .show(ui, |ui| {
-            ui.label(theme::body_strong(&row.title));
-            ui.horizontal(|ui| {
-                ui.label(theme::muted(format!("{:?}", row.payload_kind)));
-                ui.separator();
-                ui.label(theme::accent(
-                    format!("Risk: {}", proposal_risk_label(row.risk_label)),
-                    risk_color(row.risk_label),
-                ));
-            });
-            // Surface the lifecycle state so terminal proposals are legible.
-            ui.label(theme::muted(format!("status: {}", row.lifecycle.label)));
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(actionable, |ui| {
-                    if primary_button(ui, "Approve", theme::tokens().accent.green).clicked()
-                        && actionable
-                    {
-                        actions.push(DesktopAction::ApproveProposal {
-                            proposal_id: row.proposal_id,
-                        });
-                    }
-                });
-                if soft_button(ui, "Review").clicked() {
-                    actions.push(DesktopAction::OpenProposalDetails {
-                        proposal_id: row.proposal_id,
-                    });
-                }
-                ui.add_enabled_ui(actionable, |ui| {
-                    if soft_button(ui, "Reject").clicked() && actionable {
-                        actions.push(DesktopAction::RejectProposal {
-                            proposal_id: row.proposal_id,
-                            reason: ProposalRejectionReason::UserRejected,
-                        });
-                    }
-                });
-                ui.add_enabled_ui(cancellable, |ui| {
-                    if soft_button(ui, "Cancel proposal").clicked() && cancellable {
-                        actions.push(DesktopAction::CancelProposal {
-                            proposal_id: row.proposal_id,
-                            reason: ProposalCancellationReason::UserCancelled,
-                        });
-                    }
-                });
-            });
-        });
-    }
-    let hidden =
-        ledger.rows.len().saturating_sub(PROPOSAL_CARD_LIMIT) + ledger.omitted_row_count as usize;
-    if hidden > 0 {
-        ui.label(theme::muted(format!("{hidden} more proposals")));
-    }
 }
 
 fn render_delegated_hunk_review_controls(

@@ -8240,6 +8240,8 @@ pub struct DelegatedTaskProjection {
     pub chat_messages: Vec<DelegatedTaskChatMessage>,
     /// Codebase context citations selected for Delegate chat turns.
     pub context_citations: Vec<DelegatedTaskContextCitation>,
+    /// Provider routes the chat turns in this projection actually used.
+    pub provider_routes: Vec<DelegatedTaskProviderRoute>,
     /// Per-hunk proposal review queues owned by human approval state.
     pub proposal_reviews: Vec<DelegatedTaskProposalReview>,
     /// Tool permission rows for Ask/Write Delegate profiles.
@@ -8269,6 +8271,37 @@ pub enum DelegatedTaskChatRole {
     Assistant,
     /// System or policy-authored Delegate note.
     System,
+}
+
+/// Where a Delegate turn's provider request went, for the person reviewing it.
+///
+/// Metadata only: the destination, the provider that answered, and how the
+/// invocation ended. No prompt, no excerpt, no credential -- the same discipline
+/// as every other projection here, and the reason this can be rendered beside a
+/// transcript.
+///
+/// It exists because a Delegate turn could upload a buffer excerpt while the
+/// surface that ran it retained nothing a reviewer could read about the
+/// destination. Assist carries that evidence in its proposal; this is the same
+/// evidence for the path that has no proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskProviderRoute {
+    /// Stable route identifier, matching the phase-4 audit record.
+    pub route_id: String,
+    /// Provider that was authorized and invoked.
+    pub provider_id: String,
+    /// Model label as the route declared it.
+    pub model_label: String,
+    /// Whether this route carries workspace text off the machine.
+    pub egress_label: String,
+    /// Destination host, without userinfo or path.
+    pub destination_label: String,
+    /// How the invocation ended.
+    pub invocation_state: AssistedAiProviderInvocationState,
+    /// Redaction hints for this route record.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Route DTO schema version.
+    pub schema_version: u16,
 }
 
 /// Codebase context citation used by Delegate chat and planning surfaces.
@@ -12772,6 +12805,9 @@ pub fn delegated_task_projection_from_plan_contracts(
         tool_permission_request_count: tool_permission_requests.len() as u32,
         chat_messages,
         context_citations,
+        // Filled by the composition layer, which is the only place that knows
+        // where a turn's request went.
+        provider_routes: Vec::new(),
         proposal_reviews,
         tool_permission_requests,
         generated_at,

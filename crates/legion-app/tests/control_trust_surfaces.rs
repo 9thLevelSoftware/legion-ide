@@ -1037,3 +1037,79 @@ fn assisted_ai_refusals_visible_for_untrusted_workspace() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// An org bundle that permits Assist mode but forbids provider invocation stops
+/// the Assist lane too.
+///
+/// Assist became reachable from the rail in this PR, and it built its broker
+/// from `product_ai_security_policy` rather than from the installed bundle. Mode
+/// ceiling and provider ceiling are different questions: a bundle can perfectly
+/// well say "Assist is fine, this provider is not", and passing the first check
+/// is not passing the second. Until this was fixed, those newly reachable
+/// commands could still send the buffer excerpt.
+#[test]
+fn an_org_provider_ceiling_refuses_assisted_ai_even_when_assist_mode_is_allowed() {
+    use legion_security::{
+        PolicyKeyring, PolicySigningKey, policy_bundle_verifying_key_b64, sign_policy_bundle,
+    };
+
+    const SEED: [u8; 32] = [23u8; 32];
+    const KEY_ID: &str = "assist-ceiling-test-signer";
+
+    // The shipped example, whose mode ceiling is Assist, with provider
+    // invocation switched off. Editing the real bundle keeps the fixture honest
+    // about the schema rather than testing a hand-rolled default.
+    let payload = include_str!("../../../xtask/legion-policy.example.toml");
+    assert!(
+        payload.contains("provider_invocation_enabled = true"),
+        "the example bundle no longer enables provider invocation, so switching it off \
+         proves nothing"
+    );
+    let edited = payload.replace(
+        "provider_invocation_enabled = true",
+        "provider_invocation_enabled = false",
+    );
+    let keyring = PolicyKeyring::new(vec![PolicySigningKey {
+        key_id: KEY_ID.to_string(),
+        verifying_key_b64: policy_bundle_verifying_key_b64(&SEED),
+    }]);
+    let bundle = sign_policy_bundle(&edited, KEY_ID, &SEED)
+        .verify(&keyring)
+        .expect("a bundle this test signed must verify");
+
+    let root = create_root();
+    let target = root.join("ceiling.rs");
+    std::fs::write(&target, "fn main() {}\n").expect("seed file");
+
+    let mut app = AppComposition::new();
+    app.set_org_policy_bundle(bundle);
+    app.set_product_mode(AppProductMode::Assist);
+    // Non-vacuity: the refusal below has to come from the provider ceiling, not
+    // from a bundle that refused the mode and left the app in Manual.
+    assert_eq!(
+        app.product_mode(),
+        AppProductMode::Assist,
+        "the bundle's ceiling is Assist, so Assist mode must take effect"
+    );
+    let (_opened, _file_id, _buffer_id, _node, _preconditions) =
+        opened_text_file(&mut app, &root, "ceiling.rs");
+
+    let dispatched = app.dispatch_ui_intent(CommandDispatchIntent::StartAiExplain {
+        instruction_label: "summarize context".to_string(),
+    });
+
+    // A hard error is an acceptable refusal; what must not happen is the run
+    // being authorized. So this asserts only on the path where one started.
+    if let Ok(outcome) = dispatched {
+        let outcome = ai_outcome(outcome);
+        assert!(
+            outcome.refusal.is_some(),
+            "the bundle disabled provider invocation and the Assist run was authorized \
+             anyway, so the buffer excerpt went out under a policy that forbade it; \
+             invocation state was {:?}",
+            outcome.route_response.invocation_state
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

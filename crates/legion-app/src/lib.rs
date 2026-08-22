@@ -50,11 +50,28 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
     legion_editor::TextPosition::new(line, column)
 }
 
-/// Outcome construction, extracted from this file for the chokepoint budget.
-/// App-owned extension catalog: verification, permission review, install (P7.F2).
+mod delegate_workflow;
+mod phase4_trust;
+/// Live product-AI completions: which backend answers, and what it returns.
+mod product_ai_completion;
+mod product_ai_lane;
+mod product_ai_policy;
+use delegate_workflow::*;
+use phase4_trust::*;
+use product_ai_completion::*;
+use product_ai_lane::*;
+use product_ai_policy::*;
+
+/// Where a product AI chat turn's bytes actually go, and what the audit says.
+pub mod ai_route_descriptor;
+
+/// Cloud-lane egress manifest and acknowledgement, with a content digest.
 pub mod cloud_lane_egress;
+
+/// App-owned extension catalog: verification, permission review, install (P7.F2).
 pub mod extension_management;
 
+/// Outcome construction, extracted from this file for the chokepoint budget.
 mod command_outcome;
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
@@ -1579,10 +1596,12 @@ pub enum AppDelegatedTaskExecutionOutcome {
 /// Product-facing AI provider preference for Assist / Delegate composition paths.
 ///
 /// **Local-first default (`Auto`):** try Ollama loopback when a fast TCP probe
-/// succeeds, else Anthropic BYOK when credentials exist, else deterministic fixture.
+/// succeeds, else the deterministic fixture. `Auto` does not reach a remote
+/// provider: a metered upload of the buffer excerpt is a decision somebody
+/// makes, not a fallback they discover afterwards. Select `Anthropic` for that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProductAiProviderPreference {
-    /// Local-first auto routing (Ollama → Anthropic → fixture).
+    /// Local-first auto routing (Ollama → fixture; never remote).
     #[default]
     Auto,
     /// Force Ollama loopback when reachable; else fixture.
@@ -1684,6 +1703,7 @@ fn anthropic_base_url_from_env() -> String {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         })
+        .map(|configured| crate::ai_route_descriptor::enforce_https_for_remote(&configured))
         .unwrap_or_else(|| "https://api.anthropic.com".to_string())
 }
 
@@ -1708,9 +1728,22 @@ fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMes
             ReqwestProviderHttpTransport,
         );
     }
-    // No explicit key: still use from_env so base URL + any remaining credential
-    // sources stay consistent with the provider adapter.
-    AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
+    // No explicit key: env credential resolution, but *this* base URL. Plain
+    // `from_env` reads the environment for the endpoint too, which would undo
+    // the plaintext refusal above and post the credential to the original
+    // address.
+    AnthropicMessagesClient::from_env_with_base_url(ANTHROPIC_PROVIDER_ID, base_url)
+}
+
+/// Resolve the configured Ollama base URL (custom port / self-hosted).
+///
+/// Not gated on the `ai` feature: it reads only the environment, and the route
+/// descriptor names a destination in every build.
+pub(crate) fn ollama_base_url_from_env() -> String {
+    std::env::var("OLLAMA_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:11434".to_string())
 }
 
 /// Fast TCP probe for Ollama loopback so CI/offline does not pay HTTP timeouts.
@@ -1719,31 +1752,52 @@ fn ollama_loopback_reachable() -> bool {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let base =
-        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-    let trimmed = base
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/');
-    let host_port = if trimmed.contains(':') {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}:11434")
-    };
-    let Ok(mut addrs) = host_port.to_socket_addrs() else {
+    // Through the shared route descriptor, so the probe, the authorized target
+    // and the provider client all resolve one endpoint from one configuration.
+    // This used to default to `127.0.0.1` while `OllamaProvider::default` used
+    // `localhost`, and to append `:11434` to a bare host the client would have
+    // reached on port 80 -- so a configured deployment could be probed at an
+    // address the request never used.
+    let target = crate::ai_route_descriptor::ollama_network_target();
+    // A tuple, not a formatted string.
+    //
+    // The host is stored the way a policy list writes it, so an IPv6 loopback is
+    // `::1` -- and formatting `{host}:{port}` turns that into `::1:11434`, which
+    // `ToSocketAddrs` cannot split into a host and a port. The probe then
+    // reported a running Ollama as unreachable and both `Ollama` and `Auto` fell
+    // through to the deterministic provider. A tuple takes the host and the port
+    // as the separate things they are, so no bracket convention has to be
+    // reintroduced here to undo one applied elsewhere.
+    let port = target.port.unwrap_or(11434);
+    let Ok(addrs) = (target.host.as_str(), port).to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    // Guard against accidental remote probes in product auto mode.
-    match addr {
-        SocketAddr::V4(v4) if v4.ip().is_loopback() => {}
-        SocketAddr::V6(v6) if v6.ip().is_loopback() => {}
-        _ => return false,
-    }
-    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+
+    // Every resolved address, not just the first.
+    //
+    // On a dual-stack host `localhost` commonly resolves to `::1` before
+    // `127.0.0.1`. Ollama listens on IPv4 by default, so probing only the first
+    // address reported it unreachable while the provider client -- which tries
+    // them in turn -- could talk to it. `Auto` then fell through to Anthropic or
+    // to the deterministic fixture with a working local model right there.
+    //
+    // The budget stays bounded: the same 150ms applies to each candidate and at
+    // most four are tried, so the worst case is 600ms rather than one timeout
+    // multiplied by however many addresses a resolver returns.
+    const PER_ADDRESS_TIMEOUT: Duration = Duration::from_millis(150);
+    const MAX_CANDIDATES: usize = 4;
+
+    addrs
+        // Guard against accidental remote probes in product auto mode. Applied
+        // per address rather than to the first one only: a hostname can resolve
+        // to a mix, and a non-loopback entry appearing first must not decide the
+        // answer for the loopback entries behind it.
+        .filter(|addr| match addr {
+            SocketAddr::V4(v4) => v4.ip().is_loopback(),
+            SocketAddr::V6(v6) => v6.ip().is_loopback(),
+        })
+        .take(MAX_CANDIDATES)
+        .any(|addr| TcpStream::connect_timeout(&addr, PER_ADDRESS_TIMEOUT).is_ok())
 }
 
 #[cfg(feature = "ai")]
@@ -1767,319 +1821,6 @@ struct ProductChatCompletion {
     streamed: bool,
 }
 
-/// Product completion bound to the **authorized** live backend only.
-///
-/// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
-/// key exists. Completion never falls through from an Ollama-authorized route to
-/// Anthropic (or the reverse): that would bypass the capability/network decision
-/// built for the selected backend. Offline / no-provider returns `None` for
-/// fixture fallbacks.
-///
-/// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
-/// chunks arrive). Ollama remains a single-chunk completion.
-#[cfg(feature = "ai")]
-fn complete_product_chat(
-    preference: ProductAiProviderPreference,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-    temperature: f32,
-    mut on_delta: Option<&mut dyn FnMut(&str)>,
-) -> Option<ProductChatCompletion> {
-    use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
-    use legion_ai_providers::OllamaProvider;
-
-    let backend = product_ai_selected_live_backend(preference)?;
-
-    match backend {
-        ProductAiLiveBackend::Ollama => {
-            let model = ollama_model_label();
-            let client = OllamaProvider::default();
-            let request = ChatCompletionRequest {
-                provider: "ollama".to_string(),
-                model: model.clone(),
-                messages: vec![
-                    ChatMessage {
-                        role: ChatRole::System,
-                        content: system.to_string(),
-                    },
-                    ChatMessage {
-                        role: ChatRole::User,
-                        content: user.to_string(),
-                    },
-                ],
-                max_tokens: Some(max_tokens),
-                temperature: Some(temperature),
-                metadata: Default::default(),
-            };
-            if let Ok(response) = client.complete(request)
-                && !response.text.trim().is_empty()
-            {
-                let text = response.text.trim().to_string();
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(&text);
-                }
-                return Some(ProductChatCompletion {
-                    provider_id: "ollama".to_string(),
-                    model: response.model,
-                    stream_chunks: vec![text.clone()],
-                    text,
-                    streamed: false,
-                });
-            }
-            None
-        }
-        ProductAiLiveBackend::Anthropic => {
-            let client = anthropic_client_with_keyring_fallback();
-            let request = ChatCompletionRequest {
-                provider: "anthropic".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: ChatRole::System,
-                        content: system.to_string(),
-                    },
-                    ChatMessage {
-                        role: ChatRole::User,
-                        content: user.to_string(),
-                    },
-                ],
-                max_tokens: Some(max_tokens),
-                temperature: Some(temperature),
-                metadata: Default::default(),
-            };
-            // Progressive SSE: on_delta fires as text deltas arrive on the wire.
-            let mut delta_sink = |text: &str| {
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(text);
-                }
-            };
-            if let Ok(chunks) = client.stream_text_deltas_with_callback(
-                request.clone(),
-                Default::default(),
-                &mut delta_sink,
-            ) {
-                let chunks: Vec<String> = chunks.into_iter().filter(|d| !d.is_empty()).collect();
-                let text = chunks.join("");
-                if !text.trim().is_empty() {
-                    let streamed = chunks.len() > 1;
-                    return Some(ProductChatCompletion {
-                        provider_id: "anthropic".to_string(),
-                        model: request.model.clone(),
-                        stream_chunks: if chunks.is_empty() {
-                            vec![text.clone()]
-                        } else {
-                            chunks
-                        },
-                        text: text.trim().to_string(),
-                        streamed,
-                    });
-                }
-            }
-            if let Ok(response) = client.complete(request)
-                && !response.text.trim().is_empty()
-            {
-                let text = response.text.trim().to_string();
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(&text);
-                }
-                return Some(ProductChatCompletion {
-                    provider_id: "anthropic".to_string(),
-                    model: response.model,
-                    stream_chunks: vec![text.clone()],
-                    text,
-                    streamed: false,
-                });
-            }
-            None
-        }
-    }
-}
-
-/// Result of resolving assist edit proposal body text (live model or fixture).
-#[derive(Debug, Clone)]
-struct AssistedEditProposalSource {
-    provider_id: String,
-    summary: String,
-    details: Vec<String>,
-    replacement: String,
-}
-
-fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
-    AssistedEditProposalSource {
-        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-        summary: "Phase 4 local AI edit proposal".to_string(),
-        details: vec![
-            "Generated by deterministic local provider (no live credentials)".to_string(),
-            "Proposal is registered only; app/editor/workspace own apply".to_string(),
-        ],
-        replacement: "/* phase4 local AI proposal */\n".to_string(),
-    }
-}
-
-/// Display-safe record of the last / live product AI stream for rail projection.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProductAiStreamProjection {
-    /// Provider that produced the stream (`ollama`, `anthropic`, or empty).
-    pub provider_id: String,
-    /// Model label.
-    pub model: String,
-    /// Operation that produced the stream (`assist.proposal`, `delegate.chat`, …).
-    pub operation: String,
-    /// Ordered stream chunks (SSE deltas or single full response).
-    pub chunks: Vec<String>,
-    /// Whether the provider used multi-delta streaming.
-    pub streamed: bool,
-    /// True while a background or progressive stream is still receiving deltas.
-    pub in_flight: bool,
-    /// Final accumulated text (bounded for projection rows).
-    pub text_preview: String,
-}
-
-/// Resolve assist edit text via product preference routing (Ollama / Anthropic / fixture).
-#[cfg(feature = "ai")]
-fn resolve_assisted_edit_proposal_text(
-    preference: ProductAiProviderPreference,
-    instruction_label: &str,
-    buffer_excerpt: &str,
-    file_path: &str,
-    on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (
-    AssistedEditProposalSource,
-    Option<ProductAiStreamProjection>,
-) {
-    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
-Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
-no markdown fences, no explanation.";
-    let user = format!(
-        "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
-    );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
-        Some(completion) => {
-            let mut text = completion.text.clone();
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
-            let stream = product_stream_from_completion(&completion, "assist.proposal");
-            (
-                AssistedEditProposalSource {
-                    provider_id: completion.provider_id.clone(),
-                    summary: format!("Assist edit proposal from {}", completion.provider_id),
-                    details: vec![
-                        format!("model={}", completion.model),
-                        format!("preference={}", preference.as_str()),
-                        format!(
-                            "streamed={} chunks={}",
-                            completion.streamed,
-                            completion.stream_chunks.len()
-                        ),
-                        "Proposal is registered only; app/editor/workspace own apply".to_string(),
-                    ],
-                    replacement: text,
-                },
-                Some(stream),
-            )
-        }
-        None => (deterministic_assisted_edit_proposal(), None),
-    }
-}
-
-#[cfg(not(feature = "ai"))]
-fn resolve_assisted_edit_proposal_text(
-    _preference: ProductAiProviderPreference,
-    _instruction_label: &str,
-    _buffer_excerpt: &str,
-    _file_path: &str,
-    _on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (
-    AssistedEditProposalSource,
-    Option<ProductAiStreamProjection>,
-) {
-    (deterministic_assisted_edit_proposal(), None)
-}
-
-/// Resolve Delegate chat assistant body via product preference routing.
-#[cfg(feature = "ai")]
-#[allow(clippy::too_many_arguments)]
-fn resolve_delegate_chat_reply(
-    preference: ProductAiProviderPreference,
-    prompt_label: &str,
-    buffer_excerpt: &str,
-    file_path: &str,
-    citation_count: usize,
-    route_id: &str,
-    route_labels: &[String],
-    on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (String, Option<ProductAiStreamProjection>) {
-    let system = "You are Legion's Delegate chat assistant. Answer helpfully and concisely \
-about the user's workspace code. Prefer concrete references to the cited file. \
-Do not invent file paths. Keep the reply under ~800 characters.";
-    let user = format!(
-        "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
-    );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
-        Some(completion) => {
-            let stream = product_stream_from_completion(&completion, "delegate.chat");
-            (bounded_label(completion.text, 1_200), Some(stream))
-        }
-        None => (
-            format!(
-                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (preference={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
-                route_labels.join(","),
-                preference.as_str()
-            ),
-            None,
-        ),
-    }
-}
-
-#[cfg(not(feature = "ai"))]
-#[allow(clippy::too_many_arguments)]
-fn resolve_delegate_chat_reply(
-    _preference: ProductAiProviderPreference,
-    _prompt_label: &str,
-    _buffer_excerpt: &str,
-    _file_path: &str,
-    citation_count: usize,
-    route_id: &str,
-    route_labels: &[String],
-    _on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (String, Option<ProductAiStreamProjection>) {
-    (
-        format!(
-            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={}",
-            route_labels.join(",")
-        ),
-        None,
-    )
-}
-
-fn product_stream_from_completion(
-    completion: &ProductChatCompletion,
-    operation: &str,
-) -> ProductAiStreamProjection {
-    ProductAiStreamProjection {
-        provider_id: completion.provider_id.clone(),
-        model: completion.model.clone(),
-        operation: operation.to_string(),
-        chunks: completion.stream_chunks.clone(),
-        streamed: completion.streamed,
-        in_flight: false,
-        text_preview: bounded_label(completion.text.as_str(), 480),
-    }
-}
-
-/// Whether product AI will attempt a live (non-fixture) completion for `preference`.
-#[cfg(feature = "ai")]
-fn product_ai_will_attempt_live(preference: ProductAiProviderPreference) -> bool {
-    product_ai_selected_live_backend(preference).is_some()
-}
-
-#[cfg(not(feature = "ai"))]
-fn product_ai_will_attempt_live(_preference: ProductAiProviderPreference) -> bool {
-    false
-}
-
 /// Selected live backend for product composition (policy + routing metadata).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProductAiLiveBackend {
@@ -2099,14 +1840,24 @@ fn product_ai_selected_live_backend(
         ProductAiProviderPreference::Anthropic => {
             resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
         }
+        // Auto never escalates to a remote provider on its own.
+        //
+        // A key in the environment is not consent. `can_activate_provider`
+        // holds a BYOK remote provider to `AssistedAiWorkspaceConsent::Granted`
+        // *and* a credential, and Auto was treating the credential alone as
+        // both -- so a workspace that happened to have `ANTHROPIC_API_KEY` set
+        // would send buffer excerpts to a paid remote provider because Ollama
+        // was not running, without anyone choosing that.
+        //
+        // Choosing Anthropic explicitly is a person selecting a remote provider
+        // in settings, which is an act they took. Auto is not, so Auto stops at
+        // the local route.
+        //
+        // Narrower than the full contract, and deliberately so: no
+        // `AssistedAiWorkspaceConsent` state exists in this composition yet, so
+        // this cannot check consent -- it removes the path that never asked.
         ProductAiProviderPreference::Auto => {
-            if ollama_loopback_reachable() {
-                Some(ProductAiLiveBackend::Ollama)
-            } else if resolve_anthropic_api_key().is_some() {
-                Some(ProductAiLiveBackend::Anthropic)
-            } else {
-                None
-            }
+            ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
         }
     }
 }
@@ -2127,6 +1878,25 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
             policy.network_policy.air_gap = true;
             policy.ai_provider_policy.allow_local_provider = true;
             policy.ai_provider_policy.allow_remote_provider = false;
+            // The default allowlist holds `localhost` only, so a configured
+            // `OLLAMA_BASE_URL` of `http://127.0.0.1:11500` produced a route the
+            // probe selected and the broker then denied -- Assist proposals and
+            // Delegate chat silently never reaching a server that was running.
+            //
+            // Only a loopback host is added. The air gap above is what keeps
+            // this local; adding a resolved host without checking it would let
+            // one environment variable turn a local-only policy into an
+            // allowlist entry for anywhere.
+            let host = crate::ai_route_descriptor::ollama_network_target().host;
+            if crate::ai_route_descriptor::is_loopback_host(&host)
+                && !policy
+                    .network_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry == &host)
+            {
+                policy.network_policy.allowlist.push(host);
+            }
         }
         Some(ProductAiLiveBackend::Anthropic) => {
             // Trusted-workspace BYOK: allow the configured Anthropic host only.
@@ -2150,24 +1920,10 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
 }
 
 fn anthropic_route_host() -> String {
-    #[cfg(feature = "ai")]
-    {
-        let base = anthropic_base_url_from_env();
-        base.trim()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .split(':')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .to_string()
-    }
-    #[cfg(not(feature = "ai"))]
-    {
-        "api.anthropic.com".to_string()
-    }
+    // The host the broker allowlists must come from the same parse as the host
+    // the route request names, or a configured proxy is authorized under one
+    // spelling and contacted under another.
+    crate::ai_route_descriptor::anthropic_network_target().host
 }
 
 /// Provider route metadata that matches the backend that will receive workspace text.
@@ -2187,11 +1943,7 @@ fn product_ai_route_fields(
             "ollama".to_string(),
             ollama_model_label_offline_safe(),
             AssistedAiProviderClass::LocalLoopback,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            Some(crate::ai_route_descriptor::ollama_network_target()),
             vec!["local.ollama".to_string()],
             vec!["local.free".to_string()],
             legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
@@ -2200,11 +1952,7 @@ fn product_ai_route_fields(
             "anthropic".to_string(),
             "claude-sonnet-4-20250514".to_string(),
             AssistedAiProviderClass::ByokRemote,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "https".to_string(),
-                host: anthropic_route_host(),
-                port: Some(443),
-            }),
+            Some(crate::ai_route_descriptor::anthropic_network_target()),
             vec!["byok.anthropic".to_string()],
             vec!["remote.byok".to_string()],
             // Buffer excerpts leave the machine under BYOK remote.
@@ -2237,226 +1985,6 @@ fn ollama_model_label_offline_safe() -> String {
     }
 }
 
-/// Background job result for non-blocking product AI generation.
-#[derive(Debug, Clone)]
-struct ProductAiBackgroundResult {
-    /// Delegate chat assistant message to finalize; empty when this is Assist.
-    assistant_message_id: String,
-    content_label: String,
-    stream: Option<ProductAiStreamProjection>,
-    /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
-    assist_proposal: Option<AssistedEditProposalSource>,
-}
-
-/// Context retained while a live Assist proposal streams on a worker thread.
-///
-/// Authorization and agent Planning→Proposing run on the UI thread; completion
-/// text arrives later so the renderer can poll progressive deltas and remain
-/// responsive. Proposal registration happens on poll after the worker finishes.
-#[derive(Debug, Clone)]
-struct PendingAssistProposalJob {
-    run_id: legion_protocol::AgentRunId,
-    route_id: String,
-    operation_class: legion_protocol::AssistedAiOperationClass,
-    provider_class: legion_protocol::AssistedAiProviderClass,
-    provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
-    route_response: legion_protocol::AssistedAiProviderRouteResponse,
-    context_manifest_projection: legion_protocol::ContextManifestProjection,
-    privacy_inspector_projection: legion_protocol::PrivacyInspectorProjection,
-    permission_budget_projection: legion_protocol::PermissionBudgetProjection,
-    generated_at: TimestampMillis,
-    event_context: EventContext,
-    principal: PrincipalId,
-    file_id: FileId,
-    preconditions: ProposalVersionPreconditions,
-    agent: AgentRuntime,
-}
-
-/// Shared live stream sink updated as SSE deltas arrive (background or progressive).
-#[derive(Debug, Default)]
-struct LiveProductAiStreamSink {
-    projection: Mutex<ProductAiStreamProjection>,
-    in_flight: std::sync::atomic::AtomicBool,
-    /// Completed background chat results waiting to be applied on the app thread.
-    pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
-}
-
-struct ProductAiLaneReservation {
-    sink: Arc<LiveProductAiStreamSink>,
-    operation: &'static str,
-    armed: bool,
-}
-
-impl ProductAiLaneReservation {
-    fn try_acquire(
-        sink: Arc<LiveProductAiStreamSink>,
-        operation: &'static str,
-        provider_hint: &str,
-        model_hint: &str,
-    ) -> Option<Self> {
-        if !sink.try_begin(operation, provider_hint, model_hint) {
-            return None;
-        }
-        Some(Self {
-            sink,
-            operation,
-            armed: true,
-        })
-    }
-
-    fn sink(&self) -> Arc<LiveProductAiStreamSink> {
-        self.sink.clone()
-    }
-
-    fn finish(mut self, completion: Option<&ProductChatCompletion>) {
-        self.armed = false;
-        self.sink.finish(completion, self.operation);
-    }
-
-    fn finish_background(
-        mut self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-    ) {
-        self.armed = false;
-        self.sink
-            .finish_background(result, completion, self.operation);
-    }
-}
-
-impl Drop for ProductAiLaneReservation {
-    fn drop(&mut self) {
-        if self.armed {
-            self.sink.finish(None, self.operation);
-        }
-    }
-}
-
-impl LiveProductAiStreamSink {
-    fn try_begin(&self, operation: &str, provider_hint: &str, model_hint: &str) -> bool {
-        let Ok(pending) = self.pending_results.lock() else {
-            return false;
-        };
-        if !pending.is_empty()
-            || self
-                .in_flight
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_err()
-        {
-            return false;
-        }
-        let Ok(mut guard) = self.projection.lock() else {
-            self.in_flight
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            return false;
-        };
-        *guard = ProductAiStreamProjection {
-            provider_id: provider_hint.to_string(),
-            model: model_hint.to_string(),
-            operation: operation.to_string(),
-            chunks: Vec::new(),
-            streamed: false,
-            in_flight: true,
-            text_preview: String::new(),
-        };
-        true
-    }
-
-    fn push_delta(&self, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-        if let Ok(mut guard) = self.projection.lock() {
-            guard.chunks.push(delta.to_string());
-            guard.streamed = guard.chunks.len() > 1 || guard.streamed;
-            guard.in_flight = true;
-            let joined = guard.chunks.join("");
-            guard.text_preview = joined.chars().take(480).collect();
-        }
-    }
-
-    fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn snapshot(&self) -> ProductAiStreamProjection {
-        self.projection
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
-
-    fn is_in_flight(&self) -> bool {
-        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn has_pending_results(&self) -> bool {
-        self.pending_results
-            .lock()
-            .map(|queue| !queue.is_empty())
-            .unwrap_or(true)
-    }
-
-    fn mode_allows_active_operation(&self, mode: AppProductMode) -> bool {
-        if !self.is_in_flight() && !self.has_pending_results() {
-            return true;
-        }
-        let Ok(guard) = self.projection.lock() else {
-            return false;
-        };
-        match guard.operation.as_str() {
-            "delegate.chat" => mode.allows_delegate(),
-            "assist.proposal" => mode.allows_assist(),
-            _ => false,
-        }
-    }
-
-    /// Publish the final stream projection and enqueue its app-thread result
-    /// before making the operation observable as no longer in flight. This
-    /// ordering closes the Manual-transition race between provider completion
-    /// and result handoff.
-    fn finish_background(
-        &self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-        operation: &str,
-    ) {
-        let Ok(mut queue) = self.pending_results.lock() else {
-            return;
-        };
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        queue.push_back(result);
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
-        self.pending_results
-            .lock()
-            .map(|mut queue| queue.drain(..).collect())
-            .unwrap_or_default()
-    }
-}
-
 /// Bound ghost-text bytes for live inline predictions (matches protocol max).
 #[cfg(feature = "ai")]
 fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
@@ -2473,7 +2001,7 @@ fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
 /// the ghost-text result shape. Falls back to `None` for deterministic offline.
 #[cfg(feature = "ai")]
 fn try_live_product_inline_prediction(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     metadata: &InlinePredictionRequestMetadata,
     buffer_excerpt: &str,
 ) -> Option<InlinePredictionResult> {
@@ -2488,7 +2016,18 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
         "Language: {}\nCursor line {} character {}\nBuffer excerpt:\n{buffer_excerpt}",
         metadata.language_id.0, metadata.cursor.line, metadata.cursor.character
     );
-    let completion = complete_product_chat(preference, &system, &user, 128, 0.1, None)?;
+    // The already-authorized backend, not the preference. Resolving again here
+    // would repeat the delegate-chat defect: the caller has just authorized one
+    // destination through the broker, and a second resolution can answer
+    // differently and send the excerpt somewhere never approved.
+    let completion = complete_product_chat(
+        backend,
+        &system,
+        &user,
+        INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
+        0.1,
+        None,
+    )?;
     let text = bound_inline_prediction_text(completion.text.trim(), max_bytes);
     if text.is_empty() {
         return None;
@@ -3083,176 +2622,15 @@ pub struct AppDelegateChatOutcome {
     pub assistant_message_id: String,
     /// Number of retrieval citations attached to the assistant response.
     pub citation_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct DelegateWorkflowState {
-    chat_messages: Vec<DelegatedTaskChatMessage>,
-    context_citations: Vec<DelegatedTaskContextCitation>,
-    hunk_decisions: HashMap<(ProposalId, String), DelegatedTaskProposalHunkDisposition>,
-    tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
-    runtime_activation: DelegatedTaskRuntimeActivationState,
-    next_message_sequence: u64,
-    /// Last live sandbox enforcement summary from tool-host spawns (display-safe).
-    last_sandbox_enforcement_label: Option<String>,
-}
-
-impl Default for DelegateWorkflowState {
-    fn default() -> Self {
-        Self {
-            chat_messages: Vec::new(),
-            context_citations: Vec::new(),
-            hunk_decisions: HashMap::new(),
-            tool_permission_requests: HashMap::new(),
-            runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
-            next_message_sequence: 0,
-            last_sandbox_enforcement_label: None,
-        }
-    }
-}
-
-impl DelegateWorkflowState {
-    fn next_message_id(&mut self, role: DelegatedTaskChatRole) -> String {
-        self.next_message_sequence = self.next_message_sequence.saturating_add(1);
-        format!("delegate:{role:?}:{}", self.next_message_sequence)
-    }
-
-    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
-    fn set_runtime_activation(&mut self, runtime_activation: DelegatedTaskRuntimeActivationState) {
-        self.runtime_activation = runtime_activation;
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn record_system_message(
-        &mut self,
-        content_label: impl Into<String>,
-        plan_id: Option<DelegatedTaskPlanId>,
-        proposal_id: Option<ProposalId>,
-        correlation_id: CorrelationId,
-        causality_id: CausalityId,
-    ) -> String {
-        let message_id = self.next_message_id(DelegatedTaskChatRole::System);
-        self.chat_messages.push(DelegatedTaskChatMessage {
-            message_id: message_id.clone(),
-            role: DelegatedTaskChatRole::System,
-            content_label: content_label.into(),
-            plan_id,
-            proposal_id,
-            citation_ids: Vec::new(),
-            tool_permission_request_ids: Vec::new(),
-            correlation_id,
-            causality_id,
-            created_at: TimestampMillis::now(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        });
-        message_id
-    }
-
-    fn record_tool_permission(&mut self, request: DelegatedTaskToolPermissionRequest) {
-        self.tool_permission_requests
-            .insert(request.request_id.clone(), request);
-    }
-
-    fn tool_permission(&self, request_id: &str) -> Option<&DelegatedTaskToolPermissionRequest> {
-        self.tool_permission_requests.get(request_id)
-    }
-
-    fn record_tool_permission_decision(
-        &mut self,
-        mut input: DelegatedTaskToolPermissionRequestInput,
-    ) -> DelegatedTaskToolPermissionRequest {
-        let effective_decision = if self
-            .tool_permission_requests
-            .get(&input.request_id)
-            .is_some_and(|request| request.deny_overrides)
-        {
-            DelegatedTaskToolPermissionDecision::Deny
-        } else {
-            input.decision
-        };
-        input.decision = effective_decision;
-        let request = delegated_task_tool_permission_request(input);
-        self.record_tool_permission(request.clone());
-        request
-    }
-
-    fn apply_to_projection(
-        &self,
-        projection: &mut DelegatedTaskProjection,
-        proposal_ledger: &ProposalLedgerProjection,
-    ) {
-        projection.chat_messages = self.chat_messages.clone();
-        projection.context_citations = self.context_citations.clone();
-        projection.proposal_reviews = proposal_ledger
-            .rows
-            .iter()
-            .filter(|row| row.diff_summary.hunk_count > 0 || !row.diff_summary.chunks.is_empty())
-            .map(|row| self.review_for_row(row))
-            .collect();
-        projection.tool_permission_requests = self
-            .tool_permission_requests
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        projection.tool_permission_requests.sort_by(|left, right| {
-            left.request_id
-                .cmp(&right.request_id)
-                .then_with(|| format!("{:?}", left.profile).cmp(&format!("{:?}", right.profile)))
-        });
-        projection.runtime_activation = self.runtime_activation;
-        projection.chat_message_count = projection.chat_messages.len() as u32;
-        projection.context_citation_count = projection.context_citations.len() as u32;
-        projection.proposal_review_count = projection.proposal_reviews.len() as u32;
-        projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
-        if let Some(label) = &self.last_sandbox_enforcement_label
-            && !projection
-                .plan_only_disclaimers
-                .iter()
-                .any(|existing| existing == label)
-        {
-            projection.plan_only_disclaimers.push(label.clone());
-        }
-    }
-
-    fn review_for_row(&self, row: &ProposalLedgerRow) -> DelegatedTaskProposalReview {
-        let chunks = proposal_review_chunks(row)
-            .into_iter()
-            .map(|chunk| {
-                let hunk_id = delegate_hunk_id(row.proposal_id, &chunk);
-                let disposition = self
-                    .hunk_decisions
-                    .get(&(row.proposal_id, hunk_id.clone()))
-                    .copied()
-                    .unwrap_or(DelegatedTaskProposalHunkDisposition::Pending);
-                DelegatedTaskProposalHunkReview {
-                    hunk_id,
-                    proposal_id: row.proposal_id,
-                    target_id: chunk.target_id.clone(),
-                    payload_kind: row.payload_kind,
-                    path: target_path_for_chunk(row, chunk.target_id.as_deref()),
-                    byte_range: chunk.byte_range,
-                    changed_line_count: chunk.changed_line_count,
-                    inserted_line_count: chunk.inserted_line_count,
-                    deleted_line_count: chunk.deleted_line_count,
-                    content_hash: chunk.content_hash.clone(),
-                    disposition,
-                    risk_label: row.risk_label,
-                    privacy_label: row.privacy_label,
-                    labels: vec!["delegate.proposal_hunk.human_review".to_string()],
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                }
-            })
-            .collect::<Vec<_>>();
-        DelegatedTaskProposalReview::from_hunks(
-            format!("delegate:review:{}", row.proposal_id.0),
-            row.proposal_id,
-            chunks,
-            vec!["delegate.proposal_review.human_approval_queue".to_string()],
-            1,
-        )
-    }
+    /// The provider route this turn was authorized against.
+    ///
+    /// Delegate chat built an accurate route request, used it for the broker
+    /// decision, and dropped it -- so a reachable UI operation could upload the
+    /// buffer excerpt with nothing retained about the destination. Assist keeps
+    /// its route; this is the same evidence for the other path.
+    pub provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
+    /// How the provider invocation ended.
+    pub invocation_state: legion_protocol::AssistedAiProviderInvocationState,
 }
 
 /// App-owned outcome for an Automate MCP tool-call attempt.
@@ -9451,222 +8829,6 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-struct Phase4ContextAssemblyService;
-
-impl Phase4ContextAssemblyService {
-    #[allow(clippy::too_many_arguments)]
-    fn assemble_context_manifest(
-        context: &ActiveSaveContext,
-        run_id: &legion_protocol::AgentRunId,
-        provider_route_id: &str,
-        snapshot_id: legion_protocol::SnapshotId,
-        buffer_version: legion_protocol::BufferVersion,
-        snapshot_hash: FileFingerprint,
-        byte_len: u64,
-        line_count: u32,
-        generated_at: TimestampMillis,
-        instruction_manifest_items: Vec<legion_protocol::ContextManifestItem>,
-    ) -> legion_protocol::ContextManifestProjection {
-        let file_item = legion_protocol::ContextManifestItem {
-            item_id: format!("phase4:{}:file", run_id.0),
-            kind: legion_protocol::ContextManifestItemKind::File,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(context.workspace_id),
-            file_id: Some(context.metadata.identity.file_id),
-            buffer_id: Some(context.buffer_id),
-            proposal_id: None,
-            target_id: Some(context.metadata.identity.file_id.0.to_string()),
-            path: Some(context.metadata.identity.canonical_path.clone()),
-            ranges: Vec::new(),
-            counts: context
-                .metadata
-                .file_length
-                .map(|count| legion_protocol::ContextManifestItemCount {
-                    label: "file_bytes".to_string(),
-                    count: count.min(u32::MAX as u64) as u32,
-                })
-                .into_iter()
-                .collect(),
-            hashes: vec![context.metadata.fingerprint.clone()],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
-                state: legion_protocol::SemanticFreshnessState::Fresh,
-                freshness_key_present: true,
-                snapshot_id: Some(snapshot_id),
-                file_content_version: Some(context.metadata.file_content_version),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                content_hash: Some(context.metadata.fingerprint.clone()),
-                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-                observed_at: Some(generated_at),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            preconditions: None,
-            labels: vec!["phase4.context.file_metadata".to_string()],
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let buffer_item = legion_protocol::ContextManifestItem {
-            item_id: format!("phase4:{}:buffer", run_id.0),
-            kind: legion_protocol::ContextManifestItemKind::Buffer,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(context.workspace_id),
-            file_id: Some(context.metadata.identity.file_id),
-            buffer_id: Some(context.buffer_id),
-            proposal_id: None,
-            target_id: Some(context.buffer_id.0.to_string()),
-            path: None,
-            ranges: Vec::new(),
-            counts: vec![
-                legion_protocol::ContextManifestItemCount {
-                    label: "snapshot_bytes".to_string(),
-                    count: byte_len.min(u32::MAX as u64) as u32,
-                },
-                legion_protocol::ContextManifestItemCount {
-                    label: "lines".to_string(),
-                    count: line_count,
-                },
-            ],
-            hashes: vec![snapshot_hash],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
-                state: legion_protocol::SemanticFreshnessState::Fresh,
-                freshness_key_present: true,
-                snapshot_id: Some(snapshot_id),
-                file_content_version: Some(context.metadata.file_content_version),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                content_hash: None,
-                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-                observed_at: Some(generated_at),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            preconditions: Some(legion_protocol::ContextManifestPreconditionSummary {
-                file_content_version: Some(context.metadata.file_content_version),
-                buffer_version: Some(buffer_version),
-                snapshot_id: Some(snapshot_id),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                expected_fingerprint: Some(context.metadata.fingerprint.clone()),
-                expected_file_length: context.metadata.file_length,
-                expected_modified_at: context.metadata.modified_at,
-                core_preconditions_present: true,
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            labels: vec!["phase4.context.buffer_descriptor".to_string()],
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let route_item = Self::metadata_item(
-            format!("phase4:{}:provider-route", run_id.0),
-            legion_protocol::ContextManifestItemKind::ProviderRoute,
-            context.workspace_id,
-            provider_route_id,
-            legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            vec!["phase4.provider.local_loopback".to_string()],
-        );
-        let agent_item = Self::metadata_item(
-            format!("phase4:{}:agent-step", run_id.0),
-            legion_protocol::ContextManifestItemKind::AgentStep,
-            context.workspace_id,
-            &run_id.0,
-            legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            vec!["phase4.agent.proposal_only".to_string()],
-        );
-        let selection_item = Self::metadata_item(
-            format!("phase4:{}:selection", run_id.0),
-            legion_protocol::ContextManifestItemKind::UserSelection,
-            context.workspace_id,
-            "active-buffer",
-            legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            vec!["phase4.selection.active_buffer".to_string()],
-        );
-
-        let permission = legion_protocol::ContextManifestPermissionSummary {
-            kind: legion_protocol::ContextManifestPermissionKind::ModelProvider,
-            capability: CapabilityId("ai.provider.invoke".to_string()),
-            principal: Some(context.principal.clone()),
-            decision_id: None,
-            granted: false,
-            privacy_scope: legion_protocol::SemanticPrivacyScope::MetadataOnly,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let manifest = legion_protocol::ContextManifestRecord {
-            manifest_id: format!("phase4:manifest:{}", run_id.0),
-            workspace_id: Some(context.workspace_id),
-            proposal_id: None,
-            purpose: legion_protocol::ContextManifestPurpose::ProviderRequest,
-            workspace_trust_state: Some(context.trust.clone()),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            items: vec![file_item, buffer_item]
-                .into_iter()
-                .chain(instruction_manifest_items)
-                .chain(vec![selection_item, route_item, agent_item])
-                .collect(),
-            permissions: vec![permission],
-            omitted_item_count: 0,
-            stale_or_missing_metadata_risk_present: false,
-            generated_at,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        legion_protocol::ContextManifestProjection {
-            manifest,
-            selected_item_id: None,
-            generated_at,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }
-    }
-
-    fn metadata_item(
-        item_id: String,
-        kind: legion_protocol::ContextManifestItemKind,
-        workspace_id: WorkspaceId,
-        target_id: &str,
-        egress: legion_protocol::ContextManifestEgressStatus,
-        labels: Vec<String>,
-    ) -> legion_protocol::ContextManifestItem {
-        legion_protocol::ContextManifestItem {
-            item_id,
-            kind,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(workspace_id),
-            file_id: None,
-            buffer_id: None,
-            proposal_id: None,
-            target_id: Some(target_id.to_string()),
-            path: None,
-            ranges: Vec::new(),
-            counts: Vec::new(),
-            hashes: Vec::new(),
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress,
-            freshness: None,
-            preconditions: None,
-            labels,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct InstructionPrefixSource {
     source_label: String,
@@ -12926,92 +12088,6 @@ fn command_descriptor(input: AppCommandDescriptorInput<'_>) -> legion_protocol::
     }
 }
 
-fn phase4_provider_capability(
-    provider_class: legion_protocol::AssistedAiProviderClass,
-    refusal: Option<legion_protocol::AssistedAiRefusalMetadata>,
-) -> legion_protocol::AssistedAiProviderCapability {
-    legion_protocol::AssistedAiProviderCapability {
-        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-        provider_label: "Deterministic local provider".to_string(),
-        provider_class,
-        supported_operations: vec![
-            legion_protocol::AssistedAiOperationClass::Explain,
-            legion_protocol::AssistedAiOperationClass::ProposeEdit,
-        ],
-        model_capability_labels: vec!["deterministic".to_string()],
-        tool_capability_labels: Vec::new(),
-        context_window_label: "small".to_string(),
-        cost_budget_label: "local.free".to_string(),
-        risk_budget_label: "low".to_string(),
-        privacy_retention_label: "metadata-only".to_string(),
-        byok_support: legion_protocol::AssistedAiSupportLabel::Unsupported,
-        local_execution_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        offline_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        air_gap_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        redaction_requirements: vec!["metadata-only".to_string()],
-        consent_requirements: vec!["proposal-review".to_string()],
-        availability: if refusal.is_some() {
-            legion_protocol::AssistedAiProviderAvailabilityState::Refused
-        } else {
-            legion_protocol::AssistedAiProviderAvailabilityState::Available
-        },
-        refusal,
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    }
-}
-
-fn phase4_permission_budget_projection(
-    context_manifest: &legion_protocol::ContextManifestProjection,
-    run_id: &legion_protocol::AgentRunId,
-    generated_at: TimestampMillis,
-) -> legion_protocol::PermissionBudgetProjection {
-    let budget = legion_protocol::PermissionBudgetContract {
-        budget_id: format!("phase4:budget:{}", run_id.0),
-        action_class: legion_protocol::PermissionBudgetActionClass::InvokeProvider,
-        capability: Some(CapabilityId("ai.provider.invoke".to_string())),
-        state: legion_protocol::PermissionBudgetState::Allowed,
-        privacy_scope: legion_protocol::SemanticPrivacyScope::MetadataOnly,
-        usage: legion_protocol::PermissionBudgetUsageSummary {
-            unit_label: "calls".to_string(),
-            used: 0,
-            ceiling: Some(1),
-            remaining: Some(1),
-            attempted: 0,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        },
-        reset_policy_label: legion_protocol::PermissionBudgetResetPolicyLabel::Session,
-        consent_requirement_label:
-            legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
-        risk_label: legion_protocol::ProposalRiskLabel::Low,
-        reasons: vec!["phase4.local_provider.budget_allowed".to_string()],
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    };
-    let action = legion_protocol::permission_budget_action_from_permission_summary(
-        &context_manifest.manifest.permissions[0],
-        format!("phase4:budget-action:{}", run_id.0),
-        legion_protocol::PermissionBudgetActionClass::InvokeProvider,
-        context_manifest.manifest.workspace_id,
-        context_manifest.manifest.proposal_id,
-        1,
-    );
-    let evaluation = legion_protocol::evaluate_permission_budget(
-        &budget,
-        action,
-        format!("phase4:budget-eval:{}", run_id.0),
-        1,
-    );
-    legion_protocol::permission_budget_projection_from_contracts(
-        format!("phase4:permission-budget:{}", run_id.0),
-        vec![budget],
-        vec![evaluation],
-        generated_at,
-        1,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn assisted_ai_request_contract_from_metadata(
     request_id: String,
@@ -13381,8 +12457,34 @@ struct Phase4ProjectionState {
     approval_checklist_projection: Option<legion_protocol::ProposalApprovalChecklistProjection>,
     checkpoint_rollback_projection: Option<legion_protocol::CheckpointRollbackProjection>,
     assisted_ai_projection: Option<legion_protocol::AssistedAiProjection>,
+    /// The trust projections a Phase 4 run built, keyed by its proposal.
+    ///
+    /// The selected-proposal path reconstructs these generically from the
+    /// proposal row, and that reconstruction cannot know what route produced the
+    /// proposal -- it hard-codes `NotRequired` consent. A remote run's consent
+    /// refusal was therefore computed, linked to the proposal, and then replaced
+    /// on the one path that renders. Keeping what the run actually built means a
+    /// reviewer reads the run's own answer rather than a plausible one.
+    phase4_trust_by_proposal: HashMap<ProposalId, Box<SelectedProposalTrustProjections>>,
+    /// Terminal Delegate route records whose write has not succeeded yet.
+    ///
+    /// The background result that carries the ending is consumed once, so a
+    /// failed write left the route recorded as `Streaming` for good -- the
+    /// audit trail permanently unable to say whether a remote turn had
+    /// finished. Kept here and retried on the next poll instead.
+    pending_route_audits: Vec<PendingRouteAudit>,
     replay_manifests: HashMap<legion_protocol::AgentRunId, legion_protocol::AgentReplayManifest>,
     inspection_snapshots: HashMap<legion_protocol::AgentRunId, AppAiInspectionSnapshot>,
+}
+
+/// A terminal route record still owed to the audit trail.
+#[derive(Debug, Clone)]
+struct PendingRouteAudit {
+    run_id: legion_protocol::AgentRunId,
+    route_id: String,
+    state: legion_protocol::AssistedAiProviderInvocationState,
+    outcome_label: &'static str,
+    event_context: EventContext,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -14838,6 +13940,13 @@ pub struct LspDebounceEvent {
     pub kind: LspDebounceKind,
 }
 
+/// Maximum characters of a Delegate chat prompt that reach app authority.
+///
+/// Exported so the renderer's composer caps at the same number; the two used to
+/// disagree (4096 in the field, 240 here) and the difference vanished without a
+/// word.
+pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
+
 /// Root application composition.
 pub struct AppComposition {
     workspace: WorkspaceActor,
@@ -14853,6 +13962,20 @@ pub struct AppComposition {
     live_product_ai_stream: Arc<LiveProductAiStreamSink>,
     /// Live Assist proposal awaiting worker completion (registered on poll).
     pending_assist_proposal: Option<PendingAssistProposalJob>,
+    /// Set when a running inline prediction has been cancelled.
+    ///
+    /// The worker cannot be interrupted -- the provider client is blocking --
+    /// but it can be told that nobody wants its answer, so it releases nothing
+    /// and publishes nothing when it finally returns.
+    pending_inline_prediction_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The inline prediction request a worker thread is currently running.
+    ///
+    /// Kept so that a worker returning nothing -- an unreachable provider, an
+    /// empty completion -- can still be answered with the deterministic
+    /// prediction, on the app thread, rather than leaving the request with no
+    /// result at all. The synchronous path used to fall through to that fixture
+    /// itself; moving the live call to a worker moved the fallback with it.
+    pending_inline_prediction: Option<InlinePredictionRequestMetadata>,
     palette: PaletteState,
     settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
@@ -14891,6 +14014,12 @@ pub struct AppComposition {
     injected_delegated_spawn_failure: bool,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_assist_spawn_failure: bool,
+    /// Force the Delegate chat worker spawn to fail, for tests.
+    ///
+    /// Separate from the Assist seam because the two paths fail differently:
+    /// Assist publishes nothing until the worker exists, and a Delegate turn is
+    /// already half written by the time the spawn is attempted.
+    injected_delegate_chat_spawn_failure: bool,
     /// Test-only interruption seam after a Pending proposal observation is
     /// durable but before its proposals are published to the live ledger.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -15211,6 +14340,8 @@ impl AppComposition {
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
+            pending_inline_prediction: None,
+            pending_inline_prediction_cancelled: None,
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -15243,6 +14374,7 @@ impl AppComposition {
             injected_delegated_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_assist_spawn_failure: false,
+            injected_delegate_chat_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
@@ -15815,6 +14947,18 @@ impl AppComposition {
         }
     }
 
+    /// The product AI policy for `backend`, tightened by any installed org bundle.
+    ///
+    /// `product_ai_security_policy` derives a policy from the backend alone, so
+    /// a signed org bundle that permits Delegate mode but forbids a provider was
+    /// never consulted on this route: the mode ceiling was checked and the
+    /// provider restriction was not, and the buffer excerpt could go to a
+    /// provider the organization had refused.
+    ///
+    /// Combined as a **ceiling**, never a permission. Every field takes the more
+    /// restrictive of the two, so an installed bundle can only ever narrow what
+    /// the product policy already allowed — a bundle that said `air_gap = false`
+    /// must not be able to switch off an air gap the product asked for.
     /// Whether the installed org policy bundle's mode ceiling refuses `mode`.
     ///
     /// `false` when no bundle is installed — an absent bundle imposes no ceiling,
@@ -15913,6 +15057,7 @@ impl AppComposition {
     /// ledger changed (desktop should repaint).
     pub fn poll_product_ai_stream(&mut self) -> bool {
         let mut changed = self.poll_scheduled_proposal_observation_retries();
+        changed |= self.retry_pending_route_audits();
         let snap = self.live_product_ai_stream.snapshot();
         if (!snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty())
             && self.last_product_ai_stream.as_ref() != Some(&snap)
@@ -15921,6 +15066,81 @@ impl AppComposition {
             changed = true;
         }
         for result in self.live_product_ai_stream.take_background_results() {
+            // How a background Delegate turn ended, written where it becomes
+            // known.
+            //
+            // The record persisted when the worker started says `Streaming`,
+            // which is honest at that moment and permanent without this: a
+            // successful turn, an empty one and a failed one were all audited as
+            // streaming forever.
+            if let Some(route) = result.delegate_route.clone() {
+                let state = if result.live_failed {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
+                let replay_manifest = legion_protocol::AgentReplayManifest {
+                    run_id: route.run_id.clone(),
+                    transitions: Vec::new(),
+                    context_manifests: Vec::new(),
+                    provider_route_ids: vec![route.route_id.clone()],
+                    proposal_ids: Vec::new(),
+                    correlation_id: route.event_context.correlation_id,
+                    causality_id: route.event_context.causality_id,
+                    event_sequence: self.event_sequence_generator.next(),
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let outcome_label = if result.live_failed {
+                    "phase4.provider.route.failed"
+                } else {
+                    "phase4.provider.route.completed"
+                };
+                if self
+                    .persist_phase4_runtime_records(
+                        &route.run_id,
+                        &route.route_id,
+                        state,
+                        outcome_label,
+                        route.event_context,
+                        &replay_manifest,
+                    )
+                    .is_err()
+                {
+                    // The result that carries this ending is consumed here and
+                    // nowhere else, so dropping the failure leaves the route
+                    // recorded as `Streaming` for good. Kept for the next poll.
+                    self.queue_route_audit(PendingRouteAudit {
+                        run_id: route.run_id.clone(),
+                        route_id: route.route_id.clone(),
+                        state,
+                        outcome_label,
+                        event_context: route.event_context,
+                    });
+                } else {
+                    // The ending is on disk. A `Streaming` record queued when
+                    // this run started writes to the same audit id, so leaving
+                    // it queued would overwrite the ending on the next poll and
+                    // a finished turn would read as permanently in flight.
+                    self.forget_queued_route_audit(&route.run_id, &route.route_id);
+                }
+                // And the projection the transcript reads, which holds the same
+                // fact in a second place.
+                //
+                // The durable record answers an auditor later; this answers the
+                // person looking at the reply now, and it was left saying
+                // `Streaming` for good once the worker finished. Two copies of
+                // one answer is why they are written together.
+                if let Some(projected) = self
+                    .delegate_workflow
+                    .provider_routes
+                    .iter_mut()
+                    .find(|projected| projected.route_id == route.route_id)
+                {
+                    projected.invocation_state = state;
+                }
+                changed = true;
+            }
             if let Some(stream) = result.stream {
                 self.last_product_ai_stream = Some(stream);
             }
@@ -15934,9 +15154,63 @@ impl AppComposition {
                 message.content_label = result.content_label;
                 changed = true;
             }
+            if let Some(prediction) = result.inline_prediction {
+                self.pending_inline_prediction = None;
+                self.merge_inline_prediction_result(prediction);
+                changed = true;
+            } else if let Some(metadata) = self.pending_inline_prediction.take() {
+                // The worker finished with nothing to show -- an unreachable
+                // provider, or a completion that came back empty. Answer with
+                // the deterministic prediction, here on the app thread, rather
+                // than leaving the request with no result: that is what the
+                // synchronous path did, and losing it would trade a frozen UI
+                // for ghost text that silently stops appearing.
+                let failed_request_id = metadata.request_id.clone();
+                match self.invoke_inline_prediction_provider(metadata) {
+                    Ok(prediction) => {
+                        self.merge_inline_prediction_result(prediction);
+                    }
+                    Err(_error) => {
+                        // Nothing to show and nothing to say. Clearing the flag
+                        // is the part that matters -- leaving it set strands the
+                        // Cancel control with nothing to cancel -- but only for
+                        // the request that actually failed, since a newer one
+                        // may already own this state.
+                        if self
+                            .assist_inline_prediction_state
+                            .active_request_id
+                            .as_ref()
+                            == Some(&failed_request_id)
+                        {
+                            self.assist_inline_prediction_state.request_in_flight = false;
+                            self.assist_inline_prediction_state.active_request_id = None;
+                        }
+                    }
+                }
+                changed = true;
+            }
             if let Some(proposal_source) = result.assist_proposal
-                && let Some(job) = self.pending_assist_proposal.take()
+                && let Some(mut job) = self.pending_assist_proposal.take()
             {
+                // The route record agrees with the proposal about what happened.
+                //
+                // `route_response` is built and marked `Completed` before the
+                // worker runs, because that is when policy approves the route.
+                // Leaving it there when the provider never answered persists
+                // `phase4.provider.route.completed` beside a proposal saying the
+                // opposite -- an audit trail that contradicts the artifact it
+                // describes is worse than one that says nothing.
+                if result.live_failed {
+                    // Every field that says how the run ended, not just the
+                    // outermost one. The nested decision is copied into the
+                    // reviewer-facing contract and the outcome label is what is
+                    // persisted, so leaving either at `Completed` reproduced the
+                    // contradiction one layer down.
+                    job.route_response.invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                    job.route_response.route_decision.provider_invocation =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                }
                 match self.finish_assisted_edit_proposal_registration(job, proposal_source) {
                     Ok(_outcome) => {
                         changed = true;
@@ -15961,6 +15235,83 @@ impl AppComposition {
                 .next_attempt_at
                 .saturating_duration_since(Instant::now())
         })
+    }
+
+    /// Whether the audit trail still owes a route record a write.
+    ///
+    /// The desktop repaints while this is true, because a failed write is only
+    /// retried by another poll and a poll only happens on a repaint: without
+    /// this the queue could sit untouched until unrelated input arrived, and a
+    /// finished turn would stay recorded as `Streaming` in the meantime.
+    pub fn has_pending_route_audits(&self) -> bool {
+        !self.phase4_projection_state.pending_route_audits.is_empty()
+    }
+
+    /// Queue a route record for retry, replacing any older one for the same run.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place: a `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight. There is
+    /// one true answer per run, and it is the most recent.
+    fn queue_route_audit(&mut self, audit: PendingRouteAudit) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != audit.run_id || queued.route_id != audit.route_id);
+        self.phase4_projection_state
+            .pending_route_audits
+            .push(audit);
+    }
+
+    /// Drop any queued record that a written one has superseded.
+    fn forget_queued_route_audit(&mut self, run_id: &legion_protocol::AgentRunId, route_id: &str) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != *run_id || queued.route_id != route_id);
+    }
+
+    /// Try again to write the terminal route records that failed.
+    ///
+    /// One attempt per poll, in order, and a record stays queued until it is
+    /// written -- an audit trail that cannot say how a run ended is the failure
+    /// this whole area keeps producing, and a dropped write is the quietest way
+    /// to produce it.
+    fn retry_pending_route_audits(&mut self) -> bool {
+        if self.phase4_projection_state.pending_route_audits.is_empty() {
+            return false;
+        }
+        let pending = std::mem::take(&mut self.phase4_projection_state.pending_route_audits);
+        let mut changed = false;
+        for audit in pending {
+            let replay_manifest = legion_protocol::AgentReplayManifest {
+                run_id: audit.run_id.clone(),
+                transitions: Vec::new(),
+                context_manifests: Vec::new(),
+                provider_route_ids: vec![audit.route_id.clone()],
+                proposal_ids: Vec::new(),
+                correlation_id: audit.event_context.correlation_id,
+                causality_id: audit.event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            if self
+                .persist_phase4_runtime_records(
+                    &audit.run_id,
+                    &audit.route_id,
+                    audit.state,
+                    audit.outcome_label,
+                    audit.event_context,
+                    &replay_manifest,
+                )
+                .is_err()
+            {
+                self.queue_route_audit(audit);
+            } else {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn poll_scheduled_proposal_observation_retries(&mut self) -> bool {
@@ -16396,6 +15747,11 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_assist_spawn_failure_for_test(&mut self) {
         self.injected_assist_spawn_failure = true;
+    }
+
+    /// Make the next Delegate chat worker spawn fail.
+    pub fn inject_delegate_chat_spawn_failure_for_test(&mut self) {
+        self.injected_delegate_chat_spawn_failure = true;
     }
 
     /// Test-only: report whether an Assist proposal job remains app-owned.
@@ -16936,6 +16292,37 @@ impl AppComposition {
                 self.handle_proposal_request(ProposalRequest::Validate(proposal.clone()))?;
             if !matches!(validated, ProposalResponse::Validated(_)) {
                 return Ok(validated);
+            }
+        }
+        // Approving a freshly created proposal walks it through the same steps
+        // `Preview` gets above, instead of failing on a lifecycle it was never
+        // given a chance to satisfy.
+        //
+        // An Assist rail command registers its proposal in `Created` and nothing
+        // advances it: `OpenProposalDetails` maps to no request, so the panel
+        // offered an Approve whose only outcome was a refusal, which then landed
+        // the proposal in a terminal state. That is the "approve turns into
+        // rejected" behaviour recorded in the interactive-GUI journal, and it is
+        // a lifecycle gap rather than an approval policy -- validation and
+        // preview are precisely the checks approval is supposed to come after,
+        // so running them is not weakening the gate, it is honouring it.
+        if let ProposalRequest::Approve(command) = &request {
+            let proposal_id = command.proposal_id;
+            let state = self
+                .proposal_coordinator
+                .current_lifecycle_state(proposal_id);
+            if matches!(state, Some(ProposalLifecycleState::Created))
+                && let Some(proposal) = self.proposal_coordinator.proposal(proposal_id)
+            {
+                let validated =
+                    self.handle_proposal_request(ProposalRequest::Validate(proposal.clone()))?;
+                if !matches!(validated, ProposalResponse::Validated(_)) {
+                    return Ok(validated);
+                }
+                let previewed = self.handle_proposal_request(ProposalRequest::Preview(proposal))?;
+                if !matches!(previewed, ProposalResponse::Previewed { .. }) {
+                    return Ok(previewed);
+                }
             }
         }
         self.handle_proposal_request(request)
@@ -24689,7 +24076,6 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::Explain,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
     }
 
@@ -24701,18 +24087,30 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
     }
 
+    /// Run one Assist operation, from authorization to proposal or refusal.
+    ///
+    /// The provider class is **not** a parameter. Both callers passed
+    /// `LocalLoopback` because that is what the fixture used to be, and the
+    /// value travelled all the way into the reviewer-facing capability -- so an
+    /// Anthropic proposal was presented as local, free, metadata-only and
+    /// air-gap safe while the excerpt went over the wire. Deriving `remote`
+    /// from the class was only half a fix while the class itself came from a
+    /// caller guessing. `product_ai_route_fields` resolves it below, from the
+    /// backend that will actually receive the text, and nothing else may
+    /// supply it.
     fn run_assisted_ai_operation(
         &mut self,
         operation_class: legion_protocol::AssistedAiOperationClass,
         instruction_label: impl Into<String>,
-        provider_class: legion_protocol::AssistedAiProviderClass,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         self.require_assist_mode()?;
-        let instruction_label = instruction_label.into();
+        // Trimmed to the length declared to the broker below. An unbounded
+        // instruction makes the declaration a number the request is free to
+        // exceed, which is the same as declaring nothing.
+        let instruction_label = bounded_assist_instruction(&instruction_label.into());
         let context = self.active_documents.require_active_save_context()?;
         let event_context = self.next_event_context();
         let generated_at = TimestampMillis::now();
@@ -24735,29 +24133,60 @@ impl AppComposition {
                 .as_deref()
                 .map(std::path::Path::new),
         );
-        let context_manifest_projection = Phase4ContextAssemblyService::assemble_context_manifest(
-            &context,
-            &run_id,
-            &route_id,
-            snapshot.snapshot_id,
-            snapshot.buffer_version,
-            snapshot_hash,
-            snapshot.byte_len as u64,
-            snapshot.line_count.min(u32::MAX as usize) as u32,
-            generated_at,
-            instruction_bundle.manifest_items,
-        );
-        let privacy_inspector_projection =
+        // Resolved before the trust projections, not after them.
+        //
+        // These projections describe what the run will do, and they were built
+        // from the loopback fixture's assumptions and then handed a route that
+        // might be Anthropic. Ordering was the whole defect: the reviewer read
+        // an accurate remote capability beside a manifest, an inspector and a
+        // budget all still saying the buffer never leaves the machine.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        let (
+            route_provider_id,
+            route_model,
+            route_provider_class,
+            route_network,
+            route_health,
+            route_cost,
+            route_privacy,
+        ) = product_ai_route_fields(live_backend);
+        // Both halves, here where the projections are first built.
+        //
+        // `Explain` leaves through the metadata-only path without calling a
+        // provider, so a remote class alone described an upload that never
+        // happened. The proposal-registration path applies the same pair, and
+        // Explain never reaches it -- which is why this is the copy that
+        // mattered.
+        let sends_the_buffer = provider_class_sends_the_buffer(route_provider_class)
+            && operation_uploads_the_excerpt(operation_class);
+        let mut context_manifest_projection =
+            Phase4ContextAssemblyService::assemble_context_manifest(
+                &context,
+                &run_id,
+                &route_id,
+                snapshot.snapshot_id,
+                snapshot.buffer_version,
+                snapshot_hash,
+                snapshot.byte_len as u64,
+                snapshot.line_count.min(u32::MAX as usize) as u32,
+                generated_at,
+                instruction_bundle.manifest_items,
+                sends_the_buffer,
+            );
+        let mut privacy_inspector_projection =
             legion_protocol::privacy_inspector_from_context_manifest_projection(
                 &context_manifest_projection,
                 format!("phase4:privacy:{}", run_id.0),
                 generated_at,
                 1,
             );
-        let permission_budget_projection = phase4_permission_budget_projection(
+        let mut permission_budget_projection = phase4_permission_budget_projection(
             &context_manifest_projection,
             &run_id,
             generated_at,
+            sends_the_buffer,
+            // Not yet: the broker has not been asked at this point.
+            false,
         );
 
         let mut agent = AgentRuntime::new(run_id.clone());
@@ -24771,18 +24200,8 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        // Authorize the *actual* backend that will receive buffer text (Ollama /
-        // Anthropic / fixture), not a hard-coded deterministic localhost route.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
-        let (
-            route_provider_id,
-            route_model,
-            route_provider_class,
-            route_network,
-            route_health,
-            route_cost,
-            route_privacy,
-        ) = product_ai_route_fields(live_backend);
+        // The backend authorized here is the one resolved above, before the
+        // trust projections were built from it.
         let provider_route_request = legion_protocol::AssistedAiProviderRouteRequest {
             route_id: route_id.clone(),
             provider_id: route_provider_id.clone(),
@@ -24845,7 +24264,13 @@ impl AppComposition {
             schema_version: 1,
         };
         let broker = DenyByDefaultBroker::new(
-            product_ai_security_policy(live_backend),
+            // The installed bundle, not the product defaults. Assist was reached
+            // through the rail commands this PR made reachable, and it asked
+            // `product_ai_security_policy` -- so a bundle permitting Assist mode
+            // while forbidding the selected provider still let the buffer
+            // excerpt go out. Mode ceiling and provider ceiling are different
+            // questions and passing the first is not passing the second.
+            self.product_ai_policy_with_org_ceiling(live_backend),
             CapabilityNamespace("app.ai".to_string()),
         );
         // Capability/network decision only — product prose is filled by
@@ -24860,6 +24285,21 @@ impl AppComposition {
                     decision_id: None,
                     context: legion_protocol::CapabilityRequestContext {
                         network_target: provider_route_request.network_target.clone(),
+                        // Declared, for the same reason the Delegate lane
+                        // declares it: without an identity the broker sees a
+                        // destination and nothing to match a provider
+                        // restriction against, so an allowlist naming exactly
+                        // which providers may run has no input to evaluate.
+                        ai_provider_id: Some(route_provider_id.clone()),
+                        // Same reasoning one field up: an undeclared token count
+                        // is never compared against the org's cap, so a bundle
+                        // capping tokens per request had nothing to cap.
+                        budget_request_tokens: Some(declared_request_tokens(
+                            ASSIST_PROMPT_MAX_BYTES,
+                            crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
+                        )),
+                        budget_request_cost_cents: live_backend
+                            .and_then(declared_request_cost_cents),
                         ..Default::default()
                     },
                     correlation_id: event_context.correlation_id,
@@ -24869,6 +24309,51 @@ impl AppComposition {
                 decision,
                 CapabilityResponse::Decision(ref d) if d.granted
             ) || matches!(decision, CapabilityResponse::Granted(_));
+            // The manifest is built before the broker answers, so its provider
+            // permission starts as ungranted with no decision behind it. That
+            // is true right up until the broker grants, and then it is a record
+            // of a permission that was never given -- which
+            // `privacy_inspector_from_context_manifest_projection` reads as a
+            // denial and turns into a refusal, so the approval checklist
+            // reported blockers on every Assist proposal that had in fact been
+            // authorized. A reviewer who sees blockers on a run nothing blocked
+            // learns to click past them.
+            if granted {
+                let decision_id = match &decision {
+                    CapabilityResponse::Decision(decision) => Some(decision.decision_id),
+                    CapabilityResponse::Granted(grant) => Some(grant.decision_id),
+                    CapabilityResponse::Denied(_) => None,
+                };
+                for permission in &mut context_manifest_projection.manifest.permissions {
+                    if permission.capability.0 == "ai.provider.invoke" {
+                        permission.granted = true;
+                        permission.decision_id = decision_id;
+                    }
+                }
+                // Rebuilt from the corrected manifest rather than patched: the
+                // inspector is a projection of the manifest, and two ways to
+                // change it is how they come apart.
+                privacy_inspector_projection =
+                    legion_protocol::privacy_inspector_from_context_manifest_projection(
+                        &context_manifest_projection,
+                        format!("phase4:privacy:{}", run_id.0),
+                        generated_at,
+                        1,
+                    );
+                permission_budget_projection = phase4_permission_budget_projection(
+                    &context_manifest_projection,
+                    &run_id,
+                    generated_at,
+                    sends_the_buffer,
+                    // The person picked this destination; the broker only
+                    // allowed it. `Auto` never routes remotely, so a remote
+                    // route exists because somebody selected one.
+                    matches!(
+                        self.preferred_ai_provider,
+                        ProductAiProviderPreference::Anthropic
+                    ),
+                );
+            }
             if !granted {
                 let event_sequence = provider_route_request.event_sequence;
                 let refusal = legion_protocol::AssistedAiRefusalMetadata {
@@ -24888,7 +24373,7 @@ impl AppComposition {
                     run_id,
                     route_id,
                     operation_class,
-                    provider_class,
+                    route_provider_class,
                     provider_route_request.clone(),
                     legion_protocol::AssistedAiProviderRouteResponse {
                         route_id: provider_route_request.route_id.clone(),
@@ -24962,7 +24447,7 @@ impl AppComposition {
                 run_id,
                 route_id,
                 operation_class,
-                provider_class,
+                route_provider_class,
                 provider_route_request,
                 route_response,
                 context_manifest_projection,
@@ -24986,13 +24471,16 @@ impl AppComposition {
 
         // Live completion only after the capability/network decision above.
         // Uses the authorized backend only (no silent Ollama→Anthropic fallback).
-        let buffer_excerpt = self
-            .editor
-            .text(context.buffer_id)
-            .unwrap_or("")
-            .chars()
-            .take(4_000)
-            .collect::<String>();
+        // Bounded in bytes by the constant the broker is told about.
+        //
+        // A `4_000` here and an `ASSIST_EXCERPT_MAX_BYTES` in the declaration
+        // are two numbers that happen to agree, and taking characters while
+        // declaring bytes made them disagree for anything but ASCII: four
+        // thousand emoji are four thousand `char`s and sixteen thousand bytes.
+        let buffer_excerpt = bounded_by_bytes(
+            self.editor.text(context.buffer_id).unwrap_or(""),
+            ASSIST_EXCERPT_MAX_BYTES,
+        );
         let preconditions = ProposalVersionPreconditions {
             file_version: Some(context.metadata.file_content_version),
             buffer_version: Some(snapshot.buffer_version),
@@ -25008,12 +24496,17 @@ impl AppComposition {
             run_id: run_id.clone(),
             route_id: route_id.clone(),
             operation_class,
-            provider_class,
+            // The class the route resolved, not one a caller supplied: this is
+            // what the capability a reviewer reads is built from.
+            provider_class: route_provider_class,
+            // The decision as it stood when the excerpt was sent.
+            consent_granted: matches!(
+                self.preferred_ai_provider,
+                ProductAiProviderPreference::Anthropic
+            ),
             provider_route_request: provider_route_request.clone(),
             route_response: route_response.clone(),
             context_manifest_projection: context_manifest_projection.clone(),
-            privacy_inspector_projection: privacy_inspector_projection.clone(),
-            permission_budget_projection: permission_budget_projection.clone(),
             generated_at,
             event_context,
             principal: context.principal.clone(),
@@ -25036,9 +24529,18 @@ impl AppComposition {
                 false
             }
         };
+        // Whether a worker runs follows the backend the broker approved, not a
+        // second probe of the same question.
+        //
+        // `product_ai_will_attempt_live` re-asks whether a live route exists.
+        // Between authorization and here that answer can change -- an Ollama
+        // server that stopped, a network that went away -- and when it flipped
+        // to `false` the fallback ran the already-authorized backend
+        // *synchronously on this thread*, which is the blocking provider call
+        // this lane exists to prevent. The authorized backend is a fact; a
+        // re-probe is a guess about it.
         #[cfg(feature = "ai")]
-        let use_background_live =
-            product_ai_will_attempt_live(self.preferred_ai_provider) || inject_assist_spawn_failure;
+        let use_background_live = live_backend.is_some() || inject_assist_spawn_failure;
         #[cfg(not(feature = "ai"))]
         let use_background_live = false;
         let lane_reservation = ProductAiLaneReservation::try_acquire(
@@ -25056,8 +24558,14 @@ impl AppComposition {
 
         #[cfg(feature = "ai")]
         if use_background_live {
-            let preference = self.preferred_ai_provider;
-            let file_path = context.metadata.identity.canonical_path.0.clone();
+            // No preference is captured: the worker uses the backend the
+            // broker already approved, so there is nothing here that could
+            // resolve to a different destination than the one authorized.
+            // Bounded like the instruction, and for the same reason: the
+            // prompt embeds this path and a canonical path has no length of its
+            // own, so a declaration allowing for a nominal one understates any
+            // request against a deeply nested file.
+            let file_path = bounded_assist_path(&context.metadata.identity.canonical_path.0);
             let instruction_for_worker = instruction_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
             let streaming_replay = legion_protocol::AgentReplayManifest {
@@ -25075,11 +24583,11 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             };
-            let sink_delta = lane_reservation.sink();
+            let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
-                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-                    preference,
+                    live_backend,
                     &instruction_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -25096,8 +24604,11 @@ impl AppComposition {
                     ProductAiBackgroundResult {
                         assistant_message_id: String::new(),
                         content_label: String::new(),
+                        live_failed: live_backend.is_some() && stream.is_none(),
                         stream,
                         assist_proposal: Some(proposal_source),
+                        inline_prediction: None,
+                        delegate_route: None,
                     },
                     completion.as_ref(),
                 );
@@ -25147,10 +24658,10 @@ impl AppComposition {
         #[cfg(not(feature = "ai"))]
         let _ = use_background_live;
 
-        let sink_delta = lane_reservation.sink();
-        let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+        let sink_delta = lane_reservation.delta_writer();
+        let mut on_delta = move |delta: &str| sink_delta.push(delta);
         let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-            self.preferred_ai_provider,
+            live_backend,
             &instruction_label,
             &buffer_excerpt,
             &context.metadata.identity.canonical_path.0,
@@ -25182,11 +24693,10 @@ impl AppComposition {
             route_id,
             operation_class,
             provider_class,
+            consent_granted,
             provider_route_request,
             route_response,
             context_manifest_projection,
-            privacy_inspector_projection,
-            permission_budget_projection,
             generated_at,
             event_context,
             principal,
@@ -25196,6 +24706,44 @@ impl AppComposition {
         } = job;
 
         let proposal_id = self.proposal_coordinator.next_id();
+        // The trust projections were built before this proposal existed, so
+        // their actions named no proposal -- and `permission_budget_gate` only
+        // considers refused evaluations whose action names the proposal being
+        // approved. A remote route's unresolved consent was therefore
+        // evaluated, recorded, and then omitted from the one gate it exists to
+        // block. A refusal nobody is shown is the same as no refusal.
+        //
+        // Rebuilt rather than patched: the evaluation is derived from the
+        // manifest's permission and the action built from it, so setting the id
+        // in one place and leaving the derived record alone is how they come
+        // apart.
+        let mut context_manifest_projection = context_manifest_projection;
+        context_manifest_projection.manifest.proposal_id = Some(proposal_id);
+        let permission_budget_projection = phase4_permission_budget_projection(
+            &context_manifest_projection,
+            &run_id,
+            generated_at,
+            provider_class_sends_the_buffer(provider_class)
+                && operation_uploads_the_excerpt(operation_class),
+            // The decision recorded when this run started, not whatever the
+            // picker says now: the preference is still changeable while a
+            // request streams, and by here the excerpt has already gone.
+            consent_granted,
+        );
+        // Everything derived from the manifest, not just the budget.
+        //
+        // The inspector is a projection of the manifest and carries its
+        // `proposal_id`; leaving the earlier one in place gave the checklist an
+        // inspector naming no proposal, which `privacy_gate` reports as
+        // `privacy_inspector.proposal_mismatch` -- a blocker on every proposal,
+        // including the local ones this linking has nothing to do with.
+        let privacy_inspector_projection =
+            legion_protocol::privacy_inspector_from_context_manifest_projection(
+                &context_manifest_projection,
+                format!("phase4:privacy:{}", run_id.0),
+                generated_at,
+                1,
+            );
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),
@@ -25265,7 +24813,8 @@ impl AppComposition {
                 generated_at,
                 1,
             );
-        let provider_capability = phase4_provider_capability(provider_class, None);
+        let provider_capability =
+            phase4_provider_capability(provider_class, &provider_route_request.provider_id, None);
         let request_contract = assisted_ai_request_contract_from_metadata(
             output.request_id.clone(),
             &provider_capability,
@@ -25323,7 +24872,16 @@ impl AppComposition {
             &run_id,
             &route_id,
             route_response.invocation_state,
-            "phase4.provider.route.completed",
+            // The label follows the state rather than restating the happy path.
+            // Persisting `completed` beside a `Failed` invocation state is the
+            // same contradiction the state was corrected to remove.
+            if route_response.invocation_state
+                == legion_protocol::AssistedAiProviderInvocationState::Failed
+            {
+                "phase4.provider.route.failed"
+            } else {
+                "phase4.provider.route.completed"
+            },
             event_context,
             &replay_manifest,
         )?;
@@ -25358,6 +24916,23 @@ impl AppComposition {
             Some(privacy_inspector_projection.clone());
         self.phase4_projection_state.permission_budget_projection =
             Some(permission_budget_projection.clone());
+        // The run's own projections, kept against the proposal they describe.
+        //
+        // The selected-proposal path reconstructs these from the proposal row,
+        // which carries no route -- so it cannot tell a remote run from a local
+        // one and assumes consent was never required.
+        self.phase4_projection_state
+            .phase4_trust_by_proposal
+            .insert(
+                proposal_id,
+                Box::new(SelectedProposalTrustProjections {
+                    context_manifest_projection: context_manifest_projection.clone(),
+                    privacy_inspector_projection: privacy_inspector_projection.clone(),
+                    permission_budget_projection: permission_budget_projection.clone(),
+                    approval_checklist_projection: approval_checklist_projection.clone(),
+                    checkpoint_rollback_projection: checkpoint_rollback_projection.clone(),
+                }),
+            );
         self.phase4_projection_state.approval_checklist_projection =
             Some(approval_checklist_projection);
         self.phase4_projection_state.checkpoint_rollback_projection =
@@ -25428,8 +25003,11 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        let provider_capability =
-            phase4_provider_capability(provider_class, route_response.refusal.clone());
+        let provider_capability = phase4_provider_capability(
+            provider_class,
+            &provider_route_request.provider_id,
+            route_response.refusal.clone(),
+        );
         let approval_checklist_projection = empty_approval_checklist_projection();
         let checkpoint_rollback_projection = empty_checkpoint_rollback_projection();
         let request_contract = assisted_ai_request_contract_from_metadata(
@@ -27401,12 +26979,18 @@ impl AppComposition {
     }
 
     /// Send a Delegate chat turn using local, metadata-only codebase retrieval citations.
+    ///
+    /// The prompt is bounded to [`DELEGATE_CHAT_PROMPT_MAX_CHARS`]. That bound is
+    /// deliberate -- what crosses this boundary is a *label*, not raw prompt
+    /// text -- so any composer feeding it must cap at the same number. A field
+    /// that accepted more would discard the remainder here, silently, after
+    /// clearing the draft the user typed.
     pub fn send_delegate_chat(
         &mut self,
         prompt_label: impl Into<String>,
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
-        let prompt_label = bounded_label(prompt_label.into(), 240);
+        let prompt_label = bounded_label(prompt_label.into(), DELEGATE_CHAT_PROMPT_MAX_CHARS);
         let lane_reservation = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
             "delegate.chat",
@@ -27424,7 +27008,36 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
-        let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
+        // The same bound the Delegate declaration counts, in the same unit.
+        let buffer_excerpt = bounded_by_bytes(&input.text, ASSIST_EXCERPT_MAX_BYTES);
+        // Resolved before the route request so the capability decision, the
+        // audit record and the bytes all describe the same destination.
+        // The backend is resolved once and drives three things that have to
+        // agree: the route request, the broker policy, and the bytes. Naming
+        // Anthropic in the request while building the broker from
+        // `SecurityPolicy::default()` -- which is air-gapped, local-provider
+        // only, and allowlists localhost -- makes the router refuse the very
+        // route the audit describes, so an honest record buys a broken feature.
+        // Resolved **once**, here, and used for every decision downstream.
+        //
+        // `product_ai_selected_live_backend` probes the host -- is Ollama
+        // listening, is there a key -- so calling it again later can answer
+        // differently. It did: the worker re-resolved from the preference, so an
+        // `Auto` run that authorized Ollama could find it gone by the time the
+        // request was sent and hand the buffer excerpt to Anthropic instead --
+        // a destination the broker never approved. One resolution, threaded
+        // through, is the only version of this that cannot drift.
+        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        let (route_target, route_health, route_cost, route_privacy) =
+            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
+        // Identity from the same backend as the destination. These were
+        // hard-coded to the deterministic provider while the target followed the
+        // live one, so provider-allowlist policy was evaluated against
+        // `deterministic-local` and the audit recorded a local call for traffic
+        // going to Anthropic.
+        let (route_provider_id, route_model_label, route_provider_class, ..) =
+            product_ai_route_fields(live_backend);
+        let route_provider_id_for_decision = route_provider_id.clone();
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -27493,9 +27106,9 @@ impl AppComposition {
                 input.workspace_id.0,
                 self.event_sequence_generator.next().0
             ),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-            model_label: "deterministic-local-delegate".to_string(),
-            provider_class: AssistedAiProviderClass::Local,
+            provider_id: route_provider_id,
+            model_label: route_model_label,
+            provider_class: route_provider_class,
             operation_class: AssistedAiOperationClass::Explain,
             context_manifest: context_reference,
             privacy_inspector: privacy_reference,
@@ -27524,7 +27137,7 @@ impl AppComposition {
                 },
                 required_capability: CapabilityId("ai.provider.invoke".to_string()),
                 risk_label: ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                privacy_label: route_privacy,
                 labels: vec![
                     "delegate.chat.provider_route".to_string(),
                     format!("delegate.prompt:{}", prompt_fingerprint.value),
@@ -27536,14 +27149,13 @@ impl AppComposition {
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            // Kept on the request because it is the audit record's copy of the
+            // destination; the authorization decision below is handed the same
+            // target directly rather than reading it back out of here.
+            network_target: Some(route_target.clone()),
             cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: vec!["delegate.local.deterministic".to_string()],
-            cost_labels: vec!["local.free".to_string()],
+            health_labels: vec![route_health.to_string()],
+            cost_labels: vec![route_cost.to_string()],
             principal_id: input.principal.clone(),
             workspace_trust_state: context.trust.clone(),
             correlation_id: event_context.correlation_id,
@@ -27552,22 +27164,85 @@ impl AppComposition {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         };
+        let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
-            SecurityPolicy::default(),
+            self.product_ai_policy_with_org_ceiling(live_backend),
             CapabilityNamespace("app.delegate".to_string()),
         );
-        let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
-            .route_completion(provider_route_request)
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        // Policy router is metadata-only; product chat text comes from a live
-        // provider when credentials exist, else a deterministic fixture label.
-        let route_completed = provider_route_response.invocation_state
-            == AssistedAiProviderInvocationState::Completed;
+        // Authorization only. `route_completion` *invokes* the registry provider
+        // named in the request, which was harmless while that name was the
+        // deterministic fixture and became a real call the moment the request
+        // started naming the live backend honestly. With an environment
+        // credential that is a synchronous paid completion here, followed by a
+        // second one in the worker for the reply the person actually sees; with
+        // a keyring credential the registry client has no key at all and the
+        // chat fails before reaching `anthropic_client_with_keyring_fallback`.
+        //
+        // The Assist and inline-prediction paths ask the broker for the
+        // capability and nothing more. This does the same, so naming the true
+        // provider costs a policy decision rather than a provider call.
+        let route_id = provider_route_request.route_id.clone();
+        let route_labels = provider_route_request.proposal_intent.labels.clone();
+        let decision = broker
+            .handle(CapabilityRequest::Request {
+                principal_id: input.principal.clone(),
+                capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                workspace_trust_state: context.trust.clone(),
+                target_path: None,
+                decision_id: None,
+                context: legion_protocol::CapabilityRequestContext {
+                    network_target: Some(route_target_for_decision),
+                    // Declared so a provider restriction can actually be
+                    // evaluated. Without it the broker sees a destination and no
+                    // identity, and an org bundle forbidding a specific provider
+                    // has nothing to match against.
+                    ai_provider_id: Some(route_provider_id_for_decision),
+                    // Declared against the same total Assist uses, which is
+                    // only honest because the Delegate worker bounds the path
+                    // it sends by the same constant. Declaring a bound the
+                    // caller does not apply is the shape of defect this whole
+                    // sequence has been about.
+                    budget_request_tokens: Some(declared_request_tokens(
+                        ASSIST_PROMPT_MAX_BYTES,
+                        crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
+                    )),
+                    budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
+                    ..Default::default()
+                },
+                correlation_id: event_context.correlation_id,
+            })
+            .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+        let refusal_reason = match &decision {
+            CapabilityResponse::Decision(decision) if !decision.granted => decision.reason.clone(),
+            CapabilityResponse::Denied(denial) => Some(denial.reason.clone()),
+            _ => None,
+        };
+        let route_completed = refusal_reason.is_none()
+            && (matches!(decision, CapabilityResponse::Decision(ref d) if d.granted)
+                || matches!(decision, CapabilityResponse::Granted(_)));
+        // Read before either `use_background_live` binding, and outside both,
+        // so the `#[cfg]` below stays attached to the binding it describes.
+        // Placed between them it silently became the gated item and the binding
+        // it was meant to gate became unconditional -- which the no-`ai` build
+        // catches and the ordinary one does not.
+        let inject_delegate_chat_spawn_failure = {
+            #[cfg(any(test, feature = "test-helpers"))]
+            {
+                std::mem::take(&mut self.injected_delegate_chat_spawn_failure)
+            }
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            {
+                false
+            }
+        };
         #[cfg(feature = "ai")]
         let use_background_live =
-            route_completed && product_ai_will_attempt_live(self.preferred_ai_provider);
+            route_completed && (live_backend.is_some() || inject_delegate_chat_spawn_failure);
         #[cfg(not(feature = "ai"))]
-        let use_background_live = false;
+        let use_background_live = {
+            let _ = inject_delegate_chat_spawn_failure;
+            false
+        };
         let user_message_id = self
             .delegate_workflow
             .next_message_id(DelegatedTaskChatRole::User);
@@ -27592,81 +27267,144 @@ impl AppComposition {
                 schema_version: 1,
             });
 
+        // What the provider invocation actually did, as opposed to what policy
+        // allowed it to do.
+        //
+        // The broker grant is the beginning of the story and was being recorded
+        // as its end: a live provider that failed, answered with nothing, or
+        // whose worker never started still persisted
+        // `phase4.provider.route.completed` beside an assistant message saying
+        // no answer was produced.
+        let mut invocation_state = legion_protocol::AssistedAiProviderInvocationState::Refused;
         let assistant_content_label = if !route_completed {
             lane_reservation.finish(None);
             format!(
                 "Delegate provider refused; citation(s)={} route={} reason={}",
                 citation_ids.len(),
-                provider_route_response.route_id,
-                provider_route_response
-                    .refusal
-                    .as_ref()
-                    .map(|refusal| refusal.reason_code.as_str())
-                    .unwrap_or("unknown")
+                route_id,
+                refusal_reason.as_deref().unwrap_or("unknown")
             )
         } else if use_background_live {
             // Non-blocking path: stream on a worker thread; poll_product_ai_stream
             // finalizes the assistant message when generation completes.
-            let preference = self.preferred_ai_provider;
-            let file_path = input.metadata.identity.canonical_path.0.clone();
-            let route_id = provider_route_response.route_id.clone();
-            let route_labels = provider_route_response.output_labels.clone();
+            // The worker captures `live_backend`, not the preference. That is
+            // the structural half of the fix: with no preference in scope there
+            // is nothing for it to re-resolve, so the destination it contacts is
+            // the one the broker approved above and cannot become another.
+            // Bounded by the same constant the declaration counts, like the
+            // Assist worker. The Delegate lane declares `ASSIST_PROMPT_MAX_BYTES`
+            // and was cloning the path unbounded, so a deeply nested file or a
+            // Windows long path sent more than the broker had been told about.
+            let file_path = bounded_assist_path(&input.metadata.identity.canonical_path.0);
+            let route_id = route_id.clone();
+            let route_labels = route_labels.clone();
             let citation_count = citation_ids.len();
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
-            let sink_delta = lane_reservation.sink();
-            std::thread::Builder::new()
+            // Copies for the worker: the terminal route record is written when
+            // its result is polled, and by then none of this is in scope.
+            let worker_run_id = legion_protocol::AgentRunId(format!(
+                "delegate-chat-run:{}",
+                event_context.correlation_id.0
+            ));
+            let worker_route_id = provider_route_request.route_id.clone();
+            let worker_event_context = event_context;
+            let sink_delta = lane_reservation.delta_writer();
+            let worker = move || {
+                let mut on_delta = move |delta: &str| sink_delta.push(delta);
+                let (label, stream) = resolve_delegate_chat_reply(
+                    live_backend,
+                    &prompt_for_worker,
+                    &excerpt_for_worker,
+                    &file_path,
+                    citation_count,
+                    &route_id,
+                    &route_labels,
+                    Some(&mut on_delta),
+                );
+                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
+                });
+                lane_reservation.finish_background(
+                    ProductAiBackgroundResult {
+                        assistant_message_id: assistant_id,
+                        content_label: label,
+                        // A live backend that produced no stream did not answer.
+                        live_failed: stream.is_none(),
+                        stream,
+                        assist_proposal: None,
+                        inline_prediction: None,
+                        // How this turn ended is only knowable here, and the
+                        // route record persisted at spawn says `Streaming`
+                        // until somebody writes the ending.
+                        delegate_route: Some(crate::product_ai_lane::DelegateRouteRecord {
+                            run_id: worker_run_id,
+                            route_id: worker_route_id,
+                            event_context: worker_event_context,
+                        }),
+                    },
+                    completion.as_ref(),
+                );
+            };
+            #[cfg(any(test, feature = "test-helpers"))]
+            let spawned = if inject_delegate_chat_spawn_failure {
+                Err(std::io::Error::other(
+                    "injected Delegate chat worker spawn failure",
+                ))
+            } else {
+                std::thread::Builder::new()
+                    .name("legion-delegate-chat".to_string())
+                    .spawn(worker)
+            };
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            let spawned = std::thread::Builder::new()
                 .name("legion-delegate-chat".to_string())
-                .spawn(move || {
-                    let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-                    let (label, stream) = resolve_delegate_chat_reply(
-                        preference,
-                        &prompt_for_worker,
-                        &excerpt_for_worker,
-                        &file_path,
-                        citation_count,
-                        &route_id,
-                        &route_labels,
-                        Some(&mut on_delta),
-                    );
-                    let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-                        provider_id: stream.provider_id.clone(),
-                        model: stream.model.clone(),
-                        text: stream.text_preview.clone(),
-                        stream_chunks: stream.chunks.clone(),
-                        streamed: stream.streamed,
-                    });
-                    lane_reservation.finish_background(
-                        ProductAiBackgroundResult {
-                            assistant_message_id: assistant_id,
-                            content_label: label,
-                            stream,
-                            assist_proposal: None,
-                        },
-                        completion.as_ref(),
-                    );
-                })
-                .map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "failed to spawn Delegate chat worker: {error}"
-                    ))
-                })?;
-            "Streaming response…".to_string()
+                .spawn(worker);
+            match spawned {
+                Err(error) => {
+                    // A failed spawn used to return an error from here, and by
+                    // here the turn is half written: the question, its citations
+                    // and the permission record are already in the transcript,
+                    // and the assistant message that answers them is added
+                    // below. Returning left the question standing with no reply
+                    // and no explanation, and asking again appended a second
+                    // copy of all of it.
+                    //
+                    // The lane frees itself: the reservation was moved into the
+                    // closure the spawn refused, so dropping it fires the
+                    // release. Without that the next turn would be rejected as
+                    // "already in flight" by a run that never started.
+                    invocation_state = legion_protocol::AssistedAiProviderInvocationState::Failed;
+                    format!("Delegate could not start a worker for this turn: {error}")
+                }
+                Ok(_handle) => {
+                    // The worker owns the ending from here; the terminal state
+                    // arrives with its result.
+                    invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Streaming;
+                    "Streaming response…".to_string()
+                }
+            }
         } else {
-            let sink_delta = lane_reservation.sink();
-            let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+            let sink_delta = lane_reservation.delta_writer();
+            let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
-                self.preferred_ai_provider,
+                live_backend,
                 &prompt_label,
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,
                 citation_ids.len(),
-                &provider_route_response.route_id,
-                &provider_route_response.output_labels,
+                &route_id,
+                &route_labels,
                 Some(&mut on_delta),
             );
             if let Some(stream) = stream {
+                invocation_state = legion_protocol::AssistedAiProviderInvocationState::Completed;
                 lane_reservation.finish(Some(&ProductChatCompletion {
                     provider_id: stream.provider_id.clone(),
                     model: stream.model.clone(),
@@ -27676,6 +27414,18 @@ impl AppComposition {
                 }));
                 self.last_product_ai_stream = Some(stream);
             } else {
+                // No stream is not the same as no answer.
+                //
+                // The deterministic fixture answers without one, and that turn
+                // completed. A *live* backend that returns no stream is the
+                // failure the label already reports ("did not answer; showing
+                // the offline reply instead") and the route record used to
+                // contradict.
+                invocation_state = if live_backend.is_some() {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
                 lane_reservation.finish(None);
             }
             label
@@ -27697,12 +27447,124 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
+        // The route this turn actually took, kept rather than dropped -- the
+        // evidence the Assist path already keeps and this one did not.
+        //
+        // `Streaming` is the honest state for a background turn at this point:
+        // the worker exists and its result has not arrived. Recording
+        // `Completed` here would be the same contradiction, one path over.
+        let delegate_run_id = legion_protocol::AgentRunId(format!(
+            "delegate-chat-run:{}",
+            event_context.correlation_id.0
+        ));
+        let replay_manifest = legion_protocol::AgentReplayManifest {
+            run_id: delegate_run_id.clone(),
+            transitions: Vec::new(),
+            context_manifests: Vec::new(),
+            provider_route_ids: vec![provider_route_request.route_id.clone()],
+            proposal_ids: Vec::new(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let outcome_label = match invocation_state {
+            legion_protocol::AssistedAiProviderInvocationState::Completed => {
+                "phase4.provider.route.completed"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Streaming => {
+                "phase4.provider.route.streaming"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Failed => {
+                "phase4.provider.route.failed"
+            }
+            _ => "phase4.provider.route.refused",
+        };
+        // Queued rather than returned, for the same reason the spawn failure is.
+        //
+        // By here the citations, the permission decision, both chat messages and
+        // possibly a live worker are all committed. Returning an error leaves a
+        // turn that happened looking like one that failed -- retrying duplicates
+        // it, and a worker already running finishes into the request the person
+        // was told had failed. The write is owed, not the turn.
+        if self
+            .persist_phase4_runtime_records(
+                &delegate_run_id,
+                &provider_route_request.route_id,
+                invocation_state,
+                outcome_label,
+                event_context,
+                &replay_manifest,
+            )
+            .is_err()
+        {
+            self.queue_route_audit(PendingRouteAudit {
+                run_id: delegate_run_id.clone(),
+                route_id: provider_route_request.route_id.clone(),
+                state: invocation_state,
+                outcome_label,
+                event_context,
+            });
+        }
+
+        // The same evidence, kept where the transcript can show it.
+        //
+        // The audit record survives the session and answers an auditor; this
+        // answers the person reading the reply, who is the one deciding whether
+        // to trust it. Bounded, because a long conversation should not grow an
+        // unbounded list of routes in a projection rebuilt every frame.
+        const DELEGATE_ROUTE_HISTORY: usize = 32;
+        self.delegate_workflow
+            .provider_routes
+            .push(legion_protocol::DelegatedTaskProviderRoute {
+                route_id: provider_route_request.route_id.clone(),
+                provider_id: provider_route_request.provider_id.clone(),
+                model_label: provider_route_request.model_label.clone(),
+                egress_label: if provider_class_sends_the_buffer(
+                    provider_route_request.provider_class,
+                ) {
+                    "sends workspace text off this machine".to_string()
+                } else {
+                    "stays on this machine".to_string()
+                },
+                // The whole authority, port included, and IPv6 bracketed.
+                //
+                // `scheme://host` alone reported a different destination from
+                // the one authorized and contacted whenever a port was
+                // configured, and produced `http://::1` for a loopback literal
+                // -- a label that is neither a URL nor the address.
+                destination_label: provider_route_request.network_target.as_ref().map_or_else(
+                    || "not encoded".to_string(),
+                    |target| {
+                        let host = if target.host.contains(':') && !target.host.starts_with('[') {
+                            format!("[{}]", target.host)
+                        } else {
+                            target.host.clone()
+                        };
+                        match target.port {
+                            Some(port) => format!("{}://{host}:{port}", target.scheme),
+                            None => format!("{}://{host}", target.scheme),
+                        }
+                    },
+                ),
+                invocation_state,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        if self.delegate_workflow.provider_routes.len() > DELEGATE_ROUTE_HISTORY {
+            let excess = self.delegate_workflow.provider_routes.len() - DELEGATE_ROUTE_HISTORY;
+            self.delegate_workflow.provider_routes.drain(..excess);
+        }
+
         let projection = self.current_delegated_task_projection(TimestampMillis::now());
         Ok(AppDelegateChatOutcome {
             projection,
             user_message_id,
             assistant_message_id,
             citation_count: citation_ids.len(),
+            provider_route_request,
+            invocation_state,
         })
     }
 
@@ -27860,6 +27722,26 @@ impl AppComposition {
             .requests
             .insert(metadata.request_id.clone(), metadata.clone());
 
+        // A live provider call does not run here.
+        //
+        // This is the UI thread. The blocking transport allows a request 120
+        // seconds, and for all of it eframe can neither repaint nor read input
+        // -- so the `request_in_flight` state set two lines above, and the
+        // Cancel control that depends on it, could never actually be seen. The
+        // deterministic path stays inline because it returns immediately and
+        // running it through a thread would only add a frame of latency.
+        match self.spawn_live_inline_prediction(&metadata) {
+            Ok(true) => {
+                return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.assist_inline_prediction_state.request_in_flight = false;
+                self.assist_inline_prediction_state.active_request_id = None;
+                return Err(error);
+            }
+        }
+
         let result = match self.invoke_inline_prediction_provider(metadata) {
             Ok(result) => result,
             Err(error) => {
@@ -27954,6 +27836,35 @@ impl AppComposition {
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
+        // Release the shared lane now, rather than when the provider gets round
+        // to answering.
+        //
+        // The worker holds a `ProductAiLaneReservation` for the whole of its
+        // request, and the transport allows that up to 120 seconds. Leaving it
+        // held meant `product_ai_stream_in_flight()` stayed true after the
+        // cancel: every Assist proposal, prediction and Delegate control stayed
+        // disabled while the surface said the prediction had been cancelled.
+        //
+        // This sat in `accept_assist_inline_prediction` for one revision, which
+        // is a function that only ever runs against a *finished* prediction --
+        // no pending worker, no flag, an immediate early return. The comment
+        // described cancelling and the code was nowhere near it.
+        // Which prediction this cancel names, before anything is released.
+        //
+        // A `CancelGhostText` built from an older projection carries an old id,
+        // and releasing first cancelled whatever was running -- so a newer
+        // request was killed and its result fenced out by a command that was
+        // never about it. The validation below would then reject the id, having
+        // already done the damage.
+        let names_the_active_request = prediction_id.as_deref().is_none_or(|requested| {
+            self.assist_inline_prediction_state
+                .active_request_id
+                .as_ref()
+                .is_none_or(|active| active.0 == requested)
+        });
+        if names_the_active_request {
+            self.release_cancelled_inline_prediction_lane();
+        }
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             self.assist_inline_prediction_state.request_in_flight = false;
@@ -27963,6 +27874,25 @@ impl AppComposition {
         self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Cancel)?;
         self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Cancelled)?;
         Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    /// Tell a running prediction worker that nobody is waiting, and free the lane.
+    ///
+    /// Safe when no worker is running: the flag is absent and the sink is not
+    /// in flight, so both halves are no-ops.
+    fn release_cancelled_inline_prediction_lane(&mut self) {
+        self.pending_inline_prediction = None;
+        let Some(flag) = self.pending_inline_prediction_cancelled.take() else {
+            return;
+        };
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.live_product_ai_stream.snapshot().operation.as_str() == "assist.inline_prediction" {
+            // Ends this occupancy as well as freeing the lane, so the worker's
+            // own generation check refuses to publish whatever it eventually
+            // returns -- the flag alone cannot, because the worker may have
+            // read it before this line ran.
+            self.live_product_ai_stream.release_lane();
+        }
     }
 
     fn inline_prediction_request_metadata(
@@ -28072,57 +28002,14 @@ impl AppComposition {
         &self,
         metadata: InlinePredictionRequestMetadata,
     ) -> Result<InlinePredictionResult, AppCompositionError> {
-        // Tier 2: local-first product completion (Ollama / Anthropic) for ghost text.
-        // Without a live route (CI/offline), keep deterministic fixture.
+        // The deterministic offline prediction.
         //
-        // Authorize the concrete backend before any buffer excerpt leaves the process.
-        // DenyByDefaultBroker recognizes `ai.provider.invoke` / `ai.provider.stream`
-        // for provider egress — not the structural `ai.inline_prediction.invoke`
-        // label carried in InlinePredictionRequestMetadata.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
-        if let Some(backend) = live_backend {
-            let (_provider_id, _model, _class, network_target, _, _, _) =
-                product_ai_route_fields(Some(backend));
-            let broker = DenyByDefaultBroker::new(
-                product_ai_security_policy(Some(backend)),
-                CapabilityNamespace("app.ai".to_string()),
-            );
-            let decision = broker
-                .handle(CapabilityRequest::Request {
-                    principal_id: metadata.principal_id.clone(),
-                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
-                    workspace_trust_state: metadata.workspace_trust_state.clone(),
-                    target_path: None,
-                    decision_id: None,
-                    context: legion_protocol::CapabilityRequestContext {
-                        network_target,
-                        ..Default::default()
-                    },
-                    correlation_id: metadata.correlation_id,
-                })
-                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
-            let granted = matches!(
-                decision,
-                CapabilityResponse::Decision(ref d) if d.granted
-            ) || matches!(decision, CapabilityResponse::Granted(_));
-            if granted {
-                let buffer_excerpt = self
-                    .editor
-                    .text(metadata.buffer_id)
-                    .unwrap_or("")
-                    .chars()
-                    .take(2_000)
-                    .collect::<String>();
-                if let Some(live) = try_live_product_inline_prediction(
-                    self.preferred_ai_provider,
-                    &metadata,
-                    &buffer_excerpt,
-                ) {
-                    return Ok(live);
-                }
-            }
-            // Live route denied or empty: fall through to deterministic offline fixture.
-        }
+        // A live route is attempted by `spawn_live_inline_prediction` on a
+        // worker thread and lands through `merge_inline_prediction_result`.
+        // This is what answers when there is no live backend, when policy
+        // refused one, or when the worker came back with nothing -- and it is
+        // the only path that may run on the calling thread, because it does no
+        // network work at all.
 
         let request = InlinePredictionRequest {
             provider: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
@@ -29165,6 +29052,26 @@ impl AppComposition {
         generated_at: TimestampMillis,
     ) -> Option<SelectedProposalTrustProjections> {
         let selected_proposal_id = proposal_ledger_projection.selected_proposal_id?;
+        // What the run itself built, if this proposal came from one.
+        //
+        // The reconstruction below derives everything from the proposal row,
+        // which carries no route -- so it cannot tell a remote run from a local
+        // one and assumes consent was never required. Preferring the stored
+        // projections keeps the refusal a reviewer needs to see.
+        // Route-specific data is kept; lifecycle-dependent projections are not.
+        //
+        // The manifest, inspector and budget describe *what the run did* and
+        // cannot be reconstructed from the proposal row -- that is why they are
+        // stored. The approval checklist and the checkpoint projection describe
+        // *where the proposal is now*, and returning the ones captured at
+        // `Created` left the checklist reporting `Created` and its lifecycle
+        // gate blocked while the ledger beside it showed the proposal approved,
+        // applied or cancelled.
+        let stored_trust = self
+            .phase4_projection_state
+            .phase4_trust_by_proposal
+            .get(&selected_proposal_id)
+            .cloned();
         let proposal = self
             .proposal_coordinator
             .proposal_for_id(selected_proposal_id)?;
@@ -29173,34 +29080,6 @@ impl AppComposition {
             .iter()
             .find(|row| row.proposal_id == selected_proposal_id)?;
         let lifecycle_state = row.lifecycle.state;
-        let context_manifest_projection = legion_protocol::ContextManifestProjection {
-            manifest: legion_protocol::context_manifest_from_proposal(
-                &proposal,
-                format!("proposal:{}:context-details", selected_proposal_id.0),
-                self.active_documents.active_workspace_trust.clone(),
-                row.privacy_label,
-                row.risk_label,
-                generated_at,
-                1,
-            ),
-            selected_item_id: None,
-            generated_at,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let privacy_inspector_projection =
-            legion_protocol::privacy_inspector_from_context_manifest_projection(
-                &context_manifest_projection,
-                format!("proposal:{}:privacy-details", selected_proposal_id.0),
-                generated_at,
-                1,
-            );
-        let permission_budget_projection = Self::selected_proposal_permission_budget_projection(
-            &proposal,
-            &context_manifest_projection,
-            row.risk_label,
-            generated_at,
-        );
         let causality_id = self
             .proposal_coordinator
             .proposal_contexts
@@ -29224,6 +29103,60 @@ impl AppComposition {
                 generated_at,
                 1,
             );
+        // The run's own answers where it has them, the reconstruction
+        // otherwise -- decided here, because the checklist is built from these
+        // and a checklist reading the reconstruction while the caller receives
+        // the stored trio is two answers to one question.
+        let (
+            context_manifest_projection,
+            privacy_inspector_projection,
+            permission_budget_projection,
+        ) = match stored_trust {
+            Some(stored) => (
+                stored.context_manifest_projection,
+                stored.privacy_inspector_projection,
+                stored.permission_budget_projection,
+            ),
+            // Built only when there is nothing stored to build *instead of*.
+            // Three protocol calls and a budget projection, on every shell
+            // snapshot, for a value the arm above discards.
+            None => {
+                let context_manifest_projection = legion_protocol::ContextManifestProjection {
+                    manifest: legion_protocol::context_manifest_from_proposal(
+                        &proposal,
+                        format!("proposal:{}:context-details", selected_proposal_id.0),
+                        self.active_documents.active_workspace_trust.clone(),
+                        row.privacy_label,
+                        row.risk_label,
+                        generated_at,
+                        1,
+                    ),
+                    selected_item_id: None,
+                    generated_at,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let privacy_inspector_projection =
+                    legion_protocol::privacy_inspector_from_context_manifest_projection(
+                        &context_manifest_projection,
+                        format!("proposal:{}:privacy-details", selected_proposal_id.0),
+                        generated_at,
+                        1,
+                    );
+                let permission_budget_projection =
+                    Self::selected_proposal_permission_budget_projection(
+                        &proposal,
+                        &context_manifest_projection,
+                        row.risk_label,
+                        generated_at,
+                    );
+                (
+                    context_manifest_projection,
+                    privacy_inspector_projection,
+                    permission_budget_projection,
+                )
+            }
+        };
         let approval_checklist_projection =
             legion_protocol::approval_checklist_from_trust_projections(
                 format!("proposal:{}:approval-details", selected_proposal_id.0),
@@ -33172,6 +33105,7 @@ pub fn default_workspace_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -36062,11 +35996,11 @@ mod pkt_worker_tests {
     fn manual_mode_is_refused_while_product_provider_stream_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         app.set_product_mode(AppProductMode::Manual);
 
@@ -36078,26 +36012,99 @@ mod pkt_worker_tests {
         assert_eq!(app.product_mode(), AppProductMode::Manual);
     }
 
+    /// A reservation cannot finish a lane somebody else now holds.
+    ///
+    /// The cancellation flag alone cannot close this: a worker can read "not
+    /// cancelled", be pre-empted, and reach `finish_background` after the app
+    /// thread released the lane and another operation took it. Its stale result
+    /// would then land against the new run and clear an in-flight flag that is
+    /// not its own -- so a request still in progress looks finished, and a
+    /// third is let in behind it.
+    #[test]
+    fn a_stale_reservation_cannot_finish_a_reused_lane() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let stale = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "assist.inline_prediction",
+            "provider:a",
+            "model:a",
+        )
+        .expect("the lane must be free to start");
+
+        // The app thread cancels: the lane is released and this occupancy ends.
+        sink.release_lane();
+        let _current = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "delegate.chat",
+            "provider:b",
+            "model:b",
+        )
+        .expect("the released lane must be available to the next operation");
+        assert!(
+            sink.is_in_flight(),
+            "the new operation must hold the lane for this test to mean anything"
+        );
+
+        // The old worker finally returns.
+        stale.finish_background(
+            ProductAiBackgroundResult {
+                live_failed: false,
+                assistant_message_id: String::new(),
+                content_label: String::new(),
+                stream: None,
+                assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
+            },
+            None,
+        );
+
+        assert!(
+            sink.is_in_flight(),
+            "a stale reservation cleared the in-flight flag of an operation that is still \
+             running, which makes it look finished and lets another request in behind it"
+        );
+        assert!(
+            sink.take_background_results().is_empty(),
+            "a stale reservation published its result against somebody else's run"
+        );
+    }
+
     #[test]
     fn product_ai_stream_lane_rejects_reentrant_and_pending_result_begin() {
         let sink = LiveProductAiStreamSink::default();
-        assert!(sink.try_begin("assist.proposal", "provider:a", "model:a"));
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        let generation = sink
+            .try_begin("assist.proposal", "provider:a", "model:a")
+            .expect("the lane must be free to start");
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.snapshot().operation, "assist.proposal");
 
-        sink.finish_background(
+        sink.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "assist.proposal",
         );
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.take_background_results().len(), 1);
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -36113,7 +36120,10 @@ mod pkt_worker_tests {
 
         drop(reservation);
 
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -36132,11 +36142,12 @@ mod pkt_worker_tests {
         .expect("open workspace");
         app.open_file("lib.rs").expect("open source");
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(
-            app.live_product_ai_stream
-                .try_begin("delegate.chat", "provider:a", "model:a")
-        );
-        app.live_product_ai_stream.push_delta("stream-a");
+        let occupancy = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:a", "model:a")
+            .expect("the lane starts free");
+        app.live_product_ai_stream
+            .push_delta_owned(occupancy, "stream-a");
 
         let stream_before = app.live_product_ai_stream.snapshot();
         let semantic_index_before = format!("{:?}", app.language_tooling.semantic_index);
@@ -36174,21 +36185,24 @@ mod pkt_worker_tests {
     fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
 
         app.set_product_mode(AppProductMode::Assist);
         assert_eq!(app.product_mode(), AppProductMode::Delegate);
 
-        app.live_product_ai_stream.finish_background(
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
@@ -36204,11 +36218,11 @@ mod pkt_worker_tests {
     fn manual_dispatch_does_not_report_mode_changed_while_provider_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         let outcome = app.dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
             mode: DockMode::Manual,
@@ -36223,17 +36237,20 @@ mod pkt_worker_tests {
     fn manual_mode_waits_until_completed_provider_result_is_merged() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
-        app.live_product_ai_stream.finish_background(
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
@@ -36264,6 +36281,95 @@ mod pkt_worker_tests {
 
         assert!(error.to_string().contains("belongs to workflow"));
         assert!(!flag.is_cancelled());
+    }
+
+    /// A stale queued record cannot overwrite the ending that replaced it.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place. A `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight.
+    #[test]
+    fn a_queued_streaming_record_does_not_outlive_the_ending() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:coalesce".to_string());
+        let route_id = "delegate-chat-route:coalesce".to_string();
+        let event_context = app.next_event_context();
+
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+            outcome_label: "phase4.provider.route.completed",
+            event_context,
+        });
+
+        let queued = &app.phase4_projection_state.pending_route_audits;
+        assert_eq!(
+            queued.len(),
+            1,
+            "two records for one run write to the same audit id, so the older one is a stale answer waiting to overwrite the newer: {queued:?}"
+        );
+        assert_eq!(
+            queued[0].state,
+            legion_protocol::AssistedAiProviderInvocationState::Completed,
+            "the surviving record must be the ending, not the beginning"
+        );
+
+        // And a record written directly clears anything still queued for it.
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.forget_queued_route_audit(&run_id, &route_id);
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a queued record survived the write that superseded it"
+        );
+    }
+
+    /// A terminal route record that failed to write is written later.
+    ///
+    /// The background result carrying the ending is consumed once, so dropping
+    /// a failed write left the route recorded as `Streaming` for good -- an
+    /// audit trail permanently unable to say whether a remote turn finished.
+    #[test]
+    fn a_failed_route_audit_write_is_retried_rather_than_lost() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:retry".to_string());
+        let event_context = app.next_event_context();
+        app.phase4_projection_state
+            .pending_route_audits
+            .push(PendingRouteAudit {
+                run_id: run_id.clone(),
+                route_id: "delegate-chat-route:retry".to_string(),
+                state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+                outcome_label: "phase4.provider.route.completed",
+                event_context,
+            });
+
+        assert!(
+            app.retry_pending_route_audits(),
+            "a queued record must be attempted on the next poll"
+        );
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a record that wrote successfully must not stay queued forever"
+        );
+        assert!(
+            app.replay_ai_run(run_id).is_ok(),
+            "the retried write did not reach the audit trail"
+        );
     }
 
     #[test]

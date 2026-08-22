@@ -444,12 +444,31 @@ fn is_windows_drive_path(value: &str) -> bool {
     )
 }
 
-/// Whether a host is a loopback address that never leaves the machine.
-fn is_loopback_host(host: &str) -> bool {
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "localhost" | "127.0.0.1" | "::1"
-    )
+/// Whether a host never leaves the machine.
+///
+/// One definition, because there were three and they disagreed. The broker
+/// accepted exactly `localhost`, `127.0.0.1` and `::1`; the product AI route
+/// descriptor accepted any loopback `IpAddr` and bracketed IPv6. So an
+/// `OLLAMA_BASE_URL` of `http://127.0.0.2:11434` was recognised as local by the
+/// descriptor, added to the allowlist, selected by the reachability probe -- and
+/// then denied by the broker as remote. Every Assist and Delegate request
+/// failed, for a server that was running on a loopback address.
+///
+/// The wider reading is the correct one: `127.0.0.0/8` is loopback in its
+/// entirety, and a bracketed `[::1]` is the same host as `::1` written the way a
+/// URL requires. This is not permissiveness -- none of these addresses can reach
+/// another machine, which is the property air-gap mode actually cares about.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 /// The policy decision for one git remote operation, together with the audit

@@ -1,0 +1,433 @@
+//! Live product-AI completions: which backend answers, and what it returns.
+//!
+//! Moved out of `lib.rs`, which is a chokepoint file with a line budget, under
+//! the roadmap's extract-before-modify rule. A self-contained region: given an
+//! already-resolved backend, produce a chat completion, an Assist edit proposal,
+//! or a Delegate chat reply — and a fixture label when there is no live backend.
+//!
+//! Every entry point here takes `Option<ProductAiLiveBackend>` rather than a
+//! `ProductAiProviderPreference`, and that is load-bearing rather than
+//! stylistic. Resolving a preference probes the host, so a second resolution can
+//! answer differently from the one the broker authorized — on `Auto`, an
+//! authorized Ollama route could send a buffer excerpt to Anthropic instead.
+//! Taking the backend leaves nothing here that could re-resolve.
+
+use super::*;
+
+/// Completion tokens a product chat completion may return.
+///
+/// Named because it is also *declared* to the capability broker: an org policy
+/// bundle can cap tokens per request, and a request that declares none is never
+/// compared against that cap at all. A literal in one place and a declaration in
+/// another would drift, and the drift would show up as a cap that silently
+/// stopped applying.
+///
+/// Ungated deliberately. The declaration is made on every build; only the code
+/// that would consume the tokens is behind `ai`.
+pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
+
+/// The wire name of a live backend.
+///
+/// One place, because this is the discriminator spelled out rather than data
+/// about it -- and three call sites spelling it themselves is how one of them
+/// ends up saying `claude` while the others say `anthropic`, in metadata a
+/// person reads to decide whether to accept a proposal.
+#[cfg(feature = "ai")]
+pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str {
+    match backend {
+        ProductAiLiveBackend::Ollama => "ollama",
+        ProductAiLiveBackend::Anthropic => "anthropic",
+    }
+}
+
+/// Product completion bound to the **authorized** live backend only.
+///
+/// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
+/// key exists. Completion never falls through from an Ollama-authorized route to
+/// Anthropic (or the reverse): that would bypass the capability/network decision
+/// built for the selected backend. Offline / no-provider returns `None` for
+/// fixture fallbacks.
+///
+/// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
+/// chunks arrive). Ollama remains a single-chunk completion.
+#[cfg(feature = "ai")]
+pub(crate) fn complete_product_chat(
+    backend: Option<ProductAiLiveBackend>,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    temperature: f32,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
+) -> Option<ProductChatCompletion> {
+    use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
+    use legion_ai_providers::OllamaProvider;
+
+    // The backend is passed in, already resolved and already authorized. This
+    // used to take the preference and resolve it again, which is a second answer
+    // to a question the broker had already been asked -- and on `Auto` the two
+    // answers can differ.
+    let backend = backend?;
+
+    match backend {
+        ProductAiLiveBackend::Ollama => {
+            let model = ollama_model_label();
+            let client = OllamaProvider::default();
+            let request = ChatCompletionRequest {
+                provider: "ollama".to_string(),
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                return Some(ProductChatCompletion {
+                    provider_id: "ollama".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
+            }
+            None
+        }
+        ProductAiLiveBackend::Anthropic => {
+            let client = anthropic_client_with_keyring_fallback();
+            let request = ChatCompletionRequest {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            // Progressive SSE: on_delta fires as text deltas arrive on the wire.
+            //
+            // Whether anything reached the surface is recorded, because it
+            // decides whether a failure may be retried. A stream that emitted
+            // deltas and then failed has already been generated and already
+            // been paid for; sending the same prompt again bills a second
+            // generation and replaces the partial text on screen with an
+            // unrelated answer.
+            let emitted_delta = std::cell::Cell::new(false);
+            let mut delta_sink = |text: &str| {
+                emitted_delta.set(true);
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(text);
+                }
+            };
+            if let Ok(chunks) = client.stream_text_deltas_with_callback(
+                request.clone(),
+                Default::default(),
+                &mut delta_sink,
+            ) {
+                let chunks: Vec<String> = chunks.into_iter().filter(|d| !d.is_empty()).collect();
+                let text = chunks.join("");
+                if !text.trim().is_empty() {
+                    let streamed = chunks.len() > 1;
+                    return Some(ProductChatCompletion {
+                        provider_id: "anthropic".to_string(),
+                        model: request.model.clone(),
+                        stream_chunks: if chunks.is_empty() {
+                            vec![text.clone()]
+                        } else {
+                            chunks
+                        },
+                        text: text.trim().to_string(),
+                        streamed,
+                    });
+                }
+            }
+            // Only when the stream produced nothing at all.
+            //
+            // A failure before the first delta cost nothing and is worth
+            // retrying without streaming. A failure after one is not a retry,
+            // it is a second purchase.
+            if emitted_delta.get() {
+                return None;
+            }
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                return Some(ProductChatCompletion {
+                    provider_id: "anthropic".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
+            }
+            None
+        }
+    }
+}
+
+/// Result of resolving assist edit proposal body text (live model or fixture).
+#[derive(Debug, Clone)]
+pub(crate) struct AssistedEditProposalSource {
+    pub(crate) provider_id: String,
+    pub(crate) summary: String,
+    pub(crate) details: Vec<String>,
+    pub(crate) replacement: String,
+}
+
+pub(crate) fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
+    AssistedEditProposalSource {
+        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
+        summary: "Phase 4 local AI edit proposal".to_string(),
+        details: vec![
+            "Generated by deterministic local provider (no live credentials)".to_string(),
+            "Proposal is registered only; app/editor/workspace own apply".to_string(),
+        ],
+        replacement: "/* phase4 local AI proposal */\n".to_string(),
+    }
+}
+
+/// Display-safe record of the last / live product AI stream for rail projection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProductAiStreamProjection {
+    /// Provider that produced the stream (`ollama`, `anthropic`, or empty).
+    pub provider_id: String,
+    /// Model label.
+    pub model: String,
+    /// Operation that produced the stream (`assist.proposal`, `delegate.chat`, …).
+    pub operation: String,
+    /// Ordered stream chunks (SSE deltas or single full response).
+    pub chunks: Vec<String>,
+    /// Whether the provider used multi-delta streaming.
+    pub streamed: bool,
+    /// True while a background or progressive stream is still receiving deltas.
+    pub in_flight: bool,
+    /// Final accumulated text (bounded for projection rows).
+    pub text_preview: String,
+}
+
+/// Resolve assist edit text via product preference routing (Ollama / Anthropic / fixture).
+#[cfg(feature = "ai")]
+pub(crate) fn resolve_assisted_edit_proposal_text(
+    backend: Option<ProductAiLiveBackend>,
+    instruction_label: &str,
+    buffer_excerpt: &str,
+    file_path: &str,
+    on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
+    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
+Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
+no markdown fences, no explanation.";
+    let user = format!(
+        "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
+    );
+    // The backend the caller already authorized. Resolving again here is the
+    // same defect closed in Delegate chat and inline prediction: the broker was
+    // asked about one destination and a second probe can answer differently.
+    match complete_product_chat(
+        backend,
+        system,
+        &user,
+        PRODUCT_COMPLETION_MAX_TOKENS,
+        0.2,
+        on_delta,
+    ) {
+        Some(completion) => {
+            let mut text = completion.text.clone();
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            let stream = product_stream_from_completion(&completion, "assist.proposal");
+            (
+                AssistedEditProposalSource {
+                    provider_id: completion.provider_id.clone(),
+                    summary: format!("Assist edit proposal from {}", completion.provider_id),
+                    details: vec![
+                        format!("model={}", completion.model),
+                        // The backend that actually answered, not the
+                        // preference that suggested it. On `Auto` they differ,
+                        // and this line is metadata on a proposal a person will
+                        // review.
+                        format!("backend={}", backend.map_or("none", live_backend_label)),
+                        format!(
+                            "streamed={} chunks={}",
+                            completion.streamed,
+                            completion.stream_chunks.len()
+                        ),
+                        "Proposal is registered only; app/editor/workspace own apply".to_string(),
+                    ],
+                    replacement: text,
+                },
+                Some(stream),
+            )
+        }
+        // No completion. Which of the two reasons matters to whoever reads the
+        // proposal.
+        //
+        // With no live backend selected, the deterministic proposal is the
+        // product working as configured. With a backend selected and failing --
+        // an unreachable Ollama, an Anthropic stream that broke after emitting
+        // deltas -- the same fixture arrived labelled as though a provider had
+        // produced it, and the partial text that had already reached the screen
+        // was replaced by unrelated content with nothing saying why.
+        None => (
+            match backend {
+                Some(backend) => failed_live_assisted_edit_proposal(backend),
+                None => deterministic_assisted_edit_proposal(),
+            },
+            None,
+        ),
+    }
+}
+
+/// The proposal to register when a selected live backend failed to answer.
+///
+/// Deterministic content, and honest about being it. The alternative -- what
+/// this replaces -- is a fixture wearing a provider's name, which is worse than
+/// a failure: a person reviewing it has no way to know the provider never
+/// answered, and the details they would check say the opposite.
+#[cfg(feature = "ai")]
+pub(crate) fn failed_live_assisted_edit_proposal(
+    backend: ProductAiLiveBackend,
+) -> AssistedEditProposalSource {
+    let label = live_backend_label(backend);
+    let mut source = deterministic_assisted_edit_proposal();
+    source.summary = format!("Offline fallback: the {label} provider did not answer");
+    source.details.insert(
+        0,
+        format!("live_backend={label} outcome=failed; this text is the offline fallback"),
+    );
+    source
+}
+
+#[cfg(not(feature = "ai"))]
+pub(crate) fn resolve_assisted_edit_proposal_text(
+    _backend: Option<ProductAiLiveBackend>,
+    _instruction_label: &str,
+    _buffer_excerpt: &str,
+    _file_path: &str,
+    _on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (
+    AssistedEditProposalSource,
+    Option<ProductAiStreamProjection>,
+) {
+    (deterministic_assisted_edit_proposal(), None)
+}
+
+/// Resolve Delegate chat assistant body via product preference routing.
+#[cfg(feature = "ai")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_delegate_chat_reply(
+    backend: Option<ProductAiLiveBackend>,
+    prompt_label: &str,
+    buffer_excerpt: &str,
+    file_path: &str,
+    citation_count: usize,
+    route_id: &str,
+    route_labels: &[String],
+    on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (String, Option<ProductAiStreamProjection>) {
+    let system = "You are Legion's Delegate chat assistant. Answer helpfully and concisely \
+about the user's workspace code. Prefer concrete references to the cited file. \
+Do not invent file paths. Keep the reply under ~800 characters.";
+    let user = format!(
+        "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
+    );
+    match complete_product_chat(
+        backend,
+        system,
+        &user,
+        PRODUCT_COMPLETION_MAX_TOKENS,
+        0.2,
+        on_delta,
+    ) {
+        Some(completion) => {
+            let stream = product_stream_from_completion(&completion, "delegate.chat");
+            (bounded_label(completion.text, 1_200), Some(stream))
+        }
+        // No completion. Which of the two reasons matters to whoever reads the
+        // reply, exactly as it does on the Assist path.
+        //
+        // Reporting an answer "ready" from the fixture told somebody their
+        // question had been answered when the provider they had selected never
+        // replied -- and then advised them to enable the very backend that was
+        // already selected and had just failed.
+        None => (
+            match backend {
+                Some(backend) => format!(
+                    "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
+                    live_backend_label(backend),
+                    route_labels.join(",")
+                ),
+                None => format!(
+                    "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
+                    route_labels.join(",")
+                ),
+            },
+            None,
+        ),
+    }
+}
+
+#[cfg(not(feature = "ai"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_delegate_chat_reply(
+    _backend: Option<ProductAiLiveBackend>,
+    _prompt_label: &str,
+    _buffer_excerpt: &str,
+    _file_path: &str,
+    citation_count: usize,
+    route_id: &str,
+    route_labels: &[String],
+    _on_delta: Option<&mut dyn FnMut(&str)>,
+) -> (String, Option<ProductAiStreamProjection>) {
+    (
+        format!(
+            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={}",
+            route_labels.join(",")
+        ),
+        None,
+    )
+}
+
+pub(crate) fn product_stream_from_completion(
+    completion: &ProductChatCompletion,
+    operation: &str,
+) -> ProductAiStreamProjection {
+    ProductAiStreamProjection {
+        provider_id: completion.provider_id.clone(),
+        model: completion.model.clone(),
+        operation: operation.to_string(),
+        chunks: completion.stream_chunks.clone(),
+        streamed: completion.streamed,
+        in_flight: false,
+        text_preview: bounded_label(completion.text.as_str(), 480),
+    }
+}

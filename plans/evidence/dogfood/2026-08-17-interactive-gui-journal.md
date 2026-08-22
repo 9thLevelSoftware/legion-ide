@@ -105,6 +105,17 @@ independent widgets laid out side by side, so layout spacing fell between them.
 
 ## Still open
 
+- **Approving a deterministic Assist proposal ended in `Rejected`.** Recorded
+  2026-08-20, **fixed 2026-08-21.** Clicking `Approve` left the card reading
+  `status: Rejected` with `Approval blocked` in the same frame. It was a
+  lifecycle gap rather than an approval policy: an Assist rail command registers
+  its proposal in `Created`, nothing advanced it (`OpenProposalDetails` maps to
+  no request), and approval from `Created` is refused. `handle_routed_proposal_request`
+  now walks an `Approve` on a `Created` proposal through Validate and Preview
+  first -- the same courtesy `Preview` already received -- which is not weakening
+  the gate, since those are the checks approval is meant to follow. The card now
+  reaches `status: Approved` and offers Apply.
+
 - **No way to close a file without saving.** The prompt offers Save and Cancel
   only; `grep` finds no discard path anywhere in app authority. Deliberately not
   papered over with a renderer-side button.

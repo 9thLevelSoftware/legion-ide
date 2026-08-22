@@ -1,0 +1,518 @@
+//! The shared product-AI lane: who holds it, and who may finish it.
+//!
+//! Split out of `lib.rs` rather than grown there. One provider operation runs
+//! at a time, and everything here exists to make that true under threads: a
+//! reservation taken with the lane, an occupancy number that says which run a
+//! reservation belongs to, and a result queue the app thread drains.
+//!
+//! The occupancy number is the part worth reading first. A worker that has been
+//! cancelled can observe "not cancelled", be pre-empted, and publish after the
+//! app thread has released the lane and another operation has taken it -- so
+//! "am I cancelled?" is the wrong question, and "do I still hold the lane?" is
+//! the right one.
+
+use super::*;
+
+/// Background job result for non-blocking product AI generation.
+/// What a background Delegate turn needs in order to record how it ended.
+#[derive(Debug, Clone)]
+pub(crate) struct DelegateRouteRecord {
+    pub(crate) run_id: legion_protocol::AgentRunId,
+    pub(crate) route_id: String,
+    pub(crate) event_context: EventContext,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProductAiBackgroundResult {
+    /// Delegate chat assistant message to finalize; empty when this is Assist.
+    pub(crate) assistant_message_id: String,
+    pub(crate) content_label: String,
+    pub(crate) stream: Option<ProductAiStreamProjection>,
+    /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
+    pub(crate) assist_proposal: Option<AssistedEditProposalSource>,
+    /// The Delegate route this result belongs to, when it has one.
+    ///
+    /// A background Delegate turn persists `Streaming` when its worker starts,
+    /// and the terminal state is only knowable here. Without the route travelling
+    /// with the result, every background turn -- successful, empty or failed --
+    /// stayed audited as streaming forever.
+    pub(crate) delegate_route: Option<DelegateRouteRecord>,
+    /// Whether a selected live provider was invoked and did not answer.
+    ///
+    /// The proposal says so in its own summary, and the route record has to
+    /// agree: it was built with `Completed` before the worker ran, and
+    /// persisting that while the proposal reports a failure leaves the audit
+    /// and the artifact contradicting each other about the same run. Which one
+    /// a reader believes then depends on which one they happen to open.
+    pub(crate) live_failed: bool,
+    /// When set, a live inline prediction finished on a worker thread.
+    ///
+    /// Ghost text is the smallest of these operations and was the only one that
+    /// ran its provider call inline on the UI thread. The transport allows a
+    /// request 120 seconds, and for all of it eframe could neither repaint nor
+    /// read input -- so the `request_in_flight` state the projection already
+    /// modelled, and the Cancel control that depends on it, could never be seen.
+    pub(crate) inline_prediction: Option<InlinePredictionResult>,
+}
+
+/// Context retained while a live Assist proposal streams on a worker thread.
+///
+/// Authorization and agent Planning→Proposing run on the UI thread; completion
+/// text arrives later so the renderer can poll progressive deltas and remain
+/// responsive. Proposal registration happens on poll after the worker finishes.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingAssistProposalJob {
+    pub(crate) run_id: legion_protocol::AgentRunId,
+    pub(crate) route_id: String,
+    pub(crate) operation_class: legion_protocol::AssistedAiOperationClass,
+    pub(crate) provider_class: legion_protocol::AssistedAiProviderClass,
+    /// Whether the person had chosen a remote destination when this run started.
+    ///
+    /// Read from the live preference at completion, it changed under the run: a
+    /// picker switched to Ollama mid-stream turned an upload made under an
+    /// explicit Anthropic selection into a proposal reporting consent as
+    /// outstanding. The excerpt had already gone; the record has to describe the
+    /// decision that sent it.
+    pub(crate) consent_granted: bool,
+    pub(crate) provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
+    pub(crate) route_response: legion_protocol::AssistedAiProviderRouteResponse,
+    pub(crate) context_manifest_projection: legion_protocol::ContextManifestProjection,
+    pub(crate) generated_at: TimestampMillis,
+    pub(crate) event_context: EventContext,
+    pub(crate) principal: PrincipalId,
+    pub(crate) file_id: FileId,
+    pub(crate) preconditions: ProposalVersionPreconditions,
+    pub(crate) agent: AgentRuntime,
+}
+
+/// Shared live stream sink updated as SSE deltas arrive (background or progressive).
+#[derive(Debug, Default)]
+pub(crate) struct LiveProductAiStreamSink {
+    pub(crate) projection: Mutex<ProductAiStreamProjection>,
+    pub(crate) in_flight: std::sync::atomic::AtomicBool,
+    /// Which occupancy of the lane is current.
+    ///
+    /// Guarded by `pending_results` rather than atomic on its own: an atomic
+    /// makes each read and each write indivisible and does nothing for the gap
+    /// *between* them, which is where the whole problem lives. A worker that
+    /// checks ownership and then publishes has, between those two lines, given
+    /// the app thread every opportunity to release the lane and somebody else
+    /// to take it. Both the check and the publish happen while this lock is
+    /// held, and the release takes the same lock to move the number, so there
+    /// is no moment for the answer to change in.
+    ///
+    /// Incremented every time the lane is taken. A reservation records the
+    /// value it was given and may only finish while it still matches, which
+    /// closes a race a boolean cancellation flag cannot: the worker can read
+    /// "not cancelled", be pre-empted, and by the time it publishes, the app
+    /// thread has released the lane and another operation has taken it. Its
+    /// result would then land against somebody else's run and clear an
+    /// in-flight flag that is not its own -- making a request that is still
+    /// running look finished, and letting a third into the lane behind it.
+    pub(crate) generation: Mutex<u64>,
+    /// Completed background chat results waiting to be applied on the app thread.
+    pub(crate) pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
+}
+
+pub(crate) struct ProductAiLaneReservation {
+    pub(crate) sink: Arc<LiveProductAiStreamSink>,
+    pub(crate) operation: &'static str,
+    /// The occupancy this reservation belongs to.
+    pub(crate) generation: u64,
+    pub(crate) armed: bool,
+}
+
+impl ProductAiLaneReservation {
+    pub(crate) fn try_acquire(
+        sink: Arc<LiveProductAiStreamSink>,
+        operation: &'static str,
+        provider_hint: &str,
+        model_hint: &str,
+    ) -> Option<Self> {
+        let generation = sink.try_begin(operation, provider_hint, model_hint)?;
+        Some(Self {
+            sink,
+            operation,
+            generation,
+            armed: true,
+        })
+    }
+
+    /// A delta writer bound to this occupancy of the lane.
+    ///
+    /// Handing a worker the bare sink hands it the ability to write into
+    /// somebody else's run after it has been cancelled. This carries the
+    /// generation with it, so the check cannot be forgotten at the call site --
+    /// which is where it was forgotten.
+    pub(crate) fn delta_writer(&self) -> ProductAiDeltaWriter {
+        ProductAiDeltaWriter {
+            sink: self.sink.clone(),
+            generation: self.generation,
+        }
+    }
+
+    /// Give the lane up without finishing it, because somebody else already has.
+    ///
+    /// A cancelled prediction releases the lane from the app thread so the rest
+    /// of the product is not blocked behind a provider call nobody is waiting
+    /// for. The worker still holds this reservation until its request returns,
+    /// and it must not release the lane a second time -- by then it may belong
+    /// to another operation.
+    pub(crate) fn abandon(mut self) {
+        self.armed = false;
+    }
+
+    pub(crate) fn finish(mut self, completion: Option<&ProductChatCompletion>) {
+        self.armed = false;
+        self.sink.finish(completion, self.operation);
+    }
+
+    pub(crate) fn finish_background(
+        mut self,
+        result: ProductAiBackgroundResult,
+        completion: Option<&ProductChatCompletion>,
+    ) {
+        self.armed = false;
+        // Only while this reservation still holds the lane, checked and acted
+        // on under one lock.
+        //
+        // A cancelled worker can read "not cancelled", be pre-empted, and reach
+        // here after the app thread released the lane and another operation
+        // took it. Publishing then lands a stale result against somebody
+        // else's run and clears an in-flight flag that is not this worker's --
+        // so a request still in progress looks finished, and a third is let in
+        // behind it.
+        self.sink
+            .finish_background_owned(self.generation, result, completion, self.operation);
+    }
+}
+
+/// A handle that can append deltas to one occupancy of the lane, and no other.
+pub(crate) struct ProductAiDeltaWriter {
+    sink: Arc<LiveProductAiStreamSink>,
+    generation: u64,
+}
+
+impl ProductAiDeltaWriter {
+    pub(crate) fn push(&self, delta: &str) {
+        self.sink.push_delta_owned(self.generation, delta);
+    }
+}
+
+impl Drop for ProductAiLaneReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            // Only if this occupancy still holds the lane.
+            //
+            // A worker that panics or unwinds never reaches `abandon` or
+            // `finish_background`, so its armed reservation is dropped here --
+            // and if the app thread released the lane meanwhile, an
+            // unconditional finish cleared the projection and the in-flight
+            // flag of whichever run had taken it. That is the same stale-worker
+            // race the results and the deltas are fenced against, arriving
+            // through the one path that runs when nothing else did.
+            self.sink.finish_owned(self.generation);
+        }
+    }
+}
+
+impl LiveProductAiStreamSink {
+    /// Take the lane, returning the occupancy number if it was free.
+    pub(crate) fn try_begin(
+        &self,
+        operation: &str,
+        provider_hint: &str,
+        model_hint: &str,
+    ) -> Option<u64> {
+        let Ok(pending) = self.pending_results.lock() else {
+            return None;
+        };
+        if !pending.is_empty()
+            || self
+                .in_flight
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_err()
+        {
+            return None;
+        }
+        // A new occupancy, taken while the result queue is held -- the same
+        // lock a publish has to take, so no worker can be mid-handoff here.
+        let Ok(mut generation_guard) = self.generation.lock() else {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return None;
+        };
+        *generation_guard = generation_guard.wrapping_add(1);
+        let generation = *generation_guard;
+        drop(generation_guard);
+        let Ok(mut guard) = self.projection.lock() else {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return None;
+        };
+        *guard = ProductAiStreamProjection {
+            provider_id: provider_hint.to_string(),
+            model: model_hint.to_string(),
+            operation: operation.to_string(),
+            chunks: Vec::new(),
+            streamed: false,
+            in_flight: true,
+            text_preview: String::new(),
+        };
+        Some(generation)
+    }
+
+    /// Free the lane from the app thread and end the current occupancy.
+    pub(crate) fn release_lane(&self) {
+        // The queue lock first, so a worker cannot be between its ownership
+        // check and its publish while this runs.
+        let Ok(_queue) = self.pending_results.lock() else {
+            return;
+        };
+        if let Ok(mut generation) = self.generation.lock() {
+            *generation = generation.wrapping_add(1);
+        }
+        drop(_queue);
+        self.finish(None, "");
+    }
+
+    /// Publish a background result, but only for the occupancy that holds the lane.
+    ///
+    /// The check and the publish share one lock. Splitting them -- check, then
+    /// publish -- left a window in which the lane could be released and retaken
+    /// between the two, which is the whole defect and not a smaller version of
+    /// it.
+    pub(crate) fn finish_background_owned(
+        &self,
+        generation: u64,
+        result: ProductAiBackgroundResult,
+        completion: Option<&ProductChatCompletion>,
+        operation: &str,
+    ) {
+        let Ok(mut queue) = self.pending_results.lock() else {
+            return;
+        };
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
+            return;
+        }
+        drop(current);
+        if let Ok(mut guard) = self.projection.lock() {
+            if let Some(completion) = completion {
+                *guard = product_stream_from_completion(completion, operation);
+            } else {
+                guard.in_flight = false;
+            }
+        }
+        queue.push_back(result);
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Append a streamed delta, but only for the occupancy that holds the lane.
+    ///
+    /// The final result was fenced by generation and the deltas were not, so a
+    /// cancelled worker went on appending to the projection until its transport
+    /// returned -- into whichever operation had taken the lane meanwhile. Text
+    /// from a prediction nobody is waiting for appeared under a different run,
+    /// attributed to its provider, until a completion replaced it. A partial
+    /// answer shown under the wrong question is worse than no partial answer.
+    ///
+    /// Checked and appended under one lock, like the publish, because a check
+    /// that releases before it acts is the gap this is here to close.
+    pub(crate) fn push_delta_owned(&self, generation: u64, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
+            return;
+        }
+        if let Ok(mut guard) = self.projection.lock() {
+            guard.chunks.push(delta.to_string());
+            guard.streamed = guard.chunks.len() > 1 || guard.streamed;
+            guard.in_flight = true;
+            let joined = guard.chunks.join("");
+            guard.text_preview = joined.chars().take(480).collect();
+        }
+    }
+
+    /// Give up the lane, but only if `generation` still holds it.
+    ///
+    /// For the drop path, which runs when a worker unwound and cannot say
+    /// whether it still owns anything. Checked under the same lock the publish
+    /// takes, so the answer cannot change between reading it and acting on it.
+    pub(crate) fn finish_owned(&self, generation: u64) {
+        // The guard is held across the mutation, not dropped before it.
+        //
+        // Releasing it first restored the window the check exists to close: the
+        // worker validates, is pre-empted, and by the time it clears the
+        // projection and the in-flight flag the lane has been released and
+        // retaken. Checking and then acting is the whole bug, however narrow the
+        // gap between the two lines looks.
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
+            return;
+        }
+        if let Ok(mut guard) = self.projection.lock() {
+            guard.in_flight = false;
+        }
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
+        if let Ok(mut guard) = self.projection.lock() {
+            if let Some(completion) = completion {
+                *guard = product_stream_from_completion(completion, operation);
+            } else {
+                guard.in_flight = false;
+            }
+        }
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn snapshot(&self) -> ProductAiStreamProjection {
+        self.projection
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn is_in_flight(&self) -> bool {
+        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn has_pending_results(&self) -> bool {
+        self.pending_results
+            .lock()
+            .map(|queue| !queue.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn mode_allows_active_operation(&self, mode: AppProductMode) -> bool {
+        if !self.is_in_flight() && !self.has_pending_results() {
+            return true;
+        }
+        let Ok(guard) = self.projection.lock() else {
+            return false;
+        };
+        match guard.operation.as_str() {
+            "delegate.chat" => mode.allows_delegate(),
+            "assist.proposal" | "assist.inline_prediction" => mode.allows_assist(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
+        self.pending_results
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod lane_ownership_tests {
+    use super::*;
+
+    /// A reservation dropped after cancellation does not end the next run.
+    ///
+    /// A worker that panics or unwinds never reaches `abandon` or
+    /// `finish_background`; its armed reservation is dropped instead. If the
+    /// app thread released the lane meanwhile, the unconditional finish in that
+    /// drop cleared the projection and the in-flight flag of whichever run had
+    /// taken the lane -- so a request still in progress looked finished and a
+    /// third was let in behind it.
+    #[test]
+    fn a_dropped_reservation_does_not_finish_the_run_that_replaced_it() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let cancelled = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "assist.predict",
+            "provider:a",
+            "model:a",
+        )
+        .expect("the lane starts free");
+
+        // The app thread cancels while the worker is still in its transport
+        // call, and a new operation takes the lane.
+        sink.release_lane();
+        let second = sink
+            .try_begin("delegate.chat", "provider:b", "model:b")
+            .expect("a released lane must be free to take");
+        sink.push_delta_owned(second, "answer for b");
+
+        // The worker then unwinds: no `abandon`, no publish, just a drop.
+        drop(cancelled);
+
+        assert!(
+            sink.in_flight.load(std::sync::atomic::Ordering::SeqCst),
+            "the dropped reservation cleared the in-flight flag of the run that replaced it, so a request still in progress looks finished"
+        );
+        let projection = sink.snapshot();
+        assert_eq!(
+            projection.chunks,
+            vec!["answer for b".to_string()],
+            "the dropped reservation wiped the replacing run's projection: {projection:?}"
+        );
+        assert!(
+            projection.in_flight,
+            "the replacing run was marked finished by somebody else's drop"
+        );
+    }
+
+    /// A cancelled worker's deltas do not appear under the next run.
+    ///
+    /// The final result was fenced by generation and the deltas were not, so a
+    /// worker whose prediction was cancelled went on appending until its
+    /// transport returned -- into whichever operation held the lane by then.
+    /// Text from a request nobody is waiting for, shown under a different run
+    /// and attributed to its provider, is worse than no partial answer at all.
+    #[test]
+    fn a_cancelled_workers_deltas_do_not_land_in_the_next_run() {
+        let sink = LiveProductAiStreamSink::default();
+        let first = sink
+            .try_begin("assist.predict", "provider:a", "model:a")
+            .expect("the lane starts free");
+
+        // The app thread cancels: the lane is released while the worker is
+        // still in its transport call.
+        sink.release_lane();
+
+        let second = sink
+            .try_begin("delegate.chat", "provider:b", "model:b")
+            .expect("a released lane must be free to take");
+        assert_ne!(first, second, "a new occupancy must have a new generation");
+
+        sink.push_delta_owned(second, "answer for b");
+        sink.push_delta_owned(first, "stale text from the cancelled prediction");
+
+        let projection = sink.snapshot();
+        assert!(
+            projection
+                .chunks
+                .iter()
+                .all(|chunk| chunk != "stale text from the cancelled prediction"),
+            "a cancelled worker wrote into the run that replaced it: {:?}",
+            projection.chunks
+        );
+        assert_eq!(
+            projection.chunks,
+            vec!["answer for b".to_string()],
+            "the run holding the lane must still be able to stream"
+        );
+    }
+}
