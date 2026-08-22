@@ -527,21 +527,36 @@ mod tests {
             legion_protocol::ContextManifestEgressStatus::LocalProvider,
             "a loopback route really is local and must keep saying so"
         );
-        assert_ne!(
+        let local_permission = &local.manifest.permissions[0];
+        assert_eq!(
+            local_permission.privacy_scope,
+            legion_protocol::SemanticPrivacyScope::MetadataOnly,
+            "a loopback route really is metadata-only and must keep saying so"
+        );
+        // The exact value, not merely "not the local one". Excluding a single
+        // wrong answer leaves every other wrong answer passing -- a regression
+        // to `LocalOnly` would have satisfied all three of these as `assert_ne!`
+        // and reported a remote run as never having touched the network at all.
+        assert_eq!(
             remote.manifest.egress,
-            legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            "a route that uploads the excerpt is described as local egress"
+            legion_protocol::ContextManifestEgressStatus::ExternalEgressMetadata,
+            "a route that uploads the excerpt must say external egress happened"
         );
         let remote_permission = &remote.manifest.permissions[0];
-        assert_ne!(
+        assert_eq!(
             remote_permission.privacy_scope,
-            legion_protocol::SemanticPrivacyScope::MetadataOnly,
-            "sending the excerpt itself is not a metadata-only permission"
+            legion_protocol::SemanticPrivacyScope::File,
+            "the excerpt itself is file-scoped, and calling it metadata-only is the              claim this fix removes"
         );
-        assert_ne!(
+        assert_eq!(
             remote_permission.egress,
-            legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            "the model-provider permission still claims local egress"
+            legion_protocol::ContextManifestEgressStatus::ExternalEgressMetadata,
+            "the model-provider permission must report the egress the route performs"
+        );
+        assert_eq!(
+            remote_permission.risk_label,
+            legion_protocol::ProposalRiskLabel::Medium,
+            "a run that uploads the buffer is not the same risk as one that does not"
         );
 
         // The inspector is derived from the manifest, so correcting the
@@ -569,7 +584,7 @@ mod tests {
         assert_eq!(
             remote_budget.budgets[0].consent_requirement_label,
             legion_protocol::PermissionBudgetConsentRequirementLabel::Required,
-            "uploading the excerpt to a metered provider needs consent, and the budget              said none was required"
+            "uploading the excerpt to a metered provider needs consent, and the budget said none was required"
         );
         assert!(
             remote_budget.budgets[0]
@@ -585,7 +600,7 @@ mod tests {
         assert_eq!(
             local_budget.budgets[0].consent_requirement_label,
             legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
-            "a metadata-only local call asks nothing of anybody and must not start              demanding consent"
+            "a metadata-only local call asks nothing of anybody and must not start demanding consent"
         );
     }
 }

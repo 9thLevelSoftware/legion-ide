@@ -259,7 +259,7 @@ fn predict_is_offered_only_where_a_provider_can_answer_it() {
     {
         assert!(
             clickable_center(&frame, "Predict").is_some(),
-            "a build that has an inline prediction provider must offer Predict              with a file open; frame was {text:?}"
+            "a build that has an inline prediction provider must offer Predict with a file open; frame was {text:?}"
         );
     }
 
@@ -267,12 +267,12 @@ fn predict_is_offered_only_where_a_provider_can_answer_it() {
     {
         assert!(
             clickable_center(&frame, "Predict").is_none(),
-            "this build has no inline prediction provider, so Predict can only              fail; frame was {text:?}"
+            "this build has no inline prediction provider, so Predict can only fail; frame was {text:?}"
         );
         assert!(
             text.iter()
                 .any(|line| line == "This build has no inline prediction provider."),
-            "a blocked surface must say what is missing rather than going quiet;              frame was {text:?}"
+            "a blocked surface must say what is missing rather than going quiet; frame was {text:?}"
         );
         // The prerequisite card rendered every resolution as a button that
         // opens the file palette, because a missing buffer had been its only
@@ -280,7 +280,7 @@ fn predict_is_offered_only_where_a_provider_can_answer_it() {
         // control that promises nothing and then does something unrelated.
         assert!(
             clickable_center(&frame, "Unavailable").is_none(),
-            "\"Unavailable\" is a state, not a step -- it must not be pressable;              frame was {text:?}"
+            "\"Unavailable\" is a state, not a step -- it must not be pressable; frame was {text:?}"
         );
     }
 }

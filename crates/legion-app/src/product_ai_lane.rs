@@ -190,7 +190,7 @@ impl Drop for ProductAiLaneReservation {
             // flag of whichever run had taken it. That is the same stale-worker
             // race the results and the deltas are fenced against, arriving
             // through the one path that runs when nothing else did.
-            self.sink.finish_owned(self.generation, self.operation);
+            self.sink.finish_owned(self.generation);
         }
     }
 }
@@ -330,15 +330,25 @@ impl LiveProductAiStreamSink {
     /// For the drop path, which runs when a worker unwound and cannot say
     /// whether it still owns anything. Checked under the same lock the publish
     /// takes, so the answer cannot change between reading it and acting on it.
-    pub(crate) fn finish_owned(&self, generation: u64, operation: &str) {
+    pub(crate) fn finish_owned(&self, generation: u64) {
+        // The guard is held across the mutation, not dropped before it.
+        //
+        // Releasing it first restored the window the check exists to close: the
+        // worker validates, is pre-empted, and by the time it clears the
+        // projection and the in-flight flag the lane has been released and
+        // retaken. Checking and then acting is the whole bug, however narrow the
+        // gap between the two lines looks.
         let Ok(current) = self.generation.lock() else {
             return;
         };
         if *current != generation {
             return;
         }
-        drop(current);
-        self.finish(None, operation);
+        if let Ok(mut guard) = self.projection.lock() {
+            guard.in_flight = false;
+        }
+        self.in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
@@ -429,7 +439,7 @@ mod lane_ownership_tests {
 
         assert!(
             sink.in_flight.load(std::sync::atomic::Ordering::SeqCst),
-            "the dropped reservation cleared the in-flight flag of the run that              replaced it, so a request still in progress looks finished"
+            "the dropped reservation cleared the in-flight flag of the run that replaced it, so a request still in progress looks finished"
         );
         let projection = sink.snapshot();
         assert_eq!(

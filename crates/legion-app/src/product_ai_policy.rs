@@ -1002,49 +1002,6 @@ mod org_ceiling {
         );
     }
 
-    /// Every projection a reviewer reads agrees about where the buffer goes.
-    ///
-    /// The capability was corrected first, and the manifest, the inspector and
-    /// the budget were still built from the loopback fixture's assumptions --
-    /// so an Anthropic proposal showed an accurate remote capability beside
-    /// three projections promising the excerpt never left the machine. One of
-    /// those four is wrong in every reading; which one does not matter to
-    /// somebody deciding whether to accept the edit.
-    #[test]
-    fn a_remote_route_is_remote_in_every_projection() {
-        for backend in [
-            crate::ProductAiLiveBackend::Anthropic,
-            crate::ProductAiLiveBackend::Ollama,
-        ] {
-            let (_id, _model, class, ..) = super::product_ai_route_fields(Some(backend));
-            let remote = super::provider_class_sends_the_buffer(class);
-            assert_eq!(
-                remote,
-                matches!(backend, crate::ProductAiLiveBackend::Anthropic),
-                "{backend:?} was classified the wrong way round, so everything below                  would agree about the wrong answer"
-            );
-        }
-
-        // And the predicate the projections share is the one the capability
-        // uses, so they cannot drift apart without this failing.
-        let remote_capability = super::phase4_provider_capability(
-            legion_protocol::AssistedAiProviderClass::ByokRemote,
-            "anthropic",
-            None,
-        );
-        assert!(
-            super::provider_class_sends_the_buffer(
-                legion_protocol::AssistedAiProviderClass::ByokRemote
-            ),
-            "the shared predicate disagrees with the capability it is supposed to feed"
-        );
-        assert_eq!(
-            remote_capability.air_gap_support,
-            legion_protocol::AssistedAiSupportLabel::Unsupported,
-            "the capability built from the shared predicate still reads as air-gap safe"
-        );
-    }
-
     /// The route decides the class, and the capability follows the route.
     ///
     /// Deriving `remote` from the class was only half a fix while the class

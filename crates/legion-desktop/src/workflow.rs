@@ -5992,7 +5992,7 @@ mod tests {
                 assert_eq!(actions.len(), 1);
                 assert!(
                     matches!(actions[0], DesktopAction::VimKey { key: 'j', .. }),
-                    "a `j` that both moved the cursor and typed a `j` is the                      loudest possible bug in this feature: {:?}",
+                    "a `j` that both moved the cursor and typed a `j` is the loudest possible bug in this feature: {:?}",
                     actions[0]
                 );
                 assert!(
@@ -6038,7 +6038,7 @@ mod tests {
                         ctrl: true
                     }
                 ),
-                "the parser reads `ctrl` to tell redo from replace-char, so a                  Ctrl+R arriving as a plain `r` replaces a character instead of                  undoing an undo: {:?}",
+                "the parser reads `ctrl` to tell redo from replace-char, so a Ctrl+R arriving as a plain `r` replaces a character instead of undoing an undo: {:?}",
                 actions[0]
             );
         });

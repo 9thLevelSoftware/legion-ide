@@ -1079,7 +1079,7 @@ fn a_delegate_turn_whose_worker_cannot_start_is_still_answered() {
 
     assert_eq!(
         outcome.projection.chat_message_count, 2,
-        "the question was recorded and its answer was not, so the transcript ends on          an unanswered turn"
+        "the question was recorded and its answer was not, so the transcript ends on an unanswered turn"
     );
     let answer = outcome
         .projection
@@ -1101,7 +1101,7 @@ fn a_delegate_turn_whose_worker_cannot_start_is_still_answered() {
         .expect("the lane must be free after a spawn that never happened");
     assert_eq!(
         second.projection.chat_message_count, 4,
-        "the retry did not produce a turn of its own, so the lane is still held by a          worker that does not exist"
+        "the retry did not produce a turn of its own, so the lane is still held by a worker that does not exist"
     );
 }
 
@@ -1110,7 +1110,7 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     let root = temp_workspace("chat");
     fs::write(
         root.join("lib.rs"),
-        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
+        "pub fn delegated_marker() -> u32 {\n 42\n}\n",
     )
     .expect("fixture file should be written");
     let mut app = AppComposition::new();

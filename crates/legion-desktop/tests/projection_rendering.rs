@@ -6174,7 +6174,7 @@ fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
     assert_eq!(
         observed,
         legion_desktop::view::dock_geometry::DockFractions::default(),
-        "an untouched layout must report nothing to persist, or every frame          overwrites the user's arrangement with the current geometry default"
+        "an untouched layout must report nothing to persist, or every frame overwrites the user's arrangement with the current geometry default"
     );
 }
 
