@@ -574,10 +574,21 @@ fn saved_scene_rect(ctx: &egui::Context) -> Option<egui::Rect> {
 /// than one that never claimed to, because nothing on the canvas says which
 /// direction the card went.
 ///
-/// So the view is capped at what the floor can draw and positioned around
-/// `anchor` -- the card the caller most needs visible. Everything else stays
-/// reachable by panning, which is what a canvas is for.
-fn within_zoom_floor(view: egui::Rect, anchor: egui::Rect, panel: egui::Vec2) -> egui::Rect {
+/// So a view that cannot be drawn is replaced by one that can: `preferred`
+/// wide, positioned around `anchor` -- the card the caller most needs visible.
+/// Everything else stays reachable by panning, which is what a canvas is for.
+///
+/// `preferred` rather than "as much as the floor allows", because the largest
+/// drawable rectangle is the whole arrangement at 25%, where no card can be
+/// read. The callers know better than this function does: an opening view wants
+/// the default size, and a view being nudged to reach a new card wants to keep
+/// whatever zoom the person was already working at.
+fn within_zoom_floor(
+    view: egui::Rect,
+    anchor: egui::Rect,
+    preferred: egui::Vec2,
+    panel: egui::Vec2,
+) -> egui::Rect {
     if panel.x <= 0.0 || panel.y <= 0.0 {
         return view;
     }
@@ -585,13 +596,12 @@ fn within_zoom_floor(view: egui::Rect, anchor: egui::Rect, panel: egui::Vec2) ->
     if view.width() <= widest.x && view.height() <= widest.y {
         return view;
     }
-    let size = egui::vec2(view.width().min(widest.x), view.height().min(widest.y));
-    // Centred on the anchor, then pushed back inside the view we were given, so
-    // a card near the edge of the arrangement does not open half in empty space.
-    let mut min = anchor.center() - size / 2.0;
-    // `size` is never larger than `view`, so these bounds cannot cross.
-    min.x = min.x.clamp(view.min.x, view.max.x - size.x);
-    min.y = min.y.clamp(view.min.y, view.max.y - size.y);
+    let size = egui::vec2(preferred.x.min(widest.x), preferred.y.min(widest.y));
+    // Centred on the anchor. Not clamped back inside `view`: `view` is the
+    // rectangle that could not be drawn, and pinning a smaller window to its
+    // edge is how the card ends up against the side of the screen rather than
+    // in front of the person who just opened it.
+    let min = anchor.center() - size / 2.0;
     let capped = egui::Rect::from_min_size(min, size);
     // A card larger than the drawable area cannot be contained by anything;
     // showing its top-left beats showing the space beside it.
@@ -630,7 +640,10 @@ fn view_reaching_new_cards(
         newest = Some(rect);
     }
     match newest {
-        Some(newest) => within_zoom_floor(widened, newest, panel),
+        // The size somebody was already working at, moved to where the card
+        // went. Zooming them out to a quarter scale to keep the old view in
+        // frame as well trades a card they can read for two they cannot.
+        Some(newest) => within_zoom_floor(widened, newest, view.size(), panel),
         None => widened,
     }
 }
@@ -671,7 +684,7 @@ pub(crate) fn default_scene_rect(nodes: &[CanvasNode], panel: egui::Vec2) -> egu
         egui::Rect::from_min_size(fitted.min, fallback.size()),
         |node| node_rect(node).expand(MARGIN),
     );
-    within_zoom_floor(fitted, anchor, panel)
+    within_zoom_floor(fitted, anchor, fallback.size(), panel)
 }
 
 /// Draw the canvas, and return the rect it occupied.
@@ -1815,6 +1828,15 @@ mod canvas_layout_rules {
             widened.contains_rect(super::node_rect(newest)),
             "the card the view was widened for sits outside it at {:?}, which is              the failure the widening exists to prevent",
             super::node_rect(newest)
+        );
+        // And at the size somebody was already working at. Filling the whole
+        // drawable rectangle instead would satisfy both assertions above by
+        // zooming out to a quarter scale, where the card is on screen and
+        // cannot be read -- which is not what reaching it meant.
+        assert_eq!(
+            widened.size(),
+            view.size(),
+            "the view changed zoom to reach a new card; it should have moved"
         );
     }
 
