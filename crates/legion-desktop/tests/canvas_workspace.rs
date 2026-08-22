@@ -552,6 +552,14 @@ fn strokes_around(output: &egui::FullOutput, target: egui::Pos2) -> Vec<(u32, eg
                     found.push((rect.stroke.width.round() as u32, rect.stroke.color));
                 }
             }
+            // Ports are circles, and a focus ring on one is a circle too.
+            egui::epaint::Shape::Circle(circle) => {
+                if circle.center.distance(target) <= circle.radius + 8.0
+                    && circle.stroke.width > 0.0
+                {
+                    found.push((circle.stroke.width.round() as u32, circle.stroke.color));
+                }
+            }
             egui::epaint::Shape::Vec(shapes) => {
                 for shape in shapes {
                     collect(shape, target, found);
@@ -804,6 +812,89 @@ fn holding_an_arrow_key_persists_the_arrangement_once() {
     assert_eq!(
         saves, 1,
         "a single held-key gesture asked for {saves} durable session writes; each one          validates, syncs and atomically replaces the file on the drawing thread"
+    );
+}
+
+/// A focused port shows which of the two has the keyboard.
+///
+/// Bringing the card into view says which *card*. The two ports sit eight
+/// pixels apart and Enter does opposite things on them -- arm a source, or
+/// complete a connection -- so a sighted keyboard user needs to see which one
+/// is about to act.
+#[test]
+fn a_focused_port_is_drawn_differently_from_the_rest() {
+    let workspace = workspace_with_files("legion_desktop_canvas_port_ring");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let port = accesskit_id(&canvas, "Connect from alpha.rs").expect("the card must have a port");
+    let centre = clickable_center(&canvas, "Connect from alpha.rs").expect("port on screen");
+    let before = strokes_around(&canvas, centre);
+
+    let focused = focus(&mut app, port);
+    let centre = clickable_center(&focused, "Connect from alpha.rs").expect("port still there");
+    let after = strokes_around(&focused, centre);
+    assert!(
+        after.len() > before.len(),
+        "focusing the port painted nothing new around it: {before:?} then {after:?}"
+    );
+
+    // The ring is thicker than the ports' own outlines, and the port beside it
+    // does not have one -- a difference that appears on both says nothing about
+    // which has the keyboard. Compared by width rather than by count: the input
+    // port paints its own thin circle, so counting strokes finds the same
+    // number on each.
+    assert!(
+        after.iter().any(|(width, _)| *width >= 2),
+        "the focused port has no ring, only its own outline: {after:?}"
+    );
+    let other = clickable_center(&focused, "Connect to alpha.rs").expect("the other port");
+    let unfocused = strokes_around(&focused, other);
+    assert!(
+        !unfocused.iter().any(|(width, _)| *width >= 2),
+        "the unfocused port is ringed too, so the ring says nothing about which has the          keyboard: {unfocused:?}"
+    );
+}
+
+/// Typing takes the keyboard back from a button that still holds it.
+///
+/// Closing an overlay restores focus to the rail control that opened it, and
+/// that focus outlives the reason for it. Suppressing activation keys while it
+/// lasted meant every typed space was swallowed -- silently, and for as long as
+/// the stale focus lasted.
+#[test]
+fn typing_reclaims_the_keyboard_from_a_button_that_still_holds_focus() {
+    let workspace = workspace_with_files("legion_desktop_canvas_stale_focus");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let control = accesskit_id(&editor, "Canvas").expect("the rail must publish a Canvas control");
+    let _ = focus(&mut app, control);
+
+    // The person carries on typing into the buffer: a word, then a space.
+    let _ =
+        app.run_headless_full_frame(full_frame_input(vec![egui::Event::Text("hi".to_string())]));
+    let _ = app.run_headless_full_frame(full_frame_input(vec![
+        egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::Text(" ".to_string()),
+    ]));
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        app.runtime_snapshot().active_buffer_projection.dirty,
+        "typing into the editor was swallowed because a rail button still had focus"
+    );
+    assert!(
+        clickable_center(&after, "Card alpha.rs").is_none(),
+        "the swallowed space also pressed the button it was meant to be typed past"
     );
 }
 

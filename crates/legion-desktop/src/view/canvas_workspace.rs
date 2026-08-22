@@ -1486,6 +1486,15 @@ fn render_ports(
             ui.ctx().data_mut(|data| {
                 data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
             });
+            // Which port has the keyboard, for somebody who is looking at the
+            // screen. Bringing the card into view says which *card*; the two
+            // ports are eight pixels apart and Enter does opposite things on
+            // them.
+            ui.painter().circle_stroke(
+                out_pos,
+                PORT_RADIUS + 3.0,
+                egui::Stroke::new(2.0_f32, tokens.accent.orange),
+            );
         }
         let outgoing = connection_titles(existing_edges, by_path, &node.path.0, true);
         let is_armed = armed_source.as_deref() == Some(node.path.0.as_str());
@@ -1549,6 +1558,11 @@ fn render_ports(
             ui.ctx().data_mut(|data| {
                 data.insert_temp(egui::Id::new(FOCUS_REQUEST_ID), node_rect(node))
             });
+            ui.painter().circle_stroke(
+                in_pos,
+                PORT_RADIUS + 3.0,
+                egui::Stroke::new(2.0_f32, tokens.accent.cyan),
+            );
         }
         let incoming = connection_titles(existing_edges, by_path, &node.path.0, false);
         ui.ctx().accesskit_node_builder(input.id, |builder| {

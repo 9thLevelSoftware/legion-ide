@@ -4166,8 +4166,32 @@ impl DesktopEframeApp {
         // A focused *text* control keeps its Enter: that is how the search field
         // retries a query and how any field submits. This is about controls that
         // are pressed rather than typed into.
-        let pressable_control_focused =
+        let mut pressable_control_focused =
             ui.memory(|memory| memory.focused().is_some()) && !ui.ctx().text_edit_focused();
+
+        // Typing into the editor takes the keyboard back from a stale button.
+        //
+        // Closing an overlay restores focus to the rail control that opened it,
+        // and that focus outlives the reason for it: the person carries on
+        // typing into the buffer while a button still holds the keyboard. Every
+        // space they typed would then be swallowed as an activation -- silently,
+        // and for as long as the focus lasted.
+        //
+        // A typed character that is not itself the activation key says plainly
+        // which surface the keyboard belongs to, so the button gives it up and
+        // this frame passes through untouched.
+        if pressable_control_focused
+            && input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Text(text) if text != " "))
+        {
+            if let Some(focused) = ui.memory(|memory| memory.focused()) {
+                ui.memory_mut(|memory| memory.surrender_focus(focused));
+            }
+            pressable_control_focused = false;
+        }
+
         if pressable_control_focused {
             // A real window backend reports a Space press as *both* a key event
             // and a text event, so removing only the key left the space to be
