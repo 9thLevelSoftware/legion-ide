@@ -26,6 +26,20 @@ use super::*;
 /// that would consume the tokens is behind `ai`.
 pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
 
+/// The wire name of a live backend.
+///
+/// One place, because this is the discriminator spelled out rather than data
+/// about it -- and three call sites spelling it themselves is how one of them
+/// ends up saying `claude` while the others say `anthropic`, in metadata a
+/// person reads to decide whether to accept a proposal.
+#[cfg(feature = "ai")]
+pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str {
+    match backend {
+        ProductAiLiveBackend::Ollama => "ollama",
+        ProductAiLiveBackend::Anthropic => "anthropic",
+    }
+}
+
 /// Product completion bound to the **authorized** live backend only.
 ///
 /// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
@@ -261,14 +275,7 @@ no markdown fences, no explanation.";
                         // preference that suggested it. On `Auto` they differ,
                         // and this line is metadata on a proposal a person will
                         // review.
-                        format!(
-                            "backend={}",
-                            match backend {
-                                Some(ProductAiLiveBackend::Ollama) => "ollama",
-                                Some(ProductAiLiveBackend::Anthropic) => "anthropic",
-                                None => "none",
-                            }
-                        ),
+                        format!("backend={}", backend.map_or("none", live_backend_label)),
                         format!(
                             "streamed={} chunks={}",
                             completion.streamed,
@@ -310,10 +317,7 @@ no markdown fences, no explanation.";
 pub(crate) fn failed_live_assisted_edit_proposal(
     backend: ProductAiLiveBackend,
 ) -> AssistedEditProposalSource {
-    let label = match backend {
-        ProductAiLiveBackend::Ollama => "ollama",
-        ProductAiLiveBackend::Anthropic => "anthropic",
-    };
+    let label = live_backend_label(backend);
     let mut source = deterministic_assisted_edit_proposal();
     source.summary = format!("Offline fallback: the {label} provider did not answer");
     source.details.insert(
@@ -372,11 +376,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
             format!(
                 "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
                 route_labels.join(","),
-                match backend {
-                    Some(ProductAiLiveBackend::Ollama) => "ollama",
-                    Some(ProductAiLiveBackend::Anthropic) => "anthropic",
-                    None => "none",
-                }
+                backend.map_or("none", live_backend_label)
             ),
             None,
         ),

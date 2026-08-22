@@ -1977,6 +1977,14 @@ struct ProductAiBackgroundResult {
     stream: Option<ProductAiStreamProjection>,
     /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
     assist_proposal: Option<AssistedEditProposalSource>,
+    /// Whether a selected live provider was invoked and did not answer.
+    ///
+    /// The proposal says so in its own summary, and the route record has to
+    /// agree: it was built with `Completed` before the worker ran, and
+    /// persisting that while the proposal reports a failure leaves the audit
+    /// and the artifact contradicting each other about the same run. Which one
+    /// a reader believes then depends on which one they happen to open.
+    live_failed: bool,
     /// When set, a live inline prediction finished on a worker thread.
     ///
     /// Ghost text is the smallest of these operations and was the only one that
@@ -15762,8 +15770,20 @@ impl AppComposition {
                 changed = true;
             }
             if let Some(proposal_source) = result.assist_proposal
-                && let Some(job) = self.pending_assist_proposal.take()
+                && let Some(mut job) = self.pending_assist_proposal.take()
             {
+                // The route record agrees with the proposal about what happened.
+                //
+                // `route_response` is built and marked `Completed` before the
+                // worker runs, because that is when policy approves the route.
+                // Leaving it there when the provider never answered persists
+                // `phase4.provider.route.completed` beside a proposal saying the
+                // opposite -- an audit trail that contradicts the artifact it
+                // describes is worse than one that says nothing.
+                if result.live_failed {
+                    job.route_response.invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                }
                 match self.finish_assisted_edit_proposal_registration(job, proposal_source) {
                     Ok(_outcome) => {
                         changed = true;
@@ -24993,6 +25013,7 @@ impl AppComposition {
                     ProductAiBackgroundResult {
                         assistant_message_id: String::new(),
                         content_label: String::new(),
+                        live_failed: live_backend.is_some() && stream.is_none(),
                         stream,
                         assist_proposal: Some(proposal_source),
                         inline_prediction: None,
@@ -27516,6 +27537,11 @@ impl AppComposition {
                     // identity, and an org bundle forbidding a specific provider
                     // has nothing to match against.
                     ai_provider_id: Some(route_provider_id_for_decision),
+                    // Declared against the same total Assist uses, which is
+                    // only honest because the Delegate worker bounds the path
+                    // it sends by the same constant. Declaring a bound the
+                    // caller does not apply is the shape of defect this whole
+                    // sequence has been about.
                     budget_request_tokens: Some(declared_request_tokens(
                         ASSIST_PROMPT_MAX_CHARS,
                         crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
@@ -27577,7 +27603,11 @@ impl AppComposition {
             // the structural half of the fix: with no preference in scope there
             // is nothing for it to re-resolve, so the destination it contacts is
             // the one the broker approved above and cannot become another.
-            let file_path = input.metadata.identity.canonical_path.0.clone();
+            // Bounded by the same constant the declaration counts, like the
+            // Assist worker. The Delegate lane declares `ASSIST_PROMPT_MAX_CHARS`
+            // and was cloning the path unbounded, so a deeply nested file or a
+            // Windows long path sent more than the broker had been told about.
+            let file_path = bounded_assist_path(&input.metadata.identity.canonical_path.0);
             let route_id = route_id.clone();
             let route_labels = route_labels.clone();
             let citation_count = citation_ids.len();
@@ -27610,6 +27640,7 @@ impl AppComposition {
                         ProductAiBackgroundResult {
                             assistant_message_id: assistant_id,
                             content_label: label,
+                            live_failed: false,
                             stream,
                             assist_proposal: None,
                             inline_prediction: None,
@@ -36065,6 +36096,7 @@ mod pkt_worker_tests {
 
         sink.finish_background(
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
@@ -36164,6 +36196,7 @@ mod pkt_worker_tests {
 
         app.live_product_ai_stream.finish_background(
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
@@ -36210,6 +36243,7 @@ mod pkt_worker_tests {
         ));
         app.live_product_ai_stream.finish_background(
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,

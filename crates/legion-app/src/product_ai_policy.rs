@@ -22,6 +22,30 @@ pub(crate) const INLINE_PREDICTION_EXCERPT_MAX_CHARS: usize = 2_000;
 /// Completion tokens an inline prediction may return.
 pub(crate) const INLINE_PREDICTION_COMPLETION_MAX_TOKENS: u32 = 128;
 
+/// Characters of framing an inline prediction prompt carries.
+///
+/// `try_live_product_inline_prediction` sends a fixed system prompt plus the
+/// language, the cursor position and delimiters around the excerpt. Declaring
+/// the excerpt alone understated the request by all of it, which is the same
+/// defect the Assist declaration had -- a cap set between the declared size and
+/// the real one admits the request it was configured to refuse.
+pub(crate) const INLINE_PREDICTION_FRAMING_MAX_CHARS: usize = 512;
+
+/// The inline total must be every part of its prompt, like the Assist one.
+///
+/// A compile-time check, because it cannot be true at some times and false at
+/// others -- and because a test asserting it is a constant expression, which is
+/// a lint rather than a guarantee.
+const _: () = assert!(
+    INLINE_PREDICTION_PROMPT_MAX_CHARS
+        == INLINE_PREDICTION_EXCERPT_MAX_CHARS + INLINE_PREDICTION_FRAMING_MAX_CHARS,
+    "the inline declared prompt total must be the sum of every bounded part"
+);
+
+/// Every character an inline prediction prompt can carry.
+pub(crate) const INLINE_PREDICTION_PROMPT_MAX_CHARS: usize =
+    INLINE_PREDICTION_EXCERPT_MAX_CHARS + INLINE_PREDICTION_FRAMING_MAX_CHARS;
+
 /// Characters of caller-supplied instruction an Assist operation may send.
 ///
 /// Bounded because it is declared. `StartAiProposal` takes an instruction label
@@ -324,6 +348,9 @@ impl AppComposition {
             }
             lane_reservation.finish_background(
                 ProductAiBackgroundResult {
+                    // Inline prediction has its own fallback path; this flag is
+                    // about the Assist proposal record.
+                    live_failed: false,
                     assistant_message_id: String::new(),
                     content_label: String::new(),
                     stream: None,
@@ -396,7 +423,7 @@ impl AppComposition {
                     // Declared, or the org bundle's token cap is compared
                     // against nothing and a capped request runs uncapped.
                     budget_request_tokens: Some(declared_request_tokens(
-                        INLINE_PREDICTION_EXCERPT_MAX_CHARS,
+                        INLINE_PREDICTION_PROMPT_MAX_CHARS,
                         INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
                     )),
                     budget_request_cost_cents: declared_request_cost_cents(backend),
