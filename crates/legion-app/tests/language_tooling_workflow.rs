@@ -955,17 +955,10 @@ fn quick_fixes_survive_for_the_file_being_read_in_a_crowded_workspace() {
     app.open_file(target.to_string_lossy())
         .expect("open target.rs");
     let target_buffer = app.active_buffer_id().expect("target.rs buffer");
-    let target_file = app.language_tooling_projection().file_id.or_else(|| {
-        app.language_tooling_projection()
-            .problems
-            .iter()
-            .find_map(|problem| problem.file_id)
-    });
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
         buffer_id: target_buffer,
     })
     .expect("read target.rs");
-    let _ = target_file;
 
     let projection = app.language_tooling_projection();
     let active_file = projection.file_id.expect("the read sets the active file");
@@ -988,6 +981,180 @@ fn quick_fixes_survive_for_the_file_being_read_in_a_crowded_workspace() {
          one file whose fixes the reader can act on; got {} fixes for {} problems",
         projection.quick_fixes.len(),
         projection.problems.len()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Opening a workspace empties the panel, without waiting to be asked.
+///
+/// Binding the carried problems to a matching workspace is necessary and not
+/// sufficient: that check only runs when something requests a read or a server
+/// publishes, and opening a workspace does neither. A workspace with no
+/// language server, or one nobody has opened a file in yet, would go on showing
+/// the previous workspace's Problems panel -- listing paths outside itself, and
+/// navigating to them on click -- for as long as it stayed quiet.
+#[test]
+fn opening_a_workspace_empties_the_problems_panel_immediately() {
+    let first_root = create_root();
+    let first_file = first_root.join("first.rs");
+    std::fs::write(&first_file, "fn main() {}\n").expect("write first source file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &first_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open first workspace");
+    app.open_file(first_file.to_string_lossy())
+        .expect("open first source file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        buffer_id,
+        &json!({
+            "uri": "file:///workspace/first.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0003",
+                "source": "rustc",
+                "message": "a problem in the first workspace"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for the first workspace");
+    assert!(
+        !app.language_tooling_projection().problems.is_empty(),
+        "the first workspace must have a problem for the switch to strand"
+    );
+
+    // The switch alone, with no read and no file opened afterwards. This is the
+    // quiet workspace the panel used to lie to.
+    let second_root = create_root();
+    app.open_workspace(
+        &second_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open second workspace");
+
+    assert!(
+        app.language_tooling_projection().problems.is_empty(),
+        "opening a workspace must empty the panel there and then -- waiting for \
+         a read means a quiet workspace shows the previous one's problems \
+         indefinitely; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&first_root).ok();
+    std::fs::remove_dir_all(&second_root).ok();
+}
+
+/// A replaced index row does not move the rows beneath it.
+///
+/// The Problems panel holds its keyboard selection as a bare index into this
+/// list. Dropping the active file's index rows and pushing their replacements
+/// onto the end shifts every row that followed them, so a selection resting
+/// below silently comes to rest on a different diagnostic and the next
+/// activation opens somewhere the reader never chose.
+///
+/// The order matters for this to bite: the index rows have to be *ahead* of
+/// something. Reading a file puts its index rows in first, and the server's
+/// diagnostics for the same file land behind them -- which is the arrangement
+/// a real session produces, since the read is synchronous and the publish
+/// arrives later.
+#[test]
+fn replacing_index_rows_leaves_the_other_rows_where_they_were() {
+    let root = create_root();
+    let todo = root.join("todo.rs");
+    std::fs::write(&todo, "// TODO: fix this\nfn a() {}\n").expect("write todo.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(todo.to_string_lossy()).expect("open todo.rs");
+    let buffer_id = app.active_buffer_id().expect("todo.rs buffer");
+
+    // The read first, so its index rows sit ahead of what follows.
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline { buffer_id })
+        .expect("first read of todo.rs");
+    assert!(
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .any(|problem| problem.source_label.as_deref() == Some("legion-index")),
+        "reading todo.rs should produce an index row to displace"
+    );
+
+    // Then the server's diagnostic for the same file, which lands behind it.
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        buffer_id,
+        &json!({
+            "uri": "file:///workspace/todo.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0004",
+                "source": "rustc",
+                "message": "a server diagnostic for todo.rs"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for todo.rs");
+
+    let position_of_server_row = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .position(|problem| problem.code_label.as_deref() == Some("E0004"))
+    };
+    let before = position_of_server_row(&app).expect("the server row must be listed");
+    assert!(
+        before > 0,
+        "the server row must sit behind an index row for this test to mean \
+         anything; list is {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.source_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Reading again replaces the index rows. That is the operation that used
+    // to shift everything below them.
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline { buffer_id })
+        .expect("second read of todo.rs");
+
+    assert_eq!(
+        position_of_server_row(&app),
+        Some(before),
+        "replacing the index rows must not move the row behind them -- the \
+         panel's selection is a position in this list, so a row that shifts \
+         under it opens a diagnostic nobody chose; list is now {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| (problem.source_label.clone(), problem.code_label.clone()))
+            .collect::<Vec<_>>()
     );
 
     std::fs::remove_dir_all(&root).ok();

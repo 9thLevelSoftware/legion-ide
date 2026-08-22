@@ -34,6 +34,7 @@ pub mod offline_ai;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
+use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
 
 pub mod terminal_policy;
 
@@ -209,19 +210,19 @@ use legion_protocol::{
     InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
-    LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
-    LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
-    LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
-    LegionCloudLaneTaskId, LegionCloudLaneTaskRequest, LegionCloudLaneTaskState,
-    LegionCloudLaneTaskStatus, LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult,
-    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
-    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
-    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
-    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
-    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
-    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
-    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
-    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LanguageProblemProjection, LanguageStickyScopeProjection, LanguageToolingOperationKind,
+    LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
+    LegionCloudLaneProjection, LegionCloudLaneProjectionRow, LegionCloudLaneTaskId,
+    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
+    LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult, LegionWorkflowConflictId,
+    LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
+    LegionWorkflowDecisionKind, LegionWorkflowDependencyState, LegionWorkflowKillSwitch,
+    LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval,
+    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState, LegionWorkflowProjection,
+    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
+    LegionWorkflowRiskMonitorState, LegionWorkflowSession, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
+    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
     LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
     McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
@@ -6565,6 +6566,23 @@ impl Default for LanguageToolingWorkflow {
 }
 
 impl LanguageToolingWorkflow {
+    /// Drop everything scoped to the workspace being left.
+    ///
+    /// The ingest paths bound their carried-forward problems to a matching
+    /// workspace, which is necessary and not sufficient: that check only runs
+    /// when something asks for a read or a server publishes, and opening a
+    /// workspace starts neither. A workspace with no language server, or one
+    /// nobody has opened a file in yet, would keep showing the previous
+    /// workspace's Problems panel -- listing paths outside itself, and
+    /// navigating to them on click -- for as long as it stayed quiet.
+    ///
+    /// The switch itself is the moment that is certain to happen, so the reset
+    /// belongs here, alongside the debug, prediction and palette state that is
+    /// cleared for the same reason.
+    fn clear_workspace_state(&mut self) {
+        self.projection = LanguageToolingProjection::empty();
+    }
+
     fn projection(&self) -> LanguageToolingProjection {
         self.projection.clone()
     }
@@ -6649,7 +6667,14 @@ impl LanguageToolingWorkflow {
             problem.redaction_hints.dedup();
         }
         self.projection.problems.extend(problems);
-        self.projection.quick_fixes = language_quick_fixes_for_problems(&self.projection.problems);
+        // Prioritised here too. The read leg already did this; the diagnostics
+        // leg rebuilding fixes from the raw list meant a file whose problems
+        // had just arrived could be listed with no fixes at all, whenever
+        // another file was already holding the cap.
+        self.projection.quick_fixes = language_quick_fixes_prioritizing(
+            &self.projection.problems,
+            input.metadata.identity.file_id,
+        );
         let operation_id = self.next_operation_id(LanguageToolingOperationKind::Diagnostics);
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -6860,7 +6885,7 @@ impl LanguageToolingWorkflow {
         // file, and leave everything else alone. This is the same rule read
         // from the other side.
         let problems = {
-            let mut merged = previous_projection.problems.clone();
+            let merged = previous_projection.problems.clone();
             // Every index-owned row goes, not just this file's.
             //
             // A row may only outlive the read that made it if something can
@@ -6887,9 +6912,31 @@ impl LanguageToolingWorkflow {
             // fails only when both are removed, which is what defence in depth
             // means and is worth saying rather than implying each is
             // load-bearing on its own.
-            merged.retain(|existing| existing.source_label.as_deref() != Some("legion-index"));
-            merged.extend(problems);
-            merged
+            // Replaced in place, not removed and appended.
+            //
+            // The Problems panel holds its keyboard selection as a bare index
+            // into this list. Dropping the index rows and pushing their
+            // replacements onto the end shifts every row that followed them, so
+            // a selection resting on one of them silently comes to rest on a
+            // different file's diagnostic and the next activation opens
+            // somewhere the reader never chose. Splicing the new rows in where
+            // the old ones were leaves every other position untouched.
+            let mut spliced = Vec::with_capacity(merged.len() + problems.len());
+            let mut placed = false;
+            for existing in &merged {
+                if existing.source_label.as_deref() == Some("legion-index") {
+                    if !placed {
+                        spliced.extend(problems.iter().cloned());
+                        placed = true;
+                    }
+                    continue;
+                }
+                spliced.push(existing.clone());
+            }
+            if !placed {
+                spliced.extend(problems);
+            }
+            spliced
         };
         // Deliberately not sorted.
         //
@@ -6914,23 +6961,8 @@ impl LanguageToolingWorkflow {
         // every fix for the file actually being edited. The list itself keeps
         // its order -- the panel's selection indexes into it -- and only this
         // view of it is reordered.
-        let quick_fixes = {
-            let active = input.metadata.identity.file_id;
-            let mut ordered = Vec::with_capacity(problems.len());
-            ordered.extend(
-                problems
-                    .iter()
-                    .filter(|problem| problem.file_id == Some(active))
-                    .cloned(),
-            );
-            ordered.extend(
-                problems
-                    .iter()
-                    .filter(|problem| problem.file_id != Some(active))
-                    .cloned(),
-            );
-            language_quick_fixes_for_problems(&ordered)
-        };
+        let quick_fixes =
+            language_quick_fixes_prioritizing(&problems, input.metadata.identity.file_id);
         let locations = response
             .results
             .iter()
@@ -8380,7 +8412,7 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
     LanguageId(language.to_string())
 }
 
-fn bounded_label(value: impl Into<String>, limit: usize) -> String {
+pub(crate) fn bounded_label(value: impl Into<String>, limit: usize) -> String {
     value.into().chars().take(limit).collect()
 }
 
@@ -8560,122 +8592,6 @@ fn debug_step_kind(kind: DebugStepKindProjection) -> DebugStepKind {
         DebugStepKindProjection::Into => DebugStepKind::Into,
         DebugStepKindProjection::Out => DebugStepKind::Out,
         DebugStepKindProjection::Back => DebugStepKind::Back,
-    }
-}
-
-fn language_quick_fixes_for_problems(
-    problems: &[LanguageProblemProjection],
-) -> Vec<LanguageQuickFixProjection> {
-    problems
-        .iter()
-        .take(50)
-        .enumerate()
-        .map(|(index, problem)| {
-            let code_label = problem
-                .code_label
-                .clone()
-                .unwrap_or_else(|| "diagnostic".to_string());
-            LanguageQuickFixProjection {
-                action_id: language_quick_fix_action_id(index, problem),
-                title: format!(
-                    "Prepare code action for {}",
-                    bounded_label(code_label.clone(), 64)
-                ),
-                kind_label: "quickfix.diagnostic".to_string(),
-                problem_code_label: problem.code_label.clone(),
-                problem_range: problem.range,
-                severity: problem.severity,
-                source_label: problem.source_label.clone(),
-                proposal_id: None,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }
-        })
-        .collect()
-}
-
-/// The projection a language read builds on when it names a different buffer.
-///
-/// Everything the previous buffer's reads produced is dropped -- its hover, its
-/// completions, its outline, its call hierarchy -- because none of it describes
-/// the buffer this result is about, and showing one file's outline against
-/// another is worse than showing none.
-///
-/// `problems` is the exception, and deliberately so. The Problems panel is a
-/// workspace-wide list: `ingest_lsp_diagnostics` curates it that way, retaining
-/// every row that belongs to a *different* file and replacing only the rows for
-/// the file whose diagnostics just arrived. Dropping the list here contradicted
-/// that directly -- a single hover emptied the panel of every diagnostic in the
-/// workspace, including the ones the hover had nothing to do with, and nothing
-/// republished them until the server happened to send that file's diagnostics
-/// again. Quick fixes are rebuilt from the rows that survive, because a fix
-/// offered for a problem that is no longer listed is an action with no subject.
-///
-/// "Workspace-wide" is the whole of the exception, and `workspace` is what
-/// bounds it. Opening workspace B keeps this same workflow, so B's first read
-/// arrives here holding A's rows; carrying them over would republish A's
-/// diagnostics under B, and a problem row records no workspace of its own --
-/// so the per-file replacement that normally retires a stale row could never
-/// find them, and clicking one would send the reader at a path outside the
-/// workspace they are in. A different workspace is a different list.
-fn language_projection_for_new_identity(
-    previous: &LanguageToolingProjection,
-    workspace: WorkspaceId,
-) -> LanguageToolingProjection {
-    let mut projection = LanguageToolingProjection::empty();
-    projection.operations = previous.operations.clone();
-    projection.cancellation_count = previous.cancellation_count;
-    projection.stale_result_count = if previous.buffer_id.is_some() {
-        previous.stale_result_count.saturating_add(1)
-    } else {
-        previous.stale_result_count
-    };
-    if previous
-        .workspace_id
-        .is_none_or(|previous| previous == workspace)
-    {
-        // Index-owned rows are dropped here for the same reason the read leg
-        // drops them: nothing retracts them, so a row kept past the buffer it
-        // was computed for is a row that can never leave.
-        projection.problems = previous
-            .problems
-            .iter()
-            .filter(|problem| problem.source_label.as_deref() != Some("legion-index"))
-            .cloned()
-            .collect();
-        projection.quick_fixes = language_quick_fixes_for_problems(&projection.problems);
-    }
-    projection
-}
-
-fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
-    let code = problem.code_label.as_deref().unwrap_or("diagnostic");
-    let safe_code = sanitized_action_component(code, 64);
-    let (line, character) = problem
-        .range
-        .map(|range| (range.start.line, range.start.character))
-        .unwrap_or((0, 0));
-    format!("quickfix:{safe_code}:{line}:{character}:{index}")
-}
-
-fn sanitized_action_component(value: &str, limit: usize) -> String {
-    let sanitized = value
-        .chars()
-        .filter_map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':') {
-                Some(character)
-            } else if character.is_ascii_whitespace() {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .take(limit)
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "diagnostic".to_string()
-    } else {
-        sanitized
     }
 }
 
@@ -15796,6 +15712,7 @@ impl AppComposition {
         self.active_documents
             .bind_workspace(opened.clone(), root_path, principal, trust.clone());
         self.debug_workflow.clear_workspace_state();
+        self.language_tooling.clear_workspace_state();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
