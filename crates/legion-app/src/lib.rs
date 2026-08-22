@@ -6861,10 +6861,33 @@ impl LanguageToolingWorkflow {
         // from the other side.
         let problems = {
             let mut merged = previous_projection.problems.clone();
-            merged.retain(|existing| {
-                existing.source_label.as_deref() != Some("legion-index")
-                    || existing.file_id != Some(input.metadata.identity.file_id)
-            });
+            // Every index-owned row goes, not just this file's.
+            //
+            // A row may only outlive the read that made it if something can
+            // later retire it. An LSP row has that: the server that published
+            // it publishes an empty list for the same file when it goes away,
+            // and `ingest_lsp_diagnostics` acts on that. An index row has
+            // nothing of the kind -- it is computed as a by-product of reading
+            // a buffer, no producer ever retracts it, and neither closing a tab
+            // nor deleting or renaming the file through the proposal flow
+            // clears it. Retaining those workspace-wide would leave the panel
+            // listing, and offering to navigate to, paths that no longer exist.
+            //
+            // So index rows live exactly as long as the file being read. The
+            // defect this merge exists to fix is unaffected: a read still
+            // leaves every LSP diagnostic in the workspace alone, which is
+            // what emptied the panel.
+            //
+            // The identity reset below states the same rule, and on every path
+            // that reaches here a file change has already fired it -- so either
+            // one alone is sufficient today. Both are kept because the rule
+            // belongs to whoever carries a row forward, and a future caller
+            // that carries without resetting would otherwise inherit the bug
+            // silently. `index_problems_do_not_survive_a_read_in_another_file`
+            // fails only when both are removed, which is what defence in depth
+            // means and is worth saying rather than implying each is
+            // load-bearing on its own.
+            merged.retain(|existing| existing.source_label.as_deref() != Some("legion-index"));
             merged.extend(problems);
             merged
         };
@@ -6880,7 +6903,34 @@ impl LanguageToolingWorkflow {
         // The underlying fragility -- a selection identified by position in a
         // list that other code edits -- is older than this function and is not
         // fixed here; this only refuses to make it worse.
-        let quick_fixes = language_quick_fixes_for_problems(&problems);
+
+        // Quick fixes see the active file first, because they are capped.
+        //
+        // `language_quick_fixes_for_problems` takes the first 50 rows. Before
+        // this merge it only ever saw the buffer being read, so the cap was
+        // about one file's diagnostics. Feeding it the workspace-wide list
+        // changed what the cap cuts: the rows for the file under the cursor are
+        // appended last, so a workspace already carrying 50 problems would lose
+        // every fix for the file actually being edited. The list itself keeps
+        // its order -- the panel's selection indexes into it -- and only this
+        // view of it is reordered.
+        let quick_fixes = {
+            let active = input.metadata.identity.file_id;
+            let mut ordered = Vec::with_capacity(problems.len());
+            ordered.extend(
+                problems
+                    .iter()
+                    .filter(|problem| problem.file_id == Some(active))
+                    .cloned(),
+            );
+            ordered.extend(
+                problems
+                    .iter()
+                    .filter(|problem| problem.file_id != Some(active))
+                    .cloned(),
+            );
+            language_quick_fixes_for_problems(&ordered)
+        };
         let locations = response
             .results
             .iter()
@@ -8584,7 +8634,15 @@ fn language_projection_for_new_identity(
         .workspace_id
         .is_none_or(|previous| previous == workspace)
     {
-        projection.problems = previous.problems.clone();
+        // Index-owned rows are dropped here for the same reason the read leg
+        // drops them: nothing retracts them, so a row kept past the buffer it
+        // was computed for is a row that can never leave.
+        projection.problems = previous
+            .problems
+            .iter()
+            .filter(|problem| problem.source_label.as_deref() != Some("legion-index"))
+            .cloned()
+            .collect();
         projection.quick_fixes = language_quick_fixes_for_problems(&projection.problems);
     }
     projection

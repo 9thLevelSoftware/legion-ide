@@ -832,3 +832,163 @@ fn problems_for_one_file_survive_a_read_in_another_file() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// An index-owned row does not outlive the read that made it.
+///
+/// LSP rows may sit in the panel while their file is closed, because the server
+/// that published them publishes an empty list for the same file when they go
+/// away. Index rows have no such producer: they are computed as a by-product of
+/// reading a buffer, nothing retracts them, and neither closing a tab nor
+/// deleting or renaming the file clears them. Retained workspace-wide they
+/// would leave the panel offering to navigate to paths that no longer exist.
+#[test]
+fn index_problems_do_not_survive_a_read_in_another_file() {
+    let root = create_root();
+    let first = root.join("todo.rs");
+    let second = root.join("plain.rs");
+    // A `TODO` is what the lexical index leg reports on, so reading this file
+    // puts a `legion-index` row in the projection without any server.
+    std::fs::write(&first, "// TODO: fix this\nfn a() {}\n").expect("write todo.rs");
+    std::fs::write(&second, "fn b() {}\n").expect("write plain.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(first.to_string_lossy())
+        .expect("open todo.rs");
+    let first_buffer = app.active_buffer_id().expect("todo.rs buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: first_buffer,
+    })
+    .expect("read todo.rs");
+
+    let index_rows = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .filter(|problem| problem.source_label.as_deref() == Some("legion-index"))
+            .count()
+    };
+    assert!(
+        index_rows(&app) > 0,
+        "reading todo.rs should produce at least one index-owned row to test with"
+    );
+
+    app.open_file(second.to_string_lossy())
+        .expect("open plain.rs");
+    let second_buffer = app.active_buffer_id().expect("plain.rs buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: second_buffer,
+    })
+    .expect("read plain.rs");
+
+    assert_eq!(
+        index_rows(&app),
+        0,
+        "todo.rs's index row must not outlive the read that made it -- nothing \
+         retracts it, so a row kept here can never leave the panel; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| (problem.source_label.clone(), problem.code_label.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The file being edited keeps its quick fixes when the workspace is crowded.
+///
+/// `language_quick_fixes_for_problems` takes the first 50 rows. While the read
+/// leg only ever saw the buffer it was reading, that cap was about one file.
+/// Feeding it the workspace-wide list changed what the cap cuts, and the rows
+/// for the file under the cursor are the ones appended last -- so a workspace
+/// already carrying 50 problems would lose every fix for the file actually
+/// being worked on.
+#[test]
+fn quick_fixes_survive_for_the_file_being_read_in_a_crowded_workspace() {
+    let root = create_root();
+    let crowded = root.join("crowded.rs");
+    let target = root.join("target.rs");
+    std::fs::write(&crowded, "fn crowded() {}\n").expect("write crowded.rs");
+    std::fs::write(&target, "// TODO: fix this\nfn target() {}\n").expect("write target.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(crowded.to_string_lossy())
+        .expect("open crowded.rs");
+    let crowded_buffer = app.active_buffer_id().expect("crowded.rs buffer");
+
+    // Sixty LSP diagnostics against a file that is not the one being read, so
+    // the cap is already exhausted before the active file's rows are reached.
+    let diagnostics: Vec<serde_json::Value> = (0..60)
+        .map(|line| {
+            json!({
+                "range": {
+                    "start": {"line": line, "character": 0},
+                    "end": {"line": line, "character": 1}
+                },
+                "severity": 1,
+                "code": format!("E9{line:03}"),
+                "source": "rustc",
+                "message": "a crowding diagnostic"
+            })
+        })
+        .collect();
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        crowded_buffer,
+        &json!({"uri": "file:///workspace/crowded.rs", "diagnostics": diagnostics}),
+        true,
+        None,
+    )
+    .expect("ingest crowding diagnostics");
+
+    app.open_file(target.to_string_lossy())
+        .expect("open target.rs");
+    let target_buffer = app.active_buffer_id().expect("target.rs buffer");
+    let target_file = app.language_tooling_projection().file_id.or_else(|| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .find_map(|problem| problem.file_id)
+    });
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: target_buffer,
+    })
+    .expect("read target.rs");
+    let _ = target_file;
+
+    let projection = app.language_tooling_projection();
+    let active_file = projection.file_id.expect("the read sets the active file");
+    let active_rows: Vec<_> = projection
+        .problems
+        .iter()
+        .filter(|problem| problem.file_id == Some(active_file))
+        .collect();
+    assert!(
+        !active_rows.is_empty(),
+        "reading target.rs should produce at least one row for it to test with"
+    );
+    assert!(
+        projection.quick_fixes.iter().any(|fix| {
+            active_rows
+                .iter()
+                .any(|problem| problem.code_label == fix.problem_code_label)
+        }),
+        "the file being read must keep its quick fixes past the cap -- it is the \
+         one file whose fixes the reader can act on; got {} fixes for {} problems",
+        projection.quick_fixes.len(),
+        projection.problems.len()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
