@@ -104,11 +104,14 @@ const _: () = assert!(
 /// from the front would leave every deeply nested file looking like the same
 /// prefix.
 pub(crate) fn bounded_assist_path(path: &str) -> String {
-    let length = path.chars().count();
-    if length <= ASSIST_PATH_MAX_CHARS {
+    if path.len() <= ASSIST_PATH_MAX_CHARS {
         return path.to_string();
     }
-    path.chars().skip(length - ASSIST_PATH_MAX_CHARS).collect()
+    let mut start = path.len() - ASSIST_PATH_MAX_CHARS;
+    while start < path.len() && !path.is_char_boundary(start) {
+        start += 1;
+    }
+    path[start..].to_string()
 }
 
 /// Trim a caller-supplied instruction to the length that was declared.
@@ -116,10 +119,23 @@ pub(crate) fn bounded_assist_path(path: &str) -> String {
 /// Declaring a bound and not enforcing it is the same defect as declaring
 /// nothing: the cap is compared against a number the request is free to exceed.
 pub(crate) fn bounded_assist_instruction(instruction: &str) -> String {
-    instruction
-        .chars()
-        .take(ASSIST_INSTRUCTION_MAX_CHARS)
-        .collect()
+    bounded_by_bytes(instruction, ASSIST_INSTRUCTION_MAX_CHARS)
+}
+
+/// Trim to a byte budget without splitting a character.
+///
+/// Byte-bounded because the declaration is: trimming by characters and
+/// declaring by bytes would let a multi-byte instruction pass the trim and
+/// exceed the declaration, which is the same understatement one layer along.
+pub(crate) fn bounded_by_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// The most tokens a request could consume, for declaration to the broker.
@@ -129,16 +145,22 @@ pub(crate) fn bounded_assist_instruction(instruction: &str) -> String {
 /// declared tokens exceed the org's limit, so declaring less than the request
 /// could consume lets through exactly what the cap exists to stop.
 ///
-/// One token per character, which no text can exceed.
+/// One token per UTF-8 byte, which no text can exceed.
 ///
-/// Four characters per token is the usual rule of thumb, and it is an
-/// *estimate*: source punctuation, uncommon Unicode and emoji all tokenize
-/// denser than that. An estimate is the wrong shape here, because a cap set
-/// between the estimate and the real count admits the very request it was
-/// configured to refuse and nobody can tell. A tokenizer would be better still;
-/// a bound nothing can exceed is what is available, and it errs safely.
-pub(crate) fn declared_request_tokens(prompt_chars: usize, completion_tokens: u32) -> u64 {
-    (prompt_chars as u64).saturating_add(u64::from(completion_tokens))
+/// Characters were the second attempt and still understated. A `char` is a
+/// Unicode scalar, and one scalar can be several tokens: an emoji outside the
+/// BMP, a combining sequence, an unusual script. Two thousand of those in a
+/// prompt exceed a two-thousand-character declaration, and a cap set between
+/// the declared value and the real one admits the request it was configured to
+/// refuse.
+///
+/// Bytes cannot be beaten that way. Every tokenizer these providers use emits
+/// at most one token per input byte -- most emit far fewer -- so a byte count
+/// is an over-declaration in the safe direction. A real tokenizer would be
+/// tighter and is what this should become; a bound that cannot be exceeded is
+/// what is available now.
+pub(crate) fn declared_request_tokens(prompt_bytes: usize, completion_tokens: u32) -> u64 {
+    (prompt_bytes as u64).saturating_add(u64::from(completion_tokens))
 }
 
 /// The cost a request can be truthfully declared to have, in cents.
@@ -706,6 +728,25 @@ mod org_ceiling {
             "an instruction within the bound must be left exactly as written"
         );
 
+        // Multi-byte text, which is where a character bound stops being one.
+        //
+        // The declaration counts bytes because one Unicode scalar can be
+        // several provider tokens; trimming by characters while declaring by
+        // bytes would let a prompt of emoji pass the trim and exceed the
+        // declaration, which is the same understatement one layer along.
+        let emoji = "\u{1F600}".repeat(super::ASSIST_INSTRUCTION_MAX_CHARS);
+        let trimmed = super::bounded_assist_instruction(&emoji);
+        assert!(
+            trimmed.len() <= super::ASSIST_INSTRUCTION_MAX_CHARS,
+            "a multi-byte instruction was trimmed to {} bytes against a bound of {}",
+            trimmed.len(),
+            super::ASSIST_INSTRUCTION_MAX_CHARS
+        );
+        assert!(
+            !trimmed.is_empty(),
+            "trimming must keep what fits rather than discarding everything"
+        );
+
         // The path is embedded in the prompt too, and a canonical path has no
         // length of its own.
         let deep = format!("/{}/main.rs", "nested".repeat(400));
@@ -725,6 +766,24 @@ mod org_ceiling {
             super::bounded_assist_path("src/lib.rs"),
             "src/lib.rs",
             "an ordinary path must be left exactly as written"
+        );
+
+        // And a path of multi-byte characters, trimmed from the front, must
+        // still be valid UTF-8 rather than a split scalar.
+        let deep_unicode = format!(
+            "/{}/main.rs",
+            "\u{00E9}".repeat(super::ASSIST_PATH_MAX_CHARS)
+        );
+        let bounded_unicode = super::bounded_assist_path(&deep_unicode);
+        assert!(
+            bounded_unicode.len() <= super::ASSIST_PATH_MAX_CHARS,
+            "a multi-byte path was trimmed to {} bytes against a bound of {}",
+            bounded_unicode.len(),
+            super::ASSIST_PATH_MAX_CHARS
+        );
+        assert!(
+            bounded_unicode.ends_with("main.rs"),
+            "the tail identifies the file, got {bounded_unicode:?}"
         );
     }
 

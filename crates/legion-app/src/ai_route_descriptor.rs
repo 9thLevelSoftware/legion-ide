@@ -134,17 +134,46 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// request fails visibly, which is the right outcome for a credential-bearing
 /// call. Loopback keeps `http` -- it never leaves the machine, and demanding TLS
 /// there would break local proxies for nothing.
+/// Whether the URL text itself names a port.
+///
+/// Read from the text rather than from the parsed target, because parsing has
+/// already replaced an omitted port with the scheme's default and the two are
+/// indistinguishable afterwards.
+fn port_is_explicit(base_url: &str) -> bool {
+    let trimmed = base_url.trim();
+    let rest = trimmed
+        .find("://")
+        .map_or(trimmed, |scheme_end| &trimmed[scheme_end + "://".len()..]);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_userinfo, host)| host);
+    // `rsplitn` yields the tail first, and a tail that parses as a port is one
+    // -- which is also how an IPv6 literal avoids being read as host and port.
+    authority
+        .rsplit_once(':')
+        .is_some_and(|(_head, tail)| tail.parse::<u16>().is_ok())
+}
+
 pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     let target = network_target_from_base_url(base_url, "api.anthropic.com");
     if target.scheme != "http" || is_loopback_host(&target.host) {
         return base_url.trim().to_string();
     }
-    // The port came from the URL or from HTTP's default. A default of 80 was
-    // chosen for a scheme no longer in use, so it moves with it; an explicitly
-    // configured port is what the operator asked for and stays.
-    let port = match target.port {
-        Some(80) | None => 443,
-        Some(port) => port,
+    // A port written down is a choice; a port supplied for the scheme is not.
+    //
+    // `network_target_from_base_url` fills in 80 for a bare `http://` URL, so
+    // by the time it is read here an omitted port and an explicit `:80` look
+    // identical -- and rewriting both to 443 contradicted the promise on this
+    // very branch to keep what the operator configured. A proxy terminating
+    // TLS on 80 is unusual and entirely legal, and moving it silently points
+    // the client somewhere nothing is listening.
+    //
+    // Asked of the URL text instead, where the difference is still visible.
+    let port = if port_is_explicit(base_url) {
+        target.port
+    } else {
+        Some(443)
     };
     // The path survives the rewrite, and the prefix is matched the same way the
     // scheme is.
@@ -167,7 +196,10 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
             format!("/{path}")
         })
         .unwrap_or_default();
-    format!("https://{}:{}{}", target.host, port, path)
+    match port {
+        Some(port) => format!("https://{}:{}{}", target.host, port, path),
+        None => format!("https://{}{}", target.host, path),
+    }
 }
 
 /// The Anthropic endpoint this build will actually contact.
@@ -280,6 +312,31 @@ mod delegate_chat_route_honesty_tests {
                 "{base} must authorize the host the client actually connects to"
             );
         }
+    }
+
+    /// A port the operator wrote down survives, including port 80.
+    ///
+    /// Parsing fills in 80 for a bare `http://` URL, so by the time the rewrite
+    /// reads it an omitted port and an explicit `:80` are indistinguishable --
+    /// and moving both to 443 contradicted the promise to keep what was
+    /// configured. A proxy terminating TLS on 80 is unusual and entirely legal.
+    #[test]
+    fn an_explicitly_configured_port_survives_the_https_upgrade() {
+        assert_eq!(
+            super::enforce_https_for_remote("http://proxy.internal:80/v1"),
+            "https://proxy.internal:80/v1",
+            "an explicitly configured port 80 was rewritten to 443"
+        );
+        assert_eq!(
+            super::enforce_https_for_remote("http://proxy.internal/v1"),
+            "https://proxy.internal:443/v1",
+            "an omitted port must move to the HTTPS default"
+        );
+        assert_eq!(
+            super::enforce_https_for_remote("http://proxy.internal:8080/v1"),
+            "https://proxy.internal:8080/v1",
+            "a nonstandard port must be kept, as it already was"
+        );
     }
 
     /// A query or fragment is not part of the host either.
