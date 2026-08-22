@@ -1043,6 +1043,64 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// The projections a reviewer sees are the ones the run built.
+///
+/// The selected-proposal path rebuilds trust projections from the proposal row,
+/// which carries no route -- so it cannot tell a remote run from a local one and
+/// hard-codes consent as never required. A run's own budget, with its
+/// proposal-linked evaluation, was therefore computed and then replaced on the
+/// one path that renders. Linking the evaluation to the proposal is worth
+/// nothing if the projection carrying it is discarded before anybody reads it.
+#[test]
+fn the_selected_proposal_shows_the_projections_its_run_produced() {
+    let root = temp_workspace("assist_selected_projection");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-selected".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    let rendered = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    let evaluations = &rendered.permission_budget_projection.evaluations;
+    assert!(
+        !evaluations.is_empty(),
+        "the rendered budget carries no evaluation at all, so there is nothing for the          approval gate to read"
+    );
+    assert!(
+        evaluations
+            .iter()
+            .all(|evaluation| evaluation.action.proposal_id == Some(proposal_id)),
+        "the rendered budget was rebuilt without the proposal link the run established,          so any refusal in it is invisible to the approval gate: {evaluations:?}"
+    );
+    assert_eq!(
+        rendered.permission_budget_projection.projection_id,
+        outcome.permission_budget_projection.projection_id,
+        "the projection on screen is not the one the run produced"
+    );
+}
+
 /// A Delegate turn keeps the route it was authorized against.
 ///
 /// The route request was built accurately, used for the broker decision, and
@@ -1150,7 +1208,7 @@ fn the_permission_budget_evaluation_names_the_proposal_it_gates() {
         assert_eq!(
             evaluation.action.proposal_id,
             Some(proposal_id),
-            "a budget evaluation that names no proposal is skipped by the approval gate,              so any refusal in it is never shown"
+            "a budget evaluation that names no proposal is skipped by the approval gate, so any refusal in it is never shown"
         );
     }
 }

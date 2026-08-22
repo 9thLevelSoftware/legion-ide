@@ -501,10 +501,20 @@ pub struct OllamaProvider<T = ReqwestProviderHttpTransport> {
 
 impl Default for OllamaProvider<ReqwestProviderHttpTransport> {
     fn default() -> Self {
+        // A present-but-blank value is not a configured endpoint.
+        //
+        // The app filters blanks when it resolves the route and probes the
+        // host, so `OLLAMA_BASE_URL=""` with a server listening made `Auto`
+        // select Ollama -- and then this built a provider whose base URL was the
+        // empty string, sending every completion to a relative `/api/chat` that
+        // resolves nowhere. Two readings of one variable disagreeing is the
+        // shape of defect this whole area keeps producing.
         Self::new(
             OLLAMA_PROVIDER_ID,
             std::env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "http://localhost:11434".to_string()),
         )
     }
 }

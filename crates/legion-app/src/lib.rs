@@ -12621,6 +12621,15 @@ struct Phase4ProjectionState {
     approval_checklist_projection: Option<legion_protocol::ProposalApprovalChecklistProjection>,
     checkpoint_rollback_projection: Option<legion_protocol::CheckpointRollbackProjection>,
     assisted_ai_projection: Option<legion_protocol::AssistedAiProjection>,
+    /// The trust projections a Phase 4 run built, keyed by its proposal.
+    ///
+    /// The selected-proposal path reconstructs these generically from the
+    /// proposal row, and that reconstruction cannot know what route produced the
+    /// proposal -- it hard-codes `NotRequired` consent. A remote run's consent
+    /// refusal was therefore computed, linked to the proposal, and then replaced
+    /// on the one path that renders. Keeping what the run actually built means a
+    /// reviewer reads the run's own answer rather than a plausible one.
+    phase4_trust_by_proposal: HashMap<ProposalId, Box<SelectedProposalTrustProjections>>,
     replay_manifests: HashMap<legion_protocol::AgentRunId, legion_protocol::AgentReplayManifest>,
     inspection_snapshots: HashMap<legion_protocol::AgentRunId, AppAiInspectionSnapshot>,
 }
@@ -24860,6 +24869,23 @@ impl AppComposition {
             Some(privacy_inspector_projection.clone());
         self.phase4_projection_state.permission_budget_projection =
             Some(permission_budget_projection.clone());
+        // The run's own projections, kept against the proposal they describe.
+        //
+        // The selected-proposal path reconstructs these from the proposal row,
+        // which carries no route -- so it cannot tell a remote run from a local
+        // one and assumes consent was never required.
+        self.phase4_projection_state
+            .phase4_trust_by_proposal
+            .insert(
+                proposal_id,
+                Box::new(SelectedProposalTrustProjections {
+                    context_manifest_projection: context_manifest_projection.clone(),
+                    privacy_inspector_projection: privacy_inspector_projection.clone(),
+                    permission_budget_projection: permission_budget_projection.clone(),
+                    approval_checklist_projection: approval_checklist_projection.clone(),
+                    checkpoint_rollback_projection: checkpoint_rollback_projection.clone(),
+                }),
+            );
         self.phase4_projection_state.approval_checklist_projection =
             Some(approval_checklist_projection);
         self.phase4_projection_state.checkpoint_rollback_projection =
@@ -28848,6 +28874,19 @@ impl AppComposition {
         generated_at: TimestampMillis,
     ) -> Option<SelectedProposalTrustProjections> {
         let selected_proposal_id = proposal_ledger_projection.selected_proposal_id?;
+        // What the run itself built, if this proposal came from one.
+        //
+        // The reconstruction below derives everything from the proposal row,
+        // which carries no route -- so it cannot tell a remote run from a local
+        // one and assumes consent was never required. Preferring the stored
+        // projections keeps the refusal a reviewer needs to see.
+        if let Some(stored) = self
+            .phase4_projection_state
+            .phase4_trust_by_proposal
+            .get(&selected_proposal_id)
+        {
+            return Some((**stored).clone());
+        }
         let proposal = self
             .proposal_coordinator
             .proposal_for_id(selected_proposal_id)?;

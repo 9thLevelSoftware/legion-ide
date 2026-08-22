@@ -18,7 +18,7 @@ pub(crate) fn render_preferred_provider_picker(
 ) {
     ui.add_space(4.0);
     ui.label(theme::muted(format!(
-        "Preferred AI provider: {active_preference}. Auto tries providers available on this computer before remote providers."
+        "Preferred AI provider: {active_preference}. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
     )));
     ui.horizontal_wrapped(|ui| {
         for (label, id) in [

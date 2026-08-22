@@ -3849,7 +3849,7 @@ fn projection_rendering_provider_credentials_live_in_settings_ai_providers_secti
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(
         &full,
-        "Preferred AI provider: auto. Auto tries providers available on this computer before remote providers."
+        "Preferred AI provider: auto. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
     ));
     assert!(accesskit_has_label(
         &full,
