@@ -807,6 +807,42 @@ fn holding_an_arrow_key_persists_the_arrangement_once() {
     );
 }
 
+/// The keyboard route into the canvas does not edit the file it replaces.
+///
+/// Tab to the Canvas rail control and press Enter: the editor keyboard handler
+/// ran first and inserted a newline into the open buffer, and the control was
+/// activated afterwards during rendering. So the standard keyboard route into
+/// another surface edited the file every single time -- silently, because the
+/// file it edited is the one being replaced on screen.
+#[test]
+fn opening_the_canvas_from_the_keyboard_does_not_edit_the_open_file() {
+    let workspace = workspace_with_files("legion_desktop_canvas_enter_route");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+
+    let editor = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    // Dirtiness rather than a line count: an inserted newline makes the buffer
+    // dirty, and "the file was edited" is the claim under test.
+    let before = app.runtime_snapshot().active_buffer_projection.dirty;
+    assert!(
+        !before,
+        "the fixture must start with a clean buffer, or an edit cannot be detected"
+    );
+    let control = accesskit_id(&editor, "Canvas").expect("the rail must publish a Canvas control");
+
+    let _ = focus(&mut app, control);
+    let opened = press_key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+
+    assert!(
+        !app.runtime_snapshot().active_buffer_projection.dirty,
+        "Enter on the focused Canvas control edited the open file, which is the file the          canvas then covered up"
+    );
+    assert!(
+        clickable_center(&opened, "Card alpha.rs").is_some(),
+        "the control must still open the canvas; suppressing the newline is only half of          what Enter is for here"
+    );
+}
+
 /// Enter on the canvas, with nothing focused, still belongs to the canvas.
 ///
 /// The card test above cannot see this on its own: Enter on a focused card

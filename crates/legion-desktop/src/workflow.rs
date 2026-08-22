@@ -4143,7 +4143,43 @@ impl DesktopEframeApp {
         // `ime_composition_state` re-enter the context via `data_mut`/`data`.
         // Running them inside the closure would deadlock on that lock, so all
         // handling below works from the cloned snapshot instead.
-        let input = ui.input(|input| input.clone());
+        let mut input = ui.input(|input| input.clone());
+        // Enter and Space belong to a focused control, not to the buffer.
+        //
+        // Tab to the Canvas rail control and press Enter: this handler ran
+        // first, inserted a newline into the open file, and the control was
+        // activated afterwards during rendering. So the standard keyboard route
+        // into another surface edited the file every single time -- silently,
+        // because the file it edited is the one being covered up.
+        //
+        // Filtered on the cloned input, so every consumer below sees the same
+        // events: `InputState::key_pressed` counts them, and doing this in one
+        // of the four places that read Enter would leave the other three.
+        //
+        // Only the activation *keys* are withheld. Typed characters arrive as
+        // `Event::Text` and are untouched, including a typed space.
+        // `shell_affordances::clicking_a_rail_button_does_not_stop_the_editor_accepting_keystrokes`
+        // records why the wider version is wrong: egui hands focus to plain
+        // buttons and they never surrender it, so gating all input on "something
+        // has focus" made one click on the gear discard every keystroke
+        // afterwards. That test caught this attempt too.
+        // A focused *text* control keeps its Enter: that is how the search field
+        // retries a query and how any field submits. This is about controls that
+        // are pressed rather than typed into.
+        let pressable_control_focused =
+            ui.memory(|memory| memory.focused().is_some()) && !ui.ctx().text_edit_focused();
+        if pressable_control_focused {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter | egui::Key::Space,
+                        ..
+                    }
+                )
+            });
+        }
+        let input = input;
         let command = input.modifiers.command;
 
         if let Some(pending) = snapshot.palette_projection.pending_confirmation.as_ref() {
