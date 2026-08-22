@@ -1002,6 +1002,52 @@ mod org_ceiling {
         );
     }
 
+    /// The route decides the class, and the capability follows the route.
+    ///
+    /// Deriving `remote` from the class was only half a fix while the class
+    /// itself came from a caller: both Assist entry points passed
+    /// `LocalLoopback` because that is what the fixture used to be, and an
+    /// Anthropic proposal was therefore presented as local, free,
+    /// metadata-only and air-gap safe. The parameter is gone, so the only
+    /// answer available is the one this chain produces -- and this test is the
+    /// chain.
+    #[test]
+    fn a_remote_route_produces_a_remote_capability_end_to_end() {
+        let (provider_id, _model, class, ..) =
+            super::product_ai_route_fields(Some(crate::ProductAiLiveBackend::Anthropic));
+        assert_eq!(
+            class,
+            legion_protocol::AssistedAiProviderClass::ByokRemote,
+            "an Anthropic route is a BYOK remote one; everything downstream reads this"
+        );
+
+        let capability = super::phase4_provider_capability(class, &provider_id, None);
+        assert_ne!(
+            capability.cost_budget_label, "local.free",
+            "the capability for a metered remote route says it is free"
+        );
+        assert_eq!(
+            capability.air_gap_support,
+            legion_protocol::AssistedAiSupportLabel::Unsupported,
+            "the capability for a remote route says it is air-gap safe"
+        );
+
+        // The other end of the same chain, so this cannot pass by calling
+        // everything remote.
+        let (provider_id, _model, class, ..) =
+            super::product_ai_route_fields(Some(crate::ProductAiLiveBackend::Ollama));
+        assert_eq!(
+            class,
+            legion_protocol::AssistedAiProviderClass::LocalLoopback,
+            "an Ollama route is loopback"
+        );
+        let capability = super::phase4_provider_capability(class, &provider_id, None);
+        assert_eq!(
+            capability.cost_budget_label, "local.free",
+            "a loopback route really is free and must keep saying so"
+        );
+    }
+
     #[test]
     fn no_bundle_imposes_no_ceiling() {
         // Non-vacuity: the refusals above must be the bundle talking, not

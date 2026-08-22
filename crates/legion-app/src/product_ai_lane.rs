@@ -117,8 +117,17 @@ impl ProductAiLaneReservation {
         })
     }
 
-    pub(crate) fn sink(&self) -> Arc<LiveProductAiStreamSink> {
-        self.sink.clone()
+    /// A delta writer bound to this occupancy of the lane.
+    ///
+    /// Handing a worker the bare sink hands it the ability to write into
+    /// somebody else's run after it has been cancelled. This carries the
+    /// generation with it, so the check cannot be forgotten at the call site --
+    /// which is where it was forgotten.
+    pub(crate) fn delta_writer(&self) -> ProductAiDeltaWriter {
+        ProductAiDeltaWriter {
+            sink: self.sink.clone(),
+            generation: self.generation,
+        }
     }
 
     /// Give the lane up without finishing it, because somebody else already has.
@@ -154,6 +163,18 @@ impl ProductAiLaneReservation {
         // behind it.
         self.sink
             .finish_background_owned(self.generation, result, completion, self.operation);
+    }
+}
+
+/// A handle that can append deltas to one occupancy of the lane, and no other.
+pub(crate) struct ProductAiDeltaWriter {
+    sink: Arc<LiveProductAiStreamSink>,
+    generation: u64,
+}
+
+impl ProductAiDeltaWriter {
+    pub(crate) fn push(&self, delta: &str) {
+        self.sink.push_delta_owned(self.generation, delta);
     }
 }
 
@@ -265,8 +286,25 @@ impl LiveProductAiStreamSink {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub(crate) fn push_delta(&self, delta: &str) {
+    /// Append a streamed delta, but only for the occupancy that holds the lane.
+    ///
+    /// The final result was fenced by generation and the deltas were not, so a
+    /// cancelled worker went on appending to the projection until its transport
+    /// returned -- into whichever operation had taken the lane meanwhile. Text
+    /// from a prediction nobody is waiting for appeared under a different run,
+    /// attributed to its provider, until a completion replaced it. A partial
+    /// answer shown under the wrong question is worse than no partial answer.
+    ///
+    /// Checked and appended under one lock, like the publish, because a check
+    /// that releases before it acts is the gap this is here to close.
+    pub(crate) fn push_delta_owned(&self, generation: u64, delta: &str) {
         if delta.is_empty() {
+            return;
+        }
+        let Ok(current) = self.generation.lock() else {
+            return;
+        };
+        if *current != generation {
             return;
         }
         if let Ok(mut guard) = self.projection.lock() {
@@ -327,5 +365,52 @@ impl LiveProductAiStreamSink {
             .lock()
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod lane_ownership_tests {
+    use super::*;
+
+    /// A cancelled worker's deltas do not appear under the next run.
+    ///
+    /// The final result was fenced by generation and the deltas were not, so a
+    /// worker whose prediction was cancelled went on appending until its
+    /// transport returned -- into whichever operation held the lane by then.
+    /// Text from a request nobody is waiting for, shown under a different run
+    /// and attributed to its provider, is worse than no partial answer at all.
+    #[test]
+    fn a_cancelled_workers_deltas_do_not_land_in_the_next_run() {
+        let sink = LiveProductAiStreamSink::default();
+        let first = sink
+            .try_begin("assist.predict", "provider:a", "model:a")
+            .expect("the lane starts free");
+
+        // The app thread cancels: the lane is released while the worker is
+        // still in its transport call.
+        sink.release_lane();
+
+        let second = sink
+            .try_begin("delegate.chat", "provider:b", "model:b")
+            .expect("a released lane must be free to take");
+        assert_ne!(first, second, "a new occupancy must have a new generation");
+
+        sink.push_delta_owned(second, "answer for b");
+        sink.push_delta_owned(first, "stale text from the cancelled prediction");
+
+        let projection = sink.snapshot();
+        assert!(
+            projection
+                .chunks
+                .iter()
+                .all(|chunk| chunk != "stale text from the cancelled prediction"),
+            "a cancelled worker wrote into the run that replaced it: {:?}",
+            projection.chunks
+        );
+        assert_eq!(
+            projection.chunks,
+            vec!["answer for b".to_string()],
+            "the run holding the lane must still be able to stream"
+        );
     }
 }

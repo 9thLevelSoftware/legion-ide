@@ -24422,7 +24422,6 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::Explain,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
     }
 
@@ -24434,15 +24433,24 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
     }
 
+    /// Run one Assist operation, from authorization to proposal or refusal.
+    ///
+    /// The provider class is **not** a parameter. Both callers passed
+    /// `LocalLoopback` because that is what the fixture used to be, and the
+    /// value travelled all the way into the reviewer-facing capability -- so an
+    /// Anthropic proposal was presented as local, free, metadata-only and
+    /// air-gap safe while the excerpt went over the wire. Deriving `remote`
+    /// from the class was only half a fix while the class itself came from a
+    /// caller guessing. `product_ai_route_fields` resolves it below, from the
+    /// backend that will actually receive the text, and nothing else may
+    /// supply it.
     fn run_assisted_ai_operation(
         &mut self,
         operation_class: legion_protocol::AssistedAiOperationClass,
         instruction_label: impl Into<String>,
-        provider_class: legion_protocol::AssistedAiProviderClass,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         self.require_assist_mode()?;
         // Trimmed to the length declared to the broker below. An unbounded
@@ -24645,7 +24653,7 @@ impl AppComposition {
                     run_id,
                     route_id,
                     operation_class,
-                    provider_class,
+                    route_provider_class,
                     provider_route_request.clone(),
                     legion_protocol::AssistedAiProviderRouteResponse {
                         route_id: provider_route_request.route_id.clone(),
@@ -24719,7 +24727,7 @@ impl AppComposition {
                 run_id,
                 route_id,
                 operation_class,
-                provider_class,
+                route_provider_class,
                 provider_route_request,
                 route_response,
                 context_manifest_projection,
@@ -24768,7 +24776,9 @@ impl AppComposition {
             run_id: run_id.clone(),
             route_id: route_id.clone(),
             operation_class,
-            provider_class,
+            // The class the route resolved, not one a caller supplied: this is
+            // what the capability a reviewer reads is built from.
+            provider_class: route_provider_class,
             provider_route_request: provider_route_request.clone(),
             route_response: route_response.clone(),
             context_manifest_projection: context_manifest_projection.clone(),
@@ -24850,9 +24860,9 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             };
-            let sink_delta = lane_reservation.sink();
+            let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
-                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
                     live_backend,
                     &instruction_for_worker,
@@ -24924,8 +24934,8 @@ impl AppComposition {
         #[cfg(not(feature = "ai"))]
         let _ = use_background_live;
 
-        let sink_delta = lane_reservation.sink();
-        let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+        let sink_delta = lane_reservation.delta_writer();
+        let mut on_delta = move |delta: &str| sink_delta.push(delta);
         let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
             live_backend,
             &instruction_label,
@@ -27505,9 +27515,9 @@ impl AppComposition {
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
-            let sink_delta = lane_reservation.sink();
+            let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
-                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+                let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (label, stream) = resolve_delegate_chat_reply(
                     live_backend,
                     &prompt_for_worker,
@@ -27571,8 +27581,8 @@ impl AppComposition {
                 |_handle| "Streaming response…".to_string(),
             )
         } else {
-            let sink_delta = lane_reservation.sink();
-            let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+            let sink_delta = lane_reservation.delta_writer();
+            let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
                 live_backend,
                 &prompt_label,
@@ -36134,12 +36144,12 @@ mod pkt_worker_tests {
         .expect("open workspace");
         app.open_file("lib.rs").expect("open source");
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(
-            app.live_product_ai_stream
-                .try_begin("delegate.chat", "provider:a", "model:a")
-                .is_some()
-        );
-        app.live_product_ai_stream.push_delta("stream-a");
+        let occupancy = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:a", "model:a")
+            .expect("the lane starts free");
+        app.live_product_ai_stream
+            .push_delta_owned(occupancy, "stream-a");
 
         let stream_before = app.live_product_ai_stream.snapshot();
         let semantic_index_before = format!("{:?}", app.language_tooling.semantic_index);
