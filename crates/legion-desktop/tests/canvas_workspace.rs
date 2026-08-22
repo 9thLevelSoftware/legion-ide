@@ -489,6 +489,77 @@ fn focusing_a_card_off_screen_brings_the_view_to_it() {
     );
 }
 
+/// The card whose buffer the app is acting on says so.
+///
+/// Activating a card switches the active buffer, and Next/Previous Tab changes
+/// it without touching the canvas -- so Save Active and Close Tab were aimed at
+/// a card nobody could identify here. A selection that is real and invisible is
+/// one somebody acts on by accident.
+#[test]
+fn the_card_owning_the_active_buffer_is_marked_as_such() {
+    let workspace = workspace_with_files("legion_desktop_canvas_active_card");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let selected: Vec<String> = ["alpha.rs", "beta.rs", "gamma.rs"]
+        .iter()
+        .filter(|name| node_is_selected(&canvas, &format!("Card {name}")) == Some(true))
+        .map(|name| (*name).to_string())
+        .collect();
+    assert_eq!(
+        selected.len(),
+        1,
+        "exactly one card owns the active buffer; the tree marked {selected:?}"
+    );
+
+    // Switching to another card moves the mark with the buffer.
+    let other = ["alpha.rs", "beta.rs", "gamma.rs"]
+        .into_iter()
+        .find(|name| !selected.contains(&(*name).to_string()))
+        .expect("the fixture opens three files");
+    let card = accesskit_id(&canvas, &format!("Card {other}")).expect("the other card exists");
+    let switched = activate(&mut app, card);
+    assert_eq!(
+        node_is_selected(&switched, &format!("Card {other}")),
+        Some(true),
+        "activating a card switched the buffer without moving the mark, so the surface          shows one card and the app acts on another"
+    );
+    assert_eq!(
+        node_is_selected(&switched, &format!("Card {}", selected[0])),
+        Some(false),
+        "the previously active card is still marked, so two cards claim the buffer"
+    );
+}
+
+/// A target port says when it cannot yet be used.
+///
+/// With no source armed, activating an input port set the pending target and
+/// the handler then did nothing -- an operable-looking control with no action
+/// and no explanation, for the reader who cannot see that nothing happened.
+#[test]
+fn a_target_port_reports_that_it_needs_a_source_first() {
+    let workspace = workspace_with_files("legion_desktop_canvas_target_unarmed");
+    let mut app = open_app(workspace.path(), None);
+    open_all_files(&mut app);
+    let canvas = show_canvas(&mut app);
+
+    let description = node_description(&canvas, "Connect to beta.rs").unwrap_or_default();
+    assert!(
+        description.contains("outgoing port first"),
+        "a target port with nothing armed must say why activating it does nothing: {description:?}"
+    );
+
+    // And once a source is armed it stops saying so, because then it works.
+    let source = accesskit_id(&canvas, "Connect from alpha.rs").expect("alpha.rs has a port");
+    let armed = activate(&mut app, source);
+    let description = node_description(&armed, "Connect to beta.rs").unwrap_or_default();
+    assert!(
+        !description.contains("outgoing port first"),
+        "the target still claims it needs a source after one was armed: {description:?}"
+    );
+}
+
 /// Nudging a card past the edge brings the view with it.
 ///
 /// The reveal is one-shot, on the frame focus arrives -- right for a card
@@ -2044,10 +2115,13 @@ fn a_connection_is_readable_from_the_accessibility_tree() {
         Some("Connects to beta.rs"),
         "after connecting, the outgoing port must name what it connects to"
     );
-    assert_eq!(
-        node_description(&connected, "Connect to beta.rs").as_deref(),
-        Some("Connected from alpha.rs"),
-        "the other end must report the connection too, from its own direction"
+    // Contains rather than equals: with no source armed the port also explains
+    // that it cannot be activated yet, and that hint is added to the connection
+    // list rather than replacing it.
+    let other_end = node_description(&connected, "Connect to beta.rs").unwrap_or_default();
+    assert!(
+        other_end.contains("Connected from alpha.rs"),
+        "the other end must report the connection too, from its own direction; it said {other_end:?}"
     );
 
     // And repeating the gesture removes it, which must be just as legible.

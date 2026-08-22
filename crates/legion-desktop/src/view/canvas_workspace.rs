@@ -85,6 +85,12 @@ pub(crate) struct CanvasNode {
     pub placed: bool,
     /// Buffer behind this node, when the projection named one.
     pub buffer_id: Option<legion_protocol::BufferId>,
+    /// Whether this card's buffer is the one the rest of the app is acting on.
+    ///
+    /// Save Active and Close Tab aim at the active buffer, and it changes from
+    /// outside this surface -- Next/Previous Tab moves it while the canvas is
+    /// showing. A selection nobody can see is one somebody acts on by accident.
+    pub active: bool,
     /// Display title, as the tab bar shows it.
     pub title: String,
     /// The name the accessibility tree uses for this card and its controls.
@@ -279,12 +285,17 @@ pub(crate) fn nodes_for_snapshot(
     origin: egui::Pos2,
     visible: Option<egui::Rect>,
 ) -> Vec<CanvasNode> {
-    nodes_for_sections(
+    let mut nodes = nodes_for_sections(
         &snapshot.excerpt_surface_projection.sections,
         positions,
         origin,
         visible,
-    )
+    );
+    let active = snapshot.active_buffer_projection.buffer_id;
+    for node in &mut nodes {
+        node.active = active.is_some() && node.buffer_id == active;
+    }
+    nodes
 }
 
 /// The cards a set of excerpt sections implies.
@@ -449,6 +460,9 @@ pub(crate) fn nodes_for_sections(
             Some(CanvasNode {
                 path,
                 placed,
+                // Filled by `nodes_for_snapshot`, which is where the active
+                // buffer is known; a bare section does not carry it.
+                active: false,
                 buffer_id: section.buffer_id,
                 accessible_name: String::new(),
                 title: section.title.clone(),
@@ -782,7 +796,17 @@ pub(crate) fn render_canvas_workspace(
     // Where a card with no saved position goes: the top-left of whatever is on
     // screen, not world zero. Read before the nodes are built, because the
     // saved viewport is what decides it.
-    let saved_view = saved_scene_rect(ui.ctx());
+    // Normalised against the panel it will be drawn into.
+    //
+    // Pan and zoom are restored from a session saved at a different window
+    // size, and a view wider than `panel / ZOOM_MIN` is not one `Scene` can
+    // draw: it clamps and shows less. Using the saved rectangle as the
+    // visibility test then judged cards "already visible" that cannot be shown,
+    // so neither the new-card reach nor the focus reveal moved toward them.
+    let saved_view = saved_scene_rect(ui.ctx()).map(|view| {
+        let panel = ui.available_rect_before_wrap().size();
+        within_zoom_floor(view, view, view.size(), panel)
+    });
     let origin = saved_view.map_or(egui::Pos2::ZERO, |view| view.min + egui::vec2(40.0, 40.0));
     let nodes = nodes_for_snapshot(snapshot, positions, origin, saved_view);
 
@@ -1054,6 +1078,20 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
     let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_HEIGHT));
     painter.rect_filled(header_rect, 6.0, tokens.bg.toolbar);
 
+    if node.active {
+        // Which card the rest of the app is acting on.
+        //
+        // Activating a card switches the active buffer, and Next/Previous Tab
+        // changes it without touching the canvas at all -- so Save Active and
+        // Close Tab were aimed at a card nobody could identify here. The
+        // selection was real and invisible.
+        painter.rect_stroke(
+            rect.expand(1.0),
+            7.0,
+            egui::Stroke::new(2.0_f32, tokens.accent.cyan),
+            egui::StrokeKind::Outside,
+        );
+    }
     let header_id = ui.id().with(("canvas-node", node.path.0.as_str()));
     let header = ui.interact(header_rect, header_id, egui::Sense::click_and_drag());
     let header_bounds = global_rect(ui, header_rect);
@@ -1282,6 +1320,7 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         // that *selects* a card, which makes it the worst of the three to leave
         // ambiguous.
         builder.set_label(format!("Card {}", node.accessible_name));
+        builder.set_selected(node.active);
         // A capability nobody is told about is a capability nobody uses, and
         // this one has no visible affordance at all: the card looks the same
         // focused as unfocused, and arranging it was a pointer gesture until
@@ -1548,7 +1587,7 @@ fn render_ports(
             // disconnect?" had no answer available.
             builder.set_description(if is_armed {
                 format!(
-                    "Armed as the connection source. Choose a target port, or press Escape                      to cancel. {}",
+                    "Armed as the connection source. Choose a target port, or press Escape to cancel. {}",
                     describe_connections(&outgoing, "Connects to")
                 )
             } else {
@@ -1602,17 +1641,34 @@ fn render_ports(
             // will not perform, to exactly the reader who cannot see that
             // nothing happened.
             let is_armed_source = armed_source.as_deref() == Some(node.path.0.as_str());
+            // Unavailable until a source is chosen.
+            //
+            // Activating a target with nothing armed sets `activated_target` and
+            // the handler then does nothing, silently -- an apparently operable
+            // control with no action and no explanation, to the reader who
+            // cannot see that nothing happened. `set_disabled` is how a tree
+            // says "not yet".
+            if armed_title.is_none() {
+                builder.set_disabled();
+            }
             builder.set_description(match armed_title.as_deref() {
+                // The connections it already has, then why it cannot be
+                // activated yet. Replacing the list would take away the answer
+                // to "what is connected here", which is the question this
+                // description was added for.
+                None => format!(
+                    "{}. Choose a card's outgoing port first, then activate this one.",
+                    describe_connections(&incoming, "Connected from")
+                ),
                 Some(_) if is_armed_source => {
-                    "This card is the connection source. Choose a different card, or press                      Escape to cancel."
+                    "This card is the connection source. Choose a different card, or press Escape to cancel."
                         .to_string()
                 }
                 Some(source) => format!(
-                    "Activating connects {source} to {}, or removes that connection if it                      already exists. {}",
+                    "Activating connects {source} to {}, or removes that connection if it already exists. {}",
                     node.accessible_name,
                     describe_connections(&incoming, "Connected from")
                 ),
-                None => describe_connections(&incoming, "Connected from"),
             });
             set_bounds(builder, in_bounds);
         });
@@ -1777,7 +1833,7 @@ mod canvas_layout_rules {
             .expect("a truncated mid-file excerpt has something to disclose");
         assert!(
             footer.contains("100-") && footer.contains("longer excerpt"),
-            "an excerpt starting at line 100 was labelled {footer:?}, which tells              the reader the card starts where the file does"
+            "an excerpt starting at line 100 was labelled {footer:?}, which tells the reader the card starts where the file does"
         );
 
         // Scrolled and short: nothing is cut off the bottom, and the old label
@@ -1787,7 +1843,7 @@ mod canvas_layout_rules {
         assert_eq!(
             super::excerpt_footer(&nodes[0]).as_deref(),
             Some("lines 100-103"),
-            "a short excerpt from the middle of a file must still say where it              starts; nothing else on the card does"
+            "a short excerpt from the middle of a file must still say where it starts; nothing else on the card does"
         );
 
         // From the top and complete: nothing omitted, so nothing claimed. A
@@ -1989,6 +2045,7 @@ mod canvas_layout_rules {
         let tallest = super::CanvasNode {
             path: CanonicalPath("tall.rs".to_string()),
             placed: false,
+            active: false,
             buffer_id: None,
             title: "tall.rs".to_string(),
             accessible_name: "tall.rs".to_string(),
@@ -2196,6 +2253,31 @@ mod canvas_layout_rules {
         }
     }
 
+    /// A saved view is measured against the panel it will be drawn into.
+    ///
+    /// Pan and zoom are restored from a session saved at a different window
+    /// size. A view wider than `panel / ZOOM_MIN` is not one `Scene` can draw --
+    /// it clamps and shows less -- so using the saved rectangle as the
+    /// visibility test judged cards "already visible" that cannot be shown, and
+    /// neither the new-card reach nor the focus reveal moved toward them.
+    #[test]
+    fn a_saved_view_wider_than_the_floor_is_normalised_before_it_is_believed() {
+        let panel = egui::vec2(600.0, 400.0);
+        let drawable = panel / super::ZOOM_MIN;
+        // Saved when the window was far larger.
+        let saved = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(6000.0, 4000.0));
+        assert!(
+            saved.width() > drawable.x && saved.height() > drawable.y,
+            "the fixture must exceed what the floor allows, or it proves nothing"
+        );
+
+        let normalised = super::within_zoom_floor(saved, saved, saved.size(), panel);
+        assert!(
+            normalised.width() <= drawable.x && normalised.height() <= drawable.y,
+            "a restored view of {normalised:?} still exceeds the {drawable:?} `Scene` can draw, so containment answers about it are answers about a rectangle nobody sees"
+        );
+    }
+
     /// Widening the view to reach a new card keeps it drawable.
     ///
     /// `Scene` honours the rect it is handed only down to `ZOOM_MIN`. Past
@@ -2230,18 +2312,18 @@ mod canvas_layout_rules {
             .expect("the card just opened must be on the canvas");
         assert!(
             !newest.placed,
-            "this test is about a card the canvas placed itself; with a saved              position it would never widen the view and the assertion below              would hold for the wrong reason"
+            "this test is about a card the canvas placed itself; with a saved position it would never widen the view and the assertion below would hold for the wrong reason"
         );
 
         let widened = super::view_reaching_new_cards(view, &nodes, panel);
         let drawable = panel / super::ZOOM_MIN;
         assert!(
             widened.width() <= drawable.x && widened.height() <= drawable.y,
-            "the view grew to {widened:?}, past the {drawable:?} that `Scene`              can draw at the zoom floor -- egui clamps and shows less than this"
+            "the view grew to {widened:?}, past the {drawable:?} that `Scene` can draw at the zoom floor -- egui clamps and shows less than this"
         );
         assert!(
             widened.contains_rect(super::node_rect(newest)),
-            "the card the view was widened for sits outside it at {:?}, which is              the failure the widening exists to prevent",
+            "the card the view was widened for sits outside it at {:?}, which is the failure the widening exists to prevent",
             super::node_rect(newest)
         );
         // And at the size somebody was already working at. Filling the whole
@@ -2291,7 +2373,7 @@ mod canvas_layout_rules {
         assert_eq!(
             reached.size(),
             view.size(),
-            "the view was resized to include a card just past its edge, which              makes every card already on screen smaller"
+            "the view was resized to include a card just past its edge, which makes every card already on screen smaller"
         );
         assert!(
             reached.contains_rect(super::node_rect(newest)),
@@ -2334,15 +2416,15 @@ mod canvas_layout_rules {
 
         assert!(
             fitted.width() > opening.width(),
-            "fitting showed no more than the opening view ({fitted:?} against              {opening:?}), so the control named for fitting everything did nothing"
+            "fitting showed no more than the opening view ({fitted:?} against {opening:?}), so the control named for fitting everything did nothing"
         );
         assert!(
             fitted.width() <= drawable.x && fitted.height() <= drawable.y,
-            "fitting asked for {fitted:?}, past the {drawable:?} `Scene` can draw --              egui clamps and shows less than this, so the fit would be a lie"
+            "fitting asked for {fitted:?}, past the {drawable:?} `Scene` can draw -- egui clamps and shows less than this, so the fit would be a lie"
         );
         assert!(
             fitted.width() >= drawable.x - 1.0,
-            "an arrangement wider than the floor allows should fill what the floor              allows; it used {fitted:?}"
+            "an arrangement wider than the floor allows should fill what the floor allows; it used {fitted:?}"
         );
 
         // And an arrangement that does fit is shown whole, not merely widened.
@@ -2359,7 +2441,7 @@ mod canvas_layout_rules {
         for node in &nodes {
             assert!(
                 fitted.contains_rect(super::node_rect(node)),
-                "{} is outside the fitted view {fitted:?}, and the whole arrangement                  fits inside what can be drawn",
+                "{} is outside the fitted view {fitted:?}, and the whole arrangement fits inside what can be drawn",
                 node.path.0
             );
         }
