@@ -3,7 +3,7 @@
 #[cfg(not(target_os = "windows"))]
 use std::process::Command;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     path::{Path, PathBuf},
     time::Instant,
@@ -603,6 +603,15 @@ pub enum DesktopLegionWorkflowStatus {
     KillSwitchTriggered,
 }
 
+/// Where a canvas card sits, and who decided.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CanvasNodePlacement {
+    /// World-space position.
+    pub(crate) position: (f32, f32),
+    /// Whether a person dragged the card here.
+    pub(crate) placed_by_person: bool,
+}
+
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
@@ -612,6 +621,28 @@ pub struct DesktopRuntime {
     workspace_root: PathBuf,
     principal: PrincipalId,
     explorer_expansion: BTreeSet<String>,
+    /// Where the person put each canvas card, keyed by canonical path.
+    ///
+    /// Adapter-local for the same reason explorer expansion is: the app decides
+    /// which buffers exist, the person decides where they sit. Keyed by path
+    /// rather than `BufferId` so an arrangement survives the restart that
+    /// renumbers buffers.
+    /// Where each card sits, and whether a person put it there.
+    ///
+    /// The flag is what tells a default the layout assigned apart from a place
+    /// somebody dragged a card to. Geometry cannot: two cards at the same point
+    /// may be a reused default slot, which must be repaired, or a deliberate
+    /// stack, which must not be touched.
+    canvas_nodes: BTreeMap<String, CanvasNodePlacement>,
+    /// Connections the person drew, as ordered `(from, to)` path pairs.
+    ///
+    /// A `BTreeSet` so drawing the same connection twice is idempotent and the
+    /// order a session is written in is stable.
+    canvas_edges: BTreeSet<(String, String)>,
+    /// How many durable session writes have been asked for.
+    session_saves: u64,
+    /// Which surface the centre shows.
+    center_surface: crate::view::CenterSurface,
     dismissed_toast_ids: BTreeSet<u64>,
     panel_state: SessionPanelState,
     /// Bottom-panel selection kept separate from the currently active side panel.
@@ -690,6 +721,8 @@ impl DesktopRuntime {
             });
 
         let mut explorer_expansion = BTreeSet::new();
+        let mut canvas_nodes: BTreeMap<String, CanvasNodePlacement> = BTreeMap::new();
+        let mut canvas_edges: BTreeSet<(String, String)> = BTreeSet::new();
         let mut panel_state = default_panel_state();
         let mut dock_layouts = DockLayout::standard_all_modes();
         // Whether `dock_layouts` represents a layout the user arranged, rather
@@ -708,6 +741,25 @@ impl DesktopRuntime {
                     .explorer_expansion
                     .iter()
                     .map(|path| path.0.clone())
+                    .collect();
+                canvas_nodes = record
+                    .canvas_nodes
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.path.0.clone(),
+                            CanvasNodePlacement {
+                                position: (node.x, node.y),
+                                placed_by_person: node.placed_by_person,
+                            },
+                        )
+                    })
+                    .collect();
+                canvas_edges = record
+                    .canvas_edges
+                    .iter()
+                    .filter(|edge| edge.from_path.0 != edge.to_path.0)
+                    .map(|edge| (edge.from_path.0.clone(), edge.to_path.0.clone()))
                     .collect();
                 panel_state = record.panel_state.clone();
                 dock_layouts = restore_dock_layouts(record);
@@ -751,6 +803,10 @@ impl DesktopRuntime {
             workspace_root: config.workspace_root.clone(),
             principal: config.principal,
             explorer_expansion,
+            canvas_nodes,
+            canvas_edges,
+            session_saves: 0,
+            center_surface: crate::view::CenterSurface::Editor,
             dismissed_toast_ids: BTreeSet::new(),
             panel_state,
             selected_bottom_panel,
@@ -781,6 +837,107 @@ impl DesktopRuntime {
     /// Handle a desktop action through bridge and app-owned authority.
     pub fn handle_action(&mut self, action: DesktopAction) -> Result<DesktopWorkflowOutcome> {
         match action {
+            DesktopAction::SetCenterSurface { surface } => {
+                // Leaving the canvas ends any arrangement gesture in progress.
+                //
+                // A keyboard nudge persists when the key is released, and
+                // switching surfaces mid-hold means no card is left to receive
+                // that release -- the canvas stops being drawn. The in-memory
+                // arrangement is already correct; this is the write that makes
+                // it survive the window closing.
+                let leaving_canvas = self.center_surface == crate::view::CenterSurface::Canvas
+                    && surface != crate::view::CenterSurface::Canvas;
+                self.center_surface = surface;
+                if leaving_canvas {
+                    self.persist_session_if_configured();
+                }
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::MoveCanvasNode {
+                path,
+                x,
+                y,
+                settled,
+            } => {
+                self.canvas_nodes.insert(
+                    path.0.clone(),
+                    CanvasNodePlacement {
+                        position: (x.get(), y.get()),
+                        // A drag is a person placing a card, which is what makes
+                        // this position untouchable by collision repair.
+                        placed_by_person: true,
+                    },
+                );
+                // Only the end of a drag reaches disk. Mid-drag frames update
+                // the arrangement in memory; persisting each one put a rewrite,
+                // a validate, a `sync_all` and an atomic replace on the renderer
+                // thread dozens of times during a single gesture.
+                if settled {
+                    self.persist_session_if_configured();
+                    // A failed save writes a warning into `last_status`, and
+                    // this action otherwise returns without rebuilding the
+                    // projection -- so a session path that went unwritable
+                    // mid-drag produced a status nobody would see until some
+                    // other action happened to refresh. Silence is the wrong
+                    // answer to "your arrangement is not being saved".
+                    self.refresh_projection()?;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::PlaceCanvasNodes { placements } => {
+                // The whole set, then one save. Emitting a settled
+                // `MoveCanvasNode` per card made the cost of opening the canvas
+                // proportional to the number of open files, all of it on the
+                // renderer thread and all of it before the first frame landed.
+                let placed_any = !placements.is_empty();
+                for placement in placements {
+                    self.canvas_nodes.insert(
+                        placement.path.0.clone(),
+                        CanvasNodePlacement {
+                            position: (placement.x.get(), placement.y.get()),
+                            // The layout chose this slot, so the layout may
+                            // choose again if something ends up on top of it.
+                            placed_by_person: false,
+                        },
+                    );
+                }
+                if placed_any {
+                    self.persist_session_if_configured();
+                    // Same reason the settled move refreshes: a save that failed
+                    // wrote a warning into `last_status`, and without a rebuild
+                    // nobody would see it.
+                    self.refresh_projection()?;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::ConnectCanvasNodes { from_path, to_path } => {
+                // A node is not connected to itself, and the check lives here
+                // rather than only in the renderer so the invariant holds for
+                // every route into this state.
+                if from_path.0 != to_path.0 {
+                    self.canvas_edges.insert((from_path.0, to_path.0));
+                    self.persist_session_if_configured();
+                    // Same reason the settled move refreshes: a failed save
+                    // writes a warning into `last_status` and nothing else, so
+                    // without a rebuild the person is not told their connection
+                    // will be gone after a restart until some unrelated action
+                    // happens to refresh the projection.
+                    self.refresh_projection()?;
+                }
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
+            DesktopAction::DisconnectCanvasNodes { from_path, to_path } => {
+                self.canvas_edges.remove(&(from_path.0, to_path.0));
+                self.persist_session_if_configured();
+                self.refresh_projection()?;
+                self.last_outcome = DesktopWorkflowOutcome::Noop;
+                Ok(DesktopWorkflowOutcome::Noop)
+            }
             DesktopAction::DismissToast { toast_id } => {
                 self.dismissed_toast_ids.insert(toast_id);
                 self.refresh_projection()?;
@@ -1592,6 +1749,24 @@ impl DesktopRuntime {
             .collect();
         record.panel_state = self.panel_state.clone();
         record.dock_layouts = session_dock_layouts_from_ui(&self.dock_layouts);
+        record.canvas_nodes = self
+            .canvas_nodes
+            .iter()
+            .map(|(path, placement)| legion_protocol::SessionCanvasNode {
+                path: CanonicalPath(path.clone()),
+                x: placement.position.0,
+                y: placement.position.1,
+                placed_by_person: placement.placed_by_person,
+            })
+            .collect();
+        record.canvas_edges = self
+            .canvas_edges
+            .iter()
+            .map(|(from, to)| legion_protocol::SessionCanvasEdge {
+                from_path: CanonicalPath(from.clone()),
+                to_path: CanonicalPath(to.clone()),
+            })
+            .collect();
         Ok(record)
     }
 
@@ -1691,6 +1866,21 @@ impl DesktopRuntime {
         DesktopProjectionViewState {
             expanded_explorer_paths: self.explorer_expansion.clone(),
             selected_explorer_file: None,
+            canvas_positions: self
+                .canvas_nodes
+                .iter()
+                .map(|(path, placement)| {
+                    (
+                        path.clone(),
+                        crate::view::canvas_workspace::SavedPosition {
+                            position: egui::pos2(placement.position.0, placement.position.1),
+                            placed_by_person: placement.placed_by_person,
+                        },
+                    )
+                })
+                .collect(),
+            canvas_edges: self.canvas_edges.iter().cloned().collect(),
+            center_surface: self.center_surface,
             dock_layouts: self.dock_layouts.clone(),
             dock_layouts_user_arranged: self.dock_layouts_user_arranged,
             dismissed_toast_ids: self.dismissed_toast_ids.clone(),
@@ -2050,8 +2240,31 @@ impl DesktopRuntime {
         }
     }
 
+    /// Whether the editor is the centre surface, whatever else is going on.
+    ///
+    /// Deliberately narrower than [`Self::editor_input_enabled`], which also
+    /// answers "and is nothing else swallowing keys". Bindings that belong to
+    /// the editor shell rather than to the buffer need this question, and
+    /// asking the other one gave the canvas the Problems list's keys.
+    pub(crate) fn center_surface_is_editor(&self) -> bool {
+        self.center_surface == crate::view::CenterSurface::Editor
+    }
+
     fn editor_input_enabled(&self, snapshot: &ShellProjectionSnapshot) -> bool {
-        !snapshot.palette_projection.open && !close_dirty_prompt_active(snapshot)
+        // The centre has to be the editor for editor keys to mean anything.
+        //
+        // Without this, typing on the canvas still reached the active buffer:
+        // characters, Backspace, Delete, Enter and every editor shortcut mutated
+        // a file that was not on screen. Invisible edits are the worst shape a
+        // keyboard defect can take -- nothing looks wrong until the file is
+        // saved, and by then there is nothing to point at.
+        //
+        // Not the same condition as "a canvas widget has focus": a click on the
+        // canvas background focuses nothing, and the keystrokes after it would
+        // still have landed in the buffer.
+        self.center_surface == crate::view::CenterSurface::Editor
+            && !snapshot.palette_projection.open
+            && !close_dirty_prompt_active(snapshot)
     }
 
     fn dispatch_intent(&mut self, intent: CommandDispatchIntent) -> Result<DesktopWorkflowOutcome> {
@@ -3267,6 +3480,7 @@ impl DesktopRuntime {
     }
 
     fn persist_session_if_configured(&mut self) {
+        self.session_saves = self.session_saves.saturating_add(1);
         if let Err(error) = self.save_session_state() {
             self.set_status(
                 StatusSeverity::Warning,
@@ -3676,6 +3890,23 @@ pub struct DesktopEframeApp {
     /// and paint-complete timestamps each frame to produce p50/p95 latency
     /// summaries via [`FrameTimingRecorder::summary`].
     frame_timing: FrameTimingRecorder,
+    /// Which widget held the keyboard last frame, and whether Tab put it there.
+    ///
+    /// Withholding Enter and Space from the buffer is right for a control the
+    /// keyboard walked to and wrong for one that merely still holds focus after
+    /// a click or an overlay closing -- there a leading space is a character
+    /// somebody typed, and swallowing it loses the character *and* presses the
+    /// control. The two look identical in `Memory::focused`, which records where
+    /// focus is and not how it arrived.
+    focus_owner: Option<egui::Id>,
+    focus_arrived_by_tab: bool,
+    /// A navigation key seen but not yet reflected in `Memory::focused`.
+    ///
+    /// egui applies both Tab navigation and an AccessKit focus request at the
+    /// *end* of the pass that carried them, so the focus change is visible on
+    /// the following frame -- by which point the event that caused it is gone.
+    /// Latched here and spent on the next change.
+    focus_navigation_pending: bool,
 }
 
 impl DesktopEframeApp {
@@ -3684,6 +3915,9 @@ impl DesktopEframeApp {
         Self {
             runtime,
             ctx: egui::Context::default(),
+            focus_owner: None,
+            focus_arrived_by_tab: false,
+            focus_navigation_pending: false,
             frame_timing: FrameTimingRecorder::new(),
         }
     }
@@ -3695,6 +3929,15 @@ impl DesktopEframeApp {
     /// storage directly.
     pub fn runtime_snapshot(&self) -> legion_ui::ShellProjectionSnapshot {
         self.runtime.projection_snapshot()
+    }
+
+    /// The session record the runtime would write right now.
+    ///
+    /// Mirrors [`Self::runtime_snapshot`]. A renderer test can see that a card
+    /// moved on screen; only this can show that the arrangement was *kept*,
+    /// which is the property a spatial workspace lives or dies on.
+    pub fn capture_session_record(&self) -> Result<legion_protocol::WorkspaceSessionRecord> {
+        self.runtime.capture_session_record()
     }
 
     /// Drive a desktop action through the wrapped runtime.
@@ -3747,6 +3990,41 @@ impl DesktopEframeApp {
     #[doc(hidden)]
     pub fn headless_egui_context(&self) -> egui::Context {
         self.ctx.clone()
+    }
+
+    /// Test-only mutable access to the wrapped runtime.
+    ///
+    /// Exists so a rendered-UI test can put the runtime into a state the UI has
+    /// no control for -- injecting an LSP completion response, for one, which a
+    /// test with no language server cannot otherwise reach. A test that cannot
+    /// reach the state it is written about passes without exercising anything,
+    /// which is worse than not having it.
+    #[doc(hidden)]
+    pub fn runtime_mut_for_test(&mut self) -> &mut DesktopRuntime {
+        &mut self.runtime
+    }
+
+    /// How many times a session save has been attempted.
+    ///
+    /// Counted rather than inferred from the file, because what matters is the
+    /// number of durable writes a gesture asks for -- a validated,
+    /// `sync_all`ed, atomically replaced file each time -- and two writes of
+    /// identical bytes are indistinguishable on disk and not at all
+    /// indistinguishable to the thread doing them.
+    #[doc(hidden)]
+    pub fn session_saves_for_test(&self) -> u64 {
+        self.runtime.session_saves
+    }
+
+    /// Whether a focus-traversal chord is waiting for the focus change it causes.
+    ///
+    /// Exposed because the rule it encodes -- that `Ctrl+Tab` is a tab shortcut
+    /// and not focus navigation -- cannot be observed through the rendered
+    /// surface: a click leaves no widget focused in the headless harness, so a
+    /// test driving it end to end passes whether or not the flag is armed.
+    #[doc(hidden)]
+    pub fn focus_navigation_pending_for_test(&self) -> bool {
+        self.focus_navigation_pending
     }
 
     /// Return the real editor allocation recorded by the last full frame.
@@ -3919,7 +4197,189 @@ impl DesktopEframeApp {
         // `ime_composition_state` re-enter the context via `data_mut`/`data`.
         // Running them inside the closure would deadlock on that lock, so all
         // handling below works from the cloned snapshot instead.
-        let input = ui.input(|input| input.clone());
+        let mut input = ui.input(|input| input.clone());
+        // Enter and Space belong to a focused control, not to the buffer.
+        //
+        // Tab to the Canvas rail control and press Enter: this handler ran
+        // first, inserted a newline into the open file, and the control was
+        // activated afterwards during rendering. So the standard keyboard route
+        // into another surface edited the file every single time -- silently,
+        // because the file it edited is the one being covered up.
+        //
+        // Filtered on the cloned input, so every consumer below sees the same
+        // events: `InputState::key_pressed` counts them, and doing this in one
+        // of the four places that read Enter would leave the other three.
+        //
+        // Only the activation *keys* are withheld. Typed characters arrive as
+        // `Event::Text` and are untouched, including a typed space.
+        // `shell_affordances::clicking_a_rail_button_does_not_stop_the_editor_accepting_keystrokes`
+        // records why the wider version is wrong: egui hands focus to plain
+        // buttons and they never surrender it, so gating all input on "something
+        // has focus" made one click on the gear discard every keystroke
+        // afterwards. That test caught this attempt too.
+        // A focused *text* control keeps its Enter: that is how the search field
+        // retries a query and how any field submits. This is about controls that
+        // are pressed rather than typed into.
+        //
+        // And *how* the keyboard got there, which `Memory::focused` does not
+        // say. Tab moved it: the next Enter or Space is aimed at that control.
+        // Anything else put it there -- a click, or an overlay restoring focus
+        // as it closed -- and the person may well be typing into the buffer, so
+        // a leading space is a character and not a press. Withholding it there
+        // loses the character *and* presses the control.
+        // Tab, or an assistive technology asking for a control by name. Both are
+        // somebody navigating to it; a click and a closing overlay are not.
+        // Unmodified Tab, or Shift+Tab going backwards: those are the chords
+        // egui itself treats as focus traversal.
+        //
+        // `Ctrl+Tab` is the published Next Tab shortcut and moves no widget
+        // focus at all, so latching it left the flag armed -- and the next focus
+        // change, from a click, was then misread as navigation. A leading space
+        // after that was swallowed as an activation.
+        let traversal_tab = input.key_pressed(egui::Key::Tab)
+            && (!input.modifiers.any() || input.modifiers.shift_only());
+        if traversal_tab
+            || input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::AccessKitActionRequest(request)
+                        if request.action == egui::accesskit::Action::Focus
+                )
+            })
+        {
+            self.focus_navigation_pending = true;
+        }
+        let focused_now = ui.memory(|memory| memory.focused());
+        if focused_now != self.focus_owner {
+            self.focus_arrived_by_tab = focused_now.is_some() && self.focus_navigation_pending;
+            self.focus_owner = focused_now;
+            self.focus_navigation_pending = false;
+        }
+        let mut pressable_control_focused =
+            focused_now.is_some() && !ui.ctx().text_edit_focused() && self.focus_arrived_by_tab;
+
+        // Typing into the editor takes the keyboard back from a stale button.
+        //
+        // Closing an overlay restores focus to the rail control that opened it,
+        // and that focus outlives the reason for it: the person carries on
+        // typing into the buffer while a button still holds the keyboard. Every
+        // space they typed would then be swallowed as an activation -- silently,
+        // and for as long as the focus lasted.
+        //
+        // A typed character that is not itself the activation key says plainly
+        // which surface the keyboard belongs to, so the button gives it up and
+        // this frame passes through untouched.
+        // Typing where the keyboard was left behind takes it back.
+        //
+        // Focus that arrived by click or by an overlay closing is focus nobody
+        // aimed, and text arriving means the person is working in the buffer --
+        // *including* a space, which is why this is a separate condition from
+        // the one above. Surrendering it here is what stops the same space
+        // pressing the control it was typed past.
+        let stale_control_focused =
+            focused_now.is_some() && !ui.ctx().text_edit_focused() && !self.focus_arrived_by_tab;
+        if (pressable_control_focused || stale_control_focused)
+            && input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Text(text)
+                        if pressable_control_focused && text != " " || stale_control_focused
+                )
+            })
+        {
+            if let Some(focused) = ui.memory(|memory| memory.focused()) {
+                ui.memory_mut(|memory| memory.surrender_focus(focused));
+            }
+            pressable_control_focused = false;
+        }
+
+        // A modified chord reaches the shell's handlers and must not *also*
+        // press whatever control holds the keyboard.
+        //
+        // egui activates a focused button on Enter whatever the modifiers are,
+        // so Alt+Enter would apply a review hunk and toggle a surface in the
+        // same frame. The cloned input above still carries the chord for the
+        // handler that documented it; this removes it from egui's own input,
+        // the way the palette consumes Escape.
+        //
+        // Outside the provenance gate deliberately: a modified chord is never a
+        // control's activation, however that control came to hold focus.
+        if focused_now.is_some() && !ui.ctx().text_edit_focused() {
+            ui.input_mut(|state| {
+                state.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Enter | egui::Key::Space,
+                            modifiers,
+                            ..
+                        } if modifiers.any()
+                    )
+                });
+            });
+        }
+
+        if pressable_control_focused {
+            // A real window backend reports a Space press as *both* a key event
+            // and a text event, so removing only the key left the space to be
+            // typed: opening the canvas with Space inserted an invisible
+            // character into the file it then covered. The accompanying text is
+            // dropped with it -- one per press, so a space typed for any other
+            // reason in the same frame still arrives.
+            // Unmodified only. A modified chord is somebody else's shortcut --
+            // Alt+Enter applies a proposal review hunk from the shell handler,
+            // and eating it here stopped that working whenever a card or rail
+            // control happened to hold the keyboard, while the chord could still
+            // press the control during rendering.
+            let unmodified = |modifiers: &egui::Modifiers| !modifiers.any();
+            let space_presses = input
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if unmodified(modifiers)
+                    )
+                })
+                .count();
+            let mut activation_consumed = false;
+            input.events.retain(|event| {
+                let is_activation = matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter | egui::Key::Space,
+                        modifiers,
+                        ..
+                    } if unmodified(modifiers)
+                );
+                activation_consumed |= is_activation;
+                !is_activation
+            });
+            let mut remaining = space_presses;
+            input.events.retain(|event| match event {
+                egui::Event::Text(text) if remaining > 0 && text == " " => {
+                    remaining -= 1;
+                    false
+                }
+                _ => true,
+            });
+            // Provenance is spent by the press it authorised.
+            //
+            // It is only recomputed when focus *changes*, so a control tabbed
+            // to and then activated stayed "intentionally focused" -- and if its
+            // action returned to the editor, the next leading space was
+            // swallowed again and could press the same control a second time.
+            // Navigating to a control buys one activation, not tenure.
+            if activation_consumed {
+                self.focus_arrived_by_tab = false;
+            }
+        }
+        let input = input;
         let command = input.modifiers.command;
 
         if let Some(pending) = snapshot.palette_projection.pending_confirmation.as_ref() {
@@ -3998,7 +4458,12 @@ impl DesktopEframeApp {
         } else {
             // Route every published default keymap entry through one central
             // dispatcher before context-specific editor input handling.
-            crate::view::dispatch_keybindings(ui.ctx(), &snapshot, &mut actions);
+            crate::view::dispatch_keybindings(
+                ui.ctx(),
+                &snapshot,
+                self.runtime.editor_input_enabled(&snapshot),
+                &mut actions,
+            );
 
             if command && input.key_pressed(egui::Key::Q) {
                 actions.push(DesktopAction::Quit);
@@ -4076,7 +4541,23 @@ impl DesktopEframeApp {
             {
                 let view_state = self.runtime.projection_view_state();
                 let problems_non_empty = !snapshot.language_tooling_projection.problems.is_empty();
-                if problems_non_empty && !view_state.completion_popup_open {
+                // Not while another centre surface owns the keyboard.
+                //
+                // `!editor_input_enabled` was standing in for "the Problems
+                // list has the keyboard", and it is not the same question. The
+                // canvas turns editor input off by design, so Enter on a
+                // focused card also activated whichever diagnostic happened to
+                // be selected -- changing the open file and the cursor behind a
+                // surface the person was arranging. Arrow keys had the same
+                // problem from the other direction: they moved the diagnostic
+                // selection while somebody was moving a card with them.
+                //
+                // There is no panel-focus state in this shell to ask instead,
+                // so this asks the narrower question it can answer honestly:
+                // these are the editor shell's bindings, and they belong to the
+                // editor shell.
+                let editor_shell = self.runtime.center_surface_is_editor();
+                if problems_non_empty && !view_state.completion_popup_open && editor_shell {
                     if input.key_pressed(egui::Key::ArrowDown) {
                         actions.push(DesktopAction::ProblemNext);
                     }
@@ -4158,7 +4639,13 @@ impl DesktopEframeApp {
             // Escape while it is open and is checked first for the same reason.
             {
                 let view_state = self.runtime.projection_view_state();
-                if input.key_pressed(egui::Key::Escape)
+                // Gated like every other editor key. This one lives outside
+                // `dispatch_keybindings`, so completing the keymap filter could
+                // not reach it: Escape on the canvas went on clearing extra
+                // cursors in a buffer that was not on screen. Invisible editor
+                // state is the same defect whichever dispatcher carries it.
+                if self.runtime.editor_input_enabled(&snapshot)
+                    && input.key_pressed(egui::Key::Escape)
                     && !view_state.completion_popup_open
                     && projected_cursor_count(&snapshot) > 1
                 {

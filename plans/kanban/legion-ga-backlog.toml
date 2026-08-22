@@ -1900,6 +1900,28 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     status = "done"
     evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
 
+  [[epics.features]]
+  id = "P6.F5"
+  title = "Canvas workspace"
+
+    [[epics.features.tasks]]
+    id = "P6.F5.T1"
+    title = "Open files as draggable cards with connections the person draws"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/src/view/canvas_workspace.rs", "crates/legion-desktop/tests/canvas_workspace.rs", "docs/ui/canvas-workspace-direction.md"]
+    dependencies = []
+    verification = ["cargo test -p legion-desktop --test canvas_workspace", "cargo run -p xtask -- deferred-surfaces"]
+    acceptance = ["A Canvas control on the activity rail switches the centre; every open file is a card carrying its own text; a card can be dragged and two cards connected; the arrangement survives a restart.", "Edges are the person's own claim, kept in their own type, so a derived import or call graph can be added later without reinterpreting them."]
+    stop_condition = "Stop if an edge is ever derived from guessed structure: no workspace-wide index retains import targets today, so a drawn architecture would be false on its first frame."
+    status = "done"
+    # The activation rule in `plans/dependency-policy.md` requires an owner in
+    # the active plan or evidence before an activated surface counts as
+    # complete. It is recorded in the evidence file named below, which is where
+    # that rule points; the card schema has no owner field to put it in.
+    evidence = "docs/ui/canvas-workspace-direction.md"
+
+
 # ---------------------------------------------------------------------------
 # EPIC P7 — Plugin and extension runtime
 # Readiness rows: PR-VSC-001, PR-VSC-002 deferred.

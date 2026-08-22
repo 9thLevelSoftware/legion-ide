@@ -1,8 +1,20 @@
 # Canvas workspace — UI direction
 
-Date: 2026-08-17
-Status: **Explored, not scheduled and not accepted.** No ADR, no backlog task, no
-product-readiness ledger row. Nothing in this document is committed work.
+Date: 2026-08-17, updated 2026-08-21
+Status: **Arrangement surface built and reachable. The rest of this document is
+still direction, not commitment.** Backlog: `P6.F5.T1` in
+`plans/kanban/legion-ga-backlog.toml`, covering the built slice only. ADR:
+`plans/adrs/ADR-0051-canvas-workspace-surface.md`, which authorizes the
+arrangement surface and nothing else in this document.
+No product-readiness ledger row: `PR-UI-001` is Manual mode's evidence and this
+surface is not part of it, so nothing here is claimed as readiness evidence and
+the canvas is not on any promotion path yet.
+Owner: the repository owner, who directed the pivot to this direction and
+carries the surface. Recorded here because
+`plans/dependency-policy.md` requires an owner in the active plan or evidence
+before an activated surface may be treated as complete, and this document is
+`P6.F5.T1`'s evidence. There is one maintainer of this repository; naming a team
+that does not exist would be the sort of record that reads well and is false.
 Source: Claude Design project `Application UI review and redesign`
 (`b0839227-4e52-4aee-b1a2-8a56a825ff57`), file `Legion Canvas Workspace.dc.html`.
 
@@ -10,6 +22,46 @@ This document exists so a direction explored in a design tool survives outside
 that tool. It records the concept, a spec precise enough to rebuild the layout
 without the mock, and — the part worth more than the spec — what is actually
 true in this codebase today that would have to change first.
+
+## What is built, as of 2026-08-21
+
+The owner directed a pivot to this direction, so section 3's "would have to be
+true first" is no longer hypothetical for the first slice, which `P6.F5.T1`
+records. What exists in
+`crates/legion-desktop/src/view/canvas_workspace.rs`, reachable from a `Canvas`
+control on the activity rail:
+
+- Pan and zoom through `egui::Scene`, with `zoom_range` set explicitly because
+  `Scene`'s own default caps at 1.0 and zooming in would otherwise do nothing.
+- One card per open file, carrying that file's real text from
+  `ExcerptSurfaceProjection`.
+- Drag a card's header to move it. `Response::drag_delta` already divides by the
+  layer's scaling inside a `Scene`, so — contrary to section 2's note, taken from
+  the mock's JavaScript — no manual division by zoom is needed.
+- Ports on each card, and a drag between them draws a connection.
+- Positions and connections persist in `WorkspaceSessionRecord`, keyed by
+  canonical path so an arrangement survives the restart that renumbers buffers.
+
+**Edges are the person's, not the code's.** An edge here means "I say these are
+related". Derived edges — imports, calls — remain absent for exactly the reason
+section 3 gives: nothing in the tree can produce them yet. They are kept in a
+separate type so derived ones can be added later without reinterpreting what
+someone drew by hand.
+
+Not built, and still as section 3 describes: syntax colouring inside cards,
+terminal/test/proposal node kinds, group frames, the minimap, edge labels, and
+every derived relationship.
+
+Two things found while building it, both fixed here and neither specific to the
+canvas:
+
+- egui fills accessibility bounds from the widget rect in *ui* coordinates and
+  applies no layer transform, so every node inside a `Scene` publishes its world
+  position as its screen bounds. Any assistive technology would point at empty
+  chrome. The canvas sets its own bounds through
+  `Context::layer_transform_to_global`.
+- `Context::pointer_interact_pos` answers in screen space regardless of the
+  asking layer, so comparing it to scene-space geometry silently never matches.
 
 It follows the posture of [`four-mode-prototype-fidelity.md`](four-mode-prototype-fidelity.md):
 a visual direction retained as reference, explicit about which parts are product
@@ -317,10 +369,12 @@ before the surface could be called ready.
 
 ## 4. Conflicts with accepted decisions
 
-- [**ADR-0046**](../../plans/adrs/ADR-0046-surface-expansion-freeze.md) — no new
-  crates or surface activation until Manual mode is daily-drivable. The work
-  fits inside existing crates, but the freeze's *intent* is no surface expansion
-  before the basics work, and this is plainly surface expansion.
+- [**ADR-0046**](../../plans/adrs/ADR-0046-surface-expansion-freeze.md) —
+  **resolved.** The freeze forbade surface expansion before Manual mode was
+  daily-drivable, and this is plainly surface expansion. The owner retired the
+  ADR on 2026-08-21 rather than amend it per surface; see its Retirement
+  section. Retiring it approved nothing else: the three gates it froze are still
+  deferred, now on their own lack of evidence.
 - [**ADR-0048**](../../plans/adrs/ADR-0048-renderer-strategy.md) — stay on egui,
   with `CodeCanvasPainter` as the escape hatch. Compatible in principle; the
   painter is the mechanism a canvas would use. The perf budgets bind.

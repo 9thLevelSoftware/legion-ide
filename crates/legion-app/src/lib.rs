@@ -11210,6 +11210,10 @@ fn capture_workspace_session_record(
         }],
         layout_splits: Vec::new(),
         explorer_expansion: Vec::new(),
+        // Renderer-owned, like explorer expansion: the app builds the record,
+        // the desktop adapter fills these in before it writes.
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: false,
             side_visible: true,

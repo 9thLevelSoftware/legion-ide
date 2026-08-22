@@ -55,6 +55,61 @@ impl Drop for SensitiveString {
     }
 }
 
+/// A finite coordinate in canvas world space.
+///
+/// Exists so `DesktopAction` can carry a position and stay `Eq`. `f32` is not
+/// `Eq` because `NaN != NaN`, and the four view models that embed a
+/// `DesktopAction` derive `Eq` in turn — so the choice was between propagating
+/// an `Eq` removal across them, storing whole pixels (which stalls a slow drag,
+/// where each frame's sub-pixel delta rounds to nothing), or excluding the one
+/// value that breaks the law.
+///
+/// This does the last. `new` maps every non-finite input to zero, so a `NaN`
+/// cannot exist inside the type and reflexivity holds for every value that can.
+/// Equality is by bits, which for finite values is ordinary equality except that
+/// it distinguishes `-0.0` from `0.0` — a distinction with no effect on where a
+/// card is drawn.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldCoord(f32);
+
+impl WorldCoord {
+    /// A coordinate, with non-finite input collapsed to zero.
+    ///
+    /// Zero rather than a saturating bound: an infinite or `NaN` position means
+    /// something upstream went wrong, and a card at the origin is recoverable by
+    /// dragging it, while one at `f32::MAX` is not findable at all.
+    pub fn new(value: f32) -> Self {
+        Self(if value.is_finite() { value } else { 0.0 })
+    }
+
+    /// The underlying value, always finite.
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl PartialEq for WorldCoord {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for WorldCoord {}
+
+/// One card's first recorded position on the canvas.
+///
+/// Paired with [`DesktopAction::PlaceCanvasNodes`] so a whole set of defaults
+/// travels as one action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasPlacement {
+    /// Canonical path of the card being placed.
+    pub path: legion_protocol::CanonicalPath,
+    /// World-space x.
+    pub x: WorldCoord,
+    /// World-space y.
+    pub y: WorldCoord,
+}
+
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAction {
@@ -73,6 +128,69 @@ pub enum DesktopAction {
     SwitchTab {
         /// Target buffer identifier.
         buffer_id: BufferId,
+    },
+    /// Switch what the central panel shows.
+    ///
+    /// Routed through the runtime rather than kept on the renderer, unlike the
+    /// activity-rail selection beside it. The display model is built from the
+    /// view state the runtime hands down, so a toggle the renderer kept to
+    /// itself would flip the rail button and leave the centre — and the status
+    /// line that names the surface — showing the old one.
+    SetCenterSurface {
+        /// Surface to show.
+        surface: crate::view::CenterSurface,
+    },
+    /// Place a canvas node at a world-space position.
+    ///
+    /// Renderer-owned view state, like explorer expansion: the app decides which
+    /// buffers are open, the person decides where the cards sit. Keyed by
+    /// canonical path rather than `BufferId` so an arrangement survives the
+    /// restart that renumbers buffers.
+    MoveCanvasNode {
+        /// Canonical path of the node being placed.
+        path: legion_protocol::CanonicalPath,
+        /// World-space x.
+        x: WorldCoord,
+        /// World-space y.
+        y: WorldCoord,
+        /// Whether the drag has ended and this position is worth persisting.
+        ///
+        /// A drag emits one of these per pointer-movement frame. Writing the
+        /// session file on each would put a rewrite, a validate, a `sync_all`
+        /// and an atomic replace on the renderer thread dozens of times during
+        /// one gesture. The arrangement updates every frame; only the last one
+        /// reaches disk.
+        settled: bool,
+    },
+    /// Record where cards drawn for the first time were laid out.
+    ///
+    /// One action for the whole set rather than one [`Self::MoveCanvasNode`]
+    /// each. Opening the canvas places every unplaced card in a single frame,
+    /// and a settled move persists and rebuilds the projection on its own --
+    /// so N open files meant N validates, N `sync_all`s, N atomic replaces and
+    /// N projection rebuilds on the renderer thread before the first canvas
+    /// frame finished. The work does not grow with the tab count now.
+    PlaceCanvasNodes {
+        /// Where each newly drawn card was laid out.
+        placements: Vec<CanvasPlacement>,
+    },
+    /// Record a connection the person drew between two canvas nodes.
+    ///
+    /// A person's claim that two files are related, which is a weaker and
+    /// different thing from an import or a call. Kept separate from any future
+    /// derived edge so neither can be mistaken for the other.
+    ConnectCanvasNodes {
+        /// Canonical path the connection starts at.
+        from_path: legion_protocol::CanonicalPath,
+        /// Canonical path the connection ends at.
+        to_path: legion_protocol::CanonicalPath,
+    },
+    /// Remove a connection the person drew.
+    DisconnectCanvasNodes {
+        /// Canonical path the connection starts at.
+        from_path: legion_protocol::CanonicalPath,
+        /// Canonical path the connection ends at.
+        to_path: legion_protocol::CanonicalPath,
     },
     /// Request close for a projected tab.
     CloseTab {
@@ -1660,6 +1778,14 @@ impl DesktopCommandBridge {
                     token,
                 })
             }
+            // Canvas arrangement is renderer state, in the same category as
+            // explorer expansion: the runtime records it and persists it, and
+            // no app command corresponds to moving a card.
+            DesktopAction::SetCenterSurface { .. }
+            | DesktopAction::MoveCanvasNode { .. }
+            | DesktopAction::PlaceCanvasNodes { .. }
+            | DesktopAction::ConnectCanvasNodes { .. }
+            | DesktopAction::DisconnectCanvasNodes { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissOnboarding => DesktopBridgeOutput::Noop,
             DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),

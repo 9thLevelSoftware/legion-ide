@@ -3974,6 +3974,8 @@ fn dto_contracts_session_record_schema_golden() {
             ratio: 0.5,
         }],
         explorer_expansion: vec![CanonicalPath("C:/repo/src".to_string())],
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: true,
             side_visible: true,
@@ -4035,6 +4037,8 @@ fn dto_contracts_session_record_schema_golden() {
             "ratio": 0.5
         }],
         "explorer_expansion": ["C:/repo/src"],
+        "canvas_nodes": [],
+        "canvas_edges": [],
         "panel_state": {
             "bottom_visible": true,
             "side_visible": true,
@@ -4095,6 +4099,56 @@ fn dto_contracts_session_record_schema_golden() {
 
     let mut missing = value;
     remove_required_field::<WorkspaceSessionRecord>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_session_record_without_canvas_fields_still_loads() {
+    // A session written before the canvas existed has no `canvas_nodes` or
+    // `canvas_edges` key at all. Both carry `#[serde(default)]` so that such a
+    // record still loads — anyone upgrading keeps their open tabs, their
+    // explorer expansion and their panel layout, and simply starts with an
+    // empty canvas.
+    //
+    // Worth pinning rather than trusting: dropping the attribute makes both
+    // fields required, and the failure mode is not a compile error. It is every
+    // existing session on disk failing to deserialize on the next launch, which
+    // presents as a workspace that has forgotten everything.
+    let json = serde_json::json!({
+        "session_id": "workspace-session:1",
+        "last_workspace": null,
+        "last_workspace_path": null,
+        "open_tabs": [],
+        "active_tab": null,
+        "active_buffer": null,
+        "tab_groups": [],
+        "layout_splits": [],
+        "explorer_expansion": ["C:/repo/src"],
+        "panel_state": {
+            "bottom_visible": true,
+            "side_visible": true,
+            "active_panel": "explorer",
+            "schema_version": 1
+        },
+        "dirty_indicators": [],
+        "saved_at": 5000,
+        "schema_version": 1
+    });
+
+    let record: WorkspaceSessionRecord = match serde_json::from_value(json) {
+        Ok(record) => record,
+        Err(error) => {
+            panic!("a session record predating the canvas must still deserialize, got {error}")
+        }
+    };
+    assert_eq!(
+        record.explorer_expansion,
+        vec![CanonicalPath("C:/repo/src".to_string())],
+        "the rest of the record must survive the upgrade"
+    );
+    assert!(
+        record.canvas_nodes.is_empty() && record.canvas_edges.is_empty(),
+        "an upgraded session starts with an empty canvas, not a broken one"
+    );
 }
 
 #[test]
