@@ -702,6 +702,22 @@ fn a_modified_arrow_does_not_move_a_focused_card() {
         );
     }
 
+    // And the release of a modified arrow does not settle either.
+    //
+    // The modifier filter covers movement; the release path is separate, and a
+    // settled move at the card's own position is still recorded as a person
+    // placing it there -- so an automatic slot became a person-reserved one,
+    // held after the file closed, because somebody navigated a diff.
+    let record = app.capture_session_record().expect("record");
+    assert!(
+        record
+            .canvas_nodes
+            .iter()
+            .find(|node| node.path.0.ends_with("alpha.rs"))
+            .is_none_or(|node| !node.placed_by_person),
+        "a modified arrow marked an automatically placed card as person-placed, so it          reserves its slot even once the file is closed"
+    );
+
     // Non-vacuity: the same key with no modifier still moves it, so this is a
     // test about modifiers and not about a gesture that stopped working.
     let plain = press_key(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);

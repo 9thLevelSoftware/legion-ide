@@ -1182,8 +1182,20 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         // `node.position`, which is still the position *before* this frame's
         // nudge, because queued actions apply on the next frame. The card moved
         // and then a durable write put it back.
-        let settled = nudge_settled(ui);
-        let target = nudged_position(ui, node.position).or(settled.then_some(node.position));
+        // A release settles a gesture that happened, not any arrow going up.
+        //
+        // The modifier filter stopped Alt+Arrow from *moving* a card and left
+        // the release path alone, so the review-navigation shortcut still queued
+        // a settled move at the card's own position -- which the workflow
+        // records as a person placing it there. An automatically placed card
+        // became a person-reserved one, holding its slot after the file closed,
+        // because somebody navigated a diff.
+        let unsaved = ui
+            .ctx()
+            .data_mut(|data| data.get_temp::<bool>(unsaved_id).unwrap_or(false));
+        let moved = nudged_position(ui, node.position);
+        let settled = nudge_settled(ui) && (moved.is_some() || unsaved);
+        let target = moved.or(settled.then_some(node.position));
         if let Some(target) = target {
             actions.push(DesktopAction::MoveCanvasNode {
                 path: node.path.clone(),
