@@ -85,8 +85,17 @@ pub(crate) struct CanvasNode {
     pub placed: bool,
     /// Buffer behind this node, when the projection named one.
     pub buffer_id: Option<legion_protocol::BufferId>,
-    /// Display title.
+    /// Display title, as the tab bar shows it.
     pub title: String,
+    /// The name the accessibility tree uses for this card and its controls.
+    ///
+    /// Usually the title, and something longer when the title is ambiguous:
+    /// `tab_title` projects only the file name, so `src/index.ts` and
+    /// `tests/index.ts` were both published as "Connect from index.ts". A
+    /// screen-reader user could not tell which file a port belonged to, and
+    /// connecting the wrong two cards was a matter of which one the tree
+    /// happened to reach first.
+    pub accessible_name: String,
     /// Whether the buffer has unsaved edits.
     pub dirty: bool,
     /// Excerpt lines to draw.
@@ -104,6 +113,33 @@ pub struct SavedPosition {
     pub position: egui::Pos2,
     /// Whether somebody dragged the card here.
     pub placed_by_person: bool,
+}
+
+/// Give every card a name the accessibility tree can tell apart.
+///
+/// Ambiguity is a property of the set, not of a card, so this runs once the
+/// whole set is known. A title shared by two cards is qualified with enough of
+/// the path to separate them; a title nothing else uses is left exactly as the
+/// tab bar shows it, because a name that differs between two surfaces is its
+/// own confusion.
+fn disambiguate_names(mut nodes: Vec<CanvasNode>) -> Vec<CanvasNode> {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for node in &nodes {
+        *counts.entry(node.title.as_str()).or_default() += 1;
+    }
+    let ambiguous: std::collections::BTreeSet<String> = counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(title, _)| title.to_string())
+        .collect();
+    for node in &mut nodes {
+        node.accessible_name = if ambiguous.contains(&node.title) {
+            format!("{} ({})", node.title, node.path.0)
+        } else {
+            node.title.clone()
+        };
+    }
+    nodes
 }
 
 /// The world-space corner of a numbered grid slot, measured from `origin`.
@@ -134,14 +170,53 @@ fn slot_position_from(origin: egui::Pos2, slot: usize) -> egui::Pos2 {
 /// The search is bounded: each drawn card can block at most four cells, so a
 /// free one always exists within `4 * rendered.len() + 1` of the start, and the
 /// bound is a guard rather than a limit anybody can reach.
-fn first_free_slot(origin: egui::Pos2, from: usize, taken: &[(egui::Pos2, bool)]) -> usize {
+/// The space a card needs, before its contents are known.
+///
+/// The tallest a card can be, since the slot is chosen before the excerpt is
+/// read. Reserving the maximum means a slot that is accepted can hold whatever
+/// lands in it; reserving less means accepting slots that cannot.
+fn slot_card_rect(position: egui::Pos2) -> egui::Rect {
+    egui::Rect::from_min_size(
+        position,
+        egui::vec2(
+            NODE_WIDTH,
+            HEADER_HEIGHT + MAX_NODE_LINES as f32 * LINE_HEIGHT,
+        ),
+    )
+}
+
+fn first_free_slot(
+    origin: egui::Pos2,
+    visible: Option<egui::Rect>,
+    from: usize,
+    taken: &[(egui::Pos2, bool)],
+) -> usize {
     let limit = from
         .saturating_add(taken.len().saturating_mul(4))
         .saturating_add(1);
     (from..=limit)
-        .find(|slot| !overlaps(slot_position_from(origin, *slot), taken))
-        // A fresh card avoids everything already drawn, however it got there:
-        // opening a file on top of one somebody arranged is nobody's intent.
+        .find(|slot| {
+            let candidate = slot_position_from(origin, *slot);
+            // A fresh card avoids everything already drawn, however it got
+            // there: opening a file on top of one somebody arranged is nobody's
+            // intent.
+            if overlaps(candidate, taken) {
+                return false;
+            }
+            // And it has to be somewhere the person can see, at full height.
+            //
+            // Moving the origin into the viewport fixed where the *grid* starts
+            // and not where a slot lands: with six cards already placed the next
+            // slot is `origin.y + 760`, and in an ordinary 800-unit view that
+            // leaves the header just inside the bottom edge with the card's
+            // contents below it. Measuring the header alone would call that
+            // visible, which is how the card ends up saved, real, and unreadable.
+            visible.is_none_or(|view| view.contains_rect(slot_card_rect(candidate)))
+        })
+        // Nothing free and visible: fall back to the first free slot anywhere.
+        // A card off screen is bad; no card at all is worse, and the person can
+        // pan to it.
+        .or_else(|| (from..=limit).find(|slot| !overlaps(slot_position_from(origin, *slot), taken)))
         .unwrap_or(limit)
 }
 
@@ -179,11 +254,13 @@ pub(crate) fn nodes_for_snapshot(
     snapshot: &ShellProjectionSnapshot,
     positions: &BTreeMap<String, SavedPosition>,
     origin: egui::Pos2,
+    visible: Option<egui::Rect>,
 ) -> Vec<CanvasNode> {
     nodes_for_sections(
         &snapshot.excerpt_surface_projection.sections,
         positions,
         origin,
+        visible,
     )
 }
 
@@ -197,6 +274,7 @@ pub(crate) fn nodes_for_sections(
     sections: &[legion_ui::ui::ExcerptSurfaceSectionProjection],
     positions: &BTreeMap<String, SavedPosition>,
     origin: egui::Pos2,
+    visible: Option<egui::Rect>,
 ) -> Vec<CanvasNode> {
     // Slots for cards that have never been placed are numbered after the cards
     // that have. Section index alone is not stable: the projection builds these
@@ -300,14 +378,14 @@ pub(crate) fn nodes_for_sections(
         if slot.is_some() {
             continue;
         }
-        let free = first_free_slot(origin, next_slot, &taken);
+        let free = first_free_slot(origin, visible, next_slot, &taken);
         next_slot = free + 1;
         let position = slot_position_from(origin, free);
         taken.push((position, false));
         *slot = Some(position);
     }
 
-    drawn
+    let nodes: Vec<CanvasNode> = drawn
         .into_iter()
         .zip(resolved)
         .filter_map(|(section, position)| {
@@ -331,6 +409,7 @@ pub(crate) fn nodes_for_sections(
                 path,
                 placed,
                 buffer_id: section.buffer_id,
+                accessible_name: String::new(),
                 title: section.title.clone(),
                 dirty: section.dirty,
                 lines_truncated: available > lines.len(),
@@ -338,7 +417,8 @@ pub(crate) fn nodes_for_sections(
                 position,
             })
         })
-        .collect()
+        .collect();
+    disambiguate_names(nodes)
 }
 
 /// Height of a node, given how many lines it draws.
@@ -478,7 +558,7 @@ pub(crate) fn render_canvas_workspace(
     // saved viewport is what decides it.
     let saved_view = saved_scene_rect(ui.ctx());
     let origin = saved_view.map_or(egui::Pos2::ZERO, |view| view.min + egui::vec2(40.0, 40.0));
-    let nodes = nodes_for_snapshot(snapshot, positions, origin);
+    let nodes = nodes_for_snapshot(snapshot, positions, origin, saved_view);
 
     if nodes.is_empty() {
         ui.label(theme::muted(
@@ -488,6 +568,18 @@ pub(crate) fn render_canvas_workspace(
     }
 
     let mut rect = saved_view.unwrap_or_else(|| default_scene_rect(&nodes, outer.size()));
+
+    // A card placed this frame that the view does not reach: widen the view.
+    //
+    // Preferring a visible slot is not always possible -- with the grid full
+    // inside the current view, every free slot is outside it, and the search
+    // has to put the card somewhere. Growing the view is what stops "somewhere"
+    // meaning "nowhere you can see". Only newly placed cards count: expanding
+    // to reach a card somebody deliberately dragged far away would undo their
+    // pan every frame.
+    for node in nodes.iter().filter(|node| !node.placed) {
+        rect = rect.union(node_rect(node).expand(40.0));
+    }
     let ctx = ui.ctx().clone();
 
     egui::Scene::new()
@@ -786,7 +878,7 @@ fn render_node(ui: &mut egui::Ui, node: &CanvasNode, actions: &mut Vec<DesktopAc
         ui.ctx().accesskit_node_builder(body.id, |builder| {
             // Not a button: this is a region of text with a name and a value.
             builder.set_role(egui::accesskit::Role::Label);
-            builder.set_label(format!("{} contents", node.title));
+            builder.set_label(format!("{} contents", node.accessible_name));
             builder.set_value(text.clone());
             set_bounds(builder, body_bounds);
         });
@@ -825,7 +917,7 @@ fn connection_titles(
             Some(
                 by_path
                     .get(other.as_str())
-                    .map(|node| node.title.clone())
+                    .map(|node| node.accessible_name.clone())
                     // An edge to a file that is no longer open is still real,
                     // and saying so is better than omitting it: the connection
                     // comes back when the file does.
@@ -898,7 +990,7 @@ fn render_ports(
         let outgoing = connection_titles(existing_edges, by_path, &node.path.0, true);
         ui.ctx().accesskit_node_builder(out.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
-            builder.set_label(format!("Connect from {}", node.title));
+            builder.set_label(format!("Connect from {}", node.accessible_name));
             // What this card is already connected to, on the control that
             // changes it. A painted curve says nothing to anyone reading the
             // tree, so activating a port was a step whose result could not be
@@ -930,7 +1022,7 @@ fn render_ports(
         let incoming = connection_titles(existing_edges, by_path, &node.path.0, false);
         ui.ctx().accesskit_node_builder(input.id, |builder| {
             builder.set_role(egui::accesskit::Role::Button);
-            builder.set_label(format!("Connect to {}", node.title));
+            builder.set_label(format!("Connect to {}", node.accessible_name));
             builder.set_description(describe_connections(&incoming, "Connected from"));
             set_bounds(builder, in_bounds);
         });
@@ -1024,6 +1116,17 @@ mod canvas_layout_rules {
         }
     }
 
+    /// A section whose title is the file name, as `tab_title` projects it.
+    ///
+    /// The plain `section` helper titles a card with its whole path, which no
+    /// projection does -- and a fixture that hands every card a distinct title
+    /// cannot show two cards sharing one.
+    fn section_titled_by_file_name(path: &str) -> ExcerptSurfaceSectionProjection {
+        let mut section = section(path);
+        section.title = path.rsplit('/').next().unwrap_or(path).to_string();
+        section
+    }
+
     fn section(path: &str) -> ExcerptSurfaceSectionProjection {
         ExcerptSurfaceSectionProjection {
             excerpt_id: format!("excerpt:{path}"),
@@ -1049,7 +1152,7 @@ mod canvas_layout_rules {
     #[test]
     fn one_file_is_one_card_even_if_the_projection_repeats_it() {
         let sections = vec![section("a.rs"), section("a.rs"), section("b.rs")];
-        let nodes = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO);
+        let nodes = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO, None);
         assert_eq!(nodes.len(), 2, "a repeated path produced a duplicate card");
         assert_eq!(nodes[0].path.0, "a.rs");
         assert_eq!(nodes[1].path.0, "b.rs");
@@ -1067,7 +1170,7 @@ mod canvas_layout_rules {
         let mut positions = BTreeMap::new();
         positions.insert("a.rs".to_string(), by_person(egui::pos2(10.0, 20.0)));
 
-        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO);
+        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO, None);
         assert!(nodes[0].placed, "a.rs has a saved position");
         assert!(
             !nodes[1].placed,
@@ -1085,7 +1188,7 @@ mod canvas_layout_rules {
     #[test]
     fn removing_a_tab_does_not_move_the_cards_that_remain() {
         let all = vec![section("a.rs"), section("b.rs"), section("c.rs")];
-        let first_pass = nodes_for_sections(&all, &BTreeMap::new(), egui::Pos2::ZERO);
+        let first_pass = nodes_for_sections(&all, &BTreeMap::new(), egui::Pos2::ZERO, None);
 
         // What the renderer persists on that first frame.
         let saved: BTreeMap<String, super::SavedPosition> = first_pass
@@ -1095,7 +1198,7 @@ mod canvas_layout_rules {
 
         // The middle tab closes.
         let remaining = vec![section("a.rs"), section("c.rs")];
-        let second_pass = nodes_for_sections(&remaining, &saved, egui::Pos2::ZERO);
+        let second_pass = nodes_for_sections(&remaining, &saved, egui::Pos2::ZERO, None);
 
         assert_eq!(
             second_pass[0].position, saved["a.rs"].position,
@@ -1126,6 +1229,7 @@ mod canvas_layout_rules {
             &[section("alpha.rs"), section("beta.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
 
         for node in &nodes {
@@ -1156,6 +1260,7 @@ mod canvas_layout_rules {
             &[section("fresh.rs"), section("closed.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
 
         assert_eq!(nodes.len(), 2, "both files must be drawn");
@@ -1166,6 +1271,92 @@ mod canvas_layout_rules {
             nodes[0].position,
             nodes[1].position
         );
+    }
+
+    #[test]
+    fn a_new_card_prefers_a_slot_the_person_can_see() {
+        // Three cards on the top row, a view with room for two rows. The next
+        // free slot by number is 3, which is the second row and visible; the
+        // rule matters when a *later* slot would be off screen, and the
+        // renderer widens the view when no slot fits at all -- that half is
+        // covered end to end by `every_open_file_has_a_card_on_screen`.
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        let mut positions = BTreeMap::new();
+        let mut sections = Vec::new();
+        for index in 0..3 {
+            let name = format!("placed{index}.rs");
+            positions.insert(
+                name.clone(),
+                by_layout(egui::pos2(index as f32 * DEFAULT_STRIDE, 0.0)),
+            );
+            sections.push(section(&name));
+        }
+        sections.push(section("fresh.rs"));
+
+        let nodes = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO, Some(view));
+
+        let fresh = nodes
+            .iter()
+            .find(|node| node.path.0 == "fresh.rs")
+            .expect("the newly opened file must have a card");
+        assert!(
+            view.contains_rect(super::slot_card_rect(fresh.position)),
+            "the new card was placed at {:?}, outside the view {view:?}, while a slot inside \
+             it was free",
+            fresh.position
+        );
+    }
+
+    #[test]
+    fn cards_sharing_a_file_name_are_named_apart() {
+        // `tab_title` projects only the file name, so two `index.ts` cards
+        // published identical control names: "Connect from index.ts" twice,
+        // with no way to tell which file a port belonged to and nothing to stop
+        // a screen-reader user connecting the wrong two cards.
+        let nodes = nodes_for_sections(
+            &[
+                section_titled_by_file_name("src/index.ts"),
+                section_titled_by_file_name("tests/index.ts"),
+            ],
+            &BTreeMap::new(),
+            egui::Pos2::ZERO,
+            None,
+        );
+
+        assert_eq!(nodes.len(), 2, "both files must be drawn");
+        assert_ne!(
+            nodes[0].accessible_name, nodes[1].accessible_name,
+            "two cards published the same name, so their ports are indistinguishable"
+        );
+        for node in &nodes {
+            assert!(
+                node.accessible_name.contains(&node.path.0),
+                "an ambiguous name must carry enough path to resolve it, got {:?}",
+                node.accessible_name
+            );
+        }
+    }
+
+    #[test]
+    fn an_unambiguous_card_keeps_the_name_the_tab_bar_shows() {
+        // The other direction: qualifying every card would make the canvas name
+        // files differently from the tab bar, which is its own confusion.
+        let nodes = nodes_for_sections(
+            &[
+                section_titled_by_file_name("src/main.rs"),
+                section_titled_by_file_name("src/other.rs"),
+            ],
+            &BTreeMap::new(),
+            egui::Pos2::ZERO,
+            None,
+        );
+
+        for node in &nodes {
+            assert_eq!(
+                node.accessible_name, node.title,
+                "a name nothing else uses must be left exactly as the tab bar shows it"
+            );
+        }
     }
 
     #[test]
@@ -1182,6 +1373,7 @@ mod canvas_layout_rules {
             &[section("fresh.rs"), section("closed.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
 
         assert_eq!(nodes.len(), 2, "both files must be drawn");
@@ -1222,7 +1414,7 @@ mod canvas_layout_rules {
             );
         }
 
-        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions, egui::Pos2::ZERO);
+        let nodes = nodes_for_sections(&[section("fresh.rs")], &positions, egui::Pos2::ZERO, None);
 
         let fresh = nodes
             .first()
@@ -1253,6 +1445,7 @@ mod canvas_layout_rules {
             &[section("far.rs"), section("near.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
         let view = super::default_scene_rect(&nodes, egui::vec2(1200.0, 800.0));
 
@@ -1270,7 +1463,12 @@ mod canvas_layout_rules {
     fn the_opening_view_of_a_lone_card_is_not_a_single_card() {
         // The other direction. Fitting exactly to one card opens zoomed to fill
         // the screen with it, which is a different kind of disorienting.
-        let nodes = nodes_for_sections(&[section("only.rs")], &BTreeMap::new(), egui::Pos2::ZERO);
+        let nodes = nodes_for_sections(
+            &[section("only.rs")],
+            &BTreeMap::new(),
+            egui::Pos2::ZERO,
+            None,
+        );
         let view = super::default_scene_rect(&nodes, egui::vec2(1200.0, 800.0));
 
         assert!(
@@ -1301,6 +1499,7 @@ mod canvas_layout_rules {
             &[section("alpha.rs"), section("beta.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
 
         let alpha = nodes
@@ -1339,6 +1538,7 @@ mod canvas_layout_rules {
             &[section("alpha.rs"), section("beta.rs"), section("gamma.rs")],
             &positions,
             egui::Pos2::ZERO,
+            None,
         );
 
         let gamma = nodes
@@ -1357,13 +1557,13 @@ mod canvas_layout_rules {
     fn a_saved_position_does_not_reshuffle_the_unplaced_cards() {
         let sections = vec![section("a.rs"), section("b.rs"), section("c.rs")];
 
-        let untouched = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO);
+        let untouched = nodes_for_sections(&sections, &BTreeMap::new(), egui::Pos2::ZERO, None);
         let b_before = untouched[1].position;
         let c_before = untouched[2].position;
 
         let mut positions = BTreeMap::new();
         positions.insert("a.rs".to_string(), by_person(egui::pos2(-900.0, 900.0)));
-        let after = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO);
+        let after = nodes_for_sections(&sections, &positions, egui::Pos2::ZERO, None);
 
         assert_eq!(
             after[1].position, b_before,

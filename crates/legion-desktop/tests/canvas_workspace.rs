@@ -991,3 +991,64 @@ fn a_connection_is_readable_from_the_accessibility_tree() {
         "after disconnecting, the port must report that it no longer connects to anything"
     );
 }
+
+#[test]
+fn a_file_opened_after_the_canvas_is_showing_appears_on_screen() {
+    // The case a first-frame test cannot reach.
+    //
+    // On the opening frame the view is computed to fit whatever exists, so every
+    // card is visible whatever the placement rules do. The defect is what
+    // happens *afterwards*: the view is saved, a file is opened, its card is
+    // laid out on the next free grid slot, and once the grid is full inside that
+    // view every free slot is outside it. The card is placed, saved, and
+    // nowhere -- with no minimap and no fit-to-content control to find it with.
+    let workspace = TempWorkspace::new("legion_desktop_canvas_late_open");
+    let names: Vec<String> = (0..9).map(|index| format!("file{index}.rs")).collect();
+    for name in &names {
+        workspace.write(name, "fn main() {}\n");
+    }
+
+    let mut app = open_app(workspace.path(), None);
+    let open_file = |app: &mut DesktopEframeApp, name: &str| {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        let row = clickable_center(&frame, name)
+            .unwrap_or_else(|| panic!("the explorer must offer {name} as a clickable row"));
+        let _ = click_at(app, row);
+    };
+
+    // Three files, then the canvas, which saves a view fitted to those three.
+    for name in names.iter().take(3) {
+        open_file(&mut app, name);
+    }
+    let canvas = show_canvas(&mut app);
+    assert!(
+        clickable_center(&canvas, "Card file0.rs").is_some(),
+        "the canvas must be showing before the rest are opened"
+    );
+
+    // The rest, opened while it is showing.
+    for name in names.iter().skip(3) {
+        open_file(&mut app, name);
+    }
+    let settled = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    // Inside the canvas region, not merely present in the tree.
+    //
+    // `clickable_center` answers from the accessibility tree, and egui publishes
+    // nodes for content the scene has scrolled past -- so asserting only that a
+    // card is *findable* passes for a card nobody can see, which is the whole
+    // defect.
+    let panel = app
+        .last_editor_rect_for_test()
+        .expect("the canvas must report the region it drew into");
+    for name in &names {
+        let centre = clickable_center(&settled, &format!("Card {name}"))
+            .unwrap_or_else(|| panic!("{name} is open and has no card at all"));
+        assert!(
+            panel.contains(centre),
+            "{name} was opened while the canvas was showing and its card sits at {centre:?}, \
+             outside the canvas region {panel:?}; a card that is placed, saved and off screen \
+             cannot be reached at all"
+        );
+    }
+}

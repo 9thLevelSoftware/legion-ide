@@ -22027,6 +22027,11 @@ pub struct TrustRecord {
     pub schema_version: u16,
 }
 
+/// Serde default for fields that are absent only in older records.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// Where one canvas node sits, and what it is a node of.
 ///
 /// Positions are adapter-local view state in the same category as explorer
@@ -22036,11 +22041,6 @@ pub struct TrustRecord {
 ///
 /// Keyed by canonical path rather than `BufferId`, because buffer ids are
 /// assigned per session and a layout that forgot its arrangement on every
-/// Serde default for fields that are absent only in older records.
-pub(crate) fn default_true() -> bool {
-    true
-}
-
 /// restart would not be a layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionCanvasNode {
