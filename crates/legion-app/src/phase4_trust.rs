@@ -276,6 +276,22 @@ impl Phase4ContextAssemblyService {
     }
 }
 
+/// Whether this operation sends the excerpt to a provider at all.
+///
+/// `Explain` is answered from metadata and returns through the metadata-only
+/// path before any provider call, so no excerpt leaves however the route is
+/// classified. Egress is a property of the pair, not of the route alone -- and
+/// once the class stopped lying, this was the remaining overstatement in the
+/// same set of projections.
+pub(crate) fn operation_uploads_the_excerpt(
+    operation_class: legion_protocol::AssistedAiOperationClass,
+) -> bool {
+    !matches!(
+        operation_class,
+        legion_protocol::AssistedAiOperationClass::Explain
+    )
+}
+
 /// Whether a route of this class carries the buffer excerpt off the machine.
 ///
 /// One predicate, because it is asked by the capability, by the context
@@ -494,6 +510,28 @@ pub(crate) fn phase4_permission_budget_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An operation that never calls a provider does not report an upload.
+    ///
+    /// `Explain` is answered from metadata and returns before any provider
+    /// call. Deriving egress from the route class alone described an upload
+    /// that never happened -- and once the class stopped lying, that was the
+    /// remaining overstatement in the same set of projections.
+    #[test]
+    fn an_operation_that_never_calls_a_provider_does_not_claim_egress() {
+        assert!(
+            !super::operation_uploads_the_excerpt(
+                legion_protocol::AssistedAiOperationClass::Explain
+            ),
+            "Explain returns through the metadata-only path, so nothing of the buffer leaves however the route is classified"
+        );
+        assert!(
+            super::operation_uploads_the_excerpt(
+                legion_protocol::AssistedAiOperationClass::ProposeEdit
+            ),
+            "a proposal really does send the excerpt, and must keep saying so"
+        );
+    }
 
     /// The manifest and the budget describe the route that will run.
     ///

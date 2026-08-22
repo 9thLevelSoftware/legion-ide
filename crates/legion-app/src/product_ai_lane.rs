@@ -66,6 +66,14 @@ pub(crate) struct PendingAssistProposalJob {
     pub(crate) route_id: String,
     pub(crate) operation_class: legion_protocol::AssistedAiOperationClass,
     pub(crate) provider_class: legion_protocol::AssistedAiProviderClass,
+    /// Whether the person had chosen a remote destination when this run started.
+    ///
+    /// Read from the live preference at completion, it changed under the run: a
+    /// picker switched to Ollama mid-stream turned an upload made under an
+    /// explicit Anthropic selection into a proposal reporting consent as
+    /// outstanding. The excerpt had already gone; the record has to describe the
+    /// decision that sent it.
+    pub(crate) consent_granted: bool,
     pub(crate) provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
     pub(crate) route_response: legion_protocol::AssistedAiProviderRouteResponse,
     pub(crate) context_manifest_projection: legion_protocol::ContextManifestProjection,

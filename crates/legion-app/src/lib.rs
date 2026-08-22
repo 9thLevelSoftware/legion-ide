@@ -24524,6 +24524,11 @@ impl AppComposition {
             // The class the route resolved, not one a caller supplied: this is
             // what the capability a reviewer reads is built from.
             provider_class: route_provider_class,
+            // The decision as it stood when the excerpt was sent.
+            consent_granted: matches!(
+                self.preferred_ai_provider,
+                ProductAiProviderPreference::Anthropic
+            ),
             provider_route_request: provider_route_request.clone(),
             route_response: route_response.clone(),
             context_manifest_projection: context_manifest_projection.clone(),
@@ -24713,6 +24718,7 @@ impl AppComposition {
             route_id,
             operation_class,
             provider_class,
+            consent_granted,
             provider_route_request,
             route_response,
             context_manifest_projection,
@@ -24742,12 +24748,12 @@ impl AppComposition {
             &context_manifest_projection,
             &run_id,
             generated_at,
-            provider_class_sends_the_buffer(provider_class),
-            // As above: chosen, not merely permitted.
-            matches!(
-                self.preferred_ai_provider,
-                ProductAiProviderPreference::Anthropic
-            ),
+            provider_class_sends_the_buffer(provider_class)
+                && operation_uploads_the_excerpt(operation_class),
+            // The decision recorded when this run started, not whatever the
+            // picker says now: the preference is still changeable while a
+            // request streams, and by here the excerpt has already gone.
+            consent_granted,
         );
         // Everything derived from the manifest, not just the budget.
         //
