@@ -24482,7 +24482,6 @@ impl AppComposition {
             provider_route_request: provider_route_request.clone(),
             route_response: route_response.clone(),
             context_manifest_projection: context_manifest_projection.clone(),
-            privacy_inspector_projection: privacy_inspector_projection.clone(),
             generated_at,
             event_context,
             principal: context.principal.clone(),
@@ -24671,7 +24670,6 @@ impl AppComposition {
             provider_route_request,
             route_response,
             context_manifest_projection,
-            privacy_inspector_projection,
             generated_at,
             event_context,
             principal,
@@ -24702,6 +24700,20 @@ impl AppComposition {
             // Reaching this point means the broker granted the invocation.
             true,
         );
+        // Everything derived from the manifest, not just the budget.
+        //
+        // The inspector is a projection of the manifest and carries its
+        // `proposal_id`; leaving the earlier one in place gave the checklist an
+        // inspector naming no proposal, which `privacy_gate` reports as
+        // `privacy_inspector.proposal_mismatch` -- a blocker on every proposal,
+        // including the local ones this linking has nothing to do with.
+        let privacy_inspector_projection =
+            legion_protocol::privacy_inspector_from_context_manifest_projection(
+                &context_manifest_projection,
+                format!("phase4:privacy:{}", run_id.0),
+                generated_at,
+                1,
+            );
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),
@@ -28916,13 +28928,20 @@ impl AppComposition {
         // which carries no route -- so it cannot tell a remote run from a local
         // one and assumes consent was never required. Preferring the stored
         // projections keeps the refusal a reviewer needs to see.
-        if let Some(stored) = self
+        // Route-specific data is kept; lifecycle-dependent projections are not.
+        //
+        // The manifest, inspector and budget describe *what the run did* and
+        // cannot be reconstructed from the proposal row -- that is why they are
+        // stored. The approval checklist and the checkpoint projection describe
+        // *where the proposal is now*, and returning the ones captured at
+        // `Created` left the checklist reporting `Created` and its lifecycle
+        // gate blocked while the ledger beside it showed the proposal approved,
+        // applied or cancelled.
+        let stored_trust = self
             .phase4_projection_state
             .phase4_trust_by_proposal
             .get(&selected_proposal_id)
-        {
-            return Some((**stored).clone());
-        }
+            .cloned();
         let proposal = self
             .proposal_coordinator
             .proposal_for_id(selected_proposal_id)?;
@@ -28982,6 +29001,26 @@ impl AppComposition {
                 generated_at,
                 1,
             );
+        // The run's own answers where it has them, the reconstruction
+        // otherwise -- decided here, because the checklist is built from these
+        // and a checklist reading the reconstruction while the caller receives
+        // the stored trio is two answers to one question.
+        let (
+            context_manifest_projection,
+            privacy_inspector_projection,
+            permission_budget_projection,
+        ) = match stored_trust {
+            Some(stored) => (
+                stored.context_manifest_projection,
+                stored.privacy_inspector_projection,
+                stored.permission_budget_projection,
+            ),
+            None => (
+                context_manifest_projection,
+                privacy_inspector_projection,
+                permission_budget_projection,
+            ),
+        };
         let approval_checklist_projection =
             legion_protocol::approval_checklist_from_trust_projections(
                 format!("proposal:{}:approval-details", selected_proposal_id.0),

@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(
             granted_budget.budgets[0].consent_requirement_label,
             legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
-            "a granted remote run still reports consent as outstanding, so its evaluation              refuses forever and after the fact"
+            "a granted remote run still reports consent as outstanding, so its evaluation refuses forever and after the fact"
         );
         assert!(
             granted_budget.budgets[0]

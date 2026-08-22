@@ -1043,6 +1043,73 @@ fn delegate_hunk_review_updates_projection_counts_and_rejects_unknown_hunk() {
     );
 }
 
+/// A proposal that has moved on says so, while keeping what its run recorded.
+///
+/// Storing the run's trust projections fixed the budget being discarded and
+/// created the opposite defect: the checklist and the checkpoint projection were
+/// captured at `Created` and served forever, so a proposal that had been
+/// approved or applied still reported `Created` with its lifecycle gate blocked
+/// -- next to a ledger row saying otherwise.
+#[test]
+fn a_proposal_that_moves_on_keeps_its_route_data_and_reports_its_state() {
+    let root = temp_workspace("assist_lifecycle_refresh");
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn marker() -> u32 {
+    42
+}
+",
+    )
+    .expect("fixture file should be written");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("assist-lifecycle".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file("lib.rs").expect("fixture file should open");
+    app.set_product_mode(AppProductMode::Assist);
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+
+    let outcome = app
+        .start_ai_proposal("add a guard")
+        .expect("the deterministic route must produce a proposal");
+    let proposal_id = outcome
+        .proposal_id
+        .expect("a completed proposal run must have a proposal id");
+
+    let created = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert_eq!(
+        created.approval_checklist_projection.lifecycle_state,
+        legion_protocol::ProposalLifecycleState::Created,
+        "the fixture must start at Created, or the assertion below proves nothing"
+    );
+
+    // Driven through the lifecycle seam rather than a UI path: what is under
+    // test is the projection following the ledger, not how it got there.
+    app.force_proposal_lifecycle_state_for_test(
+        proposal_id,
+        legion_protocol::ProposalLifecycleState::Approved,
+    );
+
+    let approved = app
+        .shell_projection_snapshot("Legion IDE")
+        .expect("the shell snapshot must build");
+    assert_ne!(
+        approved.approval_checklist_projection.lifecycle_state,
+        legion_protocol::ProposalLifecycleState::Created,
+        "the checklist still reports Created after approval, so its lifecycle gate stays blocked while the ledger says the proposal has moved on"
+    );
+    assert_eq!(
+        approved.permission_budget_projection.projection_id,
+        outcome.permission_budget_projection.projection_id,
+        "refreshing the lifecycle threw away the run's own budget, which is the defect storing it was meant to fix"
+    );
+}
+
 /// The projections a reviewer sees are the ones the run built.
 ///
 /// The selected-proposal path rebuilds trust projections from the proposal row,
@@ -1086,13 +1153,13 @@ fn the_selected_proposal_shows_the_projections_its_run_produced() {
     let evaluations = &rendered.permission_budget_projection.evaluations;
     assert!(
         !evaluations.is_empty(),
-        "the rendered budget carries no evaluation at all, so there is nothing for the          approval gate to read"
+        "the rendered budget carries no evaluation at all, so there is nothing for the approval gate to read"
     );
     assert!(
         evaluations
             .iter()
             .all(|evaluation| evaluation.action.proposal_id == Some(proposal_id)),
-        "the rendered budget was rebuilt without the proposal link the run established,          so any refusal in it is invisible to the approval gate: {evaluations:?}"
+        "the rendered budget was rebuilt without the proposal link the run established, so any refusal in it is invisible to the approval gate: {evaluations:?}"
     );
     assert_eq!(
         rendered.permission_budget_projection.projection_id,
@@ -1157,7 +1224,7 @@ fn a_delegate_turn_keeps_the_route_it_was_authorized_against() {
     assert_eq!(
         refused.invocation_state,
         legion_protocol::AssistedAiProviderInvocationState::Failed,
-        "a turn whose worker never started recorded its route as {:?}, while the          assistant message says no answer was produced",
+        "a turn whose worker never started recorded its route as {:?}, while the assistant message says no answer was produced",
         refused.invocation_state
     );
 
