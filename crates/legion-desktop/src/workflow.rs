@@ -3874,6 +3874,23 @@ pub struct DesktopEframeApp {
     /// and paint-complete timestamps each frame to produce p50/p95 latency
     /// summaries via [`FrameTimingRecorder::summary`].
     frame_timing: FrameTimingRecorder,
+    /// Which widget held the keyboard last frame, and whether Tab put it there.
+    ///
+    /// Withholding Enter and Space from the buffer is right for a control the
+    /// keyboard walked to and wrong for one that merely still holds focus after
+    /// a click or an overlay closing -- there a leading space is a character
+    /// somebody typed, and swallowing it loses the character *and* presses the
+    /// control. The two look identical in `Memory::focused`, which records where
+    /// focus is and not how it arrived.
+    focus_owner: Option<egui::Id>,
+    focus_arrived_by_tab: bool,
+    /// A navigation key seen but not yet reflected in `Memory::focused`.
+    ///
+    /// egui applies both Tab navigation and an AccessKit focus request at the
+    /// *end* of the pass that carried them, so the focus change is visible on
+    /// the following frame -- by which point the event that caused it is gone.
+    /// Latched here and spent on the next change.
+    focus_navigation_pending: bool,
 }
 
 impl DesktopEframeApp {
@@ -3882,6 +3899,9 @@ impl DesktopEframeApp {
         Self {
             runtime,
             ctx: egui::Context::default(),
+            focus_owner: None,
+            focus_arrived_by_tab: false,
+            focus_navigation_pending: false,
             frame_timing: FrameTimingRecorder::new(),
         }
     }
@@ -4166,8 +4186,34 @@ impl DesktopEframeApp {
         // A focused *text* control keeps its Enter: that is how the search field
         // retries a query and how any field submits. This is about controls that
         // are pressed rather than typed into.
+        //
+        // And *how* the keyboard got there, which `Memory::focused` does not
+        // say. Tab moved it: the next Enter or Space is aimed at that control.
+        // Anything else put it there -- a click, or an overlay restoring focus
+        // as it closed -- and the person may well be typing into the buffer, so
+        // a leading space is a character and not a press. Withholding it there
+        // loses the character *and* presses the control.
+        // Tab, or an assistive technology asking for a control by name. Both are
+        // somebody navigating to it; a click and a closing overlay are not.
+        if input.key_pressed(egui::Key::Tab)
+            || input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::AccessKitActionRequest(request)
+                        if request.action == egui::accesskit::Action::Focus
+                )
+            })
+        {
+            self.focus_navigation_pending = true;
+        }
+        let focused_now = ui.memory(|memory| memory.focused());
+        if focused_now != self.focus_owner {
+            self.focus_arrived_by_tab = focused_now.is_some() && self.focus_navigation_pending;
+            self.focus_owner = focused_now;
+            self.focus_navigation_pending = false;
+        }
         let mut pressable_control_focused =
-            ui.memory(|memory| memory.focused().is_some()) && !ui.ctx().text_edit_focused();
+            focused_now.is_some() && !ui.ctx().text_edit_focused() && self.focus_arrived_by_tab;
 
         // Typing into the editor takes the keyboard back from a stale button.
         //
@@ -4180,11 +4226,23 @@ impl DesktopEframeApp {
         // A typed character that is not itself the activation key says plainly
         // which surface the keyboard belongs to, so the button gives it up and
         // this frame passes through untouched.
-        if pressable_control_focused
-            && input
-                .events
-                .iter()
-                .any(|event| matches!(event, egui::Event::Text(text) if text != " "))
+        // Typing where the keyboard was left behind takes it back.
+        //
+        // Focus that arrived by click or by an overlay closing is focus nobody
+        // aimed, and text arriving means the person is working in the buffer --
+        // *including* a space, which is why this is a separate condition from
+        // the one above. Surrendering it here is what stops the same space
+        // pressing the control it was typed past.
+        let stale_control_focused =
+            focused_now.is_some() && !ui.ctx().text_edit_focused() && !self.focus_arrived_by_tab;
+        if (pressable_control_focused || stale_control_focused)
+            && input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Text(text)
+                        if pressable_control_focused && text != " " || stale_control_focused
+                )
+            })
         {
             if let Some(focused) = ui.memory(|memory| memory.focused()) {
                 ui.memory_mut(|memory| memory.surrender_focus(focused));
