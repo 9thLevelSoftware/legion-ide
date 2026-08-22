@@ -7104,15 +7104,25 @@ fn render_diagnostics_panel(ui: &mut egui::Ui, model: &DesktopProjectionViewMode
     });
 }
 
-/// Renders per-diagnostic problem rows as clickable labels (D3, T4).
+/// Renders per-diagnostic problem rows as selectable rows (D3, T4).
 ///
 /// Each row shows `severity path:line message`. Clicking opens the file at
 /// the problem's start line via `DesktopAction::NavigateToProblem`.
-/// Problems without a path or range render as non-clickable text.
+/// A problem with no path renders as plain text, because a row that cannot
+/// say where the problem is has nowhere to send a click.
 ///
-/// The row at `selected_index` is highlighted as the keyboard-focused row (T4).
-/// Focus is reached via tab-traversal; `ProblemNext`/`ProblemPrev`/`ProblemActivate`
-/// move selection and trigger navigation.
+/// The row at `selected_index` is the keyboard-focused row (T4);
+/// `ProblemNext`/`ProblemPrev`/`ProblemActivate` move selection and navigate.
+///
+/// Rendered with `selectable_label` and a real selected state rather than a
+/// click-sensed `Label` carrying a chevron in its text. egui publishes a plain
+/// label as static text: no `Action::Click`, no focus. Every row in this panel
+/// therefore reached assistive technology -- and anything else reading the
+/// accessibility tree -- as a sentence that could not be activated, while the
+/// mouse opened the file perfectly. Selection had the same shape of problem: a
+/// glyph glued to the front of the string is invisible to anything that asks a
+/// control whether it is selected, and it left every unselected row's name
+/// beginning with two spaces.
 fn render_problem_rows(
     ui: &mut egui::Ui,
     snapshot: &ShellProjectionSnapshot,
@@ -7130,30 +7140,45 @@ fn render_problem_rows(
             .path
             .as_ref()
             .map(|path| {
+                // `display_path`, not the canonical path: on Windows every one
+                // of these carries the \\\\?\\ extended-length prefix, which the
+                // breadcrumb and status bar already strip and this row did not
+                // -- so the panel named the file in a shape no reader has ever
+                // typed.
+                let shown = crate::path_display::display_path(&path.0);
                 if let Some(range) = &problem.range {
-                    format!("{}:{}", path.0, range.start.line)
+                    format!("{}:{}", shown, range.start.line)
                 } else {
-                    path.0.clone()
+                    shown.into_owned()
                 }
             })
             .unwrap_or_else(|| "<unknown>".to_string());
-        let raw_label = trim_middle(
+        let label = trim_middle(
             &format!("{:?} {} {}", problem.severity, location, problem.message),
             110,
         );
-        // T4: prefix the keyboard-focused row with a focus indicator.
-        let label = if i == selected_index {
-            format!("› {raw_label}")
-        } else {
-            format!("  {raw_label}")
-        };
-        // Only show clickable link if we have a path; otherwise plain text.
+        // Only clickable when the problem says where it is.
         if let (Some(path), nav_line) = (
             problem.path.as_ref().map(|p| p.0.clone()),
             problem.range.as_ref().map(|r| r.start.line).unwrap_or(0),
         ) {
-            let response =
-                ui.add(egui::Label::new(theme::body(&label)).sense(egui::Sense::click()));
+            let response = ui.selectable_label(i == selected_index, theme::body(&label));
+            // Publish the selection, because egui 0.34 does not.
+            //
+            // `selectable_label` is `Button::selectable` here, and `Button`
+            // reports itself with `WidgetInfo::labeled` -- the label and the
+            // enabled flag, and nothing about being selected. So the row would
+            // have been clickable and still unable to say which one the
+            // keyboard is on, which is half of what the chevron was doing
+            // badly. Restating the info stamps the state onto the same node.
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    ui.is_enabled(),
+                    i == selected_index,
+                    &label,
+                )
+            });
             if response.clicked() {
                 actions.push(DesktopAction::NavigateToProblem {
                     path,

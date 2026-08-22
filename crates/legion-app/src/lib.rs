@@ -6616,15 +6616,7 @@ impl LanguageToolingWorkflow {
             && self.projection.buffer_id == Some(input.buffer_id)
             && self.projection.file_id == Some(input.metadata.identity.file_id);
         if !same_identity {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            self.projection = projection;
+            self.projection = language_projection_for_new_identity(&self.projection);
         }
 
         self.projection.workspace_id = Some(input.workspace_id);
@@ -6707,15 +6699,7 @@ impl LanguageToolingWorkflow {
         let mut projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(&self.projection)
         };
 
         projection.workspace_id = Some(input.workspace_id);
@@ -6786,15 +6770,7 @@ impl LanguageToolingWorkflow {
         let previous_projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(&self.projection)
         };
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let document = SourceDocument::with_versions(
@@ -6867,6 +6843,36 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
+        // Merge into the panel rather than replace it.
+        //
+        // This assignment used to hand `problems` straight to the projection,
+        // so the index leg's answer became the entire Problems panel. The leg
+        // runs on hover and completion, it only ever produces rows for the
+        // buffer being read, and it produces none at all when the index has
+        // nothing to say -- so a single hover replaced every LSP diagnostic in
+        // the workspace with an empty list, and nothing republished them until
+        // that file's server spoke again. The panel simply emptied while the
+        // errors were still in the code.
+        //
+        // `ingest_lsp_diagnostics` already states the rule for a shared
+        // multi-file list: replace only the rows this producer owns for this
+        // file, and leave everything else alone. This is the same rule read
+        // from the other side.
+        let mut problems = {
+            let mut merged = previous_projection.problems.clone();
+            merged.retain(|existing| {
+                existing.source_label.as_deref() != Some("legion-index")
+                    || existing.file_id != Some(input.metadata.identity.file_id)
+            });
+            merged.extend(problems);
+            merged
+        };
+        problems.sort_by_key(|problem| {
+            (
+                problem.file_id.map(|file| file.0),
+                problem.range.map(|range| range.start.line),
+            )
+        });
         let quick_fixes = language_quick_fixes_for_problems(&problems);
         let locations = response
             .results
@@ -8529,6 +8535,38 @@ fn language_quick_fixes_for_problems(
             }
         })
         .collect()
+}
+
+/// The projection a language read builds on when it names a different buffer.
+///
+/// Everything the previous buffer's reads produced is dropped -- its hover, its
+/// completions, its outline, its call hierarchy -- because none of it describes
+/// the buffer this result is about, and showing one file's outline against
+/// another is worse than showing none.
+///
+/// `problems` is the exception, and deliberately so. The Problems panel is a
+/// workspace-wide list: `ingest_lsp_diagnostics` curates it that way, retaining
+/// every row that belongs to a *different* file and replacing only the rows for
+/// the file whose diagnostics just arrived. Dropping the list here contradicted
+/// that directly -- a single hover emptied the panel of every diagnostic in the
+/// workspace, including the ones the hover had nothing to do with, and nothing
+/// republished them until the server happened to send that file's diagnostics
+/// again. Quick fixes are rebuilt from the rows that survive, because a fix
+/// offered for a problem that is no longer listed is an action with no subject.
+fn language_projection_for_new_identity(
+    previous: &LanguageToolingProjection,
+) -> LanguageToolingProjection {
+    let mut projection = LanguageToolingProjection::empty();
+    projection.operations = previous.operations.clone();
+    projection.cancellation_count = previous.cancellation_count;
+    projection.stale_result_count = if previous.buffer_id.is_some() {
+        previous.stale_result_count.saturating_add(1)
+    } else {
+        previous.stale_result_count
+    };
+    projection.problems = previous.problems.clone();
+    projection.quick_fixes = language_quick_fixes_for_problems(&projection.problems);
+    projection
 }
 
 fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
