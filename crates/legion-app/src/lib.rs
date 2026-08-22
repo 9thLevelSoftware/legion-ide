@@ -15120,6 +15120,21 @@ impl AppComposition {
                     // a finished turn would read as permanently in flight.
                     self.forget_queued_route_audit(&route.run_id, &route.route_id);
                 }
+                // And the projection the transcript reads, which holds the same
+                // fact in a second place.
+                //
+                // The durable record answers an auditor later; this answers the
+                // person looking at the reply now, and it was left saying
+                // `Streaming` for good once the worker finished. Two copies of
+                // one answer is why they are written together.
+                if let Some(projected) = self
+                    .delegate_workflow
+                    .provider_routes
+                    .iter_mut()
+                    .find(|projected| projected.route_id == route.route_id)
+                {
+                    projected.invocation_state = state;
+                }
                 changed = true;
             }
             if let Some(stream) = result.stream {
@@ -36255,7 +36270,7 @@ mod pkt_worker_tests {
         assert_eq!(
             queued.len(),
             1,
-            "two records for one run write to the same audit id, so the older one is a              stale answer waiting to overwrite the newer: {queued:?}"
+            "two records for one run write to the same audit id, so the older one is a stale answer waiting to overwrite the newer: {queued:?}"
         );
         assert_eq!(
             queued[0].state,

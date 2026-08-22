@@ -317,7 +317,7 @@ fn the_delegate_transcript_names_the_route_its_turn_used() {
     let text = rendered_text(&after);
     assert!(
         text.iter().any(|line| line.starts_with("Route: ")),
-        "the transcript shows no route for the turn that just ran, so nothing on screen          says where the excerpt went; frame was {text:?}"
+        "the transcript shows no route for the turn that just ran, so nothing on screen says where the excerpt went; frame was {text:?}"
     );
 }
 

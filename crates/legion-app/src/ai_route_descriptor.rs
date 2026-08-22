@@ -465,7 +465,7 @@ mod delegate_chat_route_honesty_tests {
             let client = super::enforce_https_for_remote(base);
             assert!(
                 client.starts_with("https://"),
-                "{base} reached the client as {client}, which is not the route policy                  authorized"
+                "{base} reached the client as {client}, which is not the route policy authorized"
             );
             let target = super::network_target_from_base_url(base, "api.anthropic.com");
             assert_eq!(
