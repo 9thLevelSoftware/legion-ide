@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(
             remote_permission.privacy_scope,
             legion_protocol::SemanticPrivacyScope::File,
-            "the excerpt itself is file-scoped, and calling it metadata-only is the              claim this fix removes"
+            "the excerpt itself is file-scoped, and calling it metadata-only is the claim this fix removes"
         );
         assert_eq!(
             remote_permission.egress,

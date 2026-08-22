@@ -1757,8 +1757,17 @@ fn ollama_loopback_reachable() -> bool {
     // reached on port 80 -- so a configured deployment could be probed at an
     // address the request never used.
     let target = crate::ai_route_descriptor::ollama_network_target();
-    let host_port = format!("{}:{}", target.host, target.port.unwrap_or(11434));
-    let Ok(addrs) = host_port.to_socket_addrs() else {
+    // A tuple, not a formatted string.
+    //
+    // The host is stored the way a policy list writes it, so an IPv6 loopback is
+    // `::1` -- and formatting `{host}:{port}` turns that into `::1:11434`, which
+    // `ToSocketAddrs` cannot split into a host and a port. The probe then
+    // reported a running Ollama as unreachable and both `Ollama` and `Auto` fell
+    // through to the deterministic provider. A tuple takes the host and the port
+    // as the separate things they are, so no bracket convention has to be
+    // reintroduced here to undo one applied elsewhere.
+    let port = target.port.unwrap_or(11434);
+    let Ok(addrs) = (target.host.as_str(), port).to_socket_addrs() else {
         return false;
     };
 

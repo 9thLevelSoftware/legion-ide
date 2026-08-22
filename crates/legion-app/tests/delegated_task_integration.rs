@@ -1176,7 +1176,7 @@ fn delegate_chat_projects_rag_citations_without_raw_source_payload() {
     let root = temp_workspace("chat");
     fs::write(
         root.join("lib.rs"),
-        "pub fn delegated_marker() -> u32 {\n 42\n}\n",
+        "pub fn delegated_marker() -> u32 {\n    42\n}\n",
     )
     .expect("fixture file should be written");
     let mut app = AppComposition::new();
