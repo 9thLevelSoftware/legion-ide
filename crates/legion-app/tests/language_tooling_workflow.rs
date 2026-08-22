@@ -666,3 +666,587 @@ fn language_tooling_projects_inlay_hints_and_code_lenses_from_symbols() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Diagnostics belong to the workspace they were reported in.
+///
+/// The Problems panel is a workspace-wide list, so a language read that names a
+/// different *buffer* keeps the rows for every other file. A different
+/// *workspace* is not the same thing: opening B keeps the same
+/// `LanguageToolingWorkflow`, so B's first read arrives holding A's rows, and a
+/// problem row records no workspace of its own -- nothing downstream could ever
+/// retire them, and clicking one would send the reader at a path outside the
+/// workspace they are in.
+#[test]
+fn problems_do_not_follow_the_reader_into_another_workspace() {
+    let first_root = create_root();
+    let decoy = first_root.join("decoy.rs");
+    let first_file = first_root.join("first.rs");
+    std::fs::write(&decoy, "fn decoy() {}\n").expect("write decoy source file");
+    std::fs::write(&first_file, "fn main() {}\n").expect("write first source file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &first_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open first workspace");
+    // Open a decoy first so `first.rs` is not assigned the same `FileId` that
+    // workspace B's single file will get. File identity is allocated per
+    // workspace and starts over, so without this the two files collide and
+    // `ingest_lsp_diagnostics` retires the stale row by accident -- which
+    // looks exactly like the guard working and is not.
+    app.open_file(decoy.to_string_lossy())
+        .expect("open decoy source file");
+    app.open_file(first_file.to_string_lossy())
+        .expect("open first source file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+
+    let payload = json!({
+        "uri": "file:///workspace/first.rs",
+        "diagnostics": [{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 2}
+            },
+            "severity": 1,
+            "code": "E0001",
+            "source": "rustc",
+            "message": "a problem in the first workspace"
+        }]
+    });
+    let projected = app
+        .ingest_lsp_publish_diagnostics_for_buffer(buffer_id, &payload, true, None)
+        .expect("ingest diagnostics for the first workspace");
+    assert!(
+        projected
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0001")),
+        "the first workspace's diagnostic must be listed before the switch"
+    );
+
+    // Open a second workspace and read in it, which is what reaches the
+    // identity reset holding the first workspace's rows.
+    let second_root = create_root();
+    let second_file = second_root.join("second.rs");
+    std::fs::write(&second_file, "fn other() {}\n").expect("write second source file");
+    app.open_workspace(
+        &second_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open second workspace");
+    app.open_file(second_file.to_string_lossy())
+        .expect("open second source file");
+    let second_buffer = app.active_buffer_id().expect("second active buffer");
+
+    let cleared = json!({
+        "uri": "file:///workspace/second.rs",
+        "diagnostics": []
+    });
+    let after = app
+        .ingest_lsp_publish_diagnostics_for_buffer(second_buffer, &cleared, true, None)
+        .expect("ingest diagnostics for the second workspace");
+
+    assert!(
+        !after
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0001")),
+        "a diagnostic from another workspace must not be listed here -- nothing \
+         downstream can retire it and its path leads outside this workspace; got {:?}",
+        after
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&first_root).ok();
+    std::fs::remove_dir_all(&second_root).ok();
+}
+
+/// Within one workspace, a read for another buffer keeps the other file's rows.
+///
+/// The other half of the same rule, and the one the panel depends on: the
+/// Problems list spans the workspace, so reading in `b.rs` must not retire the
+/// diagnostics reported against `a.rs`.
+#[test]
+fn problems_for_one_file_survive_a_read_in_another_file() {
+    let root = create_root();
+    let first = root.join("a.rs");
+    let second = root.join("b.rs");
+    std::fs::write(&first, "fn a() {}\n").expect("write a.rs");
+    std::fs::write(&second, "fn b() {}\n").expect("write b.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(first.to_string_lossy()).expect("open a.rs");
+    let first_buffer = app.active_buffer_id().expect("a.rs buffer");
+
+    let payload = json!({
+        "uri": "file:///workspace/a.rs",
+        "diagnostics": [{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 2}
+            },
+            "severity": 1,
+            "code": "E0002",
+            "source": "rustc",
+            "message": "a problem in a.rs"
+        }]
+    });
+    app.ingest_lsp_publish_diagnostics_for_buffer(first_buffer, &payload, true, None)
+        .expect("ingest diagnostics for a.rs");
+
+    app.open_file(second.to_string_lossy()).expect("open b.rs");
+    let second_buffer = app.active_buffer_id().expect("b.rs buffer");
+    let cleared = json!({
+        "uri": "file:///workspace/b.rs",
+        "diagnostics": []
+    });
+    let after = app
+        .ingest_lsp_publish_diagnostics_for_buffer(second_buffer, &cleared, true, None)
+        .expect("ingest diagnostics for b.rs");
+
+    assert!(
+        after
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0002")),
+        "a.rs's diagnostic must survive a read in b.rs -- the Problems panel is \
+         a workspace-wide list, not a view of the active buffer; got {:?}",
+        after
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// An index-owned row does not outlive the read that made it.
+///
+/// LSP rows may sit in the panel while their file is closed, because the server
+/// that published them publishes an empty list for the same file when they go
+/// away. Index rows have no such producer: they are computed as a by-product of
+/// reading a buffer, nothing retracts them, and neither closing a tab nor
+/// deleting or renaming the file clears them. Retained workspace-wide they
+/// would leave the panel offering to navigate to paths that no longer exist.
+#[test]
+fn index_problems_do_not_survive_a_read_in_another_file() {
+    let root = create_root();
+    let first = root.join("todo.rs");
+    let second = root.join("plain.rs");
+    // A `TODO` is what the lexical index leg reports on, so reading this file
+    // puts a `legion-index` row in the projection without any server.
+    std::fs::write(&first, "// TODO: fix this\nfn a() {}\n").expect("write todo.rs");
+    std::fs::write(&second, "fn b() {}\n").expect("write plain.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(first.to_string_lossy())
+        .expect("open todo.rs");
+    let first_buffer = app.active_buffer_id().expect("todo.rs buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: first_buffer,
+    })
+    .expect("read todo.rs");
+
+    let index_rows = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .filter(|problem| problem.source_label.as_deref() == Some("legion-index"))
+            .count()
+    };
+    assert!(
+        index_rows(&app) > 0,
+        "reading todo.rs should produce at least one index-owned row to test with"
+    );
+
+    app.open_file(second.to_string_lossy())
+        .expect("open plain.rs");
+    let second_buffer = app.active_buffer_id().expect("plain.rs buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: second_buffer,
+    })
+    .expect("read plain.rs");
+
+    assert_eq!(
+        index_rows(&app),
+        0,
+        "todo.rs's index row must not outlive the read that made it -- nothing \
+         retracts it, so a row kept here can never leave the panel; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| (problem.source_label.clone(), problem.code_label.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The file being edited keeps its quick fixes when the workspace is crowded.
+///
+/// `language_quick_fixes_for_problems` takes the first 50 rows. While the read
+/// leg only ever saw the buffer it was reading, that cap was about one file.
+/// Feeding it the workspace-wide list changed what the cap cuts, and the rows
+/// for the file under the cursor are the ones appended last -- so a workspace
+/// already carrying 50 problems would lose every fix for the file actually
+/// being worked on.
+#[test]
+fn quick_fixes_survive_for_the_file_being_read_in_a_crowded_workspace() {
+    let root = create_root();
+    let crowded = root.join("crowded.rs");
+    let target = root.join("target.rs");
+    std::fs::write(&crowded, "fn crowded() {}\n").expect("write crowded.rs");
+    std::fs::write(&target, "// TODO: fix this\nfn target() {}\n").expect("write target.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(crowded.to_string_lossy())
+        .expect("open crowded.rs");
+    let crowded_buffer = app.active_buffer_id().expect("crowded.rs buffer");
+
+    // Sixty LSP diagnostics against a file that is not the one being read, so
+    // the cap is already exhausted before the active file's rows are reached.
+    let diagnostics: Vec<serde_json::Value> = (0..60)
+        .map(|line| {
+            json!({
+                "range": {
+                    "start": {"line": line, "character": 0},
+                    "end": {"line": line, "character": 1}
+                },
+                "severity": 1,
+                "code": format!("E9{line:03}"),
+                "source": "rustc",
+                "message": "a crowding diagnostic"
+            })
+        })
+        .collect();
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        crowded_buffer,
+        &json!({"uri": "file:///workspace/crowded.rs", "diagnostics": diagnostics}),
+        true,
+        None,
+    )
+    .expect("ingest crowding diagnostics");
+
+    app.open_file(target.to_string_lossy())
+        .expect("open target.rs");
+    let target_buffer = app.active_buffer_id().expect("target.rs buffer");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline {
+        buffer_id: target_buffer,
+    })
+    .expect("read target.rs");
+
+    let projection = app.language_tooling_projection();
+    let active_file = projection.file_id.expect("the read sets the active file");
+    let active_rows: Vec<_> = projection
+        .problems
+        .iter()
+        .filter(|problem| problem.file_id == Some(active_file))
+        .collect();
+    assert!(
+        !active_rows.is_empty(),
+        "reading target.rs should produce at least one row for it to test with"
+    );
+    assert!(
+        projection.quick_fixes.iter().any(|fix| {
+            active_rows
+                .iter()
+                .any(|problem| problem.code_label == fix.problem_code_label)
+        }),
+        "the file being read must keep its quick fixes past the cap -- it is the \
+         one file whose fixes the reader can act on; got {} fixes for {} problems",
+        projection.quick_fixes.len(),
+        projection.problems.len()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Opening a workspace empties the panel, without waiting to be asked.
+///
+/// Binding the carried problems to a matching workspace is necessary and not
+/// sufficient: that check only runs when something requests a read or a server
+/// publishes, and opening a workspace does neither. A workspace with no
+/// language server, or one nobody has opened a file in yet, would go on showing
+/// the previous workspace's Problems panel -- listing paths outside itself, and
+/// navigating to them on click -- for as long as it stayed quiet.
+#[test]
+fn opening_a_workspace_empties_the_problems_panel_immediately() {
+    let first_root = create_root();
+    let first_file = first_root.join("first.rs");
+    std::fs::write(&first_file, "fn main() {}\n").expect("write first source file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &first_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open first workspace");
+    app.open_file(first_file.to_string_lossy())
+        .expect("open first source file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        buffer_id,
+        &json!({
+            "uri": "file:///workspace/first.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0003",
+                "source": "rustc",
+                "message": "a problem in the first workspace"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for the first workspace");
+    assert!(
+        !app.language_tooling_projection().problems.is_empty(),
+        "the first workspace must have a problem for the switch to strand"
+    );
+
+    // The switch alone, with no read and no file opened afterwards. This is the
+    // quiet workspace the panel used to lie to.
+    let second_root = create_root();
+    app.open_workspace(
+        &second_root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open second workspace");
+
+    assert!(
+        app.language_tooling_projection().problems.is_empty(),
+        "opening a workspace must empty the panel there and then -- waiting for \
+         a read means a quiet workspace shows the previous one's problems \
+         indefinitely; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&first_root).ok();
+    std::fs::remove_dir_all(&second_root).ok();
+}
+
+/// A replaced index row does not move the rows beneath it.
+///
+/// The Problems panel holds its keyboard selection as a bare index into this
+/// list. Dropping the active file's index rows and pushing their replacements
+/// onto the end shifts every row that followed them, so a selection resting
+/// below silently comes to rest on a different diagnostic and the next
+/// activation opens somewhere the reader never chose.
+///
+/// The order matters for this to bite: the index rows have to be *ahead* of
+/// something. Reading a file puts its index rows in first, and the server's
+/// diagnostics for the same file land behind them -- which is the arrangement
+/// a real session produces, since the read is synchronous and the publish
+/// arrives later.
+#[test]
+fn replacing_index_rows_leaves_the_other_rows_where_they_were() {
+    let root = create_root();
+    let todo = root.join("todo.rs");
+    std::fs::write(&todo, "// TODO: fix this\nfn a() {}\n").expect("write todo.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(todo.to_string_lossy()).expect("open todo.rs");
+    let buffer_id = app.active_buffer_id().expect("todo.rs buffer");
+
+    // The read first, so its index rows sit ahead of what follows.
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline { buffer_id })
+        .expect("first read of todo.rs");
+    assert!(
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .any(|problem| problem.source_label.as_deref() == Some("legion-index")),
+        "reading todo.rs should produce an index row to displace"
+    );
+
+    // Then the server's diagnostic for the same file, which lands behind it.
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        buffer_id,
+        &json!({
+            "uri": "file:///workspace/todo.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0004",
+                "source": "rustc",
+                "message": "a server diagnostic for todo.rs"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for todo.rs");
+
+    let position_of_server_row = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .position(|problem| problem.code_label.as_deref() == Some("E0004"))
+    };
+    let before = position_of_server_row(&app).expect("the server row must be listed");
+    assert!(
+        before > 0,
+        "the server row must sit behind an index row for this test to mean \
+         anything; list is {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.source_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Reading again replaces the index rows. That is the operation that used
+    // to shift everything below them.
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshOutline { buffer_id })
+        .expect("second read of todo.rs");
+
+    assert_eq!(
+        position_of_server_row(&app),
+        Some(before),
+        "replacing the index rows must not move the row behind them -- the \
+         panel's selection is a position in this list, so a row that shifts \
+         under it opens a diagnostic nobody chose; list is now {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| (problem.source_label.clone(), problem.code_label.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A closed file's diagnostics leave the panel with it.
+///
+/// A server publishes for open buffers, and `ingest_lsp_diagnostic_batch` drops
+/// every notification -- a clear included -- for a path with no open buffer. So
+/// once a file is closed its rows can never be updated or withdrawn by anyone.
+/// Carried forward regardless they outlive deletes and renames too, and the
+/// panel goes on listing, and offering to navigate to, a path that is gone.
+///
+/// This is the counterpart to the workspace rule: a row is worth keeping only
+/// while something can still retire it.
+#[test]
+fn problems_for_a_closed_file_leave_the_panel() {
+    let root = create_root();
+    let closing = root.join("closing.rs");
+    let staying = root.join("staying.rs");
+    std::fs::write(&closing, "fn closing() {}\n").expect("write closing.rs");
+    std::fs::write(&staying, "fn staying() {}\n").expect("write staying.rs");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+
+    app.open_file(closing.to_string_lossy())
+        .expect("open closing.rs");
+    let closing_buffer = app.active_buffer_id().expect("closing.rs buffer");
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        closing_buffer,
+        &json!({
+            "uri": "file:///workspace/closing.rs",
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 2}
+                },
+                "severity": 1,
+                "code": "E0005",
+                "source": "rustc",
+                "message": "a problem in closing.rs"
+            }]
+        }),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for closing.rs");
+
+    app.open_file(staying.to_string_lossy())
+        .expect("open staying.rs");
+    let staying_buffer = app.active_buffer_id().expect("staying.rs buffer");
+
+    let lists_closing = |app: &AppComposition| {
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .any(|problem| problem.code_label.as_deref() == Some("E0005"))
+    };
+    assert!(
+        lists_closing(&app),
+        "closing.rs's diagnostic must be listed while its buffer is open -- the \
+         panel spans open files and that is the rule this must not break"
+    );
+
+    app.close_tab(closing_buffer).expect("close closing.rs");
+
+    // Any read republishes the carried rows, which is where the rule applies.
+    app.ingest_lsp_publish_diagnostics_for_buffer(
+        staying_buffer,
+        &json!({"uri": "file:///workspace/staying.rs", "diagnostics": []}),
+        true,
+        None,
+    )
+    .expect("ingest diagnostics for staying.rs");
+
+    assert!(
+        !lists_closing(&app),
+        "a closed file's rows must leave -- nothing can update or withdraw them \
+         any more, so they outlive deletes and renames and send the reader at a \
+         path that may not exist; got {:?}",
+        app.language_tooling_projection()
+            .problems
+            .iter()
+            .map(|problem| problem.code_label.clone())
+            .collect::<Vec<_>>()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

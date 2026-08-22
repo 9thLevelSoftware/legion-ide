@@ -34,6 +34,7 @@ pub mod offline_ai;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
+use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
 
 pub mod terminal_policy;
 
@@ -209,19 +210,19 @@ use legion_protocol::{
     InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
-    LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
-    LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
-    LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
-    LegionCloudLaneTaskId, LegionCloudLaneTaskRequest, LegionCloudLaneTaskState,
-    LegionCloudLaneTaskStatus, LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult,
-    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
-    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
-    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
-    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
-    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
-    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
-    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
-    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LanguageProblemProjection, LanguageStickyScopeProjection, LanguageToolingOperationKind,
+    LanguageToolingOperationProjection, LanguageToolingProjection, LanguageToolingStatusKind,
+    LegionCloudLaneProjection, LegionCloudLaneProjectionRow, LegionCloudLaneTaskId,
+    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
+    LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult, LegionWorkflowConflictId,
+    LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
+    LegionWorkflowDecisionKind, LegionWorkflowDependencyState, LegionWorkflowKillSwitch,
+    LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval,
+    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState, LegionWorkflowProjection,
+    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
+    LegionWorkflowRiskMonitorState, LegionWorkflowSession, LegionWorkflowSessionId,
+    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
+    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
     LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
     McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
@@ -6409,6 +6410,23 @@ impl ActiveDocumentController {
         None
     }
 
+    /// Every file with an open buffer right now.
+    ///
+    /// The active buffer is included explicitly rather than assumed to be in
+    /// the map, mirroring `buffer_id_for_path`, which checks it first for the
+    /// same reason.
+    fn open_file_ids(&self) -> std::collections::HashSet<FileId> {
+        let mut ids: std::collections::HashSet<FileId> = self
+            .buffer_file_metadata
+            .values()
+            .map(|meta| meta.identity.file_id)
+            .collect();
+        if let Some(meta) = &self.active_file_metadata {
+            ids.insert(meta.identity.file_id);
+        }
+        ids
+    }
+
     fn require_workspace_context(&self) -> Result<ActiveWorkspaceContext, AppCompositionError> {
         let opened = self
             .opened_workspace
@@ -6484,6 +6502,19 @@ struct LanguageRequestInput {
     snapshot_id: legion_protocol::SnapshotId,
     buffer_version: legion_protocol::BufferVersion,
     event_context: EventContext,
+    /// Files with an open buffer at the moment this request was built.
+    ///
+    /// The Problems panel carries rows forward across reads, and a row is only
+    /// worth carrying while something can still retire it. A server publishes
+    /// diagnostics for open buffers and `ingest_lsp_diagnostic_batch` drops any
+    /// notification -- including a clear -- for a path with no open buffer, so
+    /// once a file is closed its rows can never be updated or withdrawn. Held
+    /// past that point they outlive deletes and renames too, and the panel goes
+    /// on offering to navigate to a path that is gone.
+    ///
+    /// The workflow that carries the rows has no view of open documents, so the
+    /// set travels with the request that reaches it.
+    open_files: std::collections::HashSet<FileId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6565,6 +6596,23 @@ impl Default for LanguageToolingWorkflow {
 }
 
 impl LanguageToolingWorkflow {
+    /// Drop everything scoped to the workspace being left.
+    ///
+    /// The ingest paths bound their carried-forward problems to a matching
+    /// workspace, which is necessary and not sufficient: that check only runs
+    /// when something asks for a read or a server publishes, and opening a
+    /// workspace starts neither. A workspace with no language server, or one
+    /// nobody has opened a file in yet, would keep showing the previous
+    /// workspace's Problems panel -- listing paths outside itself, and
+    /// navigating to them on click -- for as long as it stayed quiet.
+    ///
+    /// The switch itself is the moment that is certain to happen, so the reset
+    /// belongs here, alongside the debug, prediction and palette state that is
+    /// cleared for the same reason.
+    fn clear_workspace_state(&mut self) {
+        self.projection = LanguageToolingProjection::empty();
+    }
+
     fn projection(&self) -> LanguageToolingProjection {
         self.projection.clone()
     }
@@ -6616,15 +6664,12 @@ impl LanguageToolingWorkflow {
             && self.projection.buffer_id == Some(input.buffer_id)
             && self.projection.file_id == Some(input.metadata.identity.file_id);
         if !same_identity {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            self.projection = projection;
+            self.projection = language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            );
         }
 
         self.projection.workspace_id = Some(input.workspace_id);
@@ -6656,7 +6701,14 @@ impl LanguageToolingWorkflow {
             problem.redaction_hints.dedup();
         }
         self.projection.problems.extend(problems);
-        self.projection.quick_fixes = language_quick_fixes_for_problems(&self.projection.problems);
+        // Prioritised here too. The read leg already did this; the diagnostics
+        // leg rebuilding fixes from the raw list meant a file whose problems
+        // had just arrived could be listed with no fixes at all, whenever
+        // another file was already holding the cap.
+        self.projection.quick_fixes = language_quick_fixes_prioritizing(
+            &self.projection.problems,
+            input.metadata.identity.file_id,
+        );
         let operation_id = self.next_operation_id(LanguageToolingOperationKind::Diagnostics);
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -6707,15 +6759,12 @@ impl LanguageToolingWorkflow {
         let mut projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
 
         projection.workspace_id = Some(input.workspace_id);
@@ -6786,15 +6835,12 @@ impl LanguageToolingWorkflow {
         let previous_projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let document = SourceDocument::with_versions(
@@ -6867,7 +6913,113 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
-        let quick_fixes = language_quick_fixes_for_problems(&problems);
+        // Merge into the panel rather than replace it.
+        //
+        // This assignment used to hand `problems` straight to the projection,
+        // so the index leg's answer became the entire Problems panel. The leg
+        // runs on hover and completion, it only ever produces rows for the
+        // buffer being read, and it produces none at all when the index has
+        // nothing to say -- so a single hover replaced every LSP diagnostic in
+        // the workspace with an empty list, and nothing republished them until
+        // that file's server spoke again. The panel simply emptied while the
+        // errors were still in the code.
+        //
+        // `ingest_lsp_diagnostics` already states the rule for a shared
+        // multi-file list: replace only the rows this producer owns for this
+        // file, and leave everything else alone. This is the same rule read
+        // from the other side.
+        let problems = {
+            let merged = previous_projection.problems.clone();
+            // Every index-owned row goes, not just this file's.
+            //
+            // A row may only outlive the read that made it if something can
+            // later retire it. An LSP row has that: the server that published
+            // it publishes an empty list for the same file when it goes away,
+            // and `ingest_lsp_diagnostics` acts on that. An index row has
+            // nothing of the kind -- it is computed as a by-product of reading
+            // a buffer, no producer ever retracts it, and neither closing a tab
+            // nor deleting or renaming the file through the proposal flow
+            // clears it. Retaining those workspace-wide would leave the panel
+            // listing, and offering to navigate to, paths that no longer exist.
+            //
+            // So index rows live exactly as long as the file being read. The
+            // defect this merge exists to fix is unaffected: a read still
+            // leaves every LSP diagnostic in the workspace alone, which is
+            // what emptied the panel.
+            //
+            // The identity reset below states the same rule, and on every path
+            // that reaches here a file change has already fired it -- so either
+            // one alone is sufficient today. Both are kept because the rule
+            // belongs to whoever carries a row forward, and a future caller
+            // that carries without resetting would otherwise inherit the bug
+            // silently. `index_problems_do_not_survive_a_read_in_another_file`
+            // fails only when both are removed, which is what defence in depth
+            // means and is worth saying rather than implying each is
+            // load-bearing on its own.
+            // Replaced in place, not removed and appended.
+            //
+            // The Problems panel holds its keyboard selection as a bare index
+            // into this list. Dropping the index rows and pushing their
+            // replacements onto the end shifts every row that followed them, so
+            // a selection resting on one of them silently comes to rest on a
+            // different file's diagnostic and the next activation opens
+            // somewhere the reader never chose. Splicing the new rows in where
+            // the old ones were leaves every other position untouched.
+            let mut spliced = Vec::with_capacity(merged.len() + problems.len());
+            let mut placed = false;
+            for existing in &merged {
+                if existing.source_label.as_deref() == Some("legion-index") {
+                    if !placed {
+                        spliced.extend(problems.iter().cloned());
+                        placed = true;
+                    }
+                    continue;
+                }
+                // A closed file's rows go the same way. The server publishes
+                // for open buffers, and the notification handler drops
+                // anything -- a clear included -- for a path with no open
+                // buffer, so once a file is closed its rows can never be
+                // updated or withdrawn. Held past that they survive deletes
+                // and renames too, and the panel keeps offering to navigate
+                // somewhere that is gone.
+                if existing
+                    .file_id
+                    .is_some_and(|file| !input.open_files.contains(&file))
+                {
+                    continue;
+                }
+                spliced.push(existing.clone());
+            }
+            if !placed {
+                spliced.extend(problems);
+            }
+            spliced
+        };
+        // Deliberately not sorted.
+        //
+        // Sorting the merged list by file and line reads better and is wrong
+        // here: `DesktopRuntime` holds the Problems panel's keyboard selection
+        // as a bare index into this list, so reordering moves the highlight to
+        // a different diagnostic without the user touching anything, and the
+        // next `ProblemActivate` opens a file they did not choose. Appending
+        // keeps every row a reader has already seen at the index it was at.
+        //
+        // The underlying fragility -- a selection identified by position in a
+        // list that other code edits -- is older than this function and is not
+        // fixed here; this only refuses to make it worse.
+
+        // Quick fixes see the active file first, because they are capped.
+        //
+        // `language_quick_fixes_for_problems` takes the first 50 rows. Before
+        // this merge it only ever saw the buffer being read, so the cap was
+        // about one file's diagnostics. Feeding it the workspace-wide list
+        // changed what the cap cuts: the rows for the file under the cursor are
+        // appended last, so a workspace already carrying 50 problems would lose
+        // every fix for the file actually being edited. The list itself keeps
+        // its order -- the panel's selection indexes into it -- and only this
+        // view of it is reordered.
+        let quick_fixes =
+            language_quick_fixes_prioritizing(&problems, input.metadata.identity.file_id);
         let locations = response
             .results
             .iter()
@@ -8317,7 +8469,7 @@ fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
     LanguageId(language.to_string())
 }
 
-fn bounded_label(value: impl Into<String>, limit: usize) -> String {
+pub(crate) fn bounded_label(value: impl Into<String>, limit: usize) -> String {
     value.into().chars().take(limit).collect()
 }
 
@@ -8497,68 +8649,6 @@ fn debug_step_kind(kind: DebugStepKindProjection) -> DebugStepKind {
         DebugStepKindProjection::Into => DebugStepKind::Into,
         DebugStepKindProjection::Out => DebugStepKind::Out,
         DebugStepKindProjection::Back => DebugStepKind::Back,
-    }
-}
-
-fn language_quick_fixes_for_problems(
-    problems: &[LanguageProblemProjection],
-) -> Vec<LanguageQuickFixProjection> {
-    problems
-        .iter()
-        .take(50)
-        .enumerate()
-        .map(|(index, problem)| {
-            let code_label = problem
-                .code_label
-                .clone()
-                .unwrap_or_else(|| "diagnostic".to_string());
-            LanguageQuickFixProjection {
-                action_id: language_quick_fix_action_id(index, problem),
-                title: format!(
-                    "Prepare code action for {}",
-                    bounded_label(code_label.clone(), 64)
-                ),
-                kind_label: "quickfix.diagnostic".to_string(),
-                problem_code_label: problem.code_label.clone(),
-                problem_range: problem.range,
-                severity: problem.severity,
-                source_label: problem.source_label.clone(),
-                proposal_id: None,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }
-        })
-        .collect()
-}
-
-fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
-    let code = problem.code_label.as_deref().unwrap_or("diagnostic");
-    let safe_code = sanitized_action_component(code, 64);
-    let (line, character) = problem
-        .range
-        .map(|range| (range.start.line, range.start.character))
-        .unwrap_or((0, 0));
-    format!("quickfix:{safe_code}:{line}:{character}:{index}")
-}
-
-fn sanitized_action_component(value: &str, limit: usize) -> String {
-    let sanitized = value
-        .chars()
-        .filter_map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':') {
-                Some(character)
-            } else if character.is_ascii_whitespace() {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .take(limit)
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "diagnostic".to_string()
-    } else {
-        sanitized
     }
 }
 
@@ -15679,6 +15769,7 @@ impl AppComposition {
         self.active_documents
             .bind_workspace(opened.clone(), root_path, principal, trust.clone());
         self.debug_workflow.clear_workspace_state();
+        self.language_tooling.clear_workspace_state();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
@@ -27667,6 +27758,7 @@ impl AppComposition {
             .active_principal_id
             .clone()
             .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        let open_files = self.active_documents.open_file_ids();
         Ok(LanguageRequestInput {
             workspace_id: metadata.identity.workspace_id,
             buffer_id,
@@ -27676,6 +27768,7 @@ impl AppComposition {
             snapshot_id,
             buffer_version,
             event_context,
+            open_files,
         })
     }
 

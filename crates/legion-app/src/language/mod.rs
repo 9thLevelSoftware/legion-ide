@@ -30,6 +30,11 @@ pub use translate::{
 
 mod lsp_reads;
 
+mod problem_rows;
+pub(crate) use problem_rows::{
+    language_projection_for_new_identity, language_quick_fixes_prioritizing,
+};
+
 mod call_hierarchy;
 pub use call_hierarchy::{
     CALL_HIERARCHY_ROW_CAP, PendingCallHierarchy, call_params, call_row_label, first_item,

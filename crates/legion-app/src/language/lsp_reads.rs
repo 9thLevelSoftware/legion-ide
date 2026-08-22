@@ -322,6 +322,7 @@ impl AppComposition {
             snapshot_id,
             buffer_version,
             event_context,
+            open_files: self.active_documents.open_file_ids(),
         };
 
         let capability = CapabilityId("fs.write".to_string());
