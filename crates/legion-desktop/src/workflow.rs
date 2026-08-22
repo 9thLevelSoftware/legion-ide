@@ -612,6 +612,40 @@ pub(crate) struct CanvasNodePlacement {
     pub(crate) placed_by_person: bool,
 }
 
+/// What makes one problem row the same row as before.
+///
+/// Deliberately not the position, which is the whole point, and deliberately
+/// not the message either: the message is a per-severity placeholder today and
+/// would become a poor discriminator the moment that changes. File, start line
+/// and code identify a diagnostic well enough that a reader who selected it
+/// stays on it, and cheaply enough to recompute on every frame.
+///
+/// The key is not always unique, and the resolver is built for that rather
+/// than assuming it away. Two diagnostics on one line sharing a code collide,
+/// and — much more sweepingly — a projection built with `disclose_ranges` off
+/// carries no line at all, which collapses every row of a file with one code
+/// to a single key. Snapping to the first match there would have stopped
+/// keyboard navigation dead: every `ProblemNext` would resolve back to the
+/// same row. `resolved_problems_selected_index` therefore picks the matching
+/// row *nearest the stored index*, so an ambiguous key degrades to the
+/// positional behaviour it replaced instead of breaking it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedProblemKey {
+    file_id: Option<legion_protocol::FileId>,
+    line: Option<u32>,
+    code_label: Option<String>,
+}
+
+impl SelectedProblemKey {
+    fn of(problem: &legion_protocol::LanguageProblemProjection) -> Self {
+        Self {
+            file_id: problem.file_id,
+            line: problem.range.map(|range| range.start.line),
+            code_label: problem.code_label.clone(),
+        }
+    }
+}
+
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
@@ -682,6 +716,19 @@ pub struct DesktopRuntime {
     last_definition_operation_id: Option<String>,
     /// Keyboard-focused row index in the Problems panel (T4).
     problems_selected_index: usize,
+    /// Which problem the selection is on, independent of where it sits.
+    ///
+    /// The index alone was the selection for three rounds of review, and it
+    /// could not be made correct: the list is rebuilt by two producers, rows
+    /// are spliced in and out as files are read and servers publish, and every
+    /// such edit moves rows the reader never touched. Splicing replacements in
+    /// where the old rows were fixes it only while the counts match -- edit a
+    /// `TODO` away and the rows behind it still shift by the difference.
+    ///
+    /// So the identity is what is stored and the index is derived from it. An
+    /// index has to stay, because arrow keys move by position and that is the
+    /// right interaction; it just stops being the thing that remembers.
+    problems_selected_key: Option<SelectedProblemKey>,
     /// Keyboard-focused hunk index in the proposal review surface (PKT-DIFF).
     review_hunk_selected_index: usize,
     /// Per-hunk accept/reject disposition state for the multi-file proposal review
@@ -827,6 +874,7 @@ impl DesktopRuntime {
             definition_navigation_queued: false,
             last_definition_operation_id: None,
             problems_selected_index: 0,
+            problems_selected_key: None,
             review_hunk_selected_index: 0,
             hunk_dispositions: ProposalHunkDispositionState::new(),
         };
@@ -970,7 +1018,9 @@ impl DesktopRuntime {
                     .problems
                     .len();
                 if count > 0 {
-                    self.problems_selected_index = (self.problems_selected_index + 1) % count;
+                    self.problems_selected_index =
+                        (self.resolved_problems_selected_index() + 1) % count;
+                    self.remember_selected_problem();
                 }
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 self.persist_diagnostics_if_configured();
@@ -986,7 +1036,8 @@ impl DesktopRuntime {
                     .len();
                 if count > 0 {
                     self.problems_selected_index =
-                        (self.problems_selected_index + count.saturating_sub(1)) % count;
+                        (self.resolved_problems_selected_index() + count.saturating_sub(1)) % count;
+                    self.remember_selected_problem();
                 }
                 self.last_outcome = DesktopWorkflowOutcome::Noop;
                 self.persist_diagnostics_if_configured();
@@ -1892,7 +1943,7 @@ impl DesktopRuntime {
             completion_popup_open: self.completion_popup_open,
             completion_selected_index: self.completion_selected_index,
             hover_tooltip_visible: self.hover_tooltip_visible,
-            problems_selected_index: self.problems_selected_index,
+            problems_selected_index: self.resolved_problems_selected_index(),
             review_hunk_selected_index: self.review_hunk_selected_index,
             durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
             preferred_ai_provider: self.app.preferred_ai_provider().as_str().to_string(),
@@ -2111,7 +2162,7 @@ impl DesktopRuntime {
     fn activate_selected_problem(&mut self) -> Result<DesktopWorkflowOutcome> {
         let snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
         let problems = &snapshot.language_tooling_projection.problems;
-        let Some(problem) = problems.get(self.problems_selected_index) else {
+        let Some(problem) = problems.get(self.resolved_problems_selected_index()) else {
             return Ok(DesktopWorkflowOutcome::Noop);
         };
         let (Some(path), line) = (
@@ -2142,7 +2193,52 @@ impl DesktopRuntime {
 
     /// Expose problems selected index for assertion in tests.
     pub fn problems_selected_index_for_test(&self) -> usize {
-        self.problems_selected_index
+        self.resolved_problems_selected_index()
+    }
+
+    /// Where the remembered problem is in the list as it stands now.
+    ///
+    /// Falls back to the stored index when nothing is remembered yet, and when
+    /// the remembered problem is gone -- a diagnostic can be fixed while it is
+    /// selected, and the reader should land somewhere sensible rather than
+    /// nowhere. Clamped, because the list can also have shrunk.
+    ///
+    /// Among rows that match, the one nearest the stored index wins. The key
+    /// is not guaranteed unique (see `SelectedProblemKey`), and taking the
+    /// first match would make every `ProblemNext` resolve straight back to the
+    /// same row whenever ranges are not disclosed. Nearest-match means a
+    /// unique key behaves as an identity and an ambiguous one behaves as the
+    /// index it replaced.
+    fn resolved_problems_selected_index(&self) -> usize {
+        let problems = &self
+            .shell
+            .projection_snapshot()
+            .language_tooling_projection
+            .problems;
+        if problems.is_empty() {
+            return 0;
+        }
+        let clamped = self.problems_selected_index.min(problems.len() - 1);
+        let Some(key) = self.problems_selected_key.as_ref() else {
+            return clamped;
+        };
+        problems
+            .iter()
+            .enumerate()
+            .filter(|(_, problem)| SelectedProblemKey::of(problem) == *key)
+            .min_by_key(|(index, _)| index.abs_diff(clamped))
+            .map_or(clamped, |(index, _)| index)
+    }
+
+    /// Record which problem the index currently points at.
+    fn remember_selected_problem(&mut self) {
+        self.problems_selected_key = self
+            .shell
+            .projection_snapshot()
+            .language_tooling_projection
+            .problems
+            .get(self.problems_selected_index)
+            .map(SelectedProblemKey::of);
     }
 
     /// Expose review hunk selected index for assertion in tests (PKT-DIFF).

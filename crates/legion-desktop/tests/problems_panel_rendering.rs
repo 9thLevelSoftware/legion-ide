@@ -417,3 +417,72 @@ fn a_language_read_leaves_the_problems_alone() {
         after.language_tooling_projection.status_message
     );
 }
+
+/// The selection stays on its problem when the list around it changes.
+///
+/// The Problems panel'"'"'s selection was a bare index for three rounds of review,
+/// and each fix left a residue: removing a sort stopped one reorder, splicing
+/// replacements in place stopped another, and both still moved rows whenever
+/// the number of rows above them changed. A read that finds one fewer lexical
+/// diagnostic than last time shifts everything behind it by one, and the
+/// highlight lands on a problem the reader never chose -- which the next
+/// activation then opens.
+///
+/// So the selection is stored as the identity of the problem it is on and the
+/// index is derived. This drives it through the rendered panel: select the
+/// second row, publish a different set of diagnostics that moves it, and assert
+/// the same row is still the selected one.
+#[test]
+fn the_selection_follows_its_problem_when_rows_move() {
+    let workspace = TempWorkspace::new("legion_desktop_problems_panel");
+    let (mut app, file) = app_with_diagnostics(
+        &workspace,
+        &[
+            (1, "first problem"),
+            (2, "second problem"),
+            (3, "third problem"),
+        ],
+    );
+
+    let panel = show_problems_panel(&mut app, 3);
+    assert!(
+        row_is_selected(&panel, "main.rs:1"),
+        "the first row starts selected; rendered text was {:?}",
+        rendered_text(&panel)
+    );
+
+    // Move to the row for line 2 and remember what the reader is looking at.
+    app.runtime_mut_for_test()
+        .handle_action(DesktopAction::ProblemNext)
+        .expect("ProblemNext should succeed");
+    let moved = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    assert!(
+        row_is_selected(&moved, "main.rs:2"),
+        "the selection should be on line 2 before the list changes; rendered \
+         text was {:?}",
+        rendered_text(&moved)
+    );
+
+    // Republish without the first diagnostic. Every row behind it moves up one,
+    // which is exactly the shift a positional selection cannot survive.
+    publish_diagnostics(
+        app.runtime_mut_for_test(),
+        &file,
+        &[(2, "second problem"), (3, "third problem")],
+    );
+    let after = app.run_headless_full_frame(full_frame_input(Vec::new()));
+
+    assert!(
+        row_is_selected(&after, "main.rs:2"),
+        "the selection must stay on the problem it was on, not the position it \
+         held -- a highlight that slides onto another diagnostic opens a file \
+         nobody chose on the next activation; rendered text was {:?}",
+        rendered_text(&after)
+    );
+    assert!(
+        !row_is_selected(&after, "main.rs:3"),
+        "only the problem the reader selected may be selected; rendered text \
+         was {:?}",
+        rendered_text(&after)
+    );
+}
