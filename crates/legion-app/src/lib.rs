@@ -12630,8 +12630,25 @@ struct Phase4ProjectionState {
     /// on the one path that renders. Keeping what the run actually built means a
     /// reviewer reads the run's own answer rather than a plausible one.
     phase4_trust_by_proposal: HashMap<ProposalId, Box<SelectedProposalTrustProjections>>,
+    /// Terminal Delegate route records whose write has not succeeded yet.
+    ///
+    /// The background result that carries the ending is consumed once, so a
+    /// failed write left the route recorded as `Streaming` for good -- the
+    /// audit trail permanently unable to say whether a remote turn had
+    /// finished. Kept here and retried on the next poll instead.
+    pending_route_audits: Vec<PendingRouteAudit>,
     replay_manifests: HashMap<legion_protocol::AgentRunId, legion_protocol::AgentReplayManifest>,
     inspection_snapshots: HashMap<legion_protocol::AgentRunId, AppAiInspectionSnapshot>,
+}
+
+/// A terminal route record still owed to the audit trail.
+#[derive(Debug, Clone)]
+struct PendingRouteAudit {
+    run_id: legion_protocol::AgentRunId,
+    route_id: String,
+    state: legion_protocol::AssistedAiProviderInvocationState,
+    outcome_label: &'static str,
+    event_context: EventContext,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -15204,6 +15221,7 @@ impl AppComposition {
     /// ledger changed (desktop should repaint).
     pub fn poll_product_ai_stream(&mut self) -> bool {
         let mut changed = self.poll_scheduled_proposal_observation_retries();
+        changed |= self.retry_pending_route_audits();
         let snap = self.live_product_ai_stream.snapshot();
         if (!snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty())
             && self.last_product_ai_stream.as_ref() != Some(&snap)
@@ -15237,18 +15255,35 @@ impl AppComposition {
                     redaction_hints: vec![RedactionHint::MetadataOnly],
                     schema_version: 1,
                 };
-                let _ = self.persist_phase4_runtime_records(
-                    &route.run_id,
-                    &route.route_id,
-                    state,
-                    if result.live_failed {
-                        "phase4.provider.route.failed"
-                    } else {
-                        "phase4.provider.route.completed"
-                    },
-                    route.event_context,
-                    &replay_manifest,
-                );
+                let outcome_label = if result.live_failed {
+                    "phase4.provider.route.failed"
+                } else {
+                    "phase4.provider.route.completed"
+                };
+                if self
+                    .persist_phase4_runtime_records(
+                        &route.run_id,
+                        &route.route_id,
+                        state,
+                        outcome_label,
+                        route.event_context,
+                        &replay_manifest,
+                    )
+                    .is_err()
+                {
+                    // The result that carries this ending is consumed here and
+                    // nowhere else, so dropping the failure leaves the route
+                    // recorded as `Streaming` for good. Kept for the next poll.
+                    self.phase4_projection_state
+                        .pending_route_audits
+                        .push(PendingRouteAudit {
+                            run_id: route.run_id.clone(),
+                            route_id: route.route_id.clone(),
+                            state,
+                            outcome_label,
+                            event_context: route.event_context,
+                        });
+                }
                 changed = true;
             }
             if let Some(stream) = result.stream {
@@ -15345,6 +15380,52 @@ impl AppComposition {
                 .next_attempt_at
                 .saturating_duration_since(Instant::now())
         })
+    }
+
+    /// Try again to write the terminal route records that failed.
+    ///
+    /// One attempt per poll, in order, and a record stays queued until it is
+    /// written -- an audit trail that cannot say how a run ended is the failure
+    /// this whole area keeps producing, and a dropped write is the quietest way
+    /// to produce it.
+    fn retry_pending_route_audits(&mut self) -> bool {
+        if self.phase4_projection_state.pending_route_audits.is_empty() {
+            return false;
+        }
+        let pending = std::mem::take(&mut self.phase4_projection_state.pending_route_audits);
+        let mut changed = false;
+        for audit in pending {
+            let replay_manifest = legion_protocol::AgentReplayManifest {
+                run_id: audit.run_id.clone(),
+                transitions: Vec::new(),
+                context_manifests: Vec::new(),
+                provider_route_ids: vec![audit.route_id.clone()],
+                proposal_ids: Vec::new(),
+                correlation_id: audit.event_context.correlation_id,
+                causality_id: audit.event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            if self
+                .persist_phase4_runtime_records(
+                    &audit.run_id,
+                    &audit.route_id,
+                    audit.state,
+                    audit.outcome_label,
+                    audit.event_context,
+                    &replay_manifest,
+                )
+                .is_err()
+            {
+                self.phase4_projection_state
+                    .pending_route_audits
+                    .push(audit);
+            } else {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn poll_scheduled_proposal_observation_retries(&mut self) -> bool {
@@ -24183,7 +24264,15 @@ impl AppComposition {
             route_cost,
             route_privacy,
         ) = product_ai_route_fields(live_backend);
-        let sends_the_buffer = provider_class_sends_the_buffer(route_provider_class);
+        // Both halves, here where the projections are first built.
+        //
+        // `Explain` leaves through the metadata-only path without calling a
+        // provider, so a remote class alone described an upload that never
+        // happened. The proposal-registration path applies the same pair, and
+        // Explain never reaches it -- which is why this is the copy that
+        // mattered.
+        let sends_the_buffer = provider_class_sends_the_buffer(route_provider_class)
+            && operation_uploads_the_excerpt(operation_class);
         let mut context_manifest_projection =
             Phase4ContextAssemblyService::assemble_context_manifest(
                 &context,
@@ -36223,6 +36312,40 @@ mod pkt_worker_tests {
 
         assert!(error.to_string().contains("belongs to workflow"));
         assert!(!flag.is_cancelled());
+    }
+
+    /// A terminal route record that failed to write is written later.
+    ///
+    /// The background result carrying the ending is consumed once, so dropping
+    /// a failed write left the route recorded as `Streaming` for good -- an
+    /// audit trail permanently unable to say whether a remote turn finished.
+    #[test]
+    fn a_failed_route_audit_write_is_retried_rather_than_lost() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:retry".to_string());
+        let event_context = app.next_event_context();
+        app.phase4_projection_state
+            .pending_route_audits
+            .push(PendingRouteAudit {
+                run_id: run_id.clone(),
+                route_id: "delegate-chat-route:retry".to_string(),
+                state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+                outcome_label: "phase4.provider.route.completed",
+                event_context,
+            });
+
+        assert!(
+            app.retry_pending_route_audits(),
+            "a queued record must be attempted on the next poll"
+        );
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a record that wrote successfully must not stay queued forever"
+        );
+        assert!(
+            app.replay_ai_run(run_id).is_ok(),
+            "the retried write did not reach the audit trail"
+        );
     }
 
     #[test]

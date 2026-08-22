@@ -254,8 +254,24 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     // `https://2001:db8::1:8080/v1` produces a URL nothing can parse, so every
     // request fails against an endpoint policy had just authorized -- which
     // reads as the provider being down.
+    // Userinfo belongs to the client URL and not to the policy record.
+    //
+    // It is stripped from `NetworkTarget` on purpose -- an audit trail should
+    // not carry a proxy password -- and rebuilding the client URL from that
+    // stripped host dropped the credential from the request as well, so an
+    // authenticated proxy rejected every call. The two representations differ
+    // again, for the same reason the brackets do.
+    let userinfo = base_url
+        .trim()
+        .find("://")
+        .map(|scheme_end| &base_url.trim()[scheme_end + "://".len()..])
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .and_then(|authority| authority.rsplit_once('@'))
+        .map(|(userinfo, _host)| format!("{userinfo}@"))
+        .unwrap_or_default();
     format!(
-        "https://{}:{}{}",
+        "https://{}{}:{}{}",
+        userinfo,
         url_authority_host(&target.host),
         port,
         path
@@ -433,6 +449,34 @@ mod delegate_chat_route_honesty_tests {
             );
             assert_eq!(target.port, expected_port, "{base} lost or invented a port");
         }
+    }
+
+    /// A proxy credential survives the upgrade, and stays out of the record.
+    ///
+    /// Userinfo is stripped from `NetworkTarget` on purpose -- an audit trail
+    /// should not carry a proxy password -- and rebuilding the client URL from
+    /// that stripped host dropped the credential from the request too, so an
+    /// authenticated proxy rejected every call.
+    #[test]
+    fn a_proxy_credential_survives_the_upgrade_but_not_the_record() {
+        assert_eq!(
+            super::enforce_https_for_remote("http://user:pass@proxy.internal/v1"),
+            "https://user:pass@proxy.internal:443/v1",
+            "the client lost the proxy credential in the upgrade"
+        );
+
+        let target = super::network_target_from_base_url(
+            "http://user:pass@proxy.internal/v1",
+            "api.anthropic.com",
+        );
+        assert_eq!(
+            target.host, "proxy.internal",
+            "the authorized target must name the host and not the credential"
+        );
+        assert!(
+            !format!("{target:?}").contains("pass"),
+            "a proxy password reached the policy record: {target:?}"
+        );
     }
 
     /// A gateway's query survives the upgrade to HTTPS.
