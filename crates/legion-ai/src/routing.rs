@@ -107,16 +107,22 @@ const QUERY_SIGNALS: &[&str] = &[
 /// `sort out`, `deal with` are all missing and always will be -- so a second
 /// clause is treated as evidence of work rather than something to be
 /// recognised word by word.
-const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", ", and ", "; ", " & "];
+const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & "];
 
-/// Characters that end a sentence, and so may start another instruction.
+/// Punctuation that ends one instruction, and so may begin another.
 ///
-/// "Investigate the crash. Resolve it." carries its second instruction in a
-/// second sentence, which no conjunction check can see. A directive with more
-/// than one sentence is doing more than one thing, and only the first is
-/// being classified -- so the rest is treated as work rather than assumed
-/// harmless.
-const SENTENCE_ENDS: &[char] = &['.', '!', '?', '\n'];
+/// "Investigate the crash. Resolve it." and "Investigate the crash, resolve
+/// it." both carry their real work in a clause no conjunction check can see:
+/// the first has no joiner at all, the second has a bare comma. Only the
+/// opening clause was ever classified, and `resolve` is in no verb list -- so
+/// both lost the edit tool for a repair the user asked for in as many words.
+///
+/// Semicolons and commas are here rather than in [`CLAUSE_JOINERS`] because a
+/// separator does not need a word after it to separate. The cost is that "what
+/// does this do, exactly?" now reads as two clauses and keeps an edit tool it
+/// will not use; that is the same trade the rest of this module makes, and it
+/// falls on the side measured in tokens.
+const CLAUSE_ENDS: &[char] = &['.', '!', '?', '\n', ';', ','];
 
 /// Classify a directive as a query or a mutation.
 ///
@@ -140,13 +146,13 @@ const SENTENCE_ENDS: &[char] = &['.', '!', '?', '\n'];
 /// so "Can you resolve this crash?" lost it to politeness.
 ///
 /// The reverse errors are real and deliberately tolerated. "Which command
-/// should I run?" and "Compare the parser and lexer" are both questions and
-/// both classify as `Mutate` — the first because `run` is a mutation signal,
-/// the second because a conjunction is read as a second clause. Each keeps an
-/// edit tool a question will not use, which costs tokens and one grammar
-/// branch. That is the whole trade: this side of the line is measured in
-/// tokens, the other side in tasks that cannot be completed, so the rule stays
-/// on this side of it.
+/// should I run?", "Compare the parser and lexer" and "What does this do,
+/// exactly?" are all questions and all classify as `Mutate` — the first because
+/// `run` is a mutation signal, the second because a conjunction is read as a
+/// second clause, the third because a comma is. Each keeps an edit tool a
+/// question will not use, which costs tokens and one grammar branch. That is
+/// the whole trade: this side of the line is measured in tokens, the other side
+/// in tasks that cannot be completed, so the rule stays on this side of it.
 pub fn classify_action(directive: &str) -> ActionClass {
     let lowered = directive.to_lowercase();
     // An underscore is part of a word, not a separator.
@@ -188,24 +194,22 @@ pub fn classify_action(directive: &str) -> ActionClass {
     let opens_as_a_question = words
         .first()
         .is_some_and(|word| QUERY_SIGNALS.contains(word));
-    let carries_a_second_clause = CLAUSE_JOINERS
-        .iter()
-        .any(|joiner| lowered.contains(joiner))
-        || carries_a_second_sentence(&lowered);
+    let carries_a_second_clause = CLAUSE_JOINERS.iter().any(|joiner| lowered.contains(joiner))
+        || text_follows_a_clause_end(&lowered);
     if opens_as_a_question && !carries_a_second_clause {
         return ActionClass::Query;
     }
     ActionClass::Mutate
 }
 
-/// Whether anything follows the first sentence.
+/// Whether anything follows the first clause.
 ///
-/// Trailing punctuation on a single sentence does not count -- "where is this
-/// defined?" is one question with a mark on the end. What counts is text after
-/// a sentence ends, because that text is a second instruction the
-/// classification of the first says nothing about.
-fn carries_a_second_sentence(lowered: &str) -> bool {
-    lowered.find(SENTENCE_ENDS).is_some_and(|end| {
+/// Trailing punctuation on a single clause does not count -- "where is this
+/// defined?" is one question with a mark on the end. What counts is text *after*
+/// a clause ends, because that text is a second instruction the classification
+/// of the first says nothing about.
+fn text_follows_a_clause_end(lowered: &str) -> bool {
+    lowered.find(CLAUSE_ENDS).is_some_and(|end| {
         lowered[end..]
             .chars()
             .next()
@@ -393,17 +397,21 @@ mod tests {
         }
     }
 
-    /// A second sentence is a second instruction.
+    /// A second clause is a second instruction, however it is punctuated.
     ///
-    /// "Investigate the crash. Resolve it." carries its work in a sentence no
-    /// conjunction check can see, and only the first sentence was being
-    /// classified. A directive doing two things has one of them unexamined.
+    /// "Investigate the crash. Resolve it." and "Investigate the crash, resolve
+    /// it." both carry their work past a separator no conjunction check saw --
+    /// a period joins nothing, and a bare comma was not a joiner. Only the
+    /// opening clause was classified, so a directive doing two things had one
+    /// of them unexamined.
     #[test]
-    fn a_second_sentence_is_treated_as_work() {
+    fn a_second_clause_is_treated_as_work() {
         for directive in [
             "Investigate the crash. Resolve it.",
+            "Investigate the crash, resolve it.",
             "Explain the failure.\nThen make it stop.",
             "What does this function do? Rewrite it to be clearer.",
+            "Review the parser; make it stop panicking.",
         ] {
             assert_eq!(
                 classify_action(directive),
@@ -413,9 +421,9 @@ mod tests {
         }
     }
 
-    /// One sentence with a mark on the end is still one sentence.
+    /// One clause with a mark on the end is still one clause.
     #[test]
-    fn trailing_punctuation_alone_is_not_a_second_sentence() {
+    fn trailing_punctuation_alone_is_not_a_second_clause() {
         assert_eq!(
             classify_action("where is the proposal ledger defined?"),
             ActionClass::Query
