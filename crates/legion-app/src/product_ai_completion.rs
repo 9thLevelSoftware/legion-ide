@@ -877,6 +877,28 @@ mod assist_placement_tests {
         assert!(!resolved.is_empty());
     }
 
+    /// A deletion is a real edit and must survive the no-op guard.
+    ///
+    /// A valid block with a non-empty SEARCH and an empty REPLACE resolves to a
+    /// non-empty span with an empty replacement. Testing emptiness of the
+    /// replacement alone classified that as unresolved, so Assist silently
+    /// rejected every deletion it was asked for. "Changes nothing" is an empty
+    /// span *and* an empty replacement.
+    #[test]
+    fn a_deletion_resolves_to_a_span_with_no_replacement() {
+        let answer = block("    println!(\"two\");", "");
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert!(span.0 < span.1, "a deletion covers the text it removes");
+        assert!(replacement.is_empty(), "and puts nothing in its place");
+        assert_ne!(
+            span,
+            (0, 0),
+            "so the registration guard, which tests both, keeps it"
+        );
+    }
+
     /// The deterministic fixture keeps prepending, and that stays honest.
     ///
     /// It is a canned comment that says it is a canned comment; inserting one
