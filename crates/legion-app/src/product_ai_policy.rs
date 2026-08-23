@@ -892,6 +892,7 @@ mod org_ceiling {
         // exact defect being fixed.
         let (offline, _) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
             None,
+            crate::ProductAiProviderPreference::Deterministic,
             "tidy this",
             "fn main() {}",
             "src/main.rs",
@@ -902,6 +903,7 @@ mod org_ceiling {
         // of a live failure.
         let (failed, stream) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
             Some(super::ProductAiLiveBackend::Anthropic),
+            crate::ProductAiProviderPreference::Anthropic,
             "tidy this",
             "fn main() {}",
             "src/main.rs",

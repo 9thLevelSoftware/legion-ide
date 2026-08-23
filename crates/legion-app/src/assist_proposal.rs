@@ -712,6 +712,11 @@ impl AppComposition {
             // own, so a declaration allowing for a nominal one understates any
             // request against a deeply nested file.
             let file_path = bounded_assist_path(&context.metadata.identity.canonical_path.0);
+            // Captured, not re-read: the preference can change while the worker
+            // runs, and the reason shown for a fixture has to describe the
+            // decision that produced it rather than whatever the picker says by
+            // the time it lands. Same rule as `consent_granted` on the job.
+            let preference_for_worker = self.preferred_ai_provider;
             let instruction_for_worker = instruction_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
             let streaming_replay = legion_protocol::AgentReplayManifest {
@@ -734,6 +739,7 @@ impl AppComposition {
                 let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
                     live_backend,
+                    preference_for_worker,
                     &instruction_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -840,6 +846,7 @@ impl AppComposition {
             ),
             None => resolve_assisted_edit_proposal_text(
                 live_backend,
+                self.preferred_ai_provider,
                 &instruction_label,
                 &buffer_excerpt,
                 &context.metadata.identity.canonical_path.0,
@@ -854,6 +861,7 @@ impl AppComposition {
             let _ = injected_assist_reply;
             resolve_assisted_edit_proposal_text(
                 live_backend,
+                self.preferred_ai_provider,
                 &instruction_label,
                 &buffer_excerpt,
                 &context.metadata.identity.canonical_path.0,
