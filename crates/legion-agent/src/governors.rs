@@ -233,7 +233,13 @@ impl LoopGovernors {
     }
 
     /// Consecutive failures recorded for `tool`.
-    pub fn tool_failures(&self, tool: &str) -> u32 {
+    ///
+    /// Test-only. The loop never asks -- it acts on what `note_tool_failure`
+    /// returns -- so this is a window into the state rather than part of the
+    /// interface, and a production surface carrying inspection knobs no caller
+    /// uses invites someone to build on one.
+    #[cfg(test)]
+    fn tool_failures(&self, tool: &str) -> u32 {
         self.tool_failures.get(tool).copied().unwrap_or(0)
     }
 
@@ -476,11 +482,6 @@ mod tests {
             "declining to repeat the work must not withhold the answer"
         );
     }
-}
-
-#[cfg(test)]
-mod trust_decay_tests {
-    use super::*;
 
     #[test]
     fn a_tool_is_left_alone_until_it_has_failed_enough() {
@@ -551,6 +552,32 @@ mod trust_decay_tests {
     ///
     /// `LEGION_AI_GOVERNORS=off` has to leave the raw baseline measuring the
     /// un-ported loop, or the bench's A/B arms stop being comparable.
+
+    /// The streak clears however the call was answered.
+    ///
+    /// `note_tool_success` is called from two places in the loop: after a fresh
+    /// execution, and after a dedup cache hit. Only the first did it at
+    /// first, so a tool that failed twice, was answered from cache, and failed
+    /// once more still reported three in a row -- a demotion describing a streak
+    /// a success had already broken. The governor cannot see which path
+    /// answered, which is exactly why the rule has to be stated here rather
+    /// than assumed at one call site.
+    #[test]
+    fn a_success_from_any_path_ends_the_streak() {
+        let mut governors = LoopGovernors::new(true);
+        governors.note_tool_failure("read");
+        governors.note_tool_failure("read");
+
+        // However the caller obtained it, a success is a success.
+        governors.note_tool_success("read");
+
+        assert_eq!(governors.tool_failures("read"), 0);
+        assert!(
+            governors.note_tool_failure("read").is_none(),
+            "the next failure is the first of a new streak, not the third of an old one"
+        );
+    }
+
     #[test]
     fn a_disabled_governor_never_demotes() {
         let mut governors = LoopGovernors::new(false);

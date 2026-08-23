@@ -1584,8 +1584,18 @@ pub fn run_delegated_task_loop(
                     // the model made it, and a governor that hid model actions
                     // from the audit would be trading one honesty problem for
                     // another.
-                    if let Some(cached) = governors.cached_result(name, input) {
-                        let notice = crate::governors::dedup_notice(name, cached);
+                    // Owned, so the immutable borrow ends before the streak
+                    // reset below needs `&mut`.
+                    if let Some(cached) = governors.cached_result(name, input).map(str::to_string) {
+                        // A cache hit is a success, and the failure streak has
+                        // to hear about it. Only the fresh-execution path reset
+                        // it, so a tool that failed twice, was then answered
+                        // from cache, and failed once more still reported three
+                        // in a row -- a demotion notice describing a streak that
+                        // a success had already broken. "Consecutive" has to
+                        // mean consecutive on every path that ends in an answer.
+                        governors.note_tool_success(name);
+                        let notice = crate::governors::dedup_notice(name, &cached);
                         // A cache hit still sends the whole result to the model,
                         // so it costs exactly what a fresh call costs and is
                         // charged the same. Serving it free would let repeated
