@@ -155,6 +155,8 @@ pub(crate) fn local_ai_unavailable_reason(
 /// configuration -- one loopback, one not -- keeps it, because the loopback one
 /// was contacted and did not answer; the bullet beneath explains the other.
 fn auto_headline() -> &'static str {
+    // `AliasNotPermitted` does not count as probed: the request would be
+    // refused before it was sent, so nothing had the chance to answer.
     let probed_anything = matches!(
         probe_reach(
             &crate::ai_route_descriptor::ollama_network_target(),
@@ -197,9 +199,31 @@ fn local_backend_reason(
     default_port: u16,
     remedy: &str,
 ) -> String {
-    let endpoint = crate::ai_route_descriptor::displayable_endpoint(target);
-    match probe_reach(target, default_port) {
+    reason_for(
+        name,
+        &crate::ai_route_descriptor::displayable_endpoint(target),
+        probe_reach(target, default_port),
+        remedy,
+    )
+}
+
+/// The wording for one reach, so every arm can be tested without a resolver.
+///
+/// The alias arm in particular needs a host name that resolves to loopback,
+/// which a test cannot create without editing the machine's resolver. Splitting
+/// the sentence from the lookup is how that arm gets a test at all -- and it is
+/// the arm most likely to be wrong, because it describes a refusal that happens
+/// two layers away.
+fn reason_for(name: &str, endpoint: &str, reach: ProbeReach, remedy: &str) -> String {
+    match reach {
         ProbeReach::Loopback => format!("{name} did not answer at {endpoint}. {remedy}"),
+        ProbeReach::AliasNotPermitted => format!(
+            "{name} is configured at {endpoint}, which resolves to this machine \
+             but is a host name rather than `localhost` or a loopback literal. \
+             Legion's local-provider policy allowlists only those, so the \
+             request would be refused before it was sent. Configure it as \
+             `localhost` or `127.0.0.1`."
+        ),
         ProbeReach::NotLoopback => format!(
             "{name} is configured at {endpoint}, which is not a loopback address. \
              Legion's local-provider policy only reaches this machine, so that \
@@ -214,6 +238,23 @@ fn local_backend_reason(
     }
 }
 
+/// Which loopback outcome a target that resolves to this machine earns.
+///
+/// Resolving here is not the same as being admitted here, and the gap between
+/// those is a capability denial two layers downstream.
+///
+/// Reported rather than closed by widening the allowlist. The policy's own
+/// comment is the argument: a name that resolves to loopback now can resolve
+/// elsewhere later, so admitting it on today's answer would turn one
+/// environment variable into an allowlist entry for anywhere.
+fn loopback_outcome(host: &str) -> ProbeReach {
+    if crate::ai_route_descriptor::is_loopback_host(host) {
+        ProbeReach::Loopback
+    } else {
+        ProbeReach::AliasNotPermitted
+    }
+}
+
 /// Ollama's port when the configured URL names none.
 ///
 /// Shared with the probe rather than written twice: a diagnosis that assumed a
@@ -225,9 +266,19 @@ pub(crate) const OLLAMA_DEFAULT_PORT: u16 = 11434;
 pub(crate) const LLAMA_CPP_DEFAULT_PORT: u16 = 8080;
 
 /// What the probe would have found to connect to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeReach {
     /// At least one resolved address is loopback, so the probe tried it.
     Loopback,
+    /// It resolves to this machine, under a name the policy will not admit.
+    ///
+    /// `loopback_target_reachable` filters resolved addresses and would connect;
+    /// `product_ai_security_policy` allowlists the host *as written*, and only
+    /// when `is_loopback_host` accepts it -- `localhost` or an IP literal. So an
+    /// alias is probed, the backend is selected, and the broker then refuses the
+    /// capability. Telling that person to start a server which is already
+    /// running is worse than saying nothing.
+    AliasNotPermitted,
     /// It resolves, but to nothing on this machine, so the probe skipped it.
     NotLoopback,
     /// The name does not resolve at all.
@@ -259,7 +310,7 @@ fn probe_reach(target: &legion_protocol::NetworkTarget, default_port: u16) -> Pr
             SocketAddr::V6(v6) => v6.ip().is_loopback(),
         };
         if loopback {
-            return ProbeReach::Loopback;
+            return loopback_outcome(&target.host);
         }
     }
     if resolved_any {
@@ -395,6 +446,13 @@ mod probe_reach_tests {
             "a loopback literal is contacted"
         );
         assert!(
+            matches!(
+                probe_reach(&target("localhost"), 11434),
+                ProbeReach::Loopback
+            ),
+            "and so is the one name the policy admits"
+        );
+        assert!(
             matches!(probe_reach(&target("::1"), 11434), ProbeReach::Loopback),
             "and so is the IPv6 one"
         );
@@ -413,5 +471,68 @@ mod probe_reach_tests {
             ),
             "and a name that does not resolve is neither"
         );
+    }
+}
+
+#[cfg(test)]
+mod alias_policy_tests {
+    use super::*;
+
+    /// A name that resolves here is not a name the policy admits.
+    ///
+    /// The remedy for a loopback endpoint is "start the server", and following
+    /// it under an alias gets the request refused by the broker instead:
+    /// `product_ai_security_policy` allowlists the host as written, and
+    /// `is_loopback_host` accepts only `localhost` and IP literals.
+    #[test]
+    fn an_alias_resolving_here_is_still_not_admitted() {
+        assert_eq!(
+            loopback_outcome("ollama.local"),
+            ProbeReach::AliasNotPermitted
+        );
+        assert_eq!(
+            loopback_outcome("localhost.localdomain"),
+            ProbeReach::AliasNotPermitted
+        );
+        assert_eq!(loopback_outcome("localhost"), ProbeReach::Loopback);
+        assert_eq!(loopback_outcome("127.0.0.1"), ProbeReach::Loopback);
+        assert_eq!(loopback_outcome("::1"), ProbeReach::Loopback);
+    }
+
+    /// The alias reason names the real obstacle and the fix that works.
+    #[test]
+    fn the_alias_reason_names_the_policy_and_the_fix() {
+        let reason = reason_for(
+            "Ollama",
+            "http://ollama.local:11434",
+            ProbeReach::AliasNotPermitted,
+            "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
+        );
+
+        assert!(
+            reason.contains("allowlists only those"),
+            "the reason must name the policy; got {reason}"
+        );
+        assert!(
+            reason.contains("`localhost` or `127.0.0.1`"),
+            "and the fix that actually works; got {reason}"
+        );
+        assert!(
+            !reason.contains("Start Ollama"),
+            "the usual remedy is wrong here and must not be offered; got {reason}"
+        );
+    }
+
+    /// A loopback endpoint still gets its remedy, so the check is not vacuous.
+    #[test]
+    fn a_loopback_endpoint_still_gets_its_remedy() {
+        let reason = reason_for(
+            "Ollama",
+            "http://127.0.0.1:11434",
+            ProbeReach::Loopback,
+            "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
+        );
+
+        assert!(reason.contains("Start Ollama"), "got {reason}");
     }
 }
