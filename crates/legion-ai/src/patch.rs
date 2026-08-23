@@ -268,11 +268,15 @@ pub fn splice_replacement(file_content: &str, start: usize, end: usize, new_str:
 
 /// Count every position the anchor could start at, including overlapping ones.
 ///
+/// Public because uniqueness sometimes has to be checked against a different
+/// text than the one an edit is resolved against -- a caller that showed a
+/// model an excerpt still owes the whole file an ambiguity check.
+///
 /// `str::matches` counts non-overlapping occurrences, which under-reports a
 /// self-overlapping anchor: `"aa"` in `"aaa"` starts at two positions but
 /// counts as one, and the edit would then be applied at the first site under
 /// a uniqueness guarantee that does not hold.
-fn count_overlapping(haystack: &str, needle: &str) -> usize {
+pub fn count_overlapping(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
     }
