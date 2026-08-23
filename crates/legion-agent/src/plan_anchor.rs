@@ -238,49 +238,66 @@ const PLAN_CUES: &[&str] = &[
 struct ListRun {
     items: Vec<String>,
     marker: ListMarker,
-    /// Index of the line the run starts on, for reading the text above it.
+    /// Index of the line the run starts on.
     first_line: usize,
+    /// Index of the first line that could introduce it.
+    ///
+    /// The line after the previous run ended, so a cue can only introduce the
+    /// list it sits above. Searching the whole reply let one "My plan:" at the
+    /// top introduce a findings list four paragraphs down.
+    search_from: usize,
 }
 
 impl ListRun {
-    fn empty() -> Self {
+    fn new(marker: ListMarker, first_line: usize, search_from: usize) -> Self {
         Self {
             items: Vec::new(),
-            marker: ListMarker::Bulleted,
-            first_line: 0,
+            marker,
+            first_line,
+            search_from,
         }
     }
 }
 
-/// Pull an ordered list of steps out of free model text.
+/// Every run of adjacent list lines in the reply, in order.
 ///
-/// Takes the longest run of *consecutive* list lines rather than every list
-/// line in the reply. A model that writes a plan and then discusses it produces
-/// several unrelated lists, and concatenating them yields a plan it never
-/// stated — the run of adjacent lines is the one it wrote as a unit.
-///
-/// A bullet run additionally has to be introduced as a plan. The module's own
-/// argument for two items being enough is that "two is an ordering" — which is
-/// true of `1.` `2.` and simply not true of `-` `-`. A bullet list is a set,
-/// and a set of findings is shaped exactly like a set of steps, so the
-/// surrounding text has to say which one it is.
-pub fn parse_plan_steps(text: &str) -> Vec<String> {
-    let mut best = ListRun::empty();
-    // The longest numbered run, kept separately so a bullet run that ties with
-    // it and then fails the cue check does not take it down as well. A reply
-    // opening with two bullets and following them with "Plan to fix:" and two
-    // numbered steps used to return nothing at all.
-    let mut best_ordered = ListRun::empty();
-    let mut current = ListRun::empty();
+/// A run ends at a non-list line, or at a change of marker: `1.` `2.` followed
+/// by `-` `-` is two lists, and a blank line between them does not make it one.
+fn list_runs(text: &str) -> Vec<ListRun> {
+    let mut runs: Vec<ListRun> = Vec::new();
+    let mut current: Option<ListRun> = None;
+    let mut previous_run_end: Option<usize> = None;
+
+    /// Close the run in progress, remembering where it ended.
+    fn close(
+        current: &mut Option<ListRun>,
+        runs: &mut Vec<ListRun>,
+        previous_run_end: &mut Option<usize>,
+        last: usize,
+    ) {
+        if let Some(run) = current.take() {
+            runs.push(run);
+            *previous_run_end = Some(last);
+        }
+    }
 
     for (index, line) in text.lines().enumerate() {
         match list_item_body(line.trim()) {
             Some((marker, body)) if !body.is_empty() => {
-                if current.items.is_empty() {
-                    current.marker = marker;
-                    current.first_line = index;
+                if current.as_ref().is_some_and(|run| run.marker != marker) {
+                    close(
+                        &mut current,
+                        &mut runs,
+                        &mut previous_run_end,
+                        index.saturating_sub(1),
+                    );
                 }
-                current.items.push(body);
+                current
+                    .get_or_insert_with(|| {
+                        ListRun::new(marker, index, previous_run_end.map_or(0, |end| end + 1))
+                    })
+                    .items
+                    .push(body);
             }
             // A blank line inside a list is formatting, not a break: models
             // routinely double-space numbered steps.
@@ -291,44 +308,71 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
             // placeholder step is a plan with a gap in it, not the end of a
             // plan.
             Some(_) => {}
-            None if line.trim().is_empty() && !current.items.is_empty() => {}
-            _ => finish_run(&mut current, &mut best, &mut best_ordered),
+            None if line.trim().is_empty() && current.is_some() => {}
+            _ => close(
+                &mut current,
+                &mut runs,
+                &mut previous_run_end,
+                index.saturating_sub(1),
+            ),
         }
     }
-    finish_run(&mut current, &mut best, &mut best_ordered);
-
-    if best.marker == ListMarker::Bulleted && !introduced_as_a_plan(text, best.first_line) {
-        // The bullets were not a plan. A numbered run elsewhere in the reply
-        // still might be, and discarding it because a longer list of findings
-        // came first would leave the run with no anchor at all.
-        return best_ordered.items;
-    }
-    best.items
+    close(
+        &mut current,
+        &mut runs,
+        &mut previous_run_end,
+        text.lines().count(),
+    );
+    runs
 }
 
-/// Close the run in progress, updating both the overall and the ordered best.
-fn finish_run(current: &mut ListRun, best: &mut ListRun, best_ordered: &mut ListRun) {
-    if current.marker == ListMarker::Ordered && current.items.len() > best_ordered.items.len() {
-        best_ordered.items = current.items.clone();
-        best_ordered.marker = ListMarker::Ordered;
-        best_ordered.first_line = current.first_line;
-    }
-    if current.items.len() > best.items.len() {
-        *best = std::mem::replace(current, ListRun::empty());
-    } else {
-        *current = ListRun::empty();
-    }
-}
-
-/// Whether the text above line `first_line` announces a plan.
+/// Pull an ordered list of steps out of free model text.
 ///
-/// Everything above the list, not just the line immediately before it: models
-/// write "Here is my plan." and then a blank line and then the bullets, and a
-/// one-line lookback would miss it. Reading further up costs a false accept on
-/// a reply that discussed a plan and then listed something else, which is the
-/// cheaper mistake — the alternative is refusing to anchor a run that stated one.
-fn introduced_as_a_plan(text: &str, first_line: usize) -> bool {
-    text.lines().take(first_line).any(line_states_a_plan)
+/// Two rules, in order.
+///
+/// A run the surrounding text introduces as a plan is the plan, whatever its
+/// markers -- that is the model saying so, and nothing beats it. Failing that,
+/// the longest *numbered* run is taken: numbering is an ordering the model
+/// wrote down, and this module's argument for two items being enough is that
+/// "two is an ordering", which is true of `1.` `2.` and simply not true of `-`
+/// `-`. A bullet run with nothing introducing it is a set, and a set of
+/// findings is shaped exactly like a set of steps.
+///
+/// Length decides only between runs of the same standing. Preferring the
+/// longest outright is what let a three-bullet findings list displace the
+/// two-step plan stated above it.
+pub fn parse_plan_steps(text: &str) -> Vec<String> {
+    let runs = list_runs(text);
+    if let Some(introduced) = runs
+        .iter()
+        .filter(|run| introduced_as_a_plan(text, run.search_from, run.first_line))
+        .max_by_key(|run| run.items.len())
+    {
+        return introduced.items.clone();
+    }
+    runs.iter()
+        .filter(|run| run.marker == ListMarker::Ordered)
+        .max_by_key(|run| run.items.len())
+        .map(|run| run.items.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the text between `search_from` and `first_line` announces a plan.
+///
+/// A window rather than everything above, because a cue introduces the list it
+/// sits over and not every list after it. "My plan:" followed by two numbered
+/// steps, and then "Findings:" followed by three bullets, used to hand the
+/// findings the earlier cue -- and since the anchor keeps its first capture for
+/// the life of the run, the plan the model actually stated was gone for good.
+///
+/// Still a window rather than a single line: models write "Here is my plan.",
+/// then a blank line, then the list, and a one-line lookback would miss every
+/// one of them.
+fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bool {
+    text.lines()
+        .take(first_line)
+        .skip(search_from)
+        .any(line_states_a_plan)
 }
 
 /// Whether one line uses a cue as a word rather than as a run of letters.
@@ -517,6 +561,70 @@ mod tests {
                 "{intro:?} introduces a plan"
             );
         }
+    }
+
+    /// A cue introduces the list it sits over, not every list after it.
+    ///
+    /// "My plan:" with two numbered steps, then "Findings:" with three bullets:
+    /// searching every line above the bullets found the earlier cue, and the
+    /// longer list won on length. The anchor keeps its first capture for the
+    /// life of the run, so the plan the model actually stated was gone for good
+    /// and the findings came back every fourth turn as "the plan you stated".
+    #[test]
+    fn a_later_findings_list_does_not_borrow_an_earlier_plan_cue() {
+        let text = "My plan:
+             1. update the field
+             2. run the tests
+             
+             Findings:
+             - stale cache
+             - missing guard
+             - unused import
+";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["update the field", "run the tests"],
+            "the cue belongs to the list beneath it"
+        );
+    }
+
+    /// Length decides between runs of the same standing, and only then.
+    ///
+    /// A longer bullet list introduced as a plan still beats a shorter numbered
+    /// one that is not -- the model saying "plan" outranks the marker.
+    #[test]
+    fn an_introduced_bullet_list_beats_an_unintroduced_numbered_one() {
+        let text = "Versions in play:
+             1. serde
+             2. tokio
+             
+             My plan:
+             - read the ledger
+             - add the field
+             - run the tests
+";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field", "run the tests"]
+        );
+    }
+
+    /// A change of marker ends a run, blank line or not.
+    #[test]
+    fn a_marker_change_starts_a_new_list() {
+        let text = "1. read
+2. edit
+- a note
+- another
+";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read", "edit"],
+            "the numbered run is a plan; the bullets after it are not the same list"
+        );
     }
 
     /// A findings list does not take the plan beside it down with it.
