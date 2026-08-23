@@ -1148,6 +1148,9 @@ fn validate_and_execute(
     loop_correlation_id: u64,
     causality_id: Uuid,
     pending_edits: &mut PendingEditContent,
+    // Set once every gate has passed, so the caller can record that the host
+    // was reached regardless of what the host then returned.
+    dispatched: &mut bool,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     // Step 1: parse tool kind
     let tool = parse_tool_kind(tool_name).ok_or_else(|| {
@@ -1279,6 +1282,13 @@ fn validate_and_execute(
 
     // Step 5: broker capability check
     check_broker_capability(broker, tool, input, loop_correlation_id)?;
+
+    // Every gate has passed, so whatever happens next happened. Recorded here
+    // rather than inferred from the outcome, because the outcome cannot carry
+    // it: a command that ran and then failed and a command refused before it
+    // ran are both `ToolCallRejected`, and only one of them may have touched
+    // the machine.
+    *dispatched = true;
 
     // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
     match tool {
@@ -1663,7 +1673,8 @@ pub fn run_delegated_task_loop(
                     }
 
                     // Validate + execute the tool.
-                    match validate_and_execute(
+                    let mut dispatched = false;
+                    let execution = validate_and_execute(
                         config,
                         name,
                         input,
@@ -1672,7 +1683,28 @@ pub fn run_delegated_task_loop(
                         correlation_id_u64,
                         causality_uuid,
                         &mut pending_edits,
-                    ) {
+                        &mut dispatched,
+                    );
+                    if dispatched {
+                        // Emitted before the outcome is known, and that is the
+                        // point: the outcome cannot distinguish a command that
+                        // ran and failed from one refused before it ran, and
+                        // only one of those may have touched the machine.
+                        event_seq += 1;
+                        step_index += 1;
+                        audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                            run_id: run_id.clone(),
+                            step_index,
+                            kind: DelegatedTaskLoopStepKind::ToolCallDispatched,
+                            correlation_id: correlation_id_str.clone(),
+                            causality_id: causality_id_str.clone(),
+                            event_sequence: event_seq,
+                            tool_name: Some(name.clone()),
+                            allowed: Some(true),
+                            reason: None,
+                        });
+                    }
+                    match execution {
                         Ok(ToolExecutionOutput {
                             content: raw_output,
                             proposal,
