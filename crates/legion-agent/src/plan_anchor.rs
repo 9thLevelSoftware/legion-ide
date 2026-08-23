@@ -351,6 +351,24 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     runs
 }
 
+/// Whether a line is a Markdown section heading.
+///
+/// One to six `#` followed by a space or nothing, per CommonMark -- `#import`
+/// and `#!/bin/sh` are not headings, and treating them as boundaries would stop
+/// the search on a line of quoted code.
+///
+/// A heading claims what follows it exactly as a colon-terminated line does,
+/// and only the colon form was recognised: "I will summarize the inspection."
+/// under a `## Findings` heading handed the findings the earlier cue.
+fn is_heading(line: &str) -> bool {
+    let hashes = line.chars().take_while(|found| *found == '#').count();
+    (1..=6).contains(&hashes)
+        && line[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
 /// A fence delimiter: which character, and how many of it.
 ///
 /// Both are needed to close one. A boolean toggled by any fence let a `~~~`
@@ -362,6 +380,13 @@ fn list_runs(text: &str) -> Vec<ListRun> {
 struct FenceMarker {
     character: char,
     length: usize,
+    /// Whether anything follows the delimiter.
+    ///
+    /// An opening fence may carry an info string -- ```` ```yaml ```` -- and a
+    /// closing one may be followed only by whitespace. Ignoring the suffix let
+    /// a `~~~~yaml` line *inside* a four-tilde fence close it, and the rest of
+    /// the quotation was then read as the model's own words.
+    has_info: bool,
 }
 
 /// The fence a line opens or closes, if it is one at all.
@@ -372,16 +397,21 @@ struct FenceMarker {
 fn fence_marker(line: &str) -> Option<FenceMarker> {
     ['`', '~'].into_iter().find_map(|character| {
         let length = line.chars().take_while(|found| *found == character).count();
-        (length >= 3).then_some(FenceMarker { character, length })
+        (length >= 3).then(|| FenceMarker {
+            character,
+            length,
+            has_info: !line[length..].trim().is_empty(),
+        })
     })
 }
 
 /// Whether `closing` may close `open`.
 ///
-/// Same character, and at least as long. A shorter run of the same character is
-/// content inside the fence, which is exactly how a nested example is written.
+/// Same character, at least as long, and carrying nothing after it. A shorter
+/// run of the same character is content inside the fence, which is exactly how
+/// a nested example is written; so is a longer run with an info string after it.
 fn closes(open: FenceMarker, closing: FenceMarker) -> bool {
-    open.character == closing.character && closing.length >= open.length
+    open.character == closing.character && closing.length >= open.length && !closing.has_info
 }
 
 /// Pull an ordered list of steps out of free model text.
@@ -472,7 +502,7 @@ fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bo
         if line_states_a_plan(line) {
             return true;
         }
-        if line.ends_with(':') {
+        if line.ends_with(':') || is_heading(line) {
             return false;
         }
     }
@@ -786,6 +816,64 @@ mod tests {
         assert!(
             parse_plan_steps(text).is_empty(),
             "the findings are introduced by \"Findings:\", not by the sentence above it"
+        );
+    }
+
+    /// A Markdown heading stops the search as a colon heading does.
+    ///
+    /// Only the colon form was recognised, so "I will summarize the
+    /// inspection." under a `## Findings` heading handed the findings the
+    /// earlier cue -- and the first capture is permanent.
+    #[test]
+    fn a_markdown_heading_stops_the_cue_search() {
+        let text =
+            "I will summarize the inspection.\n## Findings\n- stale cache\n- missing guard\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "the findings are introduced by their own heading"
+        );
+    }
+
+    /// A Markdown heading that states a plan still introduces its list.
+    #[test]
+    fn a_markdown_heading_that_states_a_plan_still_counts() {
+        let text = "Some notes.\n## My plan\n- read the ledger\n- add the field\n";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A hash that is not a heading does not stop the search.
+    #[test]
+    fn a_shebang_is_not_a_heading() {
+        let text = "My plan:\n#!/bin/sh\n- read the ledger\n- add the field\n";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A fence line carrying an info string does not close anything.
+    ///
+    /// An opening fence may name a language; a closing one may be followed only
+    /// by whitespace. Ignoring the suffix let `~~~~yaml` inside a four-tilde
+    /// fence close it, and the quotation below was read as the model's words.
+    #[test]
+    fn a_fence_with_an_info_string_does_not_close_one() {
+        let text = "The README says:\n\
+             ~~~~\n\
+             ~~~~yaml\n\
+             1. Install the toolchain\n\
+             2. Configure the endpoint\n\
+             ~~~~\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "a delimiter with a language after it opens, it does not close"
         );
     }
 
