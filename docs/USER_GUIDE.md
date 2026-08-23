@@ -7,7 +7,7 @@ It assumes the reader already has a working build or a packaged desktop app.
 
 > **Product areas that are currently projection-only, gated, or otherwise not yet productized.** The following are explicitly *not* full product paths today: debug productization (default is still simulated DAP; live spawn uses **Microsoft DAP** wire via `LEGION_DAP_ADAPTER`, `PATH` (`lldb-dap`/`codelldb` preferred-name-first), or `LEGION_DAP_USE_FAKE` for the in-tree fake adapter; every resolved binary must also be named in the security policy's debug adapter allowlist (`lldb-dap`, `lldb-vscode`, `codelldb` by default), so `LEGION_DAP_ADAPTER` selects where an adapter is, not what may be launched; `LEGION_DAP_MODE=live` fails closed; untrusted workspaces deny `debug.adapter.launch` through the capability broker; system-adapter handshake dogfood is optional via `cargo test -p legion-debug --test system_adapter_dogfood` with `LEGION_DAP_DOGFOOD=1` to require a real binary; full launch/step against a host debugee and interactive GUI dogfood remain residual), runtime plugin execution (product composition does not run plugin WASM; a wasmtime host exists for boundary/fixture tests only; marketplace/VSIX runtime remains deferred under `PR-VSC-002`), collaboration GUI / production collaboration, remote workspace / Cloud Lane UX (substrate harness and transport contracts only; not SSH/devcontainer product UX), and signing / notarization / auto-update / crash reporting (dry-run descriptors and local drills only; no private signing credentials may be committed). Autonomous apply/merge is unsupported outside explicitly approved proposal paths. See `docs/LEGION_PIVOT.md` and `plans/legion-production-master-plan-v0.2.md` for the path to activating these surfaces.
 
-> **Terminal runtime (M8, productized).** The terminal is now backed by a real PTY via the workspace trust and capability policy gate. Trusted workspaces in Manual mode auto-enable the terminal on the first explicit launch intent; untrusted workspaces are denied unconditionally. Shell selection (PowerShell Core / cmd / bash / zsh) follows workspace → user → platform-default precedence. The `LEGION_SECRET*` and `LEGION_TOKEN*` environment variable deny-list is always applied regardless of trust state. Scrollback is bounded (default 5 000 rows). See `docs/TROUBLESHOOTING.md` for terminal failure states.
+> **Terminal runtime (real PTY; `PR-LANG-002` still Substrate validated).** The terminal is backed by a real PTY via the workspace trust and capability policy gate. Trusted workspaces in Manual mode auto-enable the terminal on the first explicit launch intent; untrusted workspaces are denied unconditionally. Shell selection (PowerShell Core / cmd / bash / zsh) follows workspace → user → platform-default precedence. The `LEGION_SECRET*` and `LEGION_TOKEN*` environment variable deny-list is always applied regardless of trust state. Scrollback is bounded (default 5 000 rows). This is the runtime, not a ledger promotion: product-workflow validation (dogfood journal, 3-OS, renderer-backed) has not landed. See `docs/TROUBLESHOOTING.md` for terminal failure states.
 
 ## Start here
 
@@ -25,8 +25,11 @@ Use it when you want the projection-only UI, workspace navigation, and trusted l
 
 #### Workspace search
 
-Search operates on the active file or across the entire workspace without mutating any files.
-Multi-file search/replace is explicitly out of scope until M9; the search surface is read-only.
+Search operates on the active file or across the entire workspace.
+The search scan itself does not write files. Multi-file search/replace exists
+as a proposal (`P2.F4.T2`): matches become a `WorkspaceEditProposalPayload` and
+stop at `Previewed`. Applying is a separate, explicit proposal-pipeline step.
+There is no search-panel Replace All control for this path.
 
 Options available in workspace search:
 
@@ -38,8 +41,10 @@ Options available in workspace search:
 Binary files are detected by a NUL-byte heuristic (first 8 KiB window) and skipped automatically;
 the search report includes a `skipped_binary_count` field that records how many were bypassed.
 
-When a new query begins, results from the previous query are marked **stale** until the new
-results arrive.  Stale rows are rendered de-emphasised (tagged `[stale]` in the desktop projection).
+`run_search` is synchronous: it sets previous rows stale and then overwrites
+the projection in the same call (`search.rs` STALE-MARKER VISIBILITY
+LIMITATION). There is no practical window in which a `[stale]` tag is visible
+between queries. Do not treat the search panel as showing live stale rows.
 
 #### Command palette
 
@@ -104,10 +109,11 @@ file, and for non-Rust workspaces that happen to be trusted.
   `BackingOff` (with countdown), `Unavailable`, or `Failed` states from
   `lsp_session_status` in the `LanguageToolingProjection`.
 
-**What is deferred (write-side, P2.F1.T5):**
-Rename, format, code actions, and organize imports are proposal-mediated (generated but not
-yet applied). Apply activation lands with kanban task P3.F1.T2 in a future release.
-See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
+**Write-side (P2.F1.T5; apply via P3.F1.T2):**
+Rename, format, code actions, and organize imports are proposal-mediated.
+Proposal generation is complete, and apply is live through the proposal
+pipeline (`P3.F1.T2`). See `plans/product-readiness-ledger.md` PR-LANG-001
+for the current gate status (still Substrate validated).
 
 ## Support and release surfaces
 
