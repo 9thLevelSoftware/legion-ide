@@ -1784,35 +1784,13 @@ pub(crate) fn local_ai_unavailable_reason(
              answered instead. Add a key in settings, or choose a local provider."
                 .to_string(),
         ),
-        ProductAiProviderPreference::Ollama => Some(local_backend_reason(
-            "Ollama",
-            &ollama_base_url_from_env(),
-            &crate::ai_route_descriptor::ollama_network_target().host,
-            "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
-        )),
-        ProductAiProviderPreference::LlamaCpp => Some(local_backend_reason(
-            "A llama.cpp server",
-            &llama_cpp_base_url_from_env(),
-            &crate::ai_route_descriptor::llama_cpp_network_target().host,
-            "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours \
-             listens elsewhere.",
-        )),
+        ProductAiProviderPreference::Ollama => Some(ollama_unavailable_reason()),
+        ProductAiProviderPreference::LlamaCpp => Some(llama_cpp_unavailable_reason()),
         ProductAiProviderPreference::Auto => Some(format!(
             "No local model server answered, so the deterministic fixture \
              answered instead.\n- {}\n- {}",
-            local_backend_reason(
-                "Ollama",
-                &ollama_base_url_from_env(),
-                &crate::ai_route_descriptor::ollama_network_target().host,
-                "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
-            ),
-            local_backend_reason(
-                "A llama.cpp server",
-                &llama_cpp_base_url_from_env(),
-                &crate::ai_route_descriptor::llama_cpp_network_target().host,
-                "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours \
-                 listens elsewhere.",
-            ),
+            ollama_unavailable_reason(),
+            llama_cpp_unavailable_reason(),
         )),
     }
 }
@@ -1825,16 +1803,48 @@ pub(crate) fn local_ai_unavailable_reason(
 /// local-provider policy would refuse it if it had. `loopback_target_reachable`
 /// filters every non-loopback address before connecting, so "unreachable" and
 /// "not permitted" arrive here indistinguishable unless this asks.
-fn local_backend_reason(name: &str, base_url: &str, host: &str, remedy: &str) -> String {
-    if !crate::ai_route_descriptor::is_loopback_host(host) {
+///
+/// Takes the parsed target rather than the configured string, because this text
+/// becomes a proposal's `PreviewSummary.details` and is retained under a
+/// metadata-only redaction hint. A loopback service behind an authenticated
+/// proxy is configured as `http://user:token@127.0.0.1:11434`, and interpolating
+/// the environment value verbatim wrote that token into proposal history --
+/// while the route parser was carefully stripping the same credential out of
+/// the audit record three lines away.
+fn local_backend_reason(
+    name: &str,
+    target: &legion_protocol::NetworkTarget,
+    remedy: &str,
+) -> String {
+    let endpoint = crate::ai_route_descriptor::displayable_endpoint(target);
+    if !crate::ai_route_descriptor::is_loopback_host(&target.host) {
         return format!(
-            "{name} is configured at {base_url}, which is not a loopback address. \
+            "{name} is configured at {endpoint}, which is not a loopback address. \
              Legion's local-provider policy only reaches this machine, so that \
              endpoint was never contacted. Point it at localhost, or choose a \
              remote provider deliberately in settings."
         );
     }
-    format!("{name} did not answer at {base_url}. {remedy}")
+    format!("{name} did not answer at {endpoint}. {remedy}")
+}
+
+/// Why Ollama did not serve this run.
+fn ollama_unavailable_reason() -> String {
+    local_backend_reason(
+        "Ollama",
+        &crate::ai_route_descriptor::ollama_network_target(),
+        "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
+    )
+}
+
+/// Why llama.cpp did not serve this run.
+fn llama_cpp_unavailable_reason() -> String {
+    local_backend_reason(
+        "A llama.cpp server",
+        &crate::ai_route_descriptor::llama_cpp_network_target(),
+        "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours listens \
+         elsewhere.",
+    )
 }
 
 /// The llama.cpp model label, from configuration.
