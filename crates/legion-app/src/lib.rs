@@ -1677,26 +1677,33 @@ impl ProductAiProviderPreference {
 /// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
 #[cfg(feature = "ai")]
 fn resolve_anthropic_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            std::env::var("LEGION_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("DEVIL_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
-            // legacy `ANTHROPIC_API_KEY` account names.
-            load_provider_api_key(&OsKeyringSecretStore, "anthropic")
-                .ok()
-                .flatten()
-        })
+    anthropic_api_key_from_env().or_else(|| {
+        // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
+        // legacy `ANTHROPIC_API_KEY` account names.
+        load_provider_api_key(&OsKeyringSecretStore, "anthropic")
+            .ok()
+            .flatten()
+    })
+}
+
+/// An Anthropic key supplied by the environment, in the order the client reads.
+///
+/// Separated from the keyring lookup because the diagnosis needs the two apart:
+/// a key in the environment makes the keyring's state irrelevant, and a keyring
+/// that cannot be read is a different problem from one holding nothing.
+#[cfg(feature = "ai")]
+fn anthropic_api_key_from_env() -> Option<String> {
+    [
+        "ANTHROPIC_API_KEY",
+        "LEGION_ANTHROPIC_API_KEY",
+        "DEVIL_ANTHROPIC_API_KEY",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
 }
 
 /// Resolve configured Anthropic base URL (proxy / self-hosted / production).
@@ -1779,11 +1786,7 @@ pub(crate) fn local_ai_unavailable_reason(
 ) -> Option<String> {
     match preference {
         ProductAiProviderPreference::Deterministic => None,
-        ProductAiProviderPreference::Anthropic => Some(
-            "No Anthropic credential is configured, so the deterministic fixture \
-             answered instead. Add a key in settings, or choose a local provider."
-                .to_string(),
-        ),
+        ProductAiProviderPreference::Anthropic => Some(anthropic_unavailable_reason()),
         ProductAiProviderPreference::Ollama => Some(ollama_unavailable_reason()),
         ProductAiProviderPreference::LlamaCpp => Some(llama_cpp_unavailable_reason()),
         ProductAiProviderPreference::Auto => Some(format!(
@@ -1826,6 +1829,57 @@ fn local_backend_reason(
         );
     }
     format!("{name} did not answer at {endpoint}. {remedy}")
+}
+
+/// Why Anthropic did not serve this run.
+///
+/// "No credential is configured" was asserted for both of the ways
+/// `resolve_anthropic_api_key` can return `None`. It discards the keyring's
+/// error with `.ok().flatten()`, so a locked or unavailable OS keyring is
+/// indistinguishable there from an empty one -- and somebody who stored a key
+/// months ago was being told to go and add one, which is advice for a problem
+/// they do not have about a credential that is already there.
+///
+/// The keyring is only consulted when the environment supplied nothing, because
+/// an environment key makes its state irrelevant. That is the same order
+/// `resolve_anthropic_api_key` reads them in, so this cannot report a keyring
+/// failure for a run the keyring was never asked about.
+#[cfg(feature = "ai")]
+fn anthropic_unavailable_reason() -> String {
+    let keyring_error = if anthropic_api_key_from_env().is_none() {
+        load_provider_api_key(&OsKeyringSecretStore, "anthropic")
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+    anthropic_reason(keyring_error.as_deref())
+}
+
+/// Without the provider there is no keyring lookup to have failed.
+#[cfg(not(feature = "ai"))]
+fn anthropic_unavailable_reason() -> String {
+    anthropic_reason(None)
+}
+
+/// The wording, given what the keyring said.
+///
+/// Split out and pure so the failure branch can be tested without arranging for
+/// a locked keyring on the machine running the tests -- which is the reason
+/// this branch did not exist for as long as it did not.
+fn anthropic_reason(keyring_error: Option<&str>) -> String {
+    match keyring_error {
+        Some(error) => format!(
+            "The OS keyring could not be read ({error}), so Legion cannot tell \
+             whether an Anthropic credential is stored, and the deterministic \
+             fixture answered instead. Unlock the keyring, or set \
+             ANTHROPIC_API_KEY for this session."
+        ),
+        None => "No Anthropic credential is configured, so the deterministic \
+                 fixture answered instead. Add a key in settings, or choose a \
+                 local provider."
+            .to_string(),
+    }
 }
 
 /// Why Ollama did not serve this run.

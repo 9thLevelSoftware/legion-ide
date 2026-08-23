@@ -506,6 +506,40 @@ mod delegate_chat_route_honesty_tests {
         );
     }
 
+    /// A keyring that cannot be read is not a credential that is not there.
+    ///
+    /// `resolve_anthropic_api_key` discards the keyring's error with
+    /// `.ok().flatten()`, so a locked or unavailable keyring reaches the
+    /// diagnosis as the same `None` an empty one does. Somebody who stored a key
+    /// months ago was being told to add one -- advice for a problem they do not
+    /// have, about a credential that is already there.
+    #[test]
+    fn a_keyring_that_cannot_be_read_is_reported_as_such() {
+        let reason = crate::anthropic_reason(Some("the keyring is locked"));
+
+        assert!(
+            reason.contains("keyring could not be read"),
+            "the reason must name the real problem; got {reason}"
+        );
+        assert!(
+            reason.contains("the keyring is locked"),
+            "and carry what the keyring said; got {reason}"
+        );
+        assert!(
+            !reason.contains("No Anthropic credential is configured"),
+            "it must not assert an absence it cannot observe; got {reason}"
+        );
+    }
+
+    /// A readable keyring holding nothing really is a missing credential.
+    #[test]
+    fn a_readable_keyring_with_no_key_is_reported_as_a_missing_credential() {
+        let reason = crate::anthropic_reason(None);
+
+        assert!(reason.contains("No Anthropic credential is configured"));
+        assert!(!reason.contains("keyring could not be read"));
+    }
+
     /// A remote provider really is a credential problem, and says so.
     #[test]
     fn a_missing_remote_key_is_reported_as_a_credential_problem() {
