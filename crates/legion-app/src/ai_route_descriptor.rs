@@ -280,6 +280,29 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     )
 }
 
+/// An endpoint as it may be shown to a person or written to a record.
+///
+/// Scheme, host and port, and nothing else. Userinfo, query and fragment are
+/// all places a credential lives -- a loopback service behind an authenticated
+/// proxy is configured as `http://user:token@127.0.0.1:11434`, and interpolating
+/// the raw environment value into a diagnosis put that token into a
+/// `PreviewSummary` retained under a metadata-only redaction hint.
+///
+/// Built from the [`legion_protocol::NetworkTarget`] rather than from the text,
+/// because the target is already the sanitized form every audit record carries.
+/// Deriving a second sanitized form from the same grammar is how this file lost
+/// a query, a set of IPv6 brackets and a proxy credential one at a time.
+pub(crate) fn displayable_endpoint(target: &legion_protocol::NetworkTarget) -> String {
+    match target.port {
+        Some(port) => format!(
+            "{}://{}:{port}",
+            target.scheme,
+            url_authority_host(&target.host)
+        ),
+        None => format!("{}://{}", target.scheme, url_authority_host(&target.host)),
+    }
+}
+
 /// A host as a URL authority writes it: an IPv6 literal wears its brackets.
 fn url_authority_host(host: &str) -> String {
     if host.contains(':') && !host.starts_with('[') {
@@ -381,6 +404,309 @@ pub(crate) fn route_descriptor_for_backend(
 
 #[cfg(test)]
 mod delegate_chat_route_honesty_tests {
+
+    /// A configured fixture is not a failure and says nothing.
+    ///
+    /// Reporting a deliberate choice as a problem is how a message becomes
+    /// noise, and noise is what nobody reads on the day it matters.
+    #[test]
+    fn choosing_the_fixture_reports_nothing() {
+        let _env = RouteEnv::cleared();
+        assert!(
+            crate::local_ai_unavailable_reason(
+                crate::ProductAiProviderPreference::Deterministic,
+                None
+            )
+            .is_none()
+        );
+    }
+
+    /// The local backends are never described as a credential problem.
+    ///
+    /// The old text said "no live credentials" for every fallback. Ollama and
+    /// llama.cpp take no credential, so somebody who had never started one was
+    /// sent looking for an API key that does not exist.
+    #[test]
+    fn a_missing_local_server_is_not_reported_as_a_missing_key() {
+        let _env = RouteEnv::cleared();
+        for preference in [
+            crate::ProductAiProviderPreference::Auto,
+            crate::ProductAiProviderPreference::Ollama,
+            crate::ProductAiProviderPreference::LlamaCpp,
+        ] {
+            let reason = crate::local_ai_unavailable_reason(preference, None)
+                .expect("a local preference that fell back owes an explanation");
+            let lowered = reason.to_lowercase();
+            assert!(
+                !lowered.contains("credential") && !lowered.contains("api key"),
+                "{preference:?} must not be explained as a credential problem: {reason}"
+            );
+        }
+    }
+
+    /// Each local reason names the endpoint that was probed.
+    ///
+    /// Runs under `RouteEnv::cleared()`, which holds the environment lock and
+    /// clears the route variables -- so the endpoints are the known defaults
+    /// and cannot change between the reason being built and the assertion
+    /// reading them. Without the lock this raced the neighbouring tests that
+    /// set `OLLAMA_BASE_URL`, and failed on a scheduling accident.
+    #[test]
+    fn a_local_reason_names_the_endpoint_it_probed() {
+        let _env = RouteEnv::cleared();
+        let ollama = super::displayable_endpoint(&super::ollama_network_target());
+        let llama = super::displayable_endpoint(&super::llama_cpp_network_target());
+
+        let auto =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
+        assert!(auto.contains(&ollama), "got {auto}");
+        assert!(auto.contains(&llama), "got {auto}");
+    }
+
+    /// A credential in a configured URL never reaches the diagnosis.
+    ///
+    /// The reason becomes a proposal's `PreviewSummary.details` and is retained
+    /// under a metadata-only redaction hint, so interpolating the environment
+    /// value verbatim wrote a proxy token into proposal history -- while the
+    /// parser three lines away was carefully stripping the same credential out
+    /// of the audit record.
+    #[test]
+    fn a_credential_in_the_configured_url_is_not_repeated_in_the_reason() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://proxyuser:s3cret@127.0.0.1:11434/v1",
+        );
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            !reason.contains("s3cret") && !reason.contains("proxyuser"),
+            "the credential must not survive into the reason; got {reason}"
+        );
+        assert!(
+            reason.contains("http://127.0.0.1:11434"),
+            "and the endpoint must still be named; got {reason}"
+        );
+    }
+
+    /// The same, for a token carried in the query rather than the userinfo.
+    #[test]
+    fn a_query_token_is_not_repeated_in_the_reason() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://127.0.0.1:11434/v1?access_token=s3cret",
+        );
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            !reason.contains("s3cret"),
+            "a query token is a credential too; got {reason}"
+        );
+    }
+
+    /// A keyring that cannot be read is not a credential that is not there.
+    ///
+    /// `resolve_anthropic_api_key` discards the keyring's error with
+    /// `.ok().flatten()`, so a locked or unavailable keyring reaches the
+    /// diagnosis as the same `None` an empty one does. Somebody who stored a key
+    /// months ago was being told to add one -- advice for a problem they do not
+    /// have, about a credential that is already there.
+    #[test]
+    fn a_keyring_that_cannot_be_read_is_reported_as_such() {
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::KeyringUnreadable(
+                "the keyring is locked".to_string(),
+            ),
+        );
+
+        assert!(
+            reason.contains("keyring could not be read"),
+            "the reason must name the real problem; got {reason}"
+        );
+        assert!(
+            reason.contains("the keyring is locked"),
+            "and carry what the keyring said; got {reason}"
+        );
+        assert!(
+            !reason.contains("No Anthropic credential is configured"),
+            "it must not assert an absence it cannot observe; got {reason}"
+        );
+    }
+
+    /// A readable keyring holding nothing really is a missing credential.
+    #[test]
+    fn a_readable_keyring_with_no_key_is_reported_as_a_missing_credential() {
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::Absent,
+        );
+
+        assert!(reason.contains("No Anthropic credential is configured"));
+        assert!(!reason.contains("keyring could not be read"));
+    }
+
+    /// The diagnosis reports the state its own selection found.
+    ///
+    /// The state used to live in a process-wide slot, so two `AppComposition`
+    /// instances issuing Anthropic requests concurrently could overwrite each
+    /// other's: one records `KeyringUnreadable`, the other records `Absent`,
+    /// and the first then explains its fallback with the second's answer --
+    /// which is the misleading message this change exists to remove, arriving
+    /// through the mechanism that removed it.
+    ///
+    /// Asserted by handing the diagnosis a state that cannot have come from
+    /// this machine's keyring. A global slot would have been overwritten by
+    /// any lookup running beside it; a parameter cannot be.
+    #[test]
+    fn the_diagnosis_reports_the_state_it_was_given() {
+        let _env = RouteEnv::cleared();
+
+        let reason = crate::local_ai_unavailable_reason(
+            crate::ProductAiProviderPreference::Anthropic,
+            Some(
+                crate::local_ai_diagnosis::AnthropicKeyState::KeyringUnreadable(
+                    "a state no lookup on this machine produced".to_string(),
+                ),
+            ),
+        )
+        .expect("anthropic that fell back owes an explanation");
+
+        assert!(
+            reason.contains("a state no lookup on this machine produced"),
+            "the caller's state is the one explained; got {reason}"
+        );
+    }
+
+    /// A credential that is present is not reported as one that is missing.
+    ///
+    /// The diagnosis reads what the *selection* found, and a selection can fall
+    /// back with a perfectly good key -- an unreachable provider, a route
+    /// refused downstream. Re-reading the keyring to write this sentence, and
+    /// then flattening the answer to "no key", sent somebody to fix the one
+    /// thing that was demonstrably working.
+    #[test]
+    fn a_present_credential_is_not_reported_as_missing() {
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::Present,
+        );
+
+        assert!(reason.contains("credential is configured"), "got {reason}");
+        assert!(
+            !reason.contains("No Anthropic credential"),
+            "it must not deny a credential it just found; got {reason}"
+        );
+    }
+
+    /// Auto does not claim a server declined to answer when none was asked.
+    ///
+    /// The opening sentence was "No local model server answered" whatever had
+    /// happened, and it is the only part of the reason that reaches a proposal
+    /// title -- `reason_headline` takes the first line and leaves the
+    /// per-backend bullets in the details. So the one line a projection-only
+    /// surface shows was the one line that could be false.
+    #[test]
+    fn auto_says_contacted_rather_than_answered_when_nothing_was_probed() {
+        let env = RouteEnv::cleared();
+        env.set("OLLAMA_BASE_URL", "http://192.0.2.1:11434");
+        env.set("LEGION_LLAMA_CPP_BASE_URL", "http://192.0.2.2:8080/v1");
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
+
+        assert!(
+            reason.starts_with("No local model server could be contacted"),
+            "neither endpoint was probed, so neither declined to answer; got {reason}"
+        );
+        assert!(
+            reason.contains("not a loopback address"),
+            "and the bullets still say why; got {reason}"
+        );
+    }
+
+    /// A loopback endpoint that is simply down keeps the original wording.
+    ///
+    /// Without this the fix reads as "always say contacted", which would be the
+    /// same defect facing the other way.
+    #[test]
+    fn auto_still_says_answered_when_a_loopback_endpoint_was_probed() {
+        let _env = RouteEnv::cleared();
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
+
+        assert!(
+            reason.starts_with("No local model server answered"),
+            "the defaults are loopback, so they were contacted; got {reason}"
+        );
+    }
+
+    /// A name that does not resolve is its own problem, and says so.
+    ///
+    /// Folding it into "not a loopback address" would send somebody to change a
+    /// URL that is pointed exactly where they meant, for a name their resolver
+    /// has never heard of.
+    #[test]
+    fn an_unresolvable_host_is_reported_as_unresolvable() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://legion-no-such-host.invalid:11434",
+        );
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            reason.contains("does not resolve"),
+            "the reason must name the real problem; got {reason}"
+        );
+    }
+
+    /// A remote provider really is a credential problem, and says so.
+    #[test]
+    fn a_missing_remote_key_is_reported_as_a_credential_problem() {
+        let _env = RouteEnv::cleared();
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Anthropic, None)
+                .expect("anthropic that fell back owes an explanation");
+        assert!(reason.to_lowercase().contains("credential"));
+    }
+
+    /// A non-loopback endpoint is reported as unsupported, not as unreachable.
+    ///
+    /// `loopback_target_reachable` filters every non-loopback address before
+    /// connecting, so Legion never contacts a LAN endpoint and the
+    /// local-provider policy would refuse it anyway. Telling somebody it "did
+    /// not answer" and suggesting they set the URL is advice for a problem they
+    /// do not have, about a URL they already set.
+    #[test]
+    fn a_non_loopback_endpoint_is_reported_as_unsupported() {
+        let env = RouteEnv::cleared();
+        env.set("OLLAMA_BASE_URL", "http://192.168.1.50:11434");
+
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            reason.contains("not a loopback address"),
+            "the reason must name the real problem; got {reason}"
+        );
+        assert!(
+            !reason.contains("did not answer"),
+            "Legion never contacted it, so it cannot report a silent server; got {reason}"
+        );
+    }
 
     /// Userinfo never reaches the authorized host, or the audit record.
     ///
@@ -688,7 +1014,7 @@ mod delegate_chat_route_honesty_tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     /// Every environment variable a product AI route reads.
-    const ROUTE_ENV_VARS: [&str; 7] = [
+    const ROUTE_ENV_VARS: [&str; 10] = [
         "LEGION_ANTHROPIC_BASE_URL",
         "DEVIL_ANTHROPIC_BASE_URL",
         "ANTHROPIC_BASE_URL",
@@ -701,6 +1027,12 @@ mod delegate_chat_route_honesty_tests {
         "LEGION_LLAMA_CPP_BASE_URL",
         "DEVIL_LLAMA_CPP_BASE_URL",
         "LLAMA_CPP_BASE_URL",
+        // The credential names too, because the Anthropic diagnosis reads them
+        // and a developer with a key exported would otherwise get a different
+        // answer from the one CI gets.
+        "ANTHROPIC_API_KEY",
+        "LEGION_ANTHROPIC_API_KEY",
+        "DEVIL_ANTHROPIC_API_KEY",
     ];
 
     /// Serialises the tests that touch the process environment.

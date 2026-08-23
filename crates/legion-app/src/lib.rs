@@ -53,8 +53,13 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
 }
 
 mod delegate_workflow;
-mod phase4_trust;
 /// Live product-AI completions: which backend answers, and what it returns.
+/// Why a local model server did not answer, in words a person can act on.
+mod local_ai_diagnosis;
+mod phase4_trust;
+pub(crate) use local_ai_diagnosis::local_ai_unavailable_reason;
+#[cfg(feature = "ai")]
+use local_ai_diagnosis::resolve_anthropic_api_key;
 mod product_ai_completion;
 mod product_ai_lane;
 mod product_ai_policy;
@@ -1671,34 +1676,6 @@ impl ProductAiProviderPreference {
     }
 }
 
-/// Resolve Anthropic API key from env (preferred) or OS keyring BYOK storage.
-///
-/// Desktop `SetProviderApiKey` writes to the keyring; this path loads that secret
-/// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
-#[cfg(feature = "ai")]
-fn resolve_anthropic_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            std::env::var("LEGION_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("DEVIL_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
-            // legacy `ANTHROPIC_API_KEY` account names.
-            load_provider_api_key(&OsKeyringSecretStore, "anthropic")
-                .ok()
-                .flatten()
-        })
-}
-
 /// Resolve configured Anthropic base URL (proxy / self-hosted / production).
 #[cfg(feature = "ai")]
 fn anthropic_base_url_from_env() -> String {
@@ -1814,7 +1791,7 @@ pub(crate) fn llama_cpp_base_url_from_env() -> String {
 fn llama_cpp_reachable() -> bool {
     loopback_target_reachable(
         &crate::ai_route_descriptor::llama_cpp_network_target(),
-        8080,
+        local_ai_diagnosis::LLAMA_CPP_DEFAULT_PORT,
     )
 }
 
@@ -1827,7 +1804,10 @@ fn ollama_loopback_reachable() -> bool {
     // `localhost`, and to append `:11434` to a bare host the client would have
     // reached on port 80 -- so a configured deployment could be probed at an
     // address the request never used.
-    loopback_target_reachable(&crate::ai_route_descriptor::ollama_network_target(), 11434)
+    loopback_target_reachable(
+        &crate::ai_route_descriptor::ollama_network_target(),
+        local_ai_diagnosis::OLLAMA_DEFAULT_PORT,
+    )
 }
 
 /// Whether a loopback service is listening at `target`.
@@ -1911,8 +1891,38 @@ enum ProductAiLiveBackend {
     Anthropic,
 }
 
+/// The backend a preference resolves to.
+///
+/// Discards the credential state, so a caller that will need to explain a
+/// fallback should use [`product_ai_selection`] instead.
 #[cfg(feature = "ai")]
 fn product_ai_selected_live_backend(
+    preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    product_ai_selection(preference).0
+}
+
+/// The backend a preference resolves to, and what looking for a key found.
+///
+/// The state travels with the selection it belongs to. A process-wide slot
+/// could be overwritten between one request's selection and its fallback
+/// diagnosis, so a run explained itself with another run's credential answer.
+#[cfg(feature = "ai")]
+fn product_ai_selection(
+    preference: ProductAiProviderPreference,
+) -> (
+    Option<ProductAiLiveBackend>,
+    Option<local_ai_diagnosis::AnthropicKeyState>,
+) {
+    if preference == ProductAiProviderPreference::Anthropic {
+        let (key, state) = local_ai_diagnosis::resolve_anthropic_credential();
+        return (key.map(|_| ProductAiLiveBackend::Anthropic), Some(state));
+    }
+    (product_ai_selected_live_backend_inner(preference), None)
+}
+
+#[cfg(feature = "ai")]
+fn product_ai_selected_live_backend_inner(
     preference: ProductAiProviderPreference,
 ) -> Option<ProductAiLiveBackend> {
     match preference {
@@ -1964,6 +1974,17 @@ fn product_ai_selected_live_backend(
     _preference: ProductAiProviderPreference,
 ) -> Option<ProductAiLiveBackend> {
     None
+}
+
+/// Without the provider there is no selection and no credential to look for.
+#[cfg(not(feature = "ai"))]
+fn product_ai_selection(
+    _preference: ProductAiProviderPreference,
+) -> (
+    Option<ProductAiLiveBackend>,
+    Option<local_ai_diagnosis::AnthropicKeyState>,
+) {
+    (None, None)
 }
 
 /// Security policy for product AI routes that may reach local loopback or BYOK remote.
@@ -26446,7 +26467,7 @@ impl AppComposition {
         // request was sent and hand the buffer excerpt to Anthropic instead --
         // a destination the broker never approved. One resolution, threaded
         // through, is the only version of this that cannot drift.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
         let (route_target, route_health, route_cost, route_privacy) =
             crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
         // Identity from the same backend as the destination. These were
@@ -26729,11 +26750,18 @@ impl AppComposition {
             ));
             let worker_route_id = provider_route_request.route_id.clone();
             let worker_event_context = event_context;
+            // Captured now rather than read on the worker: the picker is still
+            // changeable while a reply streams, and the explanation has to name
+            // the preference this run was dispatched under.
+            let preference_for_worker = self.preferred_ai_provider;
+            let anthropic_for_worker = anthropic_key_state.clone();
             let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (label, stream) = resolve_delegate_chat_reply(
                     live_backend,
+                    preference_for_worker,
+                    anthropic_for_worker,
                     &prompt_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -26814,6 +26842,8 @@ impl AppComposition {
             let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
                 live_backend,
+                self.preferred_ai_provider,
+                anthropic_key_state.clone(),
                 &prompt_label,
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,
