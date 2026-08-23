@@ -691,6 +691,7 @@ pub(crate) fn resolve_assisted_edit_proposal_text(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_delegate_chat_reply(
     backend: Option<ProductAiLiveBackend>,
+    preference: ProductAiProviderPreference,
     prompt_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -731,10 +732,23 @@ Do not invent file paths. Keep the reply under ~800 characters.";
                     live_backend_label(backend),
                     route_labels.join(",")
                 ),
-                None => format!(
-                    "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
-                    route_labels.join(",")
-                ),
+                // The same explanation Assist gives, for the same fallback.
+                //
+                // "answer ready … enable Ollama loopback" told somebody who had
+                // selected Ollama to enable the thing they had selected, and
+                // said nothing about which endpoint was probed or whether it
+                // was even contacted. The diagnosis knows all of that; it was
+                // simply never asked on this path.
+                None => match crate::local_ai_unavailable_reason(preference) {
+                    Some(reason) => format!(
+                        "{reason} (route={route_id} labels={}, {citation_count} citation(s))",
+                        route_labels.join(",")
+                    ),
+                    None => format!(
+                        "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; deterministic fixture, as configured)",
+                        route_labels.join(",")
+                    ),
+                },
             },
             None,
         ),
@@ -745,6 +759,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_delegate_chat_reply(
     _backend: Option<ProductAiLiveBackend>,
+    _preference: ProductAiProviderPreference,
     _prompt_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,

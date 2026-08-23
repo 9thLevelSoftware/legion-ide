@@ -1791,7 +1791,7 @@ pub(crate) fn llama_cpp_base_url_from_env() -> String {
 fn llama_cpp_reachable() -> bool {
     loopback_target_reachable(
         &crate::ai_route_descriptor::llama_cpp_network_target(),
-        8080,
+        local_ai_diagnosis::LLAMA_CPP_DEFAULT_PORT,
     )
 }
 
@@ -1804,7 +1804,10 @@ fn ollama_loopback_reachable() -> bool {
     // `localhost`, and to append `:11434` to a bare host the client would have
     // reached on port 80 -- so a configured deployment could be probed at an
     // address the request never used.
-    loopback_target_reachable(&crate::ai_route_descriptor::ollama_network_target(), 11434)
+    loopback_target_reachable(
+        &crate::ai_route_descriptor::ollama_network_target(),
+        local_ai_diagnosis::OLLAMA_DEFAULT_PORT,
+    )
 }
 
 /// Whether a loopback service is listening at `target`.
@@ -26706,11 +26709,16 @@ impl AppComposition {
             ));
             let worker_route_id = provider_route_request.route_id.clone();
             let worker_event_context = event_context;
+            // Captured now rather than read on the worker: the picker is still
+            // changeable while a reply streams, and the explanation has to name
+            // the preference this run was dispatched under.
+            let preference_for_worker = self.preferred_ai_provider;
             let sink_delta = lane_reservation.delta_writer();
             let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (label, stream) = resolve_delegate_chat_reply(
                     live_backend,
+                    preference_for_worker,
                     &prompt_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -26791,6 +26799,7 @@ impl AppComposition {
             let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
                 live_backend,
+                self.preferred_ai_provider,
                 &prompt_label,
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,

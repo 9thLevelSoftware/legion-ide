@@ -566,6 +566,28 @@ mod delegate_chat_route_honesty_tests {
         );
     }
 
+    /// A name that does not resolve is its own problem, and says so.
+    ///
+    /// Folding it into "not a loopback address" would send somebody to change a
+    /// URL that is pointed exactly where they meant, for a name their resolver
+    /// has never heard of.
+    #[test]
+    fn an_unresolvable_host_is_reported_as_unresolvable() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://legion-no-such-host.invalid:11434",
+        );
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
+            .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            reason.contains("does not resolve"),
+            "the reason must name the real problem; got {reason}"
+        );
+    }
+
     /// A remote provider really is a credential problem, and says so.
     #[test]
     fn a_missing_remote_key_is_reported_as_a_credential_problem() {

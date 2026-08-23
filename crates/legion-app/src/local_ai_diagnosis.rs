@@ -161,18 +161,79 @@ pub(crate) fn local_ai_unavailable_reason(
 fn local_backend_reason(
     name: &str,
     target: &legion_protocol::NetworkTarget,
+    default_port: u16,
     remedy: &str,
 ) -> String {
     let endpoint = crate::ai_route_descriptor::displayable_endpoint(target);
-    if !crate::ai_route_descriptor::is_loopback_host(&target.host) {
-        return format!(
+    match probe_reach(target, default_port) {
+        ProbeReach::Loopback => format!("{name} did not answer at {endpoint}. {remedy}"),
+        ProbeReach::NotLoopback => format!(
             "{name} is configured at {endpoint}, which is not a loopback address. \
              Legion's local-provider policy only reaches this machine, so that \
              endpoint was never contacted. Point it at localhost, or choose a \
              remote provider deliberately in settings."
-        );
+        ),
+        ProbeReach::Unresolvable => format!(
+            "{name} is configured at {endpoint}, and that host name does not \
+             resolve, so nothing was contacted. Check the spelling, or point it \
+             at localhost."
+        ),
     }
-    format!("{name} did not answer at {endpoint}. {remedy}")
+}
+
+/// Ollama's port when the configured URL names none.
+///
+/// Shared with the probe rather than written twice: a diagnosis that assumed a
+/// different port from the one that was tried would describe a different
+/// endpoint from the one that failed.
+pub(crate) const OLLAMA_DEFAULT_PORT: u16 = 11434;
+
+/// `llama-server`'s port when the configured URL names none.
+pub(crate) const LLAMA_CPP_DEFAULT_PORT: u16 = 8080;
+
+/// What the probe would have found to connect to.
+enum ProbeReach {
+    /// At least one resolved address is loopback, so the probe tried it.
+    Loopback,
+    /// It resolves, but to nothing on this machine, so the probe skipped it.
+    NotLoopback,
+    /// The name does not resolve at all.
+    Unresolvable,
+}
+
+/// Ask the question `loopback_target_reachable` asks, without connecting.
+///
+/// The probe resolves the host and keeps only the loopback addresses, so an
+/// alias like `ollama.local` pointing at `127.0.0.1` **is** contacted. A textual
+/// check on the host name says otherwise, and the diagnosis then told somebody
+/// their endpoint had never been reached when it had been -- while their server
+/// was simply down, which is the one thing the message did not say.
+///
+/// The same resolution the probe performs, so the two cannot disagree about
+/// what counts as this machine.
+fn probe_reach(target: &legion_protocol::NetworkTarget, default_port: u16) -> ProbeReach {
+    use std::net::{SocketAddr, ToSocketAddrs};
+
+    let port = target.port.unwrap_or(default_port);
+    let Ok(mut addrs) = (target.host.as_str(), port).to_socket_addrs() else {
+        return ProbeReach::Unresolvable;
+    };
+    let mut resolved_any = false;
+    for addr in addrs.by_ref() {
+        resolved_any = true;
+        let loopback = match addr {
+            SocketAddr::V4(v4) => v4.ip().is_loopback(),
+            SocketAddr::V6(v6) => v6.ip().is_loopback(),
+        };
+        if loopback {
+            return ProbeReach::Loopback;
+        }
+    }
+    if resolved_any {
+        ProbeReach::NotLoopback
+    } else {
+        ProbeReach::Unresolvable
+    }
 }
 
 /// Why Anthropic did not serve this run.
@@ -248,6 +309,7 @@ fn ollama_unavailable_reason() -> String {
     local_backend_reason(
         "Ollama",
         &crate::ai_route_descriptor::ollama_network_target(),
+        OLLAMA_DEFAULT_PORT,
         "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
     )
 }
@@ -257,7 +319,66 @@ fn llama_cpp_unavailable_reason() -> String {
     local_backend_reason(
         "A llama.cpp server",
         &crate::ai_route_descriptor::llama_cpp_network_target(),
+        LLAMA_CPP_DEFAULT_PORT,
         "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours listens \
          elsewhere.",
     )
+}
+
+#[cfg(test)]
+mod probe_reach_tests {
+    use super::*;
+
+    fn target(host: &str) -> legion_protocol::NetworkTarget {
+        legion_protocol::NetworkTarget {
+            scheme: "http".to_string(),
+            host: host.to_string(),
+            port: Some(11434),
+        }
+    }
+
+    /// The probe's own question, answered without connecting.
+    ///
+    /// `loopback_target_reachable` resolves the host and keeps only loopback
+    /// addresses, so the diagnosis has to ask the same question the same way.
+    /// It used to ask `is_loopback_host`, which reads the host *as text* --
+    /// true for `localhost` and for any loopback literal, and false for a name
+    /// like `ollama.local` that resolves to `127.0.0.1`. That endpoint is
+    /// genuinely probed, and the diagnosis said it had never been contacted.
+    ///
+    /// The alias itself is not asserted here: it needs a resolver entry this
+    /// test cannot create, and inventing one would test the developer's `hosts`
+    /// file. What is asserted is that the answer comes from resolution -- the
+    /// unresolvable arm cannot exist under a textual check at all, and
+    /// `an_unresolvable_host_is_reported_as_unresolvable` fails when the textual
+    /// check is restored.
+    #[test]
+    fn probe_reach_reports_what_resolution_found() {
+        assert!(
+            matches!(
+                probe_reach(&target("127.0.0.1"), 11434),
+                ProbeReach::Loopback
+            ),
+            "a loopback literal is contacted"
+        );
+        assert!(
+            matches!(probe_reach(&target("::1"), 11434), ProbeReach::Loopback),
+            "and so is the IPv6 one"
+        );
+        // TEST-NET-1, reserved by RFC 5737 and routable nowhere.
+        assert!(
+            matches!(
+                probe_reach(&target("192.0.2.1"), 11434),
+                ProbeReach::NotLoopback
+            ),
+            "an address off this machine is not contacted"
+        );
+        assert!(
+            matches!(
+                probe_reach(&target("legion-no-such-host.invalid"), 11434),
+                ProbeReach::Unresolvable
+            ),
+            "and a name that does not resolve is neither"
+        );
+    }
 }

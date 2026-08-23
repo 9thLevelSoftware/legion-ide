@@ -937,6 +937,64 @@ mod org_ceiling {
         );
     }
 
+    /// Delegate explains its fallback the way Assist does.
+    ///
+    /// The diagnosis reached only `resolve_assisted_edit_proposal_text`, so a
+    /// Delegate turn under an unreachable Ollama still read "answer ready …
+    /// enable Ollama loopback" -- telling somebody to enable the thing they had
+    /// selected, and naming neither the endpoint probed nor whether it was
+    /// contacted at all.
+    #[cfg(feature = "ai")]
+    #[test]
+    fn a_delegate_fallback_names_the_endpoint_it_probed() {
+        let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
+            None,
+            crate::ProductAiProviderPreference::Ollama,
+            "what does this do?",
+            "fn main() {}",
+            "src/main.rs",
+            0,
+            "route-1",
+            &[],
+            None,
+        );
+
+        assert!(
+            reply.contains("Ollama"),
+            "the reply must name the backend that was selected; got {reply}"
+        );
+        assert!(
+            !reply.contains("enable Ollama loopback"),
+            "and must not advise enabling the thing that was already chosen; got {reply}"
+        );
+        assert!(
+            reply.contains("route=route-1"),
+            "the route metadata still has to survive; got {reply}"
+        );
+    }
+
+    /// A fixture asked for on purpose is still reported as ready.
+    #[cfg(feature = "ai")]
+    #[test]
+    fn a_deliberate_delegate_fixture_is_not_reported_as_a_failure() {
+        let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
+            None,
+            crate::ProductAiProviderPreference::Deterministic,
+            "what does this do?",
+            "fn main() {}",
+            "src/main.rs",
+            2,
+            "route-1",
+            &[],
+            None,
+        );
+
+        assert!(
+            reply.contains("answer ready"),
+            "choosing the fixture is a configuration, not a failure; got {reply}"
+        );
+    }
+
     /// A failed Delegate provider is not reported as an answer.
     ///
     /// The fixture reply said an answer was "ready" and then advised enabling
@@ -948,6 +1006,7 @@ mod org_ceiling {
     fn a_failed_delegate_provider_says_so_in_its_reply() {
         let (offline, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
             None,
+            crate::ProductAiProviderPreference::Deterministic,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
@@ -958,6 +1017,7 @@ mod org_ceiling {
         );
         let (failed, stream) = crate::product_ai_completion::resolve_delegate_chat_reply(
             Some(super::ProductAiLiveBackend::Anthropic),
+            crate::ProductAiProviderPreference::Anthropic,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
