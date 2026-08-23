@@ -36,6 +36,7 @@ pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
 pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str {
     match backend {
         ProductAiLiveBackend::Ollama => "ollama",
+        ProductAiLiveBackend::LlamaCpp => "llama-cpp",
         ProductAiLiveBackend::Anthropic => "anthropic",
     }
 }
@@ -98,6 +99,47 @@ pub(crate) fn complete_product_chat(
                 }
                 return Some(ProductChatCompletion {
                     provider_id: "ollama".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
+            }
+            None
+        }
+        ProductAiLiveBackend::LlamaCpp => {
+            // The OpenAI-compatible dialect the adapter already speaks. Built
+            // here rather than reaching for a second client type: the provider
+            // registry has had `LlamaCppProvider` all along, and the only thing
+            // missing was a path to it.
+            let model = crate::llama_cpp_model_label();
+            let client = legion_ai_providers::LlamaCppProvider::default();
+            let request = ChatCompletionRequest {
+                provider: "llama-cpp".to_string(),
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                return Some(ProductChatCompletion {
+                    provider_id: "llama-cpp".to_string(),
                     model: response.model,
                     stream_chunks: vec![text.clone()],
                     text,

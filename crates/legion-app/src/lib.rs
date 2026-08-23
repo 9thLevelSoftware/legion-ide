@@ -1608,6 +1608,14 @@ pub enum ProductAiProviderPreference {
     Auto,
     /// Force Ollama loopback when reachable; else fixture.
     Ollama,
+    /// Force a llama.cpp server when reachable; else fixture.
+    ///
+    /// `LlamaCppProvider` has existed and been tested since the provider
+    /// registry was written, and nothing in the product could select it: this
+    /// enum had no variant for it, so `product_ai_selected_live_backend` had no
+    /// arm and the capability matrix reported it `Unavailable` forever. A
+    /// complete adapter nobody can reach is the same as no adapter.
+    LlamaCpp,
     /// Force Anthropic when credentials exist; else fixture.
     Anthropic,
     /// Always use the offline deterministic fixture (CI / zero-egress).
@@ -1619,6 +1627,7 @@ impl ProductAiProviderPreference {
     pub fn parse(label: &str) -> Self {
         match label.trim().to_ascii_lowercase().as_str() {
             "ollama" | "local" => Self::Ollama,
+            "llama-cpp" | "llamacpp" | "llama.cpp" | "llama" => Self::LlamaCpp,
             "anthropic" | "byok" | "claude" => Self::Anthropic,
             "deterministic" | "deterministic-local" | "fixture" | "offline" => Self::Deterministic,
             "auto" | "" => Self::Auto,
@@ -1631,6 +1640,7 @@ impl ProductAiProviderPreference {
         match self {
             Self::Auto => "auto",
             Self::Ollama => "ollama",
+            Self::LlamaCpp => "llama-cpp",
             Self::Anthropic => "anthropic",
             Self::Deterministic => "deterministic",
         }
@@ -1748,19 +1758,78 @@ pub(crate) fn ollama_base_url_from_env() -> String {
         .unwrap_or_else(|| "http://localhost:11434".to_string())
 }
 
+/// The llama.cpp model label, from configuration.
+///
+/// `llama-server` serves whatever model it was started with and the OpenAI
+/// dialect requires a `model` field anyway, so this is a label rather than a
+/// selection. Configurable because the record a reviewer reads should name the
+/// model that answered, and only the operator knows which one that is.
+pub(crate) fn llama_cpp_model_label() -> String {
+    std::env::var("LEGION_LLAMA_CPP_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "llama.cpp".to_string())
+}
+
+/// Resolve the configured llama.cpp base URL.
+///
+/// Reads the same three names in the same order as `LlamaCppProvider::from_env`
+/// -- product-prefixed, legacy product-prefixed, then bare. The Ollama helper
+/// beside this one reads a single variable while its client reads more, and the
+/// comment on `ollama_loopback_reachable` records what that costs: a configured
+/// deployment probed at an address the request never uses. Copying the client's
+/// precedence is how the probe, the authorized target and the request stay one
+/// endpoint.
+pub(crate) fn llama_cpp_base_url_from_env() -> String {
+    [
+        "LEGION_LLAMA_CPP_BASE_URL",
+        "LEGION_AI_LLAMA_CPP_BASE_URL",
+        "LLAMA_CPP_BASE_URL",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+    .unwrap_or_else(|| "http://localhost:8080/v1".to_string())
+}
+
+/// Fast TCP probe for llama.cpp so CI/offline does not pay HTTP timeouts.
+///
+/// Shares `loopback_target_reachable` with the Ollama probe, including the
+/// tuple-not-format-string handling that an IPv6 loopback needs.
+#[cfg(feature = "ai")]
+fn llama_cpp_reachable() -> bool {
+    loopback_target_reachable(
+        &crate::ai_route_descriptor::llama_cpp_network_target(),
+        8080,
+    )
+}
+
 /// Fast TCP probe for Ollama loopback so CI/offline does not pay HTTP timeouts.
 #[cfg(feature = "ai")]
 fn ollama_loopback_reachable() -> bool {
-    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
     // Through the shared route descriptor, so the probe, the authorized target
     // and the provider client all resolve one endpoint from one configuration.
     // This used to default to `127.0.0.1` while `OllamaProvider::default` used
     // `localhost`, and to append `:11434` to a bare host the client would have
     // reached on port 80 -- so a configured deployment could be probed at an
     // address the request never used.
-    let target = crate::ai_route_descriptor::ollama_network_target();
+    loopback_target_reachable(&crate::ai_route_descriptor::ollama_network_target(), 11434)
+}
+
+/// Whether a loopback service is listening at `target`.
+///
+/// Shared by every local backend probe. Written once because each of the
+/// details below was a defect first, and a second copy is a second chance to
+/// get one of them wrong.
+#[cfg(feature = "ai")]
+fn loopback_target_reachable(target: &legion_protocol::NetworkTarget, default_port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let target = target.clone();
     // A tuple, not a formatted string.
     //
     // The host is stored the way a policy list writes it, so an IPv6 loopback is
@@ -1770,7 +1839,7 @@ fn ollama_loopback_reachable() -> bool {
     // through to the deterministic provider. A tuple takes the host and the port
     // as the separate things they are, so no bracket convention has to be
     // reintroduced here to undo one applied elsewhere.
-    let port = target.port.unwrap_or(11434);
+    let port = target.port.unwrap_or(default_port);
     let Ok(addrs) = (target.host.as_str(), port).to_socket_addrs() else {
         return false;
     };
@@ -1827,6 +1896,7 @@ struct ProductChatCompletion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProductAiLiveBackend {
     Ollama,
+    LlamaCpp,
     Anthropic,
 }
 
@@ -1838,6 +1908,9 @@ fn product_ai_selected_live_backend(
         ProductAiProviderPreference::Deterministic => None,
         ProductAiProviderPreference::Ollama => {
             ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
+        }
+        ProductAiProviderPreference::LlamaCpp => {
+            llama_cpp_reachable().then_some(ProductAiLiveBackend::LlamaCpp)
         }
         ProductAiProviderPreference::Anthropic => {
             resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
@@ -1858,8 +1931,19 @@ fn product_ai_selected_live_backend(
         // Narrower than the full contract, and deliberately so: no
         // `AssistedAiWorkspaceConsent` state exists in this composition yet, so
         // this cannot check consent -- it removes the path that never asked.
+        // Auto tries each local backend in turn and still stops there.
+        //
+        // Ollama first because it is the one most people have running; a
+        // llama.cpp server is a deliberate setup and its owner is not harmed by
+        // Ollama winning when both are up. Neither is remote, so the rule above
+        // is untouched: Auto reaches a local model or the fixture, never a paid
+        // endpoint nobody chose.
         ProductAiProviderPreference::Auto => {
-            ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
+            if ollama_loopback_reachable() {
+                Some(ProductAiLiveBackend::Ollama)
+            } else {
+                llama_cpp_reachable().then_some(ProductAiLiveBackend::LlamaCpp)
+            }
         }
     }
 }
@@ -1890,6 +1974,24 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
             // one environment variable turn a local-only policy into an
             // allowlist entry for anywhere.
             let host = crate::ai_route_descriptor::ollama_network_target().host;
+            if crate::ai_route_descriptor::is_loopback_host(&host)
+                && !policy
+                    .network_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry == &host)
+            {
+                policy.network_policy.allowlist.push(host);
+            }
+        }
+        Some(ProductAiLiveBackend::LlamaCpp) => {
+            // Same posture as Ollama: a loopback server, so the air gap holds
+            // and only its own loopback host joins the allowlist.
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+            let host = crate::ai_route_descriptor::llama_cpp_network_target().host;
             if crate::ai_route_descriptor::is_loopback_host(&host)
                 && !policy
                     .network_policy
@@ -1947,6 +2049,19 @@ fn product_ai_route_fields(
             AssistedAiProviderClass::LocalLoopback,
             Some(crate::ai_route_descriptor::ollama_network_target()),
             vec!["local.ollama".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+        Some(ProductAiLiveBackend::LlamaCpp) => (
+            "llama-cpp".to_string(),
+            llama_cpp_model_label(),
+            // Loopback-local, exactly like Ollama: the excerpt reaches a server
+            // on this machine and the capability must say so, because that is
+            // what a reviewer reads to decide whether the edit was free and
+            // air-gap safe.
+            AssistedAiProviderClass::LocalLoopback,
+            Some(crate::ai_route_descriptor::llama_cpp_network_target()),
+            vec!["local.llama-cpp".to_string()],
             vec!["local.free".to_string()],
             legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
         ),

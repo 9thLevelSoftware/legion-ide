@@ -309,6 +309,11 @@ pub(crate) fn ollama_network_target() -> legion_protocol::NetworkTarget {
     network_target_from_base_url(&crate::ollama_base_url_from_env(), "localhost")
 }
 
+/// The llama.cpp endpoint, from the same configuration the client reads.
+pub(crate) fn llama_cpp_network_target() -> legion_protocol::NetworkTarget {
+    network_target_from_base_url(&crate::llama_cpp_base_url_from_env(), "localhost")
+}
+
 /// The network target, health and cost labels for a chosen backend.
 ///
 /// Split from the preference lookup on purpose. Resolving a preference probes
@@ -342,6 +347,15 @@ pub(crate) fn route_descriptor_for_backend(
             // has to say so; `WorkspaceMetadata` would describe a different
             // request than the one being made.
             legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata,
+        ),
+        Some(ProductAiLiveBackend::LlamaCpp) => (
+            // Derived from the configured base URL for the same reason the
+            // other arms are: the descriptor has to name the endpoint the
+            // excerpt goes to.
+            llama_cpp_network_target(),
+            "delegate.local.llama-cpp",
+            "local.free",
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
         ),
         Some(ProductAiLiveBackend::Ollama) => (
             // Derived from `OLLAMA_BASE_URL`, for the same reason the Anthropic
@@ -1098,5 +1112,53 @@ mod delegate_chat_route_honesty_tests {
         let target = network_target_from_base_url("https:///v1", "api.anthropic.com");
         assert_eq!(target.host, "api.anthropic.com");
         assert!(!target.host.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod llama_cpp_route_tests {
+    use super::*;
+    use crate::ProductAiLiveBackend;
+
+    /// A llama.cpp route is described as local and free, like Ollama.
+    ///
+    /// This tuple is what a reviewer reads to decide whether an edit was
+    /// produced locally and at no cost. A loopback backend described as remote
+    /// would frighten people away from a free local model; described as remote
+    /// *metered* it would be a lie in the expensive direction. The mapping is
+    /// the part that must hold everywhere, which is why it is the part tested.
+    #[test]
+    fn the_llama_cpp_route_is_local_and_free() {
+        let (target, health, cost, privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::LlamaCpp));
+
+        assert_eq!(health, "delegate.local.llama-cpp");
+        assert_eq!(cost, "local.free");
+        assert_eq!(
+            privacy,
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            "nothing leaves the machine on a loopback route"
+        );
+        assert!(
+            is_loopback_host(&target.host),
+            "the default endpoint must be loopback; got {}",
+            target.host
+        );
+    }
+
+    /// The descriptor names the configured endpoint, not the default one.
+    ///
+    /// The same rule the Ollama and Anthropic arms follow: a descriptor naming
+    /// the usual endpoint would misstate the destination for exactly the
+    /// deployments that moved it, and would then have the broker allowlist a
+    /// host the request never contacts.
+    #[test]
+    fn the_llama_cpp_route_follows_its_configuration() {
+        // Parsed directly rather than through the environment, so this test
+        // cannot be perturbed by another running beside it.
+        let target = network_target_from_base_url("http://127.0.0.1:9001/v1", "localhost");
+
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, Some(9001));
     }
 }
