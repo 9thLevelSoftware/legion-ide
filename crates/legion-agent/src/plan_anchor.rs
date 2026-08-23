@@ -307,7 +307,7 @@ fn list_runs(text: &str) -> Vec<ListRun> {
         if open_fence.is_some() {
             continue;
         }
-        match list_item_body(line.trim()) {
+        match indented_list_item(line) {
             Some((marker, body)) if !body.is_empty() => {
                 if current.as_ref().is_some_and(|run| run.marker != marker) {
                     close(
@@ -351,6 +351,30 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     runs
 }
 
+/// How far a line is indented, counting a tab as four columns.
+fn indent_columns(line: &str) -> usize {
+    line.chars()
+        .take_while(|found| *found == ' ' || *found == '\t')
+        .map(|found| if found == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// A list item, unless the indentation makes it a code block.
+///
+/// `line.trim()` removed the four-space prefix that marks an indented code
+/// block, so a documentation excerpt containing "    1. Install" arrived as an
+/// ordered list -- which needs no planning cue -- and became the plan the run
+/// was held to.
+///
+/// Four columns is CommonMark's threshold. The cost is a plan whose steps are
+/// indented that far, which is unusual enough to be the right side of this
+/// trade: a nested list under a step is not itself the plan.
+fn indented_list_item(line: &str) -> Option<(ListMarker, String)> {
+    (indent_columns(line) < 4)
+        .then(|| list_item_body(line.trim()))
+        .flatten()
+}
+
 /// Whether a line is a Markdown section heading.
 ///
 /// One to six `#` followed by a space or nothing, per CommonMark -- `#import`
@@ -367,6 +391,23 @@ fn is_heading(line: &str) -> bool {
             .chars()
             .next()
             .is_none_or(char::is_whitespace)
+}
+
+/// Whether a line is a Setext heading underline.
+///
+/// A run of `=` or of `-` under a line of text makes that line a heading, and
+/// `is_heading` saw only the `#` form -- so "Findings" over "--------" was
+/// crossed as ordinary prose and the cue above it introduced the findings.
+///
+/// Two dashes minimum, so a lone `-` (a bullet with no body, which the run
+/// parser tolerates) is not read as an underline.
+fn is_setext_underline(line: &str) -> bool {
+    let mut characters = line.chars();
+    match characters.next() {
+        Some('=') => characters.all(|found| found == '='),
+        Some('-') => line.len() >= 2 && characters.all(|found| found == '-'),
+        _ => false,
+    }
 }
 
 /// A fence delimiter: which character, and how many of it.
@@ -501,6 +542,12 @@ fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bo
         }
         if line_states_a_plan(line) {
             return true;
+        }
+        // An underline means the line above it is a heading. Its text is still
+        // a candidate cue -- "My plan" over "-------" introduces its list --
+        // but either way the section boundary stops the search here.
+        if is_setext_underline(line) {
+            return index > 0 && !fenced[index - 1] && line_states_a_plan(lines[index - 1].trim());
         }
         if line.ends_with(':') || is_heading(line) {
             return false;
@@ -706,15 +753,7 @@ mod tests {
     /// and the findings came back every fourth turn as "the plan you stated".
     #[test]
     fn a_later_findings_list_does_not_borrow_an_earlier_plan_cue() {
-        let text = "My plan:
-             1. update the field
-             2. run the tests
-             
-             Findings:
-             - stale cache
-             - missing guard
-             - unused import
-";
+        let text = "My plan:\n1. update the field\n2. run the tests\n\nFindings:\n- stale cache\n- missing guard\n- unused import\n";
 
         assert_eq!(
             parse_plan_steps(text),
@@ -729,15 +768,7 @@ mod tests {
     /// one that is not -- the model saying "plan" outranks the marker.
     #[test]
     fn an_introduced_bullet_list_beats_an_unintroduced_numbered_one() {
-        let text = "Versions in play:
-             1. serde
-             2. tokio
-             
-             My plan:
-             - read the ledger
-             - add the field
-             - run the tests
-";
+        let text = "Versions in play:\n1. serde\n2. tokio\n\nMy plan:\n- read the ledger\n- add the field\n- run the tests\n";
 
         assert_eq!(
             parse_plan_steps(text),
@@ -843,6 +874,59 @@ mod tests {
         assert_eq!(
             parse_plan_steps(text),
             vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A Setext heading stops the search as an ATX one does.
+    ///
+    /// "Findings" over "--------" is a heading, and only the `#` form was
+    /// recognised -- so the search crossed it, found "I will" above, and
+    /// captured the findings permanently.
+    #[test]
+    fn a_setext_heading_stops_the_cue_search() {
+        let text = "I will summarize the inspection.\n\
+             Findings\n\
+             --------\n\
+             - stale cache\n\
+             - missing guard\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "the heading claims its list"
+        );
+    }
+
+    /// A Setext heading that states a plan still introduces its list.
+    #[test]
+    fn a_setext_heading_that_states_a_plan_still_counts() {
+        let text = "Some notes.\n\
+             My plan\n\
+             =======\n\
+             - read the ledger\n\
+             - add the field\n";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// An indented code block is quoted, exactly like a fenced one.
+    ///
+    /// Trimming the line removed the four-space prefix that marks it, so a
+    /// documentation excerpt arrived as an ordered list -- which needs no
+    /// planning cue -- and became the plan.
+    #[test]
+    fn an_indented_code_block_is_not_captured_as_a_plan() {
+        // Written escaped rather than with a `\\n\` continuation, because a
+        // continuation strips the leading whitespace of the next line --
+        // which is the entire subject of this test.
+        let text =
+            "The README says:\n\n    1. Install the toolchain\n    2. Configure the endpoint\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "four columns of indent is a code block, not a plan"
         );
     }
 
