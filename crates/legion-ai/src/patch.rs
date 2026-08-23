@@ -190,7 +190,8 @@ pub fn resolve_edit_span(file_content: &str, old_str: &str, new_str: &str) -> Pa
             let start = file_content
                 .find(old_str)
                 .expect("a single counted occurrence must be findable");
-            let end = start + old_str.len();
+            let end =
+                deletion_through_line_ending(file_content, start, start + old_str.len(), new_str);
             PatchSpan::Resolved {
                 start,
                 end,
@@ -206,12 +207,21 @@ pub fn resolve_edit_span(file_content: &str, old_str: &str, new_str: &str) -> Pa
             // file's, so the edit remains exact — only the search was
             // tolerant.
             match find_whitespace_insensitive(file_content, old_str) {
-                Some((start, end)) => PatchSpan::Resolved {
-                    start,
-                    end,
-                    replacement: newline_adjusted(file_content, start, end, new_str),
-                    outcome: EditResolutionOutcome::Fuzzy,
-                },
+                Some((start, end)) => {
+                    // Already line-terminated in practice -- the tolerant
+                    // search measures lines with `split_inclusive`, so its span
+                    // carries the newline and this returns `end` unchanged.
+                    // Applied to both paths anyway, because the alternative is
+                    // one path knowing the deletion rule and the other relying
+                    // on a coincidence of how it counts bytes.
+                    let end = deletion_through_line_ending(file_content, start, end, new_str);
+                    PatchSpan::Resolved {
+                        start,
+                        end,
+                        replacement: newline_adjusted(file_content, start, end, new_str),
+                        outcome: EditResolutionOutcome::Fuzzy,
+                    }
+                }
                 None => PatchSpan::NoMatch(no_match_diagnostic(file_content, old_str)),
             }
         }
@@ -227,6 +237,45 @@ pub fn resolve_edit_span_from_arguments(file_content: &str, arguments: &Value) -
     match edit_arguments(arguments) {
         Ok((old_str, new_str)) => resolve_edit_span(file_content, &old_str, &new_str),
         Err(reason) => PatchSpan::ValidationError { reason },
+    }
+}
+
+/// A whole-line deletion takes its line ending with it.
+///
+/// `parse_edit_blocks` joins the SEARCH lines with newlines and keeps no
+/// trailing one, so an exact match for `foo` covers three bytes of a line that
+/// occupies four. Deleting it removed the text and left the \n behind as a
+/// blank line, which is not what "delete this line" means to anyone reading the
+/// diff.
+///
+/// The whitespace-tolerant path never had this problem: it measures lines with
+/// `split_inclusive`, so its span already covers the terminator. Two resolution
+/// paths disagreeing about what a deletion removes *is* the defect, and the
+/// rule documented on [`newline_adjusted`] only holds if both spans mean the
+/// same thing.
+///
+/// Only whole lines qualify. Deleting `foo` out of `bar foo` must leave the
+/// line ending alone, so the span has to begin a line and the byte after it has
+/// to begin a terminator.
+fn deletion_through_line_ending(
+    file_content: &str,
+    start: usize,
+    end: usize,
+    new_str: &str,
+) -> usize {
+    if !new_str.is_empty() {
+        return end;
+    }
+    if start != 0 && !file_content[..start].ends_with('\n') {
+        return end;
+    }
+    let rest = &file_content[end..];
+    if rest.starts_with("\r\n") {
+        end + 2
+    } else if rest.starts_with('\n') {
+        end + 1
+    } else {
+        end
     }
 }
 
@@ -740,6 +789,70 @@ line 2
             &serde_json::json!({"old_str": "41", "new_str": 42}),
         );
         assert!(matches!(mistyped, PatchResolution::ValidationError { .. }));
+    }
+
+    /// Deleting a line removes the line, not the text off the line.
+    ///
+    /// A SEARCH block quoting `beta();` carries no trailing newline, so the
+    /// exact span covered seven bytes of an eight-byte line and approval left
+    /// an empty line where the statement had been. The tolerant path never did
+    /// this, which is how the two came to disagree about what a deletion is.
+    #[test]
+    fn an_exact_deletion_takes_its_line_ending() {
+        let out = apply_edit("alpha();\nbeta();\ngamma();\n", "beta();", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\ngamma();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// The same, for a file written with CRLF.
+    #[test]
+    fn a_crlf_deletion_takes_both_bytes_of_its_line_ending() {
+        let out = apply_edit("alpha();\r\nbeta();\r\ngamma();\r\n", "beta();", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\r\ngamma();\r\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// Deleting part of a line leaves the line ending where it was.
+    ///
+    /// The rule is "a whole line takes its terminator", and a fragment is not a
+    /// whole line. Swallowing the newline here would join two statements.
+    #[test]
+    fn deleting_inside_a_line_keeps_the_line_ending() {
+        let out = apply_edit("let total = one + two;\nnext();\n", " + two", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "let total = one;\nnext();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// A replacement is not a deletion, and keeps the line it lands on.
+    #[test]
+    fn a_replacement_does_not_consume_the_line_ending() {
+        let out = apply_edit("alpha();\nbeta();\n", "beta();", "delta();");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\ndelta();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
     }
 
     #[test]

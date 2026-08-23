@@ -57,29 +57,110 @@ fn assist_anchor_ambiguity(_haystack: &str, _needle: &str) -> Option<String> {
     None
 }
 
-/// Withdraw an edit whose anchor is not unique in `full_text`.
+/// Whether approving this edit would change no bytes.
 ///
-/// Pure, and separated from the method that reads the buffer for exactly one
-/// reason: this is the safety net the change exists to add, and a net nothing
-/// can test is a net nobody knows is there. The method below is now the two
-/// lines that fetch the text.
-fn withdraw_if_anchor_not_unique(
-    source: AssistedEditProposalSource,
-    full_text: &str,
-) -> AssistedEditProposalSource {
-    if source.anchor.is_empty() {
-        return source;
+/// A valid exact block whose SEARCH and REPLACE text are identical resolves to
+/// a real span carrying a replacement equal to what is already there. Both are
+/// non-empty, so the "changes nothing" guard downstream -- which tests an empty
+/// span *and* an empty replacement -- registers it happily, and approving it
+/// runs `EditorEngine::apply_edits`: version incremented, undo entry written,
+/// buffer marked dirty, text identical. The same no-op button, reached from the
+/// other side.
+fn edit_replaces_text_with_itself(source: &AssistedEditProposalSource, full_text: &str) -> bool {
+    let (start, end) = source.span;
+    // An unresolved source is `(0, 0)` with an empty replacement, and the empty
+    // slice at 0 does equal an empty replacement -- but that is a run that
+    // produced no edit, not one that produced a pointless edit, and the two earn
+    // different records. Left to the guard that names it.
+    if start == end && source.replacement.is_empty() {
+        return false;
     }
-    let Some(reason) = assist_anchor_ambiguity(full_text, &source.anchor) else {
-        return source;
-    };
+    // The span came from a resolver reading the excerpt, and the excerpt is a
+    // prefix of this text, so it should always be in range. Should is not a
+    // reason to index without checking.
+    if start > end || end > full_text.len() {
+        return false;
+    }
+    if !full_text.is_char_boundary(start) || !full_text.is_char_boundary(end) {
+        return false;
+    }
+    full_text[start..end] == source.replacement
+}
+
+/// Turn a source into the same no-op an unresolvable block produces.
+fn withdrawn_edit(
+    source: AssistedEditProposalSource,
+    headline: &str,
+    reason: String,
+) -> AssistedEditProposalSource {
     let mut source = source;
-    source.summary = format!("{} (anchor not unique)", source.summary);
+    source.summary = format!("{} ({headline})", source.summary);
     source.details.push(format!("edit=withdrawn: {reason}"));
     source.span = (0, 0);
     source.replacement = String::new();
     source.anchor = String::new();
     source
+}
+
+/// Withdraw an edit that must not be offered for approval.
+///
+/// Two ways to earn that. The anchor may not be unique in `full_text`, in which
+/// case the resolved span is one of several sites the model never chose
+/// between. Or the edit may be real, unique and pointless -- a replacement
+/// identical to the text under it, which costs a dirty buffer and an undo entry
+/// to accomplish nothing.
+///
+/// Pure, and separated from the method that reads the buffer for exactly one
+/// reason: this is the safety net the change exists to add, and a net nothing
+/// can test is a net nobody knows is there. The method below is now the two
+/// lines that fetch the text.
+fn withdraw_unapprovable_edit(
+    source: AssistedEditProposalSource,
+    full_text: &str,
+) -> AssistedEditProposalSource {
+    if !source.anchor.is_empty()
+        && let Some(reason) = assist_anchor_ambiguity(full_text, &source.anchor)
+    {
+        return withdrawn_edit(source, "anchor not unique", reason);
+    }
+    if edit_replaces_text_with_itself(&source, full_text) {
+        return withdrawn_edit(
+            source,
+            "changes nothing",
+            "the replacement is identical to the text it would replace".to_string(),
+        );
+    }
+    source
+}
+
+/// Why a completed Assist run registered no proposal.
+///
+/// The resolver and the withdrawal guard both write their reason into the
+/// source's details as `edit=unresolved: ...` or `edit=withdrawn: ...`, and the
+/// source is discarded once we know there is no proposal to attach it to. This
+/// lifts the line out first, so the record says *why* rather than only that
+/// nothing happened.
+///
+/// Metadata-only holds. Every reason on those two paths is a count, a line
+/// number or a similarity score -- "appears 3 times", "closest line is 214 (71%
+/// similar)", "2 blocks in the reply" -- and none quote the buffer or the
+/// reply.
+///
+/// Read from the back, and only these two prefixes. A withdrawal is *appended*
+/// to details the resolver already wrote, so a withdrawn identity edit carries
+/// `edit=exact bytes=12..30` ahead of the line saying why it was withdrawn --
+/// and taking the first `edit=` line reported the resolution as though it were
+/// the reason nothing was registered.
+fn assist_no_edit_diagnostic(source: &AssistedEditProposalSource) -> String {
+    source
+        .details
+        .iter()
+        .rev()
+        .find(|detail| {
+            detail.starts_with("edit=withdrawn:") || detail.starts_with("edit=unresolved:")
+        })
+        .cloned()
+        .unwrap_or_else(|| "edit=unresolved: no reason recorded".to_string())
 }
 
 /// Restate a route intent's byte coverage as the span the proposal edits.
@@ -104,14 +185,15 @@ fn assist_intent_over_resolved_span(
 }
 
 impl AppComposition {
-    /// Withdraw an edit whose anchor is not unique in the whole file.
+    /// Withdraw an edit the whole file says must not be approved.
     ///
-    /// Returns the source unchanged when there is nothing to check -- no edit,
-    /// or an anchor that occurs exactly once. Otherwise it becomes the same
-    /// no-op an unresolvable block produces: empty span, empty replacement, and
-    /// a detail saying why, because a proposal that changes the wrong line
-    /// confidently is the failure this whole path exists to remove.
-    fn reject_ambiguous_assist_anchor(
+    /// Returns the source unchanged when there is nothing to withdraw -- no
+    /// edit, an anchor that occurs exactly once, and a replacement that differs
+    /// from the text under it. Otherwise it becomes the same no-op an
+    /// unresolvable block produces: empty span, empty replacement, and a detail
+    /// saying why, because a proposal that changes the wrong line confidently is
+    /// the failure this whole path exists to remove.
+    fn reject_unapprovable_assist_edit(
         &self,
         buffer_id: BufferId,
         source: AssistedEditProposalSource,
@@ -119,7 +201,7 @@ impl AppComposition {
         let Ok(full_text) = self.editor.text(buffer_id) else {
             return source;
         };
-        withdraw_if_anchor_not_unique(source, full_text)
+        withdraw_unapprovable_edit(source, full_text)
     }
     /// Run one Assist operation, from authorization to proposal or refusal.
     ///
@@ -434,6 +516,9 @@ impl AppComposition {
                     permission_budget_projection,
                     generated_at,
                     event_context,
+                    // A policy refusal: the route never ran, so there is no
+                    // resolution to explain. The refusal metadata is the reason.
+                    None,
                     &mut agent,
                 );
             }
@@ -486,6 +571,9 @@ impl AppComposition {
                 permission_budget_projection,
                 generated_at,
                 event_context,
+                // Explain never had a proposal to produce, and a route that did
+                // not complete carries its own refusal.
+                None,
                 &mut agent,
             );
         }
@@ -690,15 +778,62 @@ impl AppComposition {
         #[cfg(not(feature = "ai"))]
         let _ = use_background_live;
 
+        let injected_assist_reply = {
+            #[cfg(all(
+                any(test, feature = "test-helpers"),
+                any(feature = "ai", feature = "offline")
+            ))]
+            {
+                self.injected_assist_reply.take()
+            }
+            #[cfg(not(all(
+                any(test, feature = "test-helpers"),
+                any(feature = "ai", feature = "offline")
+            )))]
+            {
+                Option::<String>::None
+            }
+        };
         let sink_delta = lane_reservation.delta_writer();
         let mut on_delta = move |delta: &str| sink_delta.push(delta);
-        let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-            live_backend,
-            &instruction_label,
-            &buffer_excerpt,
-            &context.metadata.identity.canonical_path.0,
-            Some(&mut on_delta),
-        );
+        // An injected answer stands in for the provider, not for the resolver:
+        // it takes the same placement path a live reply takes, so a test that
+        // injects a duplicated anchor is testing the rule and not a copy of it.
+        #[cfg(all(
+            any(test, feature = "test-helpers"),
+            any(feature = "ai", feature = "offline")
+        ))]
+        let (proposal_source, stream) = match injected_assist_reply {
+            Some(answer) => (
+                crate::product_ai_completion::assisted_edit_proposal_source_from_answer(
+                    &buffer_excerpt,
+                    &context.metadata.identity.canonical_path.0,
+                    &answer,
+                ),
+                None,
+            ),
+            None => resolve_assisted_edit_proposal_text(
+                live_backend,
+                &instruction_label,
+                &buffer_excerpt,
+                &context.metadata.identity.canonical_path.0,
+                Some(&mut on_delta),
+            ),
+        };
+        #[cfg(not(all(
+            any(test, feature = "test-helpers"),
+            any(feature = "ai", feature = "offline")
+        )))]
+        let (proposal_source, stream) = {
+            let _ = injected_assist_reply;
+            resolve_assisted_edit_proposal_text(
+                live_backend,
+                &instruction_label,
+                &buffer_excerpt,
+                &context.metadata.identity.canonical_path.0,
+                Some(&mut on_delta),
+            )
+        };
         let completion = stream.as_ref().map(|stream| ProductChatCompletion {
             provider_id: stream.provider_id.clone(),
             model: stream.model.clone(),
@@ -750,9 +885,33 @@ impl AppComposition {
         // Both the synchronous and background paths arrive here on the app
         // thread, which is the first point that can read the whole buffer
         // without copying it across a thread boundary.
-        let proposal_source = self.reject_ambiguous_assist_anchor(buffer_id, proposal_source);
+        let proposal_source = self.reject_unapprovable_assist_edit(buffer_id, proposal_source);
 
-        let proposal_id = self.proposal_coordinator.next_id();
+        // An edit that changes nothing is not registered as a proposal.
+        //
+        // Registering one is not free: approving it runs
+        // `EditorEngine::apply_edits`, which increments the buffer version,
+        // writes an undo entry, and marks the buffer dirty for text it did not
+        // change -- a button that looks like it worked and did nothing.
+        //
+        // "Changes nothing" is an empty span *and* an empty replacement, not
+        // emptiness of either alone. A deletion is a real edit with a non-empty
+        // span and an empty replacement, and testing the replacement by itself
+        // silently rejected every one of them. The fixture is the mirror image:
+        // an empty span with real text, which is an insertion. A replacement
+        // identical to the text under it is the third case, and it is withdrawn
+        // above rather than tested here.
+        let registers_an_edit =
+            proposal_source.span != (0, 0) || !proposal_source.replacement.is_empty();
+        // Allocated only when there is something to allocate it for.
+        //
+        // Assigning the id first and returning metadata-only afterwards left
+        // the outcome and the replay and tracker records reporting
+        // `proposal_id: None` while the context manifest, the privacy inspector
+        // and the permission budget derived from it all named a proposal that
+        // was never registered. An audit reading those projections would go
+        // looking for it.
+        let proposal_id = registers_an_edit.then(|| self.proposal_coordinator.next_id());
         // The trust projections were built before this proposal existed, so
         // their actions named no proposal -- and `permission_budget_gate` only
         // considers refused evaluations whose action names the proposal being
@@ -765,7 +924,7 @@ impl AppComposition {
         // in one place and leaving the derived record alone is how they come
         // apart.
         let mut context_manifest_projection = context_manifest_projection;
-        context_manifest_projection.manifest.proposal_id = Some(proposal_id);
+        context_manifest_projection.manifest.proposal_id = proposal_id;
         let permission_budget_projection = phase4_permission_budget_projection(
             &context_manifest_projection,
             &run_id,
@@ -791,19 +950,6 @@ impl AppComposition {
                 generated_at,
                 1,
             );
-        // An edit that changes nothing is not registered as a proposal.
-        //
-        // Registering one is not free: approving it runs
-        // `EditorEngine::apply_edits`, which increments the buffer version,
-        // writes an undo entry, and marks the buffer dirty for text it did not
-        // change -- a button that looks like it worked and did nothing.
-        //
-        // "Changes nothing" is an empty span *and* an empty replacement, not
-        // emptiness of either alone. A deletion is a real edit with a non-empty
-        // span and an empty replacement, and testing the replacement by itself
-        // silently rejected every one of them. The fixture is the mirror image:
-        // an empty span with real text, which is an insertion.
-        //
         // The run still has to be recorded. It happened, it cost a provider
         // call, and the reason the edit did not resolve is the useful part --
         // so it finishes through the metadata-only path that already exists for
@@ -811,7 +957,7 @@ impl AppComposition {
         // leaving no durable trail. That path performs the runtime and replay
         // persistence, the tracker-ledger append, the agent transition and the
         // projection updates, all of which an early return skipped.
-        if proposal_source.span == (0, 0) && proposal_source.replacement.is_empty() {
+        let Some(proposal_id) = proposal_id else {
             return self.finish_assisted_ai_metadata_only_run(
                 run_id,
                 route_id,
@@ -824,9 +970,14 @@ impl AppComposition {
                 permission_budget_projection,
                 generated_at,
                 event_context,
+                // The reason, carried into the durable records rather than
+                // dropped with the source. Without it the audit says a
+                // ProposeEdit run finished and produced nothing, and stops
+                // there -- which is the half of the story nobody can act on.
+                Some(assist_no_edit_diagnostic(&proposal_source)),
                 agent,
             );
-        }
+        };
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),
@@ -984,6 +1135,7 @@ impl AppComposition {
             },
             event_context,
             &replay_manifest,
+            &[],
         )?;
         self.tracker_ledger
             .append(TrackerRunLedgerRecord {
@@ -1074,7 +1226,13 @@ mod assist_guard_tests {
         AssistedEditProposalSource {
             provider_id: "ollama".to_string(),
             summary: "Assist edit proposal from ollama".to_string(),
-            details: vec!["model=test".to_string()],
+            details: vec![
+                "model=test".to_string(),
+                // The resolver writes its own `edit=` line before any
+                // withdrawal is appended. Leaving it out of the fixture is what
+                // let a rule that reads the *first* one look correct.
+                "edit=exact bytes=10..20".to_string(),
+            ],
             anchor: anchor.to_string(),
             replacement: "changed();".to_string(),
             span: (10, 20),
@@ -1085,7 +1243,7 @@ mod assist_guard_tests {
     #[test]
     fn a_unique_anchor_keeps_its_edit() {
         let file = "fn a() {}\nfn b() {}\n";
-        let kept = withdraw_if_anchor_not_unique(source("fn a() {}"), file);
+        let kept = withdraw_unapprovable_edit(source("fn a() {}"), file);
 
         assert_eq!(kept.span, (10, 20));
         assert_eq!(kept.replacement, "changed();");
@@ -1098,7 +1256,7 @@ mod assist_guard_tests {
     #[test]
     fn an_anchor_repeated_in_the_file_withdraws_the_edit() {
         let file = "fn a() {}\nfn b() {}\nfn a() {}\n";
-        let withdrawn = withdraw_if_anchor_not_unique(source("fn a() {}"), file);
+        let withdrawn = withdraw_unapprovable_edit(source("fn a() {}"), file);
 
         assert_eq!(withdrawn.span, (0, 0), "a withdrawn edit spans nothing");
         assert!(withdrawn.replacement.is_empty());
@@ -1128,7 +1286,7 @@ mod assist_guard_tests {
     #[test]
     fn a_whitespace_variant_duplicate_withdraws_the_edit() {
         let file = "    call(a, b);\nother();\n        call(a,   b);\n";
-        let withdrawn = withdraw_if_anchor_not_unique(source("call(a, b);"), file);
+        let withdrawn = withdraw_unapprovable_edit(source("call(a, b);"), file);
 
         assert_eq!(
             withdrawn.span,
@@ -1151,9 +1309,99 @@ mod assist_guard_tests {
         let mut empty = source("");
         empty.span = (0, 0);
         empty.replacement = "/* fixture */".to_string();
-        let kept = withdraw_if_anchor_not_unique(empty, "anything at all");
+        let kept = withdraw_unapprovable_edit(empty, "anything at all");
 
         assert_eq!(kept.replacement, "/* fixture */");
+    }
+
+    /// An edit that replaces text with itself is withdrawn.
+    ///
+    /// A valid exact block whose SEARCH and REPLACE are identical resolves to a
+    /// real span and a real replacement, so the "changes nothing" guard -- which
+    /// tests an empty span *and* an empty replacement -- registered it. Approving
+    /// it dirties the buffer, bumps the version and writes an undo entry for
+    /// text it leaves exactly as it found it.
+    #[test]
+    fn a_replacement_identical_to_the_text_it_replaces_is_withdrawn() {
+        let file = "fn a() {}\nchanged();\n";
+        let mut identity = source("changed();");
+        identity.span = (10, 20);
+
+        let withdrawn = withdraw_unapprovable_edit(identity, file);
+
+        assert_eq!(
+            &file[10..20],
+            "changed();",
+            "the fixture must be an identity edit"
+        );
+        assert_eq!(withdrawn.span, (0, 0), "a withdrawn edit spans nothing");
+        assert!(withdrawn.replacement.is_empty());
+        assert!(
+            withdrawn.summary.contains("changes nothing"),
+            "the summary must say so; got {:?}",
+            withdrawn.summary
+        );
+    }
+
+    /// A deletion is not an identity edit, whatever the emptiness suggests.
+    ///
+    /// Its replacement is empty and the text under it is not, so it survives --
+    /// the check that would have caught it is the one comparing the replacement
+    /// against the buffer slice rather than against nothing.
+    #[test]
+    fn a_deletion_survives_the_identity_check() {
+        let file = "fn a() {}\ndoomed();\n";
+        let mut deletion = source("doomed();");
+        deletion.span = (10, 20);
+        deletion.replacement = String::new();
+
+        let kept = withdraw_unapprovable_edit(deletion, file);
+
+        assert_eq!(kept.span, (10, 20), "a deletion is a real edit");
+        assert!(kept.replacement.is_empty());
+    }
+
+    /// A run that registers no proposal still says why.
+    ///
+    /// The source is discarded once there is no proposal to attach it to, and
+    /// the reason went with it -- leaving an audit record saying a ProposeEdit
+    /// run finished and produced nothing, with no way to find out what happened.
+    #[test]
+    fn the_reason_no_edit_resolved_survives_the_source() {
+        let mut unresolved = source("");
+        unresolved.span = (0, 0);
+        unresolved.replacement = String::new();
+        unresolved.details = vec![
+            "model=test".to_string(),
+            "edit=unresolved: no search/replace block in the reply".to_string(),
+        ];
+
+        assert_eq!(
+            assist_no_edit_diagnostic(&unresolved),
+            "edit=unresolved: no search/replace block in the reply"
+        );
+    }
+
+    /// A withdrawal's reason wins over the resolution it overrode.
+    ///
+    /// The resolver writes `edit=exact bytes=..` and the withdrawal is appended
+    /// after it, so reading the first `edit=` line reported a successful
+    /// resolution as the reason nothing was registered -- which is the opposite
+    /// of what happened.
+    #[test]
+    fn a_withdrawn_edit_reports_the_withdrawal_reason() {
+        let file = "fn a() {}\nfn b() {}\nfn a() {}\n";
+        let withdrawn = withdraw_unapprovable_edit(source("fn a() {}"), file);
+
+        let diagnostic = assist_no_edit_diagnostic(&withdrawn);
+        assert!(
+            diagnostic.starts_with("edit=withdrawn:"),
+            "the withdrawal reason must be the one recorded; got {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("appears 2 times"),
+            "and it must carry the count; got {diagnostic:?}"
+        );
     }
 
     /// The persisted contract names the span the proposal edits.

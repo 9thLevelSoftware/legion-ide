@@ -14105,6 +14105,12 @@ pub struct AppComposition {
     injected_delegated_spawn_failure: bool,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_assist_spawn_failure: bool,
+    /// Answer the next synchronous Assist run resolves, instead of the fixture.
+    ///
+    /// The fixture is a canned insertion that always resolves, so the paths
+    /// that produce no proposal have no way to occur in a test otherwise.
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_assist_reply: Option<String>,
     /// Force the Delegate chat worker spawn to fail, for tests.
     ///
     /// Separate from the Assist seam because the two paths fail differently:
@@ -14465,6 +14471,8 @@ impl AppComposition {
             injected_delegated_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             injected_assist_spawn_failure: false,
+            #[cfg(any(test, feature = "test-helpers"))]
+            injected_assist_reply: None,
             injected_delegate_chat_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
@@ -15195,6 +15203,7 @@ impl AppComposition {
                         outcome_label,
                         route.event_context,
                         &replay_manifest,
+                        &[],
                     )
                     .is_err()
                 {
@@ -15394,6 +15403,7 @@ impl AppComposition {
                     audit.outcome_label,
                     audit.event_context,
                     &replay_manifest,
+                    &[],
                 )
                 .is_err()
             {
@@ -15839,6 +15849,17 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_assist_spawn_failure_for_test(&mut self) {
         self.injected_assist_spawn_failure = true;
+    }
+
+    /// Test-only: resolve the next Assist run against this answer.
+    ///
+    /// Consumed once, and only by the synchronous path -- the one the fixture
+    /// preference takes. The answer goes through the same resolver a live
+    /// model's does, so a test that injects a malformed block, a duplicated
+    /// anchor or an identity edit is exercising the real placement rules.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_assist_reply_for_test(&mut self, answer: impl Into<String>) {
+        self.injected_assist_reply = Some(answer.into());
     }
 
     /// Make the next Delegate chat worker spawn fail.
@@ -24196,20 +24217,50 @@ impl AppComposition {
         permission_budget_projection: legion_protocol::PermissionBudgetProjection,
         generated_at: TimestampMillis,
         event_context: EventContext,
+        diagnostic: Option<String>,
         agent: &mut AgentRuntime,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         let refused = route_response.invocation_state
             != legion_protocol::AssistedAiProviderInvocationState::Completed;
-        let agent_state = if refused {
-            legion_protocol::AgentRunState::Blocked
+        // The state and the label are one decision, taken once.
+        //
+        // The label said `phase5.explain.metadata_ready` for every completed run
+        // that reached here, which was true while Explain was the only operation
+        // that could produce no proposal. A ProposeEdit run whose reply carried
+        // no applicable edit now arrives here too, and calling that an Explain
+        // tells an audit the run was never trying to edit anything.
+        //
+        // That run is also `Blocked`, not `Proposing`. It already transitioned to
+        // `Proposing` on its way here, so `Proposing` is not a legal move -- and
+        // it would be the wrong one regardless, because nothing is going to be
+        // proposed. `Blocked` is the state that says a run stopped short of
+        // approval and needs something to change before it can go further.
+        //
+        // Derived from the operation rather than passed in: a parameter is a
+        // second place for the state and the label to come apart.
+        let (agent_state, outcome_label) = if refused {
+            (
+                legion_protocol::AgentRunState::Blocked,
+                "phase5.provider.route.refused",
+            )
+        } else if operation_class == legion_protocol::AssistedAiOperationClass::Explain {
+            (
+                legion_protocol::AgentRunState::Proposing,
+                "phase5.explain.metadata_ready",
+            )
         } else {
-            legion_protocol::AgentRunState::Proposing
+            (
+                legion_protocol::AgentRunState::Blocked,
+                "phase5.assist.edit_unresolved",
+            )
         };
-        let outcome_label = if refused {
-            "phase5.provider.route.refused"
-        } else {
-            "phase5.explain.metadata_ready"
-        };
+        // Why no proposal exists, carried into the durable records.
+        //
+        // Metadata-only holds: the reasons are counts, line numbers and
+        // similarity scores ("appears 3 times", "closest line is 214 (71%
+        // similar)"), never the buffer text or the model's reply.
+        let mut labels = vec![outcome_label.to_string()];
+        labels.extend(diagnostic);
         agent
             .transition(
                 agent_state,
@@ -24277,6 +24328,7 @@ impl AppComposition {
             outcome_label,
             event_context,
             &replay_manifest,
+            &labels[1..],
         )?;
         self.tracker_ledger
             .append(TrackerRunLedgerRecord {
@@ -24287,7 +24339,7 @@ impl AppComposition {
                 correlation_id: event_context.correlation_id,
                 causality_id: event_context.causality_id,
                 event_sequence: self.event_sequence_generator.next(),
-                labels: vec![outcome_label.to_string()],
+                labels: labels.clone(),
             })
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
@@ -24402,6 +24454,7 @@ impl AppComposition {
             .ok_or(AppCompositionError::AiRunMissing { run_id: run_id.0 })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_phase4_runtime_records(
         &self,
         run_id: &legion_protocol::AgentRunId,
@@ -24410,7 +24463,10 @@ impl AppComposition {
         outcome_label: &str,
         event_context: EventContext,
         replay_manifest: &legion_protocol::AgentReplayManifest,
+        extra_labels: &[String],
     ) -> Result<(), AppCompositionError> {
+        let mut labels = vec!["phase4.runtime.metadata_only".to_string()];
+        labels.extend_from_slice(extra_labels);
         let record = legion_protocol::Phase4RuntimeAuditRecord {
             audit_id: format!("phase4-runtime:{}:{}", run_id.0, route_id),
             run_id: Some(run_id.clone()),
@@ -24418,7 +24474,7 @@ impl AppComposition {
             provider_route_id: Some(route_id.to_string()),
             invocation_state,
             outcome_label: outcome_label.to_string(),
-            labels: vec!["phase4.runtime.metadata_only".to_string()],
+            labels,
             correlation_id: event_context.correlation_id,
             causality_id: event_context.causality_id,
             event_sequence: replay_manifest.event_sequence,
@@ -26713,6 +26769,7 @@ impl AppComposition {
                 outcome_label,
                 event_context,
                 &replay_manifest,
+                &[],
             )
             .is_err()
         {

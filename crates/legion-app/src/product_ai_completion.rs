@@ -374,6 +374,63 @@ No explanation, no second block.";
     }
 }
 
+/// Build an edit source from an answer, as though a provider had returned it.
+///
+/// The deterministic fixture is a canned insertion, so it always resolves. That
+/// makes every outcome which produces *no* proposal -- a malformed reply, an
+/// anchor duplicated below the excerpt, a replacement identical to the text
+/// under it -- unreachable from a test unless a real model can be persuaded to
+/// make the mistake on demand.
+///
+/// This is the seam that makes them reachable, and it runs the same
+/// `resolve_assist_placement` the live path runs: a test exercises the resolver
+/// rather than a stand-in that can drift away from it.
+#[cfg(all(
+    any(test, feature = "test-helpers"),
+    any(feature = "ai", feature = "offline")
+))]
+pub(crate) fn assisted_edit_proposal_source_from_answer(
+    buffer_excerpt: &str,
+    file_path: &str,
+    answer: &str,
+) -> AssistedEditProposalSource {
+    let (span, anchor, replacement, summary, detail) =
+        match resolve_assist_placement(buffer_excerpt, file_path, answer) {
+            AssistPlacement::Resolved {
+                span,
+                anchor,
+                replacement,
+                outcome_label,
+            } => (
+                span,
+                anchor,
+                replacement,
+                "Assist edit proposal from injected-reply".to_string(),
+                format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
+            ),
+            AssistPlacement::Unresolved { reason } => (
+                (0, 0),
+                String::new(),
+                String::new(),
+                "Assist edit from injected-reply did not resolve".to_string(),
+                format!("edit=unresolved: {reason}"),
+            ),
+        };
+    AssistedEditProposalSource {
+        provider_id: "injected-reply".to_string(),
+        summary,
+        details: vec![
+            "model=injected-reply".to_string(),
+            "backend=none".to_string(),
+            detail,
+            "Proposal is registered only; app/editor/workspace own apply".to_string(),
+        ],
+        anchor,
+        replacement,
+        span,
+    }
+}
+
 /// Where a live model's answer lands in the buffer, or why it does not.
 enum AssistPlacement {
     /// The block resolved to a unique span.
