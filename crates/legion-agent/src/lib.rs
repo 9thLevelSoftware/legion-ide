@@ -23,6 +23,7 @@ pub mod governors;
 pub mod merge_readiness;
 /// Editable plan construction helpers for agent workflows.
 pub mod plan;
+pub mod plan_anchor;
 /// Task scheduling and lane management.
 pub mod scheduler;
 /// Scope enforcement for delegated task tool calls.

@@ -1476,6 +1476,8 @@ pub fn run_delegated_task_loop(
     // wider tool set than the task was admitted with.
     let action_class = legion_ai::routing::classify_action(&config.initial_message);
     let tool_defs = tool_defs_from_registry(&config.scope, action_class);
+    let mut plan_anchor =
+        crate::plan_anchor::PlanAnchor::new(legion_ai::governance::small_model_governors_enabled());
 
     // Initialize conversation with the user's task message.
     let mut turns: Vec<ToolConversationTurn> = vec![ToolConversationTurn {
@@ -2073,17 +2075,46 @@ pub fn run_delegated_task_loop(
                     });
                 }
 
+                // Capture the plan from the model's own words before the
+                // turn is filed away. First statement only -- a model that
+                // rewrites its plan mid-run is often already drifting, and
+                // adopting the rewrite would make this agree with the drift it
+                // exists to catch.
+                for block in &response.blocks {
+                    if let ToolTurnBlock::Text(text) = block
+                        && plan_anchor.capture(text)
+                    {
+                        break;
+                    }
+                }
+
                 // Append the assistant's turn to conversation history.
                 turns.push(ToolConversationTurn {
                     role: "assistant".to_string(),
                     blocks: response.blocks,
                 });
 
-                // Append all tool results as a user turn.
-                if !tool_result_blocks.is_empty() {
+                // Put the plan back in front of the model on the interval.
+                //
+                // By turn ten the conversation is mostly file contents and
+                // diagnostics; the directive is far away and the model starts
+                // solving whatever the last tool output suggested. It does not
+                // announce that, which is why the other governors cannot see
+                // it -- idle detection sees progress, dedup sees distinct
+                // calls, retry counting sees successes.
+                //
+                // Carried on the same user turn as the tool results when there
+                // are any, so a reminder never becomes a turn of its own that
+                // the model has to answer.
+                let reanchor = plan_anchor.reanchor();
+                if !tool_result_blocks.is_empty() || reanchor.is_some() {
+                    let mut blocks = tool_result_blocks;
+                    if let Some(notice) = reanchor {
+                        blocks.push(ToolTurnBlock::Text(notice));
+                    }
                     turns.push(ToolConversationTurn {
                         role: "user".to_string(),
-                        blocks: tool_result_blocks,
+                        blocks,
                     });
                 }
                 // Loop continues to next model turn.
