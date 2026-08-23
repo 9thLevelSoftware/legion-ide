@@ -328,9 +328,7 @@ fn finish_run(current: &mut ListRun, best: &mut ListRun, best_ordered: &mut List
 /// a reply that discussed a plan and then listed something else, which is the
 /// cheaper mistake — the alternative is refusing to anchor a run that stated one.
 fn introduced_as_a_plan(text: &str, first_line: usize) -> bool {
-    text.lines()
-        .take(first_line)
-        .any(line_states_a_plan)
+    text.lines().take(first_line).any(line_states_a_plan)
 }
 
 /// Whether one line uses a cue as a word rather than as a run of letters.
