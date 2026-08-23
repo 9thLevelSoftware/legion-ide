@@ -38,11 +38,12 @@ pub mod governance {
 }
 
 pub mod redaction;
-/// Tool-calling DTOs, trait, and scripted test provider.
+/// Action classification and intent-based tool narrowing (ADR-0049).
 pub mod routing;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.
 pub mod telemetry;
+/// Tool-calling DTOs, trait, and scripted test provider.
 pub mod tool_calls;
 
 pub use manifest::{

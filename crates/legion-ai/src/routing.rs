@@ -100,6 +100,15 @@ const QUERY_SIGNALS: &[&str] = &[
     "why",
 ];
 
+/// Words that join a second clause, which usually carries the real work.
+///
+/// "Investigate and resolve the crash" opens with a question word and is an
+/// instruction. A verb list can never be complete -- `resolve`, `address`,
+/// `sort out`, `deal with` are all missing and always will be -- so a second
+/// clause is treated as evidence of work rather than something to be
+/// recognised word by word.
+const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", ", and ", "; ", " & "];
+
 /// Classify a directive as a query or a mutation.
 ///
 /// Biased toward `Mutate`, and the asymmetry is the whole design. Offering a
@@ -107,14 +116,19 @@ const QUERY_SIGNALS: &[&str] = &[
 /// task impossible and the model cannot say so — it can only fail in a way that
 /// looks like incapacity.
 ///
-/// So the bias is built from positive evidence in both directions rather than
-/// from one list and a default. A mutation signal wins outright; a query
-/// signal with no mutation signal gives `Query`; and a directive carrying
-/// neither is `Mutate`, because an unrecognised instruction is far more likely
-/// to be work than to be a question. The first version of this defaulted to
-/// `Query`, which meant "Do the task." was handed a tool set with no way to do
-/// it — the exact failure the asymmetry exists to prevent, introduced by the
-/// code that claimed to prevent it.
+/// So `Query` has to be earned and everything else is `Mutate`. A mutation
+/// signal wins outright. Otherwise the directive must *open* as a question and
+/// carry no second clause; anything else — an unrecognised instruction, a
+/// question with work attached — is `Mutate`.
+///
+/// Two earlier versions got this wrong in the same direction and are worth
+/// recording. The first defaulted to `Query` when no mutation verb appeared, so
+/// "Do the task." was handed a tool set with no way to do it. The second
+/// accepted a query word anywhere, so "Investigate and resolve the crash" lost
+/// its edit tool because `resolve` is in no verb list — and no verb list will
+/// ever hold all of `resolve`, `address`, `sort out`, `deal with`. Both were the
+/// exact failure this asymmetry exists to prevent, arriving through the code
+/// meant to prevent it.
 pub fn classify_action(directive: &str) -> ActionClass {
     let lowered = directive.to_lowercase();
     // An underscore is part of a word, not a separator.
@@ -133,7 +147,26 @@ pub fn classify_action(directive: &str) -> ActionClass {
     if words.iter().any(|word| MUTATE_SIGNALS.contains(word)) {
         return ActionClass::Mutate;
     }
-    if words.iter().any(|word| QUERY_SIGNALS.contains(word)) {
+    // A question, and only a question.
+    //
+    // `Query` used to need a question word anywhere in the directive, which
+    // read "Investigate and resolve the crash" as one: `investigate` is a query
+    // signal and `resolve` is not in any verb list -- and never reliably will
+    // be, because that list cannot be completed. The edit tool was then withheld
+    // from an explicit repair request, which is the failure the whole asymmetry
+    // exists to prevent, arriving through the half of the rule meant to prevent
+    // it.
+    //
+    // So `Query` now needs the directive to *open* as a question and to carry
+    // no second clause. Both conditions are cheap to satisfy honestly and hard
+    // to satisfy by accident, and everything else falls to `Mutate`, where an
+    // unused tool costs tokens instead of the task.
+    let opens_as_a_question = words
+        .first()
+        .is_some_and(|word| QUERY_SIGNALS.contains(word))
+        || lowered.trim_end().ends_with('?');
+    let carries_a_second_clause = CLAUSE_JOINERS.iter().any(|joiner| lowered.contains(joiner));
+    if opens_as_a_question && !carries_a_second_clause {
         return ActionClass::Query;
     }
     ActionClass::Mutate
@@ -265,6 +298,45 @@ mod tests {
                 "{directive:?} carries no question, so it must keep the full tool set"
             );
         }
+    }
+
+    /// A question with work attached keeps its tools.
+    ///
+    /// "Investigate and resolve the crash" opens as a question and is an
+    /// instruction. `resolve` is in no verb list and no verb list will ever
+    /// hold every synonym for it, so the second clause is the evidence.
+    #[test]
+    fn a_question_with_work_attached_is_a_mutation() {
+        for directive in [
+            "Investigate and resolve the crash",
+            "explain the failure and address it",
+            "look at the parser, and fix whatever is wrong",
+            "review the module then sort out the naming",
+        ] {
+            assert_eq!(
+                classify_action(directive),
+                ActionClass::Mutate,
+                "{directive:?} asks for work in its second clause"
+            );
+        }
+    }
+
+    /// A question word buried mid-sentence does not make a directive a query.
+    #[test]
+    fn a_query_word_that_does_not_open_the_directive_is_not_a_question() {
+        assert_eq!(
+            classify_action("make the error message explain what went wrong"),
+            ActionClass::Mutate
+        );
+    }
+
+    /// A trailing question mark is enough on its own.
+    #[test]
+    fn a_question_mark_marks_a_question() {
+        assert_eq!(
+            classify_action("is the ledger projection rebuilt per frame?"),
+            ActionClass::Query
+        );
     }
 
     #[test]

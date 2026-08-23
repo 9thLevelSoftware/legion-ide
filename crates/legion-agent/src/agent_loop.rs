@@ -251,15 +251,28 @@ fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinitio
     definition
 }
 
-/// The tool set as advertised to the model, for A/B seam assertions.
+/// The tool set advertised for a mutation directive, for A/B seam assertions.
 ///
-/// Exposed so a test can check that the *advertised* contract moves with the
-/// enforced one; the loop itself uses [`tool_defs_from_registry`].
+/// Answers one question: does the advertised contract move with the enforced
+/// one as the governor flag changes. It deliberately does **not** exercise
+/// intent narrowing — it always asks as `Mutate`, which is the wider set — and
+/// saying so matters, because for a `Query` directive the advertised set is now
+/// narrower than the scope and a helper claiming to compare the two would be
+/// describing something it never looks at.
+///
+/// [`tool_definitions_for_query_tests`] is the other half.
 pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
-    // `Mutate` because that is the wider set: this exists to assert the
-    // advertised contract matches the enforced one, and narrowing by intent
-    // would make it assert something else.
     tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Mutate)
+}
+
+/// The tool set advertised for a query directive.
+///
+/// The narrowing seam, exposed so a test can assert that a question is not
+/// offered the edit tool through the same path the loop uses -- rather than
+/// only through `tools_for_action` in isolation, which would pass even if the
+/// loop stopped calling it.
+pub fn tool_definitions_for_query_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+    tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Query)
 }
 
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
