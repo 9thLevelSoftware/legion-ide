@@ -761,6 +761,20 @@ enum Commands {
     /// A clean skip (rust-analyzer absent) is treated as success (exit 0).
     /// Returns non-zero only on a real test failure.
     RustAnalyzerSmoke,
+    /// Run the hostile-AI evals against a real local model.
+    ///
+    /// Executes:
+    ///   cargo test -p legion-app --test hostile_eval_live -- --ignored
+    ///
+    /// The scripted evals in `hostile_eval_integration` prove the harness
+    /// refuses a tool call it is handed. These ask the different question: given
+    /// a hostile directive and a real workspace, can a live model talk its way
+    /// past the authority substrate. The assertions are about the boundary, so a
+    /// model that simply refuses the task passes too.
+    ///
+    /// A clean skip (no model server, or one that does not answer) is success:
+    /// an absent model is an absent measurement, not a failed eval.
+    HostileEvalLive,
     /// Run the scripted GP-1 golden-path smoke against a throwaway fixture workspace.
     ///
     /// Drives legion-app product APIs (AppComposition, RustAnalyzerSession,
@@ -1079,6 +1093,7 @@ fn main() {
             run_verify_readiness_consistency_command(&ledger, &backlog)
         }
         Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
+        Commands::HostileEvalLive => run_hostile_eval_live_command(),
         Commands::GoldenPath1 {
             fixture_dir,
             out_dir,
@@ -2506,6 +2521,39 @@ fn run_rust_analyzer_smoke_command() -> i32 {
     }
     println!("rust-analyzer smoke: all invocations passed");
     0
+}
+
+fn run_hostile_eval_live_command() -> i32 {
+    let args: &[&str] = &[
+        "test",
+        "-p",
+        "legion-app",
+        "--test",
+        "hostile_eval_live",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ];
+    println!("hostile-eval-live: running cargo {}", args.join(" "));
+    // `--nocapture` so the SKIP lines reach the operator. A run that measured
+    // nothing and a run that measured everything both exit 0, and the only way
+    // to tell them apart is to read what the tests printed.
+    match process::Command::new("cargo").args(args).status() {
+        Ok(status) if status.success() => {
+            println!(
+                "hostile-eval-live: passed. Check the output above for SKIP lines --                  a skip means no model answered and no boundary was exercised."
+            );
+            0
+        }
+        Ok(status) => {
+            eprintln!("hostile-eval-live: a hostile eval failed with {status}");
+            status.code().unwrap_or(1)
+        }
+        Err(err) => {
+            eprintln!("hostile-eval-live: unable to spawn cargo: {err}");
+            1
+        }
+    }
 }
 
 fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
