@@ -267,6 +267,7 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     let mut runs: Vec<ListRun> = Vec::new();
     let mut current: Option<ListRun> = None;
     let mut previous_run_end: Option<usize> = None;
+    let mut fenced = false;
 
     /// Close the run in progress, remembering where it ended.
     fn close(
@@ -282,6 +283,26 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     }
 
     for (index, line) in text.lines().enumerate() {
+        // A fence is a quotation, and a quotation is not a statement.
+        //
+        // A model pasting a README with "1. Install" and "2. Configure" was
+        // handing over an ordered list, which needs no planning cue -- so
+        // somebody else's install instructions became the plan this run was
+        // held to, permanently, and came back every fourth turn as "the plan
+        // you stated".
+        if is_fence(line.trim()) {
+            fenced = !fenced;
+            close(
+                &mut current,
+                &mut runs,
+                &mut previous_run_end,
+                index.saturating_sub(1),
+            );
+            continue;
+        }
+        if fenced {
+            continue;
+        }
         match list_item_body(line.trim()) {
             Some((marker, body)) if !body.is_empty() => {
                 if current.as_ref().is_some_and(|run| run.marker != marker) {
@@ -326,6 +347,15 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     runs
 }
 
+/// Whether a line opens or closes a fenced block.
+///
+/// Both spellings, because models emit both and a fence opened with one cannot
+/// be closed by the other -- an unmatched fence would swallow the rest of the
+/// reply.
+fn is_fence(line: &str) -> bool {
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
 /// Pull an ordered list of steps out of free model text.
 ///
 /// Two rules, in order.
@@ -365,14 +395,36 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
 /// findings the earlier cue -- and since the anchor keeps its first capture for
 /// the life of the run, the plan the model actually stated was gone for good.
 ///
-/// Still a window rather than a single line: models write "Here is my plan.",
-/// then a blank line, then the list, and a one-line lookback would miss every
-/// one of them.
+/// Read backwards, and stopped by a heading that is not itself a cue.
+///
+/// A line ending in a colon claims the list beneath it. "I will summarize the
+/// inspection." followed by "Findings:" and two bullets was reading past the
+/// heading, finding "i will" above it, and locking the findings in as the plan
+/// -- the same defect as the wide window, one section further along.
+///
+/// Still a window rather than a single line: models write "I'll do this:", then
+/// prose, then the list, and a one-line lookback would miss it. The cue is
+/// checked before the heading rule, so "My plan:" introduces its own list.
+///
+/// The trade is deliberate and asymmetric. A plan under an unrelated heading
+/// now goes uncaptured, which costs the run its anchor -- the state it was in
+/// before this feature existed. A findings list captured as a plan costs the
+/// run a permanent, actively misleading anchor it cannot shed.
 fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bool {
-    text.lines()
-        .take(first_line)
-        .skip(search_from)
-        .any(line_states_a_plan)
+    let window: Vec<&str> = text.lines().take(first_line).skip(search_from).collect();
+    for line in window.into_iter().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line_states_a_plan(line) {
+            return true;
+        }
+        if line.ends_with(':') {
+            return false;
+        }
+    }
+    false
 }
 
 /// Whether one line uses a cue as a word rather than as a run of letters.
@@ -661,7 +713,73 @@ mod tests {
     /// of one line would miss every one of them.
     #[test]
     fn a_cue_further_up_still_introduces_the_list() {
-        let text = "Here is my plan.\n\nBefore starting:\n\n- read the ledger\n- add the field\n";
+        let text = "Here is my plan.\n\n- read the ledger\n- add the field\n";
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A heading claims the list under it, and stops the search.
+    ///
+    /// "I will summarize the inspection." followed by "Findings:" and two
+    /// bullets read past the heading, found "i will" above it, and locked the
+    /// findings in as the plan -- permanently, since the anchor keeps its first
+    /// capture, and visibly, since it comes back every fourth turn wearing the
+    /// name of a plan the model never stated.
+    #[test]
+    fn a_heading_stops_the_cue_search() {
+        let text = "I will summarize the inspection.\nFindings:\n- stale cache\n- missing guard\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "the findings are introduced by \"Findings:\", not by the sentence above it"
+        );
+    }
+
+    /// A heading that is itself a cue still introduces its list.
+    #[test]
+    fn a_heading_that_states_a_plan_still_counts() {
+        let text =
+            "I will summarize the inspection.\nMy plan:\n- read the ledger\n- add the field\n";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A list quoted inside a fence is not a plan the model stated.
+    ///
+    /// A README excerpt with "1. Install" and "2. Configure" is an ordered
+    /// list, which needs no planning cue -- so somebody else's instructions
+    /// became the plan the run was held to, and blocked the real one.
+    #[test]
+    fn a_fenced_list_is_not_captured_as_a_plan() {
+        let text = "Here is what the README says:\n\
+             ```\n\
+             1. Install the toolchain\n\
+             2. Configure the endpoint\n\
+             ```\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "quoting a list is not stating one"
+        );
+    }
+
+    /// A plan outside the fence survives a fence in the same reply.
+    #[test]
+    fn a_fence_does_not_hide_the_plan_beside_it() {
+        let text = "The README says:\n\
+             ```\n\
+             1. Install the toolchain\n\
+             2. Configure the endpoint\n\
+             ```\n\
+             My plan:\n\
+             1. read the ledger\n\
+             2. add the field\n";
+
         assert_eq!(
             parse_plan_steps(text),
             vec!["read the ledger", "add the field"]
