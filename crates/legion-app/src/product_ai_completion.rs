@@ -686,6 +686,15 @@ pub(crate) fn resolve_assisted_edit_proposal_text(
     (deterministic_assisted_edit_proposal(), None)
 }
 
+/// Most characters a Delegate chat label may carry.
+///
+/// `DelegatedTaskChatMessage.content_label` is a bounded, display-safe label by
+/// contract. The live reply was bounded and the fallbacks were not, and the
+/// fallbacks are the ones built from configuration -- an environment-supplied
+/// base URL, a route label list -- so they were the unbounded half.
+#[cfg(feature = "ai")]
+pub(crate) const DELEGATE_REPLY_LABEL_MAX_CHARS: usize = 1_200;
+
 /// Resolve Delegate chat assistant body via product preference routing.
 #[cfg(feature = "ai")]
 #[allow(clippy::too_many_arguments)]
@@ -716,7 +725,10 @@ Do not invent file paths. Keep the reply under ~800 characters.";
     ) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "delegate.chat");
-            (bounded_label(completion.text, 1_200), Some(stream))
+            (
+                bounded_label(completion.text, DELEGATE_REPLY_LABEL_MAX_CHARS),
+                Some(stream),
+            )
         }
         // No completion. Which of the two reasons matters to whoever reads the
         // reply, exactly as it does on the Assist path.
@@ -725,31 +737,43 @@ Do not invent file paths. Keep the reply under ~800 characters.";
         // question had been answered when the provider they had selected never
         // replied -- and then advised them to enable the very backend that was
         // already selected and had just failed.
+        // Bounded like a live reply, and for the same reason.
+        //
+        // This becomes `DelegatedTaskChatMessage.content_label`, which the
+        // protocol defines as a bounded, display-safe label -- and every string
+        // interpolated below comes from configuration: an environment-supplied
+        // base URL with a very long host, or a route label list of any size.
+        // The success path went through `bounded_label` and this one did not, so
+        // a misconfigured URL could put megabytes into every persisted
+        // transcript and every projection built from it.
         None => (
-            match backend {
-                Some(backend) => format!(
-                    "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
-                    live_backend_label(backend),
-                    route_labels.join(",")
-                ),
-                // The same explanation Assist gives, for the same fallback.
-                //
-                // "answer ready … enable Ollama loopback" told somebody who had
-                // selected Ollama to enable the thing they had selected, and
-                // said nothing about which endpoint was probed or whether it
-                // was even contacted. The diagnosis knows all of that; it was
-                // simply never asked on this path.
-                None => match crate::local_ai_unavailable_reason(preference) {
-                    Some(reason) => format!(
-                        "{reason} (route={route_id} labels={}, {citation_count} citation(s))",
+            bounded_label(
+                match backend {
+                    Some(backend) => format!(
+                        "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
+                        live_backend_label(backend),
                         route_labels.join(",")
                     ),
-                    None => format!(
-                        "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; deterministic fixture, as configured)",
-                        route_labels.join(",")
-                    ),
+                    // The same explanation Assist gives, for the same fallback.
+                    //
+                    // "answer ready … enable Ollama loopback" told somebody who had
+                    // selected Ollama to enable the thing they had selected, and
+                    // said nothing about which endpoint was probed or whether it
+                    // was even contacted. The diagnosis knows all of that; it was
+                    // simply never asked on this path.
+                    None => match crate::local_ai_unavailable_reason(preference) {
+                        Some(reason) => format!(
+                            "{reason} (route={route_id} labels={}, {citation_count} citation(s))",
+                            route_labels.join(",")
+                        ),
+                        None => format!(
+                            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; deterministic fixture, as configured)",
+                            route_labels.join(",")
+                        ),
+                    },
                 },
-            },
+                DELEGATE_REPLY_LABEL_MAX_CHARS,
+            ),
             None,
         ),
     }

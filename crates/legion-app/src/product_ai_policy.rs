@@ -973,6 +973,38 @@ mod org_ceiling {
         );
     }
 
+    /// A diagnosed fallback is bounded like a live reply.
+    ///
+    /// The label becomes `DelegatedTaskChatMessage.content_label`, which the
+    /// protocol defines as bounded and display-safe -- and every string in the
+    /// fallback comes from configuration: an environment-supplied base URL, a
+    /// route label list. The live path went through `bounded_label` and this
+    /// one did not, so a misconfigured URL put its whole length into every
+    /// persisted transcript and every projection built from one.
+    #[cfg(feature = "ai")]
+    #[test]
+    fn a_diagnosed_delegate_fallback_is_bounded() {
+        let long_label = "x".repeat(50_000);
+
+        let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
+            None,
+            crate::ProductAiProviderPreference::Ollama,
+            "what does this do?",
+            "fn main() {}",
+            "src/main.rs",
+            0,
+            "route-1",
+            std::slice::from_ref(&long_label),
+            None,
+        );
+
+        assert!(
+            reply.chars().count() <= crate::product_ai_completion::DELEGATE_REPLY_LABEL_MAX_CHARS,
+            "a display label has a bound; got {} chars",
+            reply.chars().count()
+        );
+    }
+
     /// A fixture asked for on purpose is still reported as ready.
     #[cfg(feature = "ai")]
     #[test]
