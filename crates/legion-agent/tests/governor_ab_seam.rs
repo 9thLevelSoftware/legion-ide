@@ -860,38 +860,41 @@ const STATED_PLAN: &str = "I will work in three steps:\n\
      2. Check the contents\n\
      3. Report back\n";
 
-/// The plan the model stated comes back to it, through the real loop.
+/// A phrase only `anchor_notice` produces.
 ///
-/// `PlanAnchor` is unit-tested in isolation, and those tests keep passing
-/// whether or not `run_delegated_task_loop` still calls it. This drives the
-/// loop: the model states a plan in turn one, works for three more turns, and
-/// the provider asserts on turn five that the plan text was in what it was
-/// handed.
-///
-/// `expect_prior_result_contains` is the mechanism, so the assertion runs
-/// inside the provider against the conversation the loop actually built rather
-/// than against a reconstruction of it afterwards.
-#[test]
-fn a_stated_plan_is_reinjected_by_the_loop() {
-    let _guard = ENV_GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// "Read a.txt" was the first needle and it matched the model's own turn-one
+/// text, so the test passed with reinjection removed entirely -- it asserted
+/// the model had stated its plan, which it had, in the conversation the
+/// assertion was searching.
+const REMINDER_MARKER: &str = "Reminder \u{2014} the plan you stated";
 
+/// A workspace with four readable files, and the governor flag set.
+///
+/// Four because the filler turns have to be real work: identical reads are
+/// answered from the dedup cache instead of executing, so the turn count would
+/// not advance the way the re-anchor interval needs.
+///
+/// # Safety
+///
+/// The caller must hold `ENV_GUARD` for as long as the returned directory is
+/// in use, so no other test observes the variable mid-change.
+unsafe fn planning_fixture(setting: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
-    // Four distinct files: the filler turns must be real work, and
-    // identical reads would be answered from the dedup cache instead of
-    // executing, so the turn count would not advance the way this needs.
     for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
         std::fs::write(dir.path().join(name), format!("contents of {name}\n")).unwrap();
     }
-
-    // SAFETY: holds `ENV_GUARD` across the env-mutating block, so no other test
-    // observes the variable mid-change.
     unsafe {
-        std::env::set_var("LEGION_AI_GOVERNORS", "on");
+        std::env::set_var("LEGION_AI_GOVERNORS", setting);
     }
+    dir
+}
 
-    let provider = ScriptedToolCallingProviderBuilder::new()
+/// The four-turn script both plan tests drive.
+fn planning_script(
+    provider_id: &str,
+    expect_reminder: bool,
+) -> legion_ai::tool_calls::ScriptedToolCallingProvider {
+    let mut builder = ScriptedToolCallingProviderBuilder::new()
         .turn(
             planning_turn(
                 STATED_PLAN,
@@ -903,16 +906,32 @@ fn a_stated_plan_is_reinjected_by_the_loop() {
         )
         .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
         .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
-        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }))
-        // A phrase only `anchor_notice` produces. "Read a.txt" was the first
-        // needle and it matched the model's own turn-1 text, so the test
-        // passed with reinjection removed entirely -- it was asserting that
-        // the model had stated its plan, which it had, in the same
-        // conversation the assertion was searching.
-        .expect_prior_result_contains("Reminder \u{2014} the plan you stated")
-        .end_turn("Done.")
-        .build("plan-anchor-provider");
+        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }));
+    if expect_reminder {
+        builder = builder.expect_prior_result_contains(REMINDER_MARKER);
+    }
+    builder.end_turn("Done.").build(provider_id)
+}
 
+/// The plan the model stated comes back to it, through the real loop.
+///
+/// `PlanAnchor` is unit-tested in isolation, and those tests keep passing
+/// whether or not `run_delegated_task_loop` still calls it. This drives the
+/// loop: the model states a plan in turn one, works three more turns, and the
+/// provider asserts on turn five that the plan came back.
+///
+/// `expect_prior_result_contains` is the mechanism, so the assertion runs
+/// inside the provider against the conversation the loop actually built rather
+/// than a reconstruction of it afterwards.
+#[test]
+fn a_stated_plan_is_reinjected_by_the_loop() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("on") };
+
+    let provider = planning_script("plan-anchor-provider", true);
     let (result, _sink) = run_recording(&dir, &provider);
 
     // The expectation inside the provider is the assertion: reaching Completed
@@ -927,53 +946,43 @@ fn a_stated_plan_is_reinjected_by_the_loop() {
     }
 }
 
-/// With governors off the loop restates nothing, and the run still completes.
+/// With governors off the loop restates nothing.
 ///
-/// The raw baseline has to measure the un-ported loop or the bench's A/B arms
-/// stop being comparable. Asserted through the loop for the same reason as
-/// above: a unit test cannot see whether the loop still consults the flag.
+/// Asserted by demanding the reminder and requiring the run to fail. The
+/// scripted provider ignores extra conversation unless something inspects it,
+/// so a test that only checked the terminal result would pass whether or not a
+/// reminder had been injected -- and the regression that matters is plan
+/// anchoring quietly switching on in the raw arm, which would make the bench's
+/// A/B comparison meaningless while every check stayed green.
+///
+/// So the same script that proves presence in the enabled test proves absence
+/// here: it expects the reminder, and with governors off that expectation must
+/// go unmet. A run that completes is a run where the reminder arrived.
 #[test]
 fn a_disabled_run_does_not_reinject_a_plan() {
     let _guard = ENV_GUARD
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("off") };
 
-    let dir = TempDir::new().unwrap();
-    // Four distinct files: the filler turns must be real work, and
-    // identical reads would be answered from the dedup cache instead of
-    // executing, so the turn count would not advance the way this needs.
-    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
-        std::fs::write(dir.path().join(name), format!("contents of {name}\n")).unwrap();
-    }
-
-    // SAFETY: holds `ENV_GUARD` across the env-mutating block.
-    unsafe {
-        std::env::set_var("LEGION_AI_GOVERNORS", "off");
-    }
-
-    // No expectation: an unmet one panics, so absence is asserted by the run
-    // completing on a script that never mentions the plan again.
-    let provider = ScriptedToolCallingProviderBuilder::new()
-        .turn(
-            planning_turn(
-                STATED_PLAN,
-                "p1",
-                "read",
-                serde_json::json!({ "path": "a.txt" }),
-            ),
-            legion_ai::tool_calls::ToolCompletionStopReason::ToolUse,
-        )
-        .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
-        .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
-        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }))
-        .end_turn("Done.")
-        .build("plan-anchor-disabled-provider");
-
-    let (result, _sink) = run_recording(&dir, &provider);
+    // Expecting the reminder deliberately: this run must not satisfy it.
+    let provider = planning_script("plan-anchor-disabled-provider", true);
+    let mut sink = RecordingSink::default();
+    let result = run_delegated_task_loop(
+        &config(&dir),
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    );
 
     assert!(
-        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
-        "expected Completed, got {result:?}"
+        result.is_err(),
+        "the raw arm restated a plan -- the provider's expectation was met with \
+         governors off, so the bench's A/B comparison would be measuring the same \
+         behaviour twice. got {result:?}"
     );
 
     unsafe {
