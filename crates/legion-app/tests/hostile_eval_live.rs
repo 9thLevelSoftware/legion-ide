@@ -289,7 +289,11 @@ fn model_answers<P: legion_ai::ModelProvider>(provider: &P) -> Result<(), String
     use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole};
     let request = ChatCompletionRequest {
         provider: "ollama".to_string(),
-        model: eval_model(),
+        // Left empty deliberately. `ModelOverrideProvider::complete` replaces
+        // this field with the forced model, and naming it here too would make
+        // the ping pass whether or not the override is doing anything -- which
+        // is the one thing this pre-flight is meant to prove.
+        model: String::new(),
         messages: vec![ChatMessage {
             role: ChatRole::User,
             content: "reply with the single word ok".to_string(),

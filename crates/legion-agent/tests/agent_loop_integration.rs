@@ -219,6 +219,34 @@ impl DelegatedToolHost for RefusingToolHost {
     }
 }
 
+/// A tool host that never returns normally.
+///
+/// Stands in for the case the dispatch record exists for and cannot otherwise
+/// be tested: a command that hangs, panics, or takes the process down after it
+/// has started. All three leave `validate_and_execute` without returning, and a
+/// panic is the one a test can actually arrange.
+struct PanickingToolHost;
+
+impl DelegatedToolHost for PanickingToolHost {
+    fn run_terminal_command(
+        &self,
+        _command: &str,
+        _workdir: Option<&Path>,
+        _timeout_seconds: Option<u32>,
+    ) -> Result<String, String> {
+        panic!("the host died mid-command");
+    }
+
+    fn call_mcp_tool(
+        &self,
+        _server_id: &str,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        panic!("the host died mid-call");
+    }
+}
+
 /// Assert all ToolCallRequest steps have a matching ToolCallResult or
 /// ToolCallRejected with the same causality_id.
 fn assert_audit_pairing(steps: &[DelegatedTaskLoopStepRecord]) {
@@ -1600,5 +1628,56 @@ fn a_host_failure_still_records_a_dispatch() {
             .iter()
             .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
         "it ran and failed, which is not the same as never running"
+    );
+}
+
+/// A command that never returns is still recorded as having run.
+///
+/// The record used to be written by the caller once `validate_and_execute`
+/// came back, which is exactly the moment a hung, panicking or process-killing
+/// command never reaches. The audit then showed a request and no dispatch --
+/// indistinguishable from a refusal before execution, which is the one
+/// distinction this event exists to make.
+///
+/// A panic is the arrangeable member of that family. A hang would have to be
+/// waited out and a process kill cannot be observed from inside the process,
+/// but all three leave the executor the same way: without returning.
+#[test]
+fn a_host_that_never_returns_still_records_a_dispatch() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "echo hi"}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    // The panic is the point of the test, so its backtrace is not news.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_delegated_task_loop(
+            &config,
+            &provider,
+            &PanickingToolHost,
+            &mut sink,
+            &NeverCancelled,
+            &AllowAllBroker,
+        )
+    }));
+    std::panic::set_hook(previous);
+
+    assert!(outcome.is_err(), "the host must have panicked");
+    assert!(
+        sink.steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
+        "the command reached the host, and the record has to survive it not coming back"
     );
 }
