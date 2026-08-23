@@ -1525,9 +1525,26 @@ pub fn run_delegated_task_loop(
                                 ),
                             });
                         }
-                        tool_result_blocks.push(ToolTurnBlock::Text(format!(
-                            "Tool call `{name}` was rejected: {diagnostic}"
-                        )));
+                        // A malformed call is a failure of this tool.
+                        //
+                        // It never reaches `validate_and_execute`, so the
+                        // streak was blind to it -- and the interleaving that
+                        // hides it is ordinary: broken `grep` arguments between
+                        // working `read` calls keep resetting
+                        // `max_consecutive_retries`, so a model that can only
+                        // emit invalid JSON for one tool retries it forever
+                        // without ever being told which tool is the problem.
+                        let mut rejection =
+                            format!("Tool call `{name}` was rejected: {diagnostic}");
+                        if let Some(notice) = governors.note_tool_failure(name) {
+                            rejection.push_str(
+                                "
+
+",
+                            );
+                            rejection.push_str(&notice);
+                        }
+                        tool_result_blocks.push(ToolTurnBlock::Text(rejection));
                         continue;
                     }
                     let ToolTurnBlock::ToolUse { id, name, input } = block else {
@@ -1584,8 +1601,18 @@ pub fn run_delegated_task_loop(
                     // the model made it, and a governor that hid model actions
                     // from the audit would be trading one honesty problem for
                     // another.
-                    if let Some(cached) = governors.cached_result(name, input) {
-                        let notice = crate::governors::dedup_notice(name, cached);
+                    // Owned, so the immutable borrow ends before the streak
+                    // reset below needs `&mut`.
+                    if let Some(cached) = governors.cached_result(name, input).map(str::to_string) {
+                        // A cache hit is a success, and the failure streak has
+                        // to hear about it. Only the fresh-execution path reset
+                        // it, so a tool that failed twice, was then answered
+                        // from cache, and failed once more still reported three
+                        // in a row -- a demotion notice describing a streak that
+                        // a success had already broken. "Consecutive" has to
+                        // mean consecutive on every path that ends in an answer.
+                        governors.note_tool_success(name);
+                        let notice = crate::governors::dedup_notice(name, &cached);
                         // A cache hit still sends the whole result to the model,
                         // so it costs exactly what a fresh call costs and is
                         // charged the same. Serving it free would let repeated
@@ -1752,6 +1779,10 @@ pub fn run_delegated_task_loop(
                             // later cache hit hands the model exactly what a
                             // fresh call would have.
                             governors.record_execution(name, input, &bound.redacted_text);
+                            // A success ends this tool's failure streak. The
+                            // streak is consecutive, so working once is exactly
+                            // what makes the earlier failures not a pattern.
+                            governors.note_tool_success(name);
 
                             tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                 tool_use_id: id.clone(),
@@ -1830,6 +1861,21 @@ pub fn run_delegated_task_loop(
                                 {
                                     feedback_content
                                         .push_str(&crate::governors::read_first_hint(path));
+                                }
+                                // One tool failing repeatedly is information the
+                                // model cannot see: it gets each diagnostic
+                                // separately and nothing tells it they are the
+                                // same tool three times. `max_consecutive_retries`
+                                // counts across every tool and ends the run, which
+                                // cannot distinguish "stuck" from "this one tool
+                                // does not work here".
+                                if let Some(notice) = governors.note_tool_failure(name) {
+                                    feedback_content.push_str(
+                                        "
+
+",
+                                    );
+                                    feedback_content.push_str(&notice);
                                 }
                                 tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                     tool_use_id: id.clone(),
