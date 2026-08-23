@@ -1677,13 +1677,74 @@ impl ProductAiProviderPreference {
 /// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
 #[cfg(feature = "ai")]
 fn resolve_anthropic_api_key() -> Option<String> {
-    anthropic_api_key_from_env().or_else(|| {
-        // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
-        // legacy `ANTHROPIC_API_KEY` account names.
-        load_provider_api_key(&OsKeyringSecretStore, "anthropic")
-            .ok()
-            .flatten()
-    })
+    let (key, state) = match anthropic_api_key_from_env() {
+        Some(key) => (Some(key), AnthropicKeyState::Present),
+        None => {
+            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
+            // legacy `ANTHROPIC_API_KEY` account names.
+            match load_provider_api_key(&OsKeyringSecretStore, "anthropic") {
+                Ok(Some(key)) => (Some(key), AnthropicKeyState::Present),
+                Ok(None) => (None, AnthropicKeyState::Absent),
+                Err(error) => (
+                    None,
+                    AnthropicKeyState::KeyringUnreadable(error.to_string()),
+                ),
+            }
+        }
+    };
+    record_anthropic_key_state(state);
+    key
+}
+
+/// What the credential lookup found, kept so the diagnosis need not ask again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnthropicKeyState {
+    /// A key was resolved, from the environment or the keyring.
+    Present,
+    /// The keyring answered, and holds no key.
+    Absent,
+    /// The keyring could not be read, so nothing is known either way.
+    KeyringUnreadable(String),
+}
+
+/// The most recent credential lookup, for the diagnosis that follows it.
+///
+/// The diagnosis explains a backend selection that has *already happened*, and
+/// looking the credential up a second time to explain the first is two ways
+/// wrong. The answers can disagree -- a keyring unlocked in between turns "it
+/// failed" into "there is no key", which is the false message this whole change
+/// removes -- and each lookup can put a system prompt in front of the operator,
+/// so the second one asks them to authorise a read taken purely to write a
+/// sentence.
+static LAST_ANTHROPIC_KEY_STATE: std::sync::Mutex<Option<AnthropicKeyState>> =
+    std::sync::Mutex::new(None);
+
+/// Remember what a lookup found.
+fn record_anthropic_key_state(state: AnthropicKeyState) {
+    *LAST_ANTHROPIC_KEY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
+}
+
+/// Forget the last lookup, so a test's diagnosis cannot read another's answer.
+///
+/// The cache is process-global by design -- the selection and the diagnosis
+/// that explains it are separate calls with no value passed between them -- and
+/// that makes it shared state between tests in the same binary. `RouteEnv`
+/// clears it alongside the route variables for the same reason it clears those.
+#[cfg(test)]
+pub(crate) fn forget_anthropic_key_state() {
+    *LAST_ANTHROPIC_KEY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// What the last lookup found, if one has happened in this process.
+fn last_anthropic_key_state() -> Option<AnthropicKeyState> {
+    LAST_ANTHROPIC_KEY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 /// An Anthropic key supplied by the environment, in the order the client reads.
@@ -1846,38 +1907,51 @@ fn local_backend_reason(
 /// failure for a run the keyring was never asked about.
 #[cfg(feature = "ai")]
 fn anthropic_unavailable_reason() -> String {
-    let keyring_error = if anthropic_api_key_from_env().is_none() {
-        load_provider_api_key(&OsKeyringSecretStore, "anthropic")
-            .err()
-            .map(|error| error.to_string())
-    } else {
-        None
-    };
-    anthropic_reason(keyring_error.as_deref())
+    // The selection that fell back has already asked, and its answer is the one
+    // this is explaining. Asking again would be a second keyring read that can
+    // disagree with the first and can prompt the operator a second time.
+    //
+    // Nothing recorded means no selection has run in this process -- a test
+    // calling the diagnosis directly -- and then asking is the only way to have
+    // anything to say.
+    let state = last_anthropic_key_state().unwrap_or_else(|| {
+        resolve_anthropic_api_key();
+        last_anthropic_key_state().unwrap_or(AnthropicKeyState::Absent)
+    });
+    anthropic_reason(&state)
 }
 
 /// Without the provider there is no keyring lookup to have failed.
 #[cfg(not(feature = "ai"))]
 fn anthropic_unavailable_reason() -> String {
-    anthropic_reason(None)
+    anthropic_reason(&AnthropicKeyState::Absent)
 }
 
-/// The wording, given what the keyring said.
+/// The wording, given what the lookup found.
 ///
-/// Split out and pure so the failure branch can be tested without arranging for
-/// a locked keyring on the machine running the tests -- which is the reason
-/// this branch did not exist for as long as it did not.
-fn anthropic_reason(keyring_error: Option<&str>) -> String {
-    match keyring_error {
-        Some(error) => format!(
+/// Split out and pure so every branch can be tested without arranging for a
+/// locked keyring on the machine running the tests -- which is the reason the
+/// keyring branch did not exist for as long as it did not.
+fn anthropic_reason(state: &AnthropicKeyState) -> String {
+    match state {
+        AnthropicKeyState::KeyringUnreadable(error) => format!(
             "The OS keyring could not be read ({error}), so Legion cannot tell \
              whether an Anthropic credential is stored, and the deterministic \
              fixture answered instead. Unlock the keyring, or set \
              ANTHROPIC_API_KEY for this session."
         ),
-        None => "No Anthropic credential is configured, so the deterministic \
-                 fixture answered instead. Add a key in settings, or choose a \
-                 local provider."
+        // Reached when the credential resolved but the run still fell back --
+        // the provider was unreachable, or the route was refused downstream.
+        // Saying "add a key" here would send somebody to fix the one thing that
+        // is demonstrably working.
+        AnthropicKeyState::Present => "An Anthropic credential is configured, so \
+             something other than the credential stopped this run and the \
+             deterministic fixture answered instead. Check the route detail for \
+             the refusal or the provider error."
+            .to_string(),
+        AnthropicKeyState::Absent => "No Anthropic credential is configured, so \
+             the deterministic fixture answered instead. Add a key in settings, \
+             or choose a local provider."
             .to_string(),
     }
 }

@@ -515,7 +515,9 @@ mod delegate_chat_route_honesty_tests {
     /// have, about a credential that is already there.
     #[test]
     fn a_keyring_that_cannot_be_read_is_reported_as_such() {
-        let reason = crate::anthropic_reason(Some("the keyring is locked"));
+        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::KeyringUnreadable(
+            "the keyring is locked".to_string(),
+        ));
 
         assert!(
             reason.contains("keyring could not be read"),
@@ -534,10 +536,28 @@ mod delegate_chat_route_honesty_tests {
     /// A readable keyring holding nothing really is a missing credential.
     #[test]
     fn a_readable_keyring_with_no_key_is_reported_as_a_missing_credential() {
-        let reason = crate::anthropic_reason(None);
+        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::Absent);
 
         assert!(reason.contains("No Anthropic credential is configured"));
         assert!(!reason.contains("keyring could not be read"));
+    }
+
+    /// A credential that is present is not reported as one that is missing.
+    ///
+    /// The diagnosis reads what the *selection* found, and a selection can fall
+    /// back with a perfectly good key -- an unreachable provider, a route
+    /// refused downstream. Re-reading the keyring to write this sentence, and
+    /// then flattening the answer to "no key", sent somebody to fix the one
+    /// thing that was demonstrably working.
+    #[test]
+    fn a_present_credential_is_not_reported_as_missing() {
+        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::Present);
+
+        assert!(reason.contains("credential is configured"), "got {reason}");
+        assert!(
+            !reason.contains("No Anthropic credential"),
+            "it must not deny a credential it just found; got {reason}"
+        );
     }
 
     /// A remote provider really is a credential problem, and says so.
@@ -881,7 +901,7 @@ mod delegate_chat_route_honesty_tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     /// Every environment variable a product AI route reads.
-    const ROUTE_ENV_VARS: [&str; 7] = [
+    const ROUTE_ENV_VARS: [&str; 10] = [
         "LEGION_ANTHROPIC_BASE_URL",
         "DEVIL_ANTHROPIC_BASE_URL",
         "ANTHROPIC_BASE_URL",
@@ -894,6 +914,12 @@ mod delegate_chat_route_honesty_tests {
         "LEGION_LLAMA_CPP_BASE_URL",
         "DEVIL_LLAMA_CPP_BASE_URL",
         "LLAMA_CPP_BASE_URL",
+        // The credential names too, because the Anthropic diagnosis reads them
+        // and a developer with a key exported would otherwise get a different
+        // answer from the one CI gets.
+        "ANTHROPIC_API_KEY",
+        "LEGION_ANTHROPIC_API_KEY",
+        "DEVIL_ANTHROPIC_API_KEY",
     ];
 
     /// Serialises the tests that touch the process environment.
@@ -943,6 +969,10 @@ mod delegate_chat_route_honesty_tests {
                 .iter()
                 .map(|name| (*name, std::env::var(name).ok()))
                 .collect();
+            // The credential lookup is cached across calls, so clearing the
+            // variables is not enough on its own: a previous test's answer
+            // would still be the one this test's diagnosis reports.
+            crate::forget_anthropic_key_state();
             for name in ROUTE_ENV_VARS {
                 // SAFETY: `guard` is held and is moved into the returned value,
                 // so no other test in this binary reads or writes these
