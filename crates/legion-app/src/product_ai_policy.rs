@@ -171,8 +171,19 @@ pub(crate) fn declared_request_tokens(prompt_bytes: usize, completion_tokens: u3
 /// exists precisely to refuse a request that cannot say what it costs.
 pub(crate) fn declared_request_cost_cents(backend: ProductAiLiveBackend) -> Option<u64> {
     match backend {
-        ProductAiLiveBackend::Ollama => Some(0),
-        _ => None,
+        // Both local backends declare zero, and they have to declare the same
+        // thing because they cost the same thing. An organisation that allows
+        // `llama-cpp` and requires a cost declaration for `ai.provider.*` would
+        // otherwise have every Assist, Delegate and inline request refused by
+        // `BudgetCapPolicy` before invocation -- a loopback server on the
+        // operator's own machine, denied for an undeclared price it does not
+        // have. The route already calls it `local.free`; this is the same fact
+        // said where the broker reads it.
+        ProductAiLiveBackend::Ollama | ProductAiLiveBackend::LlamaCpp => Some(0),
+        // Anthropic is metered and its price is not known here. `None` is the
+        // honest answer, and refusing an undeclared metered call is the
+        // policy working.
+        ProductAiLiveBackend::Anthropic => None,
     }
 }
 
@@ -1046,6 +1057,36 @@ mod org_ceiling {
         assert_eq!(
             capability.cost_budget_label, "local.free",
             "a loopback route really is free and must keep saying so"
+        );
+    }
+
+    /// Both local backends declare zero cost, because both cost zero.
+    ///
+    /// An organisation that allows `llama-cpp` and requires a cost declaration
+    /// for `ai.provider.*` would otherwise have every request refused by
+    /// `BudgetCapPolicy` before invocation -- a loopback server on the
+    /// operator's own machine, denied for an undeclared price it does not have.
+    /// The route already calls it `local.free`; this asserts the broker is told
+    /// the same thing.
+    #[test]
+    fn every_local_backend_declares_zero_cost() {
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::Ollama),
+            Some(0)
+        );
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::LlamaCpp),
+            Some(0),
+            "a local llama.cpp call costs what a local Ollama call costs"
+        );
+    }
+
+    /// A metered remote call declares nothing, and that is the honest answer.
+    #[test]
+    fn a_metered_remote_backend_declares_no_cost() {
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::Anthropic),
+            None
         );
     }
 

@@ -24,6 +24,12 @@ pub(crate) fn render_preferred_provider_picker(
         for (label, id) in [
             ("Auto (local-first)", "auto"),
             ("Ollama", "ollama"),
+            // Offered because a preference nothing can select is the same as
+            // no preference. `Auto` prefers Ollama when both are reachable, so
+            // without a button a llama.cpp user has no way to choose the server
+            // they deliberately started -- the parser accepts the label and the
+            // product never produces it.
+            ("llama.cpp", "llama-cpp"),
             ("Anthropic", "anthropic"),
             ("Fixture", "deterministic"),
         ] {
