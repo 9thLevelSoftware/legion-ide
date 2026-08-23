@@ -117,12 +117,18 @@ const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & "];
 /// opening clause was ever classified, and `resolve` is in no verb list -- so
 /// both lost the edit tool for a repair the user asked for in as many words.
 ///
-/// Semicolons and commas are here rather than in [`CLAUSE_JOINERS`] because a
-/// separator does not need a word after it to separate. The cost is that "what
-/// does this do, exactly?" now reads as two clauses and keeps an edit tool it
-/// will not use; that is the same trade the rest of this module makes, and it
-/// falls on the side measured in tokens.
-const CLAUSE_ENDS: &[char] = &['.', '!', '?', '\n', ';', ','];
+/// Semicolons, commas and colons are here rather than in [`CLAUSE_JOINERS`]
+/// because a separator does not need a word after it to separate. This list has
+/// now been extended three times, once per punctuation mark somebody thought of
+/// -- period, then comma, then colon -- which is itself the argument for
+/// enumerating separators instead of verbs: the punctuation is finite, and the
+/// set of English words meaning "fix it" is not.
+///
+/// The cost is that "what does this do, exactly?" and "where is `Foo::bar`
+/// defined?" both read as two clauses and keep an edit tool they will not use.
+/// That is the same trade the rest of this module makes, and it falls on the
+/// side measured in tokens.
+const CLAUSE_ENDS: &[char] = &['.', '!', '?', '\n', ';', ',', ':'];
 
 /// Classify a directive as a query or a mutation.
 ///
@@ -209,13 +215,9 @@ pub fn classify_action(directive: &str) -> ActionClass {
 /// a clause ends, because that text is a second instruction the classification
 /// of the first says nothing about.
 fn text_follows_a_clause_end(lowered: &str) -> bool {
-    lowered.find(CLAUSE_ENDS).is_some_and(|end| {
-        lowered[end..]
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .is_some_and(|width| !lowered[end + width..].trim().is_empty())
-    })
+    lowered
+        .split_once(CLAUSE_ENDS)
+        .is_some_and(|(_, rest)| !rest.trim().is_empty())
 }
 
 /// Narrow an allowed tool set to the ones a turn of this class can use.
@@ -409,6 +411,7 @@ mod tests {
         for directive in [
             "Investigate the crash. Resolve it.",
             "Investigate the crash, resolve it.",
+            "Investigate the crash: resolve it.",
             "Explain the failure.\nThen make it stop.",
             "What does this function do? Rewrite it to be clearer.",
             "Review the parser; make it stop panicking.",
