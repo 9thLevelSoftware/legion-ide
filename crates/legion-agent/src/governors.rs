@@ -573,6 +573,29 @@ mod tests {
         );
     }
 
+    /// A tool that only ever emits broken arguments is still demoted.
+    ///
+    /// Malformed calls never reach `validate_and_execute`, so the streak was
+    /// blind to them -- and the interleaving that hides it is ordinary: broken
+    /// `grep` arguments between working `read` calls keep resetting the global
+    /// retry counter, so the model retries the same broken tool forever without
+    /// ever being told which one is the problem. Per-tool counting is exactly
+    /// what sees through that.
+    #[test]
+    fn malformed_calls_demote_the_tool_that_made_them() {
+        let mut governors = LoopGovernors::new(true);
+
+        assert!(governors.note_tool_failure("grep").is_none());
+        governors.note_tool_success("read");
+        assert!(governors.note_tool_failure("grep").is_none());
+        governors.note_tool_success("read");
+
+        let notice = governors
+            .note_tool_failure("grep")
+            .expect("another tool succeeding does not clear grep's streak");
+        assert!(notice.contains("grep"));
+    }
+
     /// Disabled governors record nothing and advise nothing.
     ///
     /// `LEGION_AI_GOVERNORS=off` has to leave the raw baseline measuring the

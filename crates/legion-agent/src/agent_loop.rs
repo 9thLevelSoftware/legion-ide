@@ -1525,9 +1525,26 @@ pub fn run_delegated_task_loop(
                                 ),
                             });
                         }
-                        tool_result_blocks.push(ToolTurnBlock::Text(format!(
-                            "Tool call `{name}` was rejected: {diagnostic}"
-                        )));
+                        // A malformed call is a failure of this tool.
+                        //
+                        // It never reaches `validate_and_execute`, so the
+                        // streak was blind to it -- and the interleaving that
+                        // hides it is ordinary: broken `grep` arguments between
+                        // working `read` calls keep resetting
+                        // `max_consecutive_retries`, so a model that can only
+                        // emit invalid JSON for one tool retries it forever
+                        // without ever being told which tool is the problem.
+                        let mut rejection =
+                            format!("Tool call `{name}` was rejected: {diagnostic}");
+                        if let Some(notice) = governors.note_tool_failure(name) {
+                            rejection.push_str(
+                                "
+
+",
+                            );
+                            rejection.push_str(&notice);
+                        }
+                        tool_result_blocks.push(ToolTurnBlock::Text(rejection));
                         continue;
                     }
                     let ToolTurnBlock::ToolUse { id, name, input } = block else {
