@@ -382,6 +382,96 @@ pub(crate) fn route_descriptor_for_backend(
 #[cfg(test)]
 mod delegate_chat_route_honesty_tests {
 
+    /// A configured fixture is not a failure and says nothing.
+    ///
+    /// Reporting a deliberate choice as a problem is how a message becomes
+    /// noise, and noise is what nobody reads on the day it matters.
+    #[test]
+    fn choosing_the_fixture_reports_nothing() {
+        let _env = RouteEnv::cleared();
+        assert!(
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Deterministic)
+                .is_none()
+        );
+    }
+
+    /// The local backends are never described as a credential problem.
+    ///
+    /// The old text said "no live credentials" for every fallback. Ollama and
+    /// llama.cpp take no credential, so somebody who had never started one was
+    /// sent looking for an API key that does not exist.
+    #[test]
+    fn a_missing_local_server_is_not_reported_as_a_missing_key() {
+        let _env = RouteEnv::cleared();
+        for preference in [
+            crate::ProductAiProviderPreference::Auto,
+            crate::ProductAiProviderPreference::Ollama,
+            crate::ProductAiProviderPreference::LlamaCpp,
+        ] {
+            let reason = crate::local_ai_unavailable_reason(preference)
+                .expect("a local preference that fell back owes an explanation");
+            let lowered = reason.to_lowercase();
+            assert!(
+                !lowered.contains("credential") && !lowered.contains("api key"),
+                "{preference:?} must not be explained as a credential problem: {reason}"
+            );
+        }
+    }
+
+    /// Each local reason names the endpoint that was probed.
+    ///
+    /// Runs under `RouteEnv::cleared()`, which holds the environment lock and
+    /// clears the route variables -- so the endpoints are the known defaults
+    /// and cannot change between the reason being built and the assertion
+    /// reading them. Without the lock this raced the neighbouring tests that
+    /// set `OLLAMA_BASE_URL`, and failed on a scheduling accident.
+    #[test]
+    fn a_local_reason_names_the_endpoint_it_probed() {
+        let _env = RouteEnv::cleared();
+        let ollama = crate::ollama_base_url_from_env();
+        let llama = crate::llama_cpp_base_url_from_env();
+
+        let auto = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
+            .expect("auto that fell back owes an explanation");
+        assert!(auto.contains(&ollama));
+        assert!(auto.contains(&llama));
+    }
+
+    /// A remote provider really is a credential problem, and says so.
+    #[test]
+    fn a_missing_remote_key_is_reported_as_a_credential_problem() {
+        let _env = RouteEnv::cleared();
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Anthropic)
+                .expect("anthropic that fell back owes an explanation");
+        assert!(reason.to_lowercase().contains("credential"));
+    }
+
+    /// A non-loopback endpoint is reported as unsupported, not as unreachable.
+    ///
+    /// `loopback_target_reachable` filters every non-loopback address before
+    /// connecting, so Legion never contacts a LAN endpoint and the
+    /// local-provider policy would refuse it anyway. Telling somebody it "did
+    /// not answer" and suggesting they set the URL is advice for a problem they
+    /// do not have, about a URL they already set.
+    #[test]
+    fn a_non_loopback_endpoint_is_reported_as_unsupported() {
+        let env = RouteEnv::cleared();
+        env.set("OLLAMA_BASE_URL", "http://192.168.1.50:11434");
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
+            .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            reason.contains("not a loopback address"),
+            "the reason must name the real problem; got {reason}"
+        );
+        assert!(
+            !reason.contains("did not answer"),
+            "Legion never contacted it, so it cannot report a silent server; got {reason}"
+        );
+    }
+
     /// Userinfo never reaches the authorized host, or the audit record.
     ///
     /// `https://user:secret@proxy.internal/v1` gave a host of
@@ -1222,69 +1312,5 @@ mod llama_cpp_route_tests {
 
         assert_eq!(target.host, "127.0.0.1");
         assert_eq!(target.port, Some(9001));
-    }
-}
-
-#[cfg(test)]
-mod local_ai_diagnosis_tests {
-    use crate::{ProductAiProviderPreference, local_ai_unavailable_reason};
-
-    /// A configured fixture is not a failure and says nothing.
-    ///
-    /// Reporting a chosen configuration as a problem is how a message becomes
-    /// noise, and a noisy message is one nobody reads on the day it matters.
-    #[test]
-    fn choosing_the_fixture_reports_nothing() {
-        assert!(local_ai_unavailable_reason(ProductAiProviderPreference::Deterministic).is_none());
-    }
-
-    /// The local backends are never described as a credential problem.
-    ///
-    /// The old text said "no live credentials" for every fallback. Ollama and
-    /// llama.cpp take no credential, so somebody who had simply never started
-    /// one was sent looking for an API key that does not exist.
-    #[test]
-    fn a_missing_local_server_is_not_reported_as_a_missing_key() {
-        for preference in [
-            ProductAiProviderPreference::Auto,
-            ProductAiProviderPreference::Ollama,
-            ProductAiProviderPreference::LlamaCpp,
-        ] {
-            let reason = local_ai_unavailable_reason(preference)
-                .expect("a local preference that fell back owes an explanation");
-            let lowered = reason.to_lowercase();
-            assert!(
-                !lowered.contains("credential") && !lowered.contains("api key"),
-                "{preference:?} must not be explained as a credential problem: {reason}"
-            );
-        }
-    }
-
-    /// Each local reason names the endpoint that was probed.
-    ///
-    /// "Not running" and "running somewhere else" look identical from here and
-    /// have different fixes, so the address is the actionable half.
-    #[test]
-    fn a_local_reason_names_the_endpoint_it_probed() {
-        let auto = local_ai_unavailable_reason(ProductAiProviderPreference::Auto)
-            .expect("auto that fell back owes an explanation");
-        assert!(auto.contains(&crate::ollama_base_url_from_env()));
-        assert!(auto.contains(&crate::llama_cpp_base_url_from_env()));
-
-        let ollama = local_ai_unavailable_reason(ProductAiProviderPreference::Ollama)
-            .expect("ollama that fell back owes an explanation");
-        assert!(ollama.contains(&crate::ollama_base_url_from_env()));
-
-        let llama = local_ai_unavailable_reason(ProductAiProviderPreference::LlamaCpp)
-            .expect("llama.cpp that fell back owes an explanation");
-        assert!(llama.contains(&crate::llama_cpp_base_url_from_env()));
-    }
-
-    /// A remote provider really is a credential problem, and says so.
-    #[test]
-    fn a_missing_remote_key_is_reported_as_a_credential_problem() {
-        let reason = local_ai_unavailable_reason(ProductAiProviderPreference::Anthropic)
-            .expect("anthropic that fell back owes an explanation");
-        assert!(reason.to_lowercase().contains("credential"));
     }
 }

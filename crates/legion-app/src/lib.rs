@@ -1784,27 +1784,57 @@ pub(crate) fn local_ai_unavailable_reason(
              answered instead. Add a key in settings, or choose a local provider."
                 .to_string(),
         ),
-        ProductAiProviderPreference::Ollama => Some(format!(
-            "Ollama did not answer at {}, so the deterministic fixture answered \
-             instead. Start Ollama, or set OLLAMA_BASE_URL if yours listens \
-             elsewhere.",
-            ollama_base_url_from_env()
+        ProductAiProviderPreference::Ollama => Some(local_backend_reason(
+            "Ollama",
+            &ollama_base_url_from_env(),
+            &crate::ai_route_descriptor::ollama_network_target().host,
+            "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
         )),
-        ProductAiProviderPreference::LlamaCpp => Some(format!(
-            "No llama.cpp server answered at {}, so the deterministic fixture \
-             answered instead. Start `llama-server`, or set \
-             LEGION_LLAMA_CPP_BASE_URL if yours listens elsewhere.",
-            llama_cpp_base_url_from_env()
+        ProductAiProviderPreference::LlamaCpp => Some(local_backend_reason(
+            "A llama.cpp server",
+            &llama_cpp_base_url_from_env(),
+            &crate::ai_route_descriptor::llama_cpp_network_target().host,
+            "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours \
+             listens elsewhere.",
         )),
         ProductAiProviderPreference::Auto => Some(format!(
             "No local model server answered, so the deterministic fixture \
-             answered instead. Legion looked for Ollama at {} and llama.cpp at \
-             {}. Start either one, or set OLLAMA_BASE_URL or \
-             LEGION_LLAMA_CPP_BASE_URL if yours listens elsewhere.",
-            ollama_base_url_from_env(),
-            llama_cpp_base_url_from_env()
+             answered instead.\n- {}\n- {}",
+            local_backend_reason(
+                "Ollama",
+                &ollama_base_url_from_env(),
+                &crate::ai_route_descriptor::ollama_network_target().host,
+                "Start Ollama, or set OLLAMA_BASE_URL if yours listens elsewhere.",
+            ),
+            local_backend_reason(
+                "A llama.cpp server",
+                &llama_cpp_base_url_from_env(),
+                &crate::ai_route_descriptor::llama_cpp_network_target().host,
+                "Start `llama-server`, or set LEGION_LLAMA_CPP_BASE_URL if yours \
+                 listens elsewhere.",
+            ),
         )),
     }
+}
+
+/// One local backend's line: not running, or configured somewhere unreachable.
+///
+/// A non-loopback endpoint is a different problem with a different fix, and
+/// saying "it did not answer, try setting the URL" for one is actively
+/// misleading -- the URL is already set, Legion never contacted it, and the
+/// local-provider policy would refuse it if it had. `loopback_target_reachable`
+/// filters every non-loopback address before connecting, so "unreachable" and
+/// "not permitted" arrive here indistinguishable unless this asks.
+fn local_backend_reason(name: &str, base_url: &str, host: &str, remedy: &str) -> String {
+    if !crate::ai_route_descriptor::is_loopback_host(host) {
+        return format!(
+            "{name} is configured at {base_url}, which is not a loopback address. \
+             Legion's local-provider policy only reaches this machine, so that \
+             endpoint was never contacted. Point it at localhost, or choose a \
+             remote provider deliberately in settings."
+        );
+    }
+    format!("{name} did not answer at {base_url}. {remedy}")
 }
 
 /// The llama.cpp model label, from configuration.
