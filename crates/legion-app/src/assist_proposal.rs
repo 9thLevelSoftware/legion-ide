@@ -11,7 +11,73 @@
 
 use crate::*;
 
+/// Count the anchor's occurrences, overlaps included.
+#[cfg(any(feature = "ai", feature = "offline"))]
+fn assist_anchor_occurrences(haystack: &str, needle: &str) -> usize {
+    legion_ai::patch::count_overlapping(haystack, needle)
+}
+
+/// Without the resolver there is no anchor to count.
+#[cfg(not(any(feature = "ai", feature = "offline")))]
+fn assist_anchor_occurrences(_haystack: &str, _needle: &str) -> usize {
+    0
+}
+
+/// Restate a route intent's byte coverage as the span the proposal edits.
+///
+/// The intent is built at authorization time, before the model has answered,
+/// so it declared `ByteRange::new(0, 0)` -- correct while every Assist edit was
+/// an insertion at byte 0, and a false record the moment they stopped being.
+/// The persisted request contract is what an audit reads to see what the run
+/// targeted, so it has to name the range the registered proposal changes.
+fn assist_intent_over_resolved_span(
+    intent: &legion_protocol::AssistedAiProposalTargetIntent,
+    span: (usize, usize),
+) -> legion_protocol::AssistedAiProposalTargetIntent {
+    let mut intent = intent.clone();
+    for target in &mut intent.target_coverage.targets {
+        target.byte_ranges = vec![legion_protocol::ByteRange::new(
+            span.0 as u64,
+            span.1 as u64,
+        )];
+    }
+    intent
+}
+
 impl AppComposition {
+    /// Withdraw an edit whose anchor is not unique in the whole file.
+    ///
+    /// Returns the source unchanged when there is nothing to check -- no edit,
+    /// or an anchor that occurs exactly once. Otherwise it becomes the same
+    /// no-op an unresolvable block produces: empty span, empty replacement, and
+    /// a detail saying why, because a proposal that changes the wrong line
+    /// confidently is the failure this whole path exists to remove.
+    fn reject_ambiguous_assist_anchor(
+        &self,
+        buffer_id: BufferId,
+        source: AssistedEditProposalSource,
+    ) -> AssistedEditProposalSource {
+        if source.anchor.is_empty() {
+            return source;
+        }
+        let Ok(full_text) = self.editor.text(buffer_id) else {
+            return source;
+        };
+        let occurrences = assist_anchor_occurrences(full_text, &source.anchor);
+        if occurrences <= 1 {
+            return source;
+        }
+        let mut source = source;
+        source.summary = format!("{} (anchor not unique)", source.summary);
+        source.details.push(format!(
+            "edit=withdrawn: the quoted text appears {occurrences} times in the file, \
+             but only once in the excerpt the model was shown"
+        ));
+        source.span = (0, 0);
+        source.replacement = String::new();
+        source.anchor = String::new();
+        source
+    }
     /// Run one Assist operation, from authorization to proposal or refusal.
     ///
     /// The provider class is **not** a parameter. Both callers passed
@@ -415,6 +481,7 @@ impl AppComposition {
             expected_modified_at: context.metadata.modified_at,
         };
         let pending_job = PendingAssistProposalJob {
+            buffer_id: context.buffer_id,
             run_id: run_id.clone(),
             route_id: route_id.clone(),
             operation_class,
@@ -611,6 +678,7 @@ impl AppComposition {
         proposal_source: AssistedEditProposalSource,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         let PendingAssistProposalJob {
+            buffer_id,
             run_id,
             route_id,
             operation_class,
@@ -626,6 +694,20 @@ impl AppComposition {
             preconditions,
             ref mut agent,
         } = job;
+
+        // The uniqueness the prompt asked for, checked against the file.
+        //
+        // Resolution ran against the excerpt, because that is the only text the
+        // model saw and the only text it could have quoted. The span that comes
+        // back is right. The *uniqueness* is not settled by it: an anchor that
+        // appears once in the first 4,000 bytes can appear again further down,
+        // and the prompt said "exactly once in the file". Editing the first
+        // occurrence would be picking a site the model never chose between.
+        //
+        // Both the synchronous and background paths arrive here on the app
+        // thread, which is the first point that can read the whole buffer
+        // without copying it across a thread boundary.
+        let proposal_source = self.reject_ambiguous_assist_anchor(buffer_id, proposal_source);
 
         let proposal_id = self.proposal_coordinator.next_id();
         // The trust projections were built before this proposal existed, so
@@ -761,7 +843,10 @@ impl AppComposition {
             &approval_checklist_projection,
             Some(&checkpoint_rollback_projection),
             event_context,
-            provider_route_request.proposal_intent.clone(),
+            assist_intent_over_resolved_span(
+                &provider_route_request.proposal_intent,
+                proposal_source.span,
+            ),
             route_response.route_decision.clone(),
             generated_at,
         );
