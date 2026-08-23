@@ -101,11 +101,21 @@ mod forbidden_walk_tests {
             )],
         );
 
-        let grep = execute_grep(&serde_json::json!({"pattern": "CANARY"}), &config).unwrap();
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY"}),
+            &config,
+            &mut false,
+        )
+        .unwrap();
         assert!(grep.contains("allowed.txt"));
         assert!(!grep.contains("secret"));
 
-        let glob = execute_glob(&serde_json::json!({"pattern": "**/*.txt"}), &config).unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt"}),
+            &config,
+            &mut false,
+        )
+        .unwrap();
         assert!(glob.contains("allowed.txt"));
         assert!(!glob.contains("secret"));
     }
@@ -440,6 +450,7 @@ fn check_broker_capability(
 fn execute_read(
     input: &serde_json::Value,
     worktree_root: &Path,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::Read)?;
     let start_line = input
@@ -466,6 +477,8 @@ fn execute_read(
     })?;
 
     let abs_path = resolved;
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     let content = std::fs::read_to_string(&abs_path).map_err(|e| {
         LegionToolCallFeedback::new(
             LegionToolKind::Read,
@@ -506,6 +519,7 @@ fn execute_read(
 fn execute_grep(
     input: &serde_json::Value,
     config: &DelegatedTaskLoopConfig,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Grep)?;
@@ -570,6 +584,8 @@ fn execute_grep(
     };
 
     let mut results = Vec::new();
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     grep_walk(
         &search_root,
         &search_root,
@@ -661,6 +677,7 @@ fn looks_binary(path: &Path) -> bool {
 fn execute_glob(
     input: &serde_json::Value,
     config: &DelegatedTaskLoopConfig,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Glob)?;
@@ -710,6 +727,8 @@ fn execute_glob(
     };
 
     let mut results = Vec::new();
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     glob_walk(
         &search_root,
         &search_root,
@@ -767,6 +786,7 @@ fn glob_walk(
 fn execute_outline(
     input: &serde_json::Value,
     worktree_root: &Path,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::Outline)?;
     let max_symbols = input
@@ -786,6 +806,8 @@ fn execute_outline(
     })?;
 
     let abs_path = resolved;
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     let content = std::fs::read_to_string(&abs_path).map_err(|e| {
         LegionToolCallFeedback::new(
             LegionToolKind::Outline,
@@ -948,6 +970,7 @@ fn execute_edit_as_proposal(
     loop_correlation_id: u64,
     causality_id: Uuid,
     pending_edits: &mut PendingEditContent,
+    reached_the_machine: &mut bool,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::EditAsProposal)?;
     let proposal_title = input
@@ -992,8 +1015,16 @@ fn execute_edit_as_proposal(
                 Some(path_str.to_string()),
             ));
         }
-        None => resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?,
+        None => {
+            // Reads the file on disk to place the fragment, so the machine has
+            // been touched by the time this returns either way.
+            *reached_the_machine = true;
+            resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?
+        }
     };
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
+
     // Stage the result so a later edit to the same file composes with this one
     // instead of resolving against stale content.
     pending_edits.insert(resolved_edit_path.clone(), replacement.clone());
@@ -1071,6 +1102,7 @@ fn execute_terminal_command(
     input: &serde_json::Value,
     worktree_root: &Path,
     tool_host: &dyn DelegatedToolHost,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let command = require_string_field(input, "command", LegionToolKind::TerminalCommand)?;
     let workdir = input.get("workdir").and_then(|v| v.as_str());
@@ -1094,6 +1126,8 @@ fn execute_terminal_command(
         None
     };
 
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     tool_host
         .run_terminal_command(command, workdir_path.as_deref(), timeout_seconds)
         .map_err(|e| {
@@ -1109,6 +1143,7 @@ fn execute_terminal_command(
 fn execute_mcp_passthrough(
     input: &serde_json::Value,
     tool_host: &dyn DelegatedToolHost,
+    reached_the_machine: &mut bool,
 ) -> Result<String, LegionToolCallFeedback> {
     let server_id = require_string_field(input, "server_id", LegionToolKind::McpPassthrough)?;
     let tool_name = require_string_field(input, "tool_name", LegionToolKind::McpPassthrough)?;
@@ -1121,6 +1156,8 @@ fn execute_mcp_passthrough(
         )
     })?;
 
+    // The operation is about to happen, so from here it did.
+    *reached_the_machine = true;
     tool_host
         .call_mcp_tool(server_id, tool_name, arguments)
         .map_err(|e| {
@@ -1148,8 +1185,10 @@ fn validate_and_execute(
     loop_correlation_id: u64,
     causality_id: Uuid,
     pending_edits: &mut PendingEditContent,
-    // Set once every gate has passed, so the caller can record that the host
-    // was reached regardless of what the host then returned.
+    // Set by the executor at the moment it reaches the host or the filesystem,
+    // so the caller can record that the machine was touched regardless of what
+    // came back. Not set by the gates: passing them means execution is about to
+    // be attempted, and each executor validates its own arguments afterwards.
     dispatched: &mut bool,
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     // Step 1: parse tool kind
@@ -1283,33 +1322,45 @@ fn validate_and_execute(
     // Step 5: broker capability check
     check_broker_capability(broker, tool, input, loop_correlation_id)?;
 
-    // Every gate has passed, so whatever happens next happened. Recorded here
-    // rather than inferred from the outcome, because the outcome cannot carry
-    // it: a command that ran and then failed and a command refused before it
-    // ran are both `ToolCallRejected`, and only one of them may have touched
-    // the machine.
-    *dispatched = true;
-
-    // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
+    // Every gate has passed, so execution is about to be *attempted*. That is
+    // not the same as reaching the machine, and this used to say it was.
+    //
+    // Each executor validates its own arguments after the shared gates: a
+    // terminal call with a `workdir` that escapes the worktree is refused
+    // inside `execute_terminal_command`, before `run_terminal_command` is ever
+    // called. Marking dispatch here recorded that command as having run --
+    // false audit evidence in the worst direction, since the whole point of
+    // this event is to answer "did anything execute" when the outcome cannot.
+    //
+    // So each executor sets the flag itself, at the moment it reaches the host
+    // or the filesystem, and not before.
     match tool {
         LegionToolKind::Read => {
-            execute_read(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+            execute_read(input, &config.worktree_root, dispatched).map(|content| {
+                ToolExecutionOutput {
+                    content,
+                    proposal: None,
+                }
+            })
+        }
+        LegionToolKind::Grep => {
+            execute_grep(input, config, dispatched).map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
             })
         }
-        LegionToolKind::Grep => execute_grep(input, config).map(|content| ToolExecutionOutput {
-            content,
-            proposal: None,
-        }),
-        LegionToolKind::Glob => execute_glob(input, config).map(|content| ToolExecutionOutput {
-            content,
-            proposal: None,
-        }),
-        LegionToolKind::Outline => {
-            execute_outline(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+        LegionToolKind::Glob => {
+            execute_glob(input, config, dispatched).map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
+            })
+        }
+        LegionToolKind::Outline => {
+            execute_outline(input, &config.worktree_root, dispatched).map(|content| {
+                ToolExecutionOutput {
+                    content,
+                    proposal: None,
+                }
             })
         }
         LegionToolKind::EditAsProposal => execute_edit_as_proposal(
@@ -1318,21 +1369,21 @@ fn validate_and_execute(
             loop_correlation_id,
             causality_id,
             pending_edits,
+            dispatched,
         ),
         LegionToolKind::TerminalCommand => {
-            execute_terminal_command(input, &config.worktree_root, tool_host).map(|content| {
-                ToolExecutionOutput {
+            execute_terminal_command(input, &config.worktree_root, tool_host, dispatched).map(
+                |content| ToolExecutionOutput {
                     content,
                     proposal: None,
-                }
-            })
+                },
+            )
         }
-        LegionToolKind::McpPassthrough => {
-            execute_mcp_passthrough(input, tool_host).map(|content| ToolExecutionOutput {
+        LegionToolKind::McpPassthrough => execute_mcp_passthrough(input, tool_host, dispatched)
+            .map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
-            })
-        }
+            }),
     }
 }
 
