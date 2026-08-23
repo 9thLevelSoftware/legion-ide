@@ -515,9 +515,11 @@ mod delegate_chat_route_honesty_tests {
     /// have, about a credential that is already there.
     #[test]
     fn a_keyring_that_cannot_be_read_is_reported_as_such() {
-        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::KeyringUnreadable(
-            "the keyring is locked".to_string(),
-        ));
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::KeyringUnreadable(
+                "the keyring is locked".to_string(),
+            ),
+        );
 
         assert!(
             reason.contains("keyring could not be read"),
@@ -536,7 +538,9 @@ mod delegate_chat_route_honesty_tests {
     /// A readable keyring holding nothing really is a missing credential.
     #[test]
     fn a_readable_keyring_with_no_key_is_reported_as_a_missing_credential() {
-        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::Absent);
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::Absent,
+        );
 
         assert!(reason.contains("No Anthropic credential is configured"));
         assert!(!reason.contains("keyring could not be read"));
@@ -551,7 +555,9 @@ mod delegate_chat_route_honesty_tests {
     /// thing that was demonstrably working.
     #[test]
     fn a_present_credential_is_not_reported_as_missing() {
-        let reason = crate::anthropic_reason(&crate::AnthropicKeyState::Present);
+        let reason = crate::local_ai_diagnosis::anthropic_reason(
+            &crate::local_ai_diagnosis::AnthropicKeyState::Present,
+        );
 
         assert!(reason.contains("credential is configured"), "got {reason}");
         assert!(
@@ -972,7 +978,7 @@ mod delegate_chat_route_honesty_tests {
             // The credential lookup is cached across calls, so clearing the
             // variables is not enough on its own: a previous test's answer
             // would still be the one this test's diagnosis reports.
-            crate::forget_anthropic_key_state();
+            crate::local_ai_diagnosis::forget_anthropic_key_state();
             for name in ROUTE_ENV_VARS {
                 // SAFETY: `guard` is held and is moved into the returned value,
                 // so no other test in this binary reads or writes these
