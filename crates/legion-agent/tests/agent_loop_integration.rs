@@ -182,6 +182,71 @@ fn default_config(dir: &TempDir) -> DelegatedTaskLoopConfig {
     }
 }
 
+/// Records whether the tool host was ever asked to do anything.
+///
+/// `NoOpToolHost` accepts silently, so a test asserting "the command never ran"
+/// against it is asserting nothing. This one refuses and remembers.
+struct RefusingToolHost {
+    terminal_calls: std::cell::Cell<usize>,
+}
+
+impl RefusingToolHost {
+    fn new() -> Self {
+        Self {
+            terminal_calls: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl DelegatedToolHost for RefusingToolHost {
+    fn run_terminal_command(
+        &self,
+        _command: &str,
+        _workdir: Option<&Path>,
+        _timeout_seconds: Option<u32>,
+    ) -> Result<String, String> {
+        self.terminal_calls.set(self.terminal_calls.get() + 1);
+        Err("the host must not have been reached".to_string())
+    }
+
+    fn call_mcp_tool(
+        &self,
+        _server_id: &str,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        Err("the host must not have been reached".to_string())
+    }
+}
+
+/// A tool host that never returns normally.
+///
+/// Stands in for the case the dispatch record exists for and cannot otherwise
+/// be tested: a command that hangs, panics, or takes the process down after it
+/// has started. All three leave `validate_and_execute` without returning, and a
+/// panic is the one a test can actually arrange.
+struct PanickingToolHost;
+
+impl DelegatedToolHost for PanickingToolHost {
+    fn run_terminal_command(
+        &self,
+        _command: &str,
+        _workdir: Option<&Path>,
+        _timeout_seconds: Option<u32>,
+    ) -> Result<String, String> {
+        panic!("the host died mid-command");
+    }
+
+    fn call_mcp_tool(
+        &self,
+        _server_id: &str,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        panic!("the host died mid-call");
+    }
+}
+
 /// Assert all ToolCallRequest steps have a matching ToolCallResult or
 /// ToolCallRejected with the same causality_id.
 fn assert_audit_pairing(steps: &[DelegatedTaskLoopStepRecord]) {
@@ -1428,4 +1493,191 @@ fn a_fragment_can_anchor_on_text_introduced_by_an_earlier_edit() {
         other => panic!("expected a file-content payload, got {other:?}"),
     };
     assert_eq!(last, "fn main() {\n    println!(\"hi\");\n}\n");
+}
+
+/// A command refused after the gates never reaches the host, and says so.
+///
+/// `ToolCallDispatched` exists to answer the one question the outcome cannot:
+/// a command that ran and then failed and a command refused before it ran are
+/// both `ToolCallRejected`. The flag was set as soon as the shared gates passed
+/// -- but each executor validates its own arguments afterwards, and a `workdir`
+/// that escapes the worktree is refused inside `execute_terminal_command`
+/// without `run_terminal_command` ever being called. The audit therefore
+/// recorded a command as having touched the machine when nothing had.
+#[test]
+fn a_workdir_refused_inside_the_executor_records_no_dispatch() {
+    let dir = TempDir::new().expect("temp dir");
+    let escaping = if cfg!(windows) { "C:\\" } else { "/" };
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "echo hi", "workdir": escaping}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let host = RefusingToolHost::new();
+
+    let _ = run_delegated_task_loop(
+        &config,
+        &provider,
+        &host,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert_eq!(
+        host.terminal_calls.get(),
+        0,
+        "the containment check must refuse before the host is asked"
+    );
+    assert!(
+        !sink
+            .steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
+        "nothing reached the machine, so nothing may be recorded as dispatched"
+    );
+    assert!(
+        sink.steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallRejected),
+        "the refusal itself still has to be on the record"
+    );
+}
+
+/// A command that does reach the host is still recorded as dispatched.
+///
+/// Without this the check above passes on a loop that never emits the event at
+/// all, which is the same audit gap in the other direction.
+#[test]
+fn a_command_that_reaches_the_host_records_a_dispatch() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "echo hi"}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    let _ = run_delegated_task_loop(
+        &config,
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert!(
+        sink.steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
+        "the host ran the command, and the audit has to say so"
+    );
+}
+
+/// A command the host itself rejects still counts as having reached it.
+///
+/// This is the case the event was added for: the failure is indistinguishable
+/// from a refusal in the outcome, and only the dispatch record separates
+/// "ran and failed" from "never ran".
+#[test]
+fn a_host_failure_still_records_a_dispatch() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "echo hi"}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+    let host = RefusingToolHost::new();
+
+    let _ = run_delegated_task_loop(
+        &config,
+        &provider,
+        &host,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    )
+    .expect("loop must not error");
+
+    assert_eq!(host.terminal_calls.get(), 1, "the host was asked");
+    assert!(
+        sink.steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
+        "it ran and failed, which is not the same as never running"
+    );
+}
+
+/// A command that never returns is still recorded as having run.
+///
+/// The record used to be written by the caller once `validate_and_execute`
+/// came back, which is exactly the moment a hung, panicking or process-killing
+/// command never reaches. The audit then showed a request and no dispatch --
+/// indistinguishable from a refusal before execution, which is the one
+/// distinction this event exists to make.
+///
+/// A panic is the arrangeable member of that family. A hang would have to be
+/// waited out and a process kill cannot be observed from inside the process,
+/// but all three leave the executor the same way: without returning.
+#[test]
+fn a_host_that_never_returns_still_records_a_dispatch() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .tool_use(
+            "t1",
+            "terminal-command",
+            serde_json::json!({"command": "echo hi"}),
+        )
+        .end_turn("done")
+        .build("test");
+
+    let config = default_config(&dir);
+    let mut sink = RecordingAuditSink::new();
+
+    // The panic is the point of the test, so its backtrace is not news.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_delegated_task_loop(
+            &config,
+            &provider,
+            &PanickingToolHost,
+            &mut sink,
+            &NeverCancelled,
+            &AllowAllBroker,
+        )
+    }));
+    std::panic::set_hook(previous);
+
+    assert!(outcome.is_err(), "the host must have panicked");
+    assert!(
+        sink.steps
+            .iter()
+            .any(|step| step.kind == DelegatedTaskLoopStepKind::ToolCallDispatched),
+        "the command reached the host, and the record has to survive it not coming back"
+    );
 }
