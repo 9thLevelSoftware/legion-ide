@@ -1758,6 +1758,55 @@ pub(crate) fn ollama_base_url_from_env() -> String {
         .unwrap_or_else(|| "http://localhost:11434".to_string())
 }
 
+/// Why no live model answered, phrased for the person who has to fix it.
+///
+/// The product falls back to the deterministic fixture whenever no live
+/// backend is reachable, and until now said only "no live credentials". For a
+/// remote provider that is the reason. For Ollama and llama.cpp it is not: they
+/// take no credential, and somebody who has never run one is sent looking for
+/// an API key that does not exist while a one-line install would have fixed it.
+///
+/// Returns `None` when a fixture is what was actually asked for, because that
+/// is a configuration rather than a failure and reporting it as one trains
+/// people to ignore the message.
+///
+/// Naming the endpoint matters as much as the cause: the probe follows
+/// `OLLAMA_BASE_URL` and the llama.cpp base-url names, so "not running" and
+/// "running somewhere else" look identical from the outside and have different
+/// fixes.
+pub(crate) fn local_ai_unavailable_reason(
+    preference: ProductAiProviderPreference,
+) -> Option<String> {
+    match preference {
+        ProductAiProviderPreference::Deterministic => None,
+        ProductAiProviderPreference::Anthropic => Some(
+            "No Anthropic credential is configured, so the deterministic fixture \
+             answered instead. Add a key in settings, or choose a local provider."
+                .to_string(),
+        ),
+        ProductAiProviderPreference::Ollama => Some(format!(
+            "Ollama did not answer at {}, so the deterministic fixture answered \
+             instead. Start Ollama, or set OLLAMA_BASE_URL if yours listens \
+             elsewhere.",
+            ollama_base_url_from_env()
+        )),
+        ProductAiProviderPreference::LlamaCpp => Some(format!(
+            "No llama.cpp server answered at {}, so the deterministic fixture \
+             answered instead. Start `llama-server`, or set \
+             LEGION_LLAMA_CPP_BASE_URL if yours listens elsewhere.",
+            llama_cpp_base_url_from_env()
+        )),
+        ProductAiProviderPreference::Auto => Some(format!(
+            "No local model server answered, so the deterministic fixture \
+             answered instead. Legion looked for Ollama at {} and llama.cpp at \
+             {}. Start either one, or set OLLAMA_BASE_URL or \
+             LEGION_LLAMA_CPP_BASE_URL if yours listens elsewhere.",
+            ollama_base_url_from_env(),
+            llama_cpp_base_url_from_env()
+        )),
+    }
+}
+
 /// The llama.cpp model label, from configuration.
 ///
 /// `llama-server` serves whatever model it was started with and the OpenAI

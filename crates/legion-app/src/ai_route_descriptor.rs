@@ -1162,3 +1162,67 @@ mod llama_cpp_route_tests {
         assert_eq!(target.port, Some(9001));
     }
 }
+
+#[cfg(test)]
+mod local_ai_diagnosis_tests {
+    use crate::{ProductAiProviderPreference, local_ai_unavailable_reason};
+
+    /// A configured fixture is not a failure and says nothing.
+    ///
+    /// Reporting a chosen configuration as a problem is how a message becomes
+    /// noise, and a noisy message is one nobody reads on the day it matters.
+    #[test]
+    fn choosing_the_fixture_reports_nothing() {
+        assert!(local_ai_unavailable_reason(ProductAiProviderPreference::Deterministic).is_none());
+    }
+
+    /// The local backends are never described as a credential problem.
+    ///
+    /// The old text said "no live credentials" for every fallback. Ollama and
+    /// llama.cpp take no credential, so somebody who had simply never started
+    /// one was sent looking for an API key that does not exist.
+    #[test]
+    fn a_missing_local_server_is_not_reported_as_a_missing_key() {
+        for preference in [
+            ProductAiProviderPreference::Auto,
+            ProductAiProviderPreference::Ollama,
+            ProductAiProviderPreference::LlamaCpp,
+        ] {
+            let reason = local_ai_unavailable_reason(preference)
+                .expect("a local preference that fell back owes an explanation");
+            let lowered = reason.to_lowercase();
+            assert!(
+                !lowered.contains("credential") && !lowered.contains("api key"),
+                "{preference:?} must not be explained as a credential problem: {reason}"
+            );
+        }
+    }
+
+    /// Each local reason names the endpoint that was probed.
+    ///
+    /// "Not running" and "running somewhere else" look identical from here and
+    /// have different fixes, so the address is the actionable half.
+    #[test]
+    fn a_local_reason_names_the_endpoint_it_probed() {
+        let auto = local_ai_unavailable_reason(ProductAiProviderPreference::Auto)
+            .expect("auto that fell back owes an explanation");
+        assert!(auto.contains(&crate::ollama_base_url_from_env()));
+        assert!(auto.contains(&crate::llama_cpp_base_url_from_env()));
+
+        let ollama = local_ai_unavailable_reason(ProductAiProviderPreference::Ollama)
+            .expect("ollama that fell back owes an explanation");
+        assert!(ollama.contains(&crate::ollama_base_url_from_env()));
+
+        let llama = local_ai_unavailable_reason(ProductAiProviderPreference::LlamaCpp)
+            .expect("llama.cpp that fell back owes an explanation");
+        assert!(llama.contains(&crate::llama_cpp_base_url_from_env()));
+    }
+
+    /// A remote provider really is a credential problem, and says so.
+    #[test]
+    fn a_missing_remote_key_is_reported_as_a_credential_problem() {
+        let reason = local_ai_unavailable_reason(ProductAiProviderPreference::Anthropic)
+            .expect("anthropic that fell back owes an explanation");
+        assert!(reason.to_lowercase().contains("credential"));
+    }
+}
