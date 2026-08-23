@@ -1060,6 +1060,52 @@ mod org_ceiling {
         );
     }
 
+    /// A local inline prediction is not reported as a remote metered one.
+    ///
+    /// The labels were derived from `provider_id == "ollama"`, so anything else
+    /// was called `byok`/`remote`. A llama.cpp prediction served from loopback
+    /// was therefore shown as remote and metered beside a route that had just
+    /// authorized it as local and free -- and "did the buffer leave the
+    /// machine" is the one question those labels exist to answer.
+    #[test]
+    fn every_local_backend_predicts_inline_as_local() {
+        for backend in [
+            crate::ProductAiLiveBackend::Ollama,
+            crate::ProductAiLiveBackend::LlamaCpp,
+        ] {
+            let (class, health, cost) =
+                crate::inline_prediction_route_labels(Some(backend), "some-provider");
+
+            assert_eq!(
+                class,
+                legion_protocol::AssistedAiProviderClass::LocalLoopback,
+                "{backend:?} serves from this machine"
+            );
+            assert!(
+                health.contains(&"local".to_string()),
+                "{backend:?} health must say local; got {health:?}"
+            );
+            assert_eq!(
+                cost,
+                vec!["local".to_string()],
+                "{backend:?} costs nothing to invoke"
+            );
+        }
+    }
+
+    /// A remote backend still says remote, so the check is not vacuous.
+    #[test]
+    fn a_remote_backend_predicts_inline_as_remote() {
+        let (class, health, cost) = crate::inline_prediction_route_labels(
+            Some(crate::ProductAiLiveBackend::Anthropic),
+            "anthropic",
+        );
+
+        assert_eq!(class, legion_protocol::AssistedAiProviderClass::ByokRemote);
+        assert!(health.contains(&"byok".to_string()), "got {health:?}");
+        assert_eq!(cost, vec!["remote".to_string()]);
+    }
+
     /// Both local backends declare zero cost, because both cost zero.
     ///
     /// An organisation that allows `llama-cpp` and requires a cost declaration

@@ -2113,6 +2113,39 @@ fn ollama_model_label_offline_safe() -> String {
     }
 }
 
+/// What an inline prediction says it was, taken from the route that ran it.
+///
+/// This used to be three separate `provider_id == "ollama"` comparisons, which
+/// called everything else remote and metered. A llama.cpp prediction served
+/// from a loopback server on this machine was therefore reported to diagnostics
+/// and projections as `byok`/`remote` -- contradicting the route that had just
+/// authorized it as local and free, and misinforming the one reader who checks
+/// whether the buffer left the machine.
+///
+/// `product_ai_route_fields` is where every other path reads the class from, so
+/// this reads it there too. Deriving the same fact twice is how the two answers
+/// came to disagree, and adding a third backend would have needed a fourth
+/// string comparison nobody would remember to write.
+#[cfg(any(feature = "ai", test))]
+fn inline_prediction_route_labels(
+    backend: Option<ProductAiLiveBackend>,
+    provider_id: &str,
+) -> (AssistedAiProviderClass, Vec<String>, Vec<String>) {
+    let (_, _, route_provider_class, ..) = product_ai_route_fields(backend);
+    let local_route = matches!(
+        route_provider_class,
+        AssistedAiProviderClass::LocalLoopback | AssistedAiProviderClass::Local
+    );
+    (
+        route_provider_class,
+        vec![
+            if local_route { "local" } else { "byok" }.to_string(),
+            provider_id.to_string(),
+        ],
+        vec![if local_route { "local" } else { "remote" }.to_string()],
+    )
+}
+
 /// Bound ghost-text bytes for live inline predictions (matches protocol max).
 #[cfg(feature = "ai")]
 fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
@@ -2165,26 +2198,13 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
     let mut provider = metadata.provider.clone();
     provider.provider_id = completion.provider_id.clone();
     provider.model_label = completion.model.clone();
-    provider.provider_class = if completion.provider_id == "ollama" {
-        AssistedAiProviderClass::LocalLoopback
-    } else {
-        AssistedAiProviderClass::ByokRemote
-    };
+    let (route_provider_class, health_labels, cost_labels) =
+        inline_prediction_route_labels(backend, &completion.provider_id);
+    provider.provider_class = route_provider_class;
     provider.operation_class = AssistedAiOperationClass::InlinePrediction;
     provider.invocation_state = AssistedAiProviderInvocationState::Completed;
-    provider.health_labels = vec![
-        if completion.provider_id == "ollama" {
-            "local".to_string()
-        } else {
-            "byok".to_string()
-        },
-        completion.provider_id.clone(),
-    ];
-    provider.cost_labels = vec![if completion.provider_id == "ollama" {
-        "local".to_string()
-    } else {
-        "remote".to_string()
-    }];
+    provider.health_labels = health_labels;
+    provider.cost_labels = cost_labels;
     provider.latency = InlinePredictionLatencyMetadata {
         queued_ms: 0,
         inference_ms: 0,
