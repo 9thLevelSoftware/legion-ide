@@ -267,7 +267,7 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     let mut runs: Vec<ListRun> = Vec::new();
     let mut current: Option<ListRun> = None;
     let mut previous_run_end: Option<usize> = None;
-    let mut fenced = false;
+    let mut open_fence: Option<FenceMarker> = None;
 
     /// Close the run in progress, remembering where it ended.
     fn close(
@@ -290,8 +290,12 @@ fn list_runs(text: &str) -> Vec<ListRun> {
         // somebody else's install instructions became the plan this run was
         // held to, permanently, and came back every fourth turn as "the plan
         // you stated".
-        if is_fence(line.trim()) {
-            fenced = !fenced;
+        if let Some(marker) = fence_marker(line.trim()) {
+            match open_fence {
+                Some(open) if closes(open, marker) => open_fence = None,
+                Some(_) => continue,
+                None => open_fence = Some(marker),
+            }
             close(
                 &mut current,
                 &mut runs,
@@ -300,7 +304,7 @@ fn list_runs(text: &str) -> Vec<ListRun> {
             );
             continue;
         }
-        if fenced {
+        if open_fence.is_some() {
             continue;
         }
         match list_item_body(line.trim()) {
@@ -347,13 +351,37 @@ fn list_runs(text: &str) -> Vec<ListRun> {
     runs
 }
 
-/// Whether a line opens or closes a fenced block.
+/// A fence delimiter: which character, and how many of it.
 ///
-/// Both spellings, because models emit both and a fence opened with one cannot
-/// be closed by the other -- an unmatched fence would swallow the rest of the
-/// reply.
-fn is_fence(line: &str) -> bool {
-    line.starts_with("```") || line.starts_with("~~~")
+/// Both are needed to close one. A boolean toggled by any fence let a `~~~`
+/// line *inside* a backtick-fenced quotation close the outer fence, and a
+/// shorter backtick run inside a longer one do the same -- after which the rest
+/// of the quotation was read as the model's own words, and its numbered lines
+/// became the plan the run was held to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FenceMarker {
+    character: char,
+    length: usize,
+}
+
+/// The fence a line opens or closes, if it is one at all.
+///
+/// Three or more of the same character, per CommonMark. The length is returned
+/// rather than compared here because a closing fence has to be at least as long
+/// as the one it closes, which only the caller holding the open fence knows.
+fn fence_marker(line: &str) -> Option<FenceMarker> {
+    ['`', '~'].into_iter().find_map(|character| {
+        let length = line.chars().take_while(|found| *found == character).count();
+        (length >= 3).then_some(FenceMarker { character, length })
+    })
+}
+
+/// Whether `closing` may close `open`.
+///
+/// Same character, and at least as long. A shorter run of the same character is
+/// content inside the fence, which is exactly how a nested example is written.
+fn closes(open: FenceMarker, closing: FenceMarker) -> bool {
+    open.character == closing.character && closing.length >= open.length
 }
 
 /// Pull an ordered list of steps out of free model text.
@@ -372,7 +400,15 @@ fn is_fence(line: &str) -> bool {
 /// longest outright is what let a three-bullet findings list displace the
 /// two-step plan stated above it.
 pub fn parse_plan_steps(text: &str) -> Vec<String> {
-    let runs = list_runs(text);
+    // A run too short to be a plan does not get to be one, and does not get to
+    // beat a run that is. "Plan:\n- inspect\nExecution:\n1. read\n2. edit"
+    // returned the single introduced bullet, which `capture` then rejected for
+    // being under `MIN_PLAN_STEPS` -- and the two-step plan below it was never
+    // considered, so the run went unanchored.
+    let runs: Vec<ListRun> = list_runs(text)
+        .into_iter()
+        .filter(|run| run.items.len() >= MIN_PLAN_STEPS)
+        .collect();
     if let Some(introduced) = runs
         .iter()
         .filter(|run| introduced_as_a_plan(text, run.search_from, run.first_line))
@@ -411,10 +447,26 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
 /// before this feature existed. A findings list captured as a plan costs the
 /// run a permanent, actively misleading anchor it cannot shed.
 fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bool {
-    let window: Vec<&str> = text.lines().take(first_line).skip(search_from).collect();
-    for line in window.into_iter().rev() {
-        let line = line.trim();
-        if line.is_empty() {
+    // Fenced lines are marked on a forward pass, because fence state only reads
+    // forwards. Without it a YAML key inside a quoted block -- `config:`,
+    // `password:` -- stopped the search as though it were a heading, and
+    // discarded a plan whose cue sat above the fence. The same defect as the
+    // wide window, in the other direction: reading a boundary in one context as
+    // a boundary in another.
+    let lines: Vec<&str> = text.lines().take(first_line).collect();
+    let mut fenced = vec![false; lines.len()];
+    let mut open_fence: Option<FenceMarker> = None;
+    for (index, line) in lines.iter().enumerate() {
+        match (open_fence, fence_marker(line.trim())) {
+            (Some(open), Some(marker)) if closes(open, marker) => open_fence = None,
+            (None, Some(marker)) => open_fence = Some(marker),
+            _ => fenced[index] = open_fence.is_some(),
+        }
+    }
+
+    for index in (search_from..first_line).rev() {
+        let line = lines[index].trim();
+        if line.is_empty() || fenced[index] {
             continue;
         }
         if line_states_a_plan(line) {
@@ -766,6 +818,79 @@ mod tests {
             parse_plan_steps(text).is_empty(),
             "quoting a list is not stating one"
         );
+    }
+
+    /// A fence closes only with its own delimiter.
+    ///
+    /// A boolean toggled by any fence let a `~~~` line inside a backtick-fenced
+    /// quotation close the outer fence, after which the rest of the quotation
+    /// was read as the model's own words and its numbered lines became the plan.
+    #[test]
+    fn a_foreign_delimiter_does_not_close_a_fence() {
+        let text = "The README says:\n\
+             ```\n\
+             ~~~\n\
+             1. Install the toolchain\n\
+             2. Configure the endpoint\n\
+             ```\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "a tilde line inside a backtick fence is content, not the close"
+        );
+    }
+
+    /// A shorter run of the same character is content too.
+    #[test]
+    fn a_shorter_fence_run_does_not_close_a_longer_one() {
+        let text = "The README says:\n\
+             ````\n\
+             ```\n\
+             1. Install the toolchain\n\
+             2. Configure the endpoint\n\
+             ````\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "nested example, not a close"
+        );
+    }
+
+    /// A key inside a fenced block is not a heading.
+    ///
+    /// The heading-stop reads a trailing colon as a section boundary, and a
+    /// YAML block full of them sat between a cue and its list -- so a plan
+    /// introduced above a quoted config was discarded. Reading a boundary in
+    /// one context as a boundary in another, which is the defect the cue window
+    /// was narrowed for, facing the other way.
+    #[test]
+    fn a_colon_inside_a_fence_does_not_stop_the_cue_search() {
+        let text = "I'll outline the setup:\n\
+             ```yaml\n\
+             config:\n\
+               - val\n\
+             ```\n\
+             - step one\n\
+             - step two\n";
+
+        // Bullets deliberately. A numbered run is rescued by the ordered
+        // fallback whether or not the cue search ever reaches its cue, so with
+        // numbers this test passes with the fence mask removed and asserts
+        // nothing about the thing it is named for.
+        assert_eq!(parse_plan_steps(text), vec!["step one", "step two"]);
+    }
+
+    /// A one-item list does not beat the plan below it.
+    ///
+    /// The introduced single bullet won on precedence, `capture` then rejected
+    /// it for being under `MIN_PLAN_STEPS`, and the two-step plan beneath was
+    /// never considered -- so a reply containing a perfectly good plan left the
+    /// run unanchored.
+    #[test]
+    fn an_undersized_introduced_list_does_not_block_a_real_plan() {
+        let text = "Plan:\n- inspect\nExecution:\n1. read\n2. edit\n";
+
+        assert_eq!(parse_plan_steps(text), vec!["read", "edit"]);
     }
 
     /// A plan outside the fence survives a fence in the same reply.
