@@ -15,26 +15,35 @@ use crate::*;
 /// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
 #[cfg(feature = "ai")]
 pub(crate) fn resolve_anthropic_api_key() -> Option<String> {
-    let (key, state) = match anthropic_api_key_from_env() {
-        Some(key) => (Some(key), AnthropicKeyState::Present),
-        None => {
-            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
-            // legacy `ANTHROPIC_API_KEY` account names.
-            match load_provider_api_key(&OsKeyringSecretStore, "anthropic") {
-                Ok(Some(key)) => (Some(key), AnthropicKeyState::Present),
-                Ok(None) => (None, AnthropicKeyState::Absent),
-                Err(error) => (
-                    None,
-                    AnthropicKeyState::KeyringUnreadable(error.to_string()),
-                ),
-            }
-        }
-    };
-    record_anthropic_key_state(state);
-    key
+    resolve_anthropic_credential().0
 }
 
-/// What the credential lookup found, kept so the diagnosis need not ask again.
+/// The credential, and what looking for it found.
+///
+/// The state belongs to *this* lookup and travels with it. It used to be
+/// written to a process-wide slot the diagnosis read back, and two
+/// `AppComposition` instances issuing Anthropic requests concurrently could
+/// overwrite each other's: one records `KeyringUnreadable`, the other records
+/// `Absent`, and the first then explains its fallback with the second's
+/// answer -- recreating the misleading message this change exists to remove.
+#[cfg(feature = "ai")]
+pub(crate) fn resolve_anthropic_credential() -> (Option<String>, AnthropicKeyState) {
+    match anthropic_api_key_from_env() {
+        Some(key) => (Some(key), AnthropicKeyState::Present),
+        // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
+        // legacy `ANTHROPIC_API_KEY` account names.
+        None => match load_provider_api_key(&OsKeyringSecretStore, "anthropic") {
+            Ok(Some(key)) => (Some(key), AnthropicKeyState::Present),
+            Ok(None) => (None, AnthropicKeyState::Absent),
+            Err(error) => (
+                None,
+                AnthropicKeyState::KeyringUnreadable(error.to_string()),
+            ),
+        },
+    }
+}
+
+/// What the credential lookup found, carried to the diagnosis that explains it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AnthropicKeyState {
     /// A key was resolved, from the environment or the keyring.
@@ -43,50 +52,6 @@ pub(crate) enum AnthropicKeyState {
     Absent,
     /// The keyring could not be read, so nothing is known either way.
     KeyringUnreadable(String),
-}
-
-/// The most recent credential lookup, for the diagnosis that follows it.
-///
-/// The diagnosis explains a backend selection that has *already happened*, and
-/// looking the credential up a second time to explain the first is two ways
-/// wrong. The answers can disagree -- a keyring unlocked in between turns "it
-/// failed" into "there is no key", which is the false message this whole change
-/// removes -- and each lookup can put a system prompt in front of the operator,
-/// so the second one asks them to authorise a read taken purely to write a
-/// sentence.
-static LAST_ANTHROPIC_KEY_STATE: std::sync::Mutex<Option<AnthropicKeyState>> =
-    std::sync::Mutex::new(None);
-
-/// The lock, with the poison rule in one place.
-///
-/// A test that fails while holding this poisons it, and the next reader still
-/// needs the value: the guard is a plain `Option`, so a panic cannot have left
-/// it half-written.
-fn lock_state() -> std::sync::MutexGuard<'static, Option<AnthropicKeyState>> {
-    LAST_ANTHROPIC_KEY_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Remember what a lookup found.
-fn record_anthropic_key_state(state: AnthropicKeyState) {
-    *lock_state() = Some(state);
-}
-
-/// Forget the last lookup, so a test's diagnosis cannot read another's answer.
-///
-/// The cache is process-global by design -- the selection and the diagnosis
-/// that explains it are separate calls with no value passed between them -- and
-/// that makes it shared state between tests in the same binary. `RouteEnv`
-/// clears it alongside the route variables for the same reason it clears those.
-#[cfg(test)]
-pub(crate) fn forget_anthropic_key_state() {
-    *lock_state() = None;
-}
-
-/// What the last lookup found, if one has happened in this process.
-fn last_anthropic_key_state() -> Option<AnthropicKeyState> {
-    lock_state().clone()
 }
 
 /// An Anthropic key supplied by the environment, in the order the client reads.
@@ -127,10 +92,11 @@ fn anthropic_api_key_from_env() -> Option<String> {
 /// fixes.
 pub(crate) fn local_ai_unavailable_reason(
     preference: ProductAiProviderPreference,
+    anthropic: Option<AnthropicKeyState>,
 ) -> Option<String> {
     match preference {
         ProductAiProviderPreference::Deterministic => None,
-        ProductAiProviderPreference::Anthropic => Some(anthropic_unavailable_reason()),
+        ProductAiProviderPreference::Anthropic => Some(anthropic_unavailable_reason(anthropic)),
         ProductAiProviderPreference::Ollama => Some(ollama_unavailable_reason()),
         ProductAiProviderPreference::LlamaCpp => Some(llama_cpp_unavailable_reason()),
         ProductAiProviderPreference::Auto => Some(format!(
@@ -334,28 +300,21 @@ fn probe_reach(target: &legion_protocol::NetworkTarget, default_port: u16) -> Pr
 /// `resolve_anthropic_api_key` reads them in, so this cannot report a keyring
 /// failure for a run the keyring was never asked about.
 #[cfg(feature = "ai")]
-fn anthropic_unavailable_reason() -> String {
-    // The selection that fell back has already asked, and its answer is the one
-    // this is explaining. Asking again would be a second keyring read that can
+fn anthropic_unavailable_reason(state: Option<AnthropicKeyState>) -> String {
+    // The selection that fell back has already asked, and its answer is what
+    // this explains. Asking again would be a second keyring read that can
     // disagree with the first and can prompt the operator a second time.
     //
-    // Nothing recorded means no selection has run in this process -- a test
-    // calling the diagnosis directly -- and then asking is the only way to have
-    // anything to say.
-    let state = last_anthropic_key_state().unwrap_or_else(|| {
-        resolve_anthropic_api_key();
-        // Not `unwrap_or(Absent)`. A lookup that returns without recording is a
-        // refactor that dropped the call, and defaulting to Absent would print
-        // "no credential is configured" for a run whose real failure nobody
-        // asked about -- which is the exact false message this exists to remove.
-        last_anthropic_key_state().expect("resolve_anthropic_api_key must record its result")
-    });
+    // `None` means the caller has no selection to explain -- a test asking the
+    // diagnosis directly -- and then asking is the only way to have anything to
+    // say.
+    let state = state.unwrap_or_else(|| resolve_anthropic_credential().1);
     anthropic_reason(&state)
 }
 
 /// Without the provider there is no keyring lookup to have failed.
 #[cfg(not(feature = "ai"))]
-fn anthropic_unavailable_reason() -> String {
+fn anthropic_unavailable_reason(_state: Option<AnthropicKeyState>) -> String {
     anthropic_reason(&AnthropicKeyState::Absent)
 }
 

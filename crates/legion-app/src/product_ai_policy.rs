@@ -893,6 +893,7 @@ mod org_ceiling {
         let (offline, _) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
             None,
             crate::ProductAiProviderPreference::Deterministic,
+            None,
             "tidy this",
             "fn main() {}",
             "src/main.rs",
@@ -904,6 +905,7 @@ mod org_ceiling {
         let (failed, stream) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
             Some(super::ProductAiLiveBackend::Anthropic),
             crate::ProductAiProviderPreference::Anthropic,
+            None,
             "tidy this",
             "fn main() {}",
             "src/main.rs",
@@ -950,6 +952,7 @@ mod org_ceiling {
         let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
             None,
             crate::ProductAiProviderPreference::Ollama,
+            None,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
@@ -989,6 +992,7 @@ mod org_ceiling {
         let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
             None,
             crate::ProductAiProviderPreference::Ollama,
+            None,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
@@ -1012,6 +1016,7 @@ mod org_ceiling {
         let (reply, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
             None,
             crate::ProductAiProviderPreference::Deterministic,
+            None,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
@@ -1039,6 +1044,7 @@ mod org_ceiling {
         let (offline, _) = crate::product_ai_completion::resolve_delegate_chat_reply(
             None,
             crate::ProductAiProviderPreference::Deterministic,
+            None,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",
@@ -1050,6 +1056,7 @@ mod org_ceiling {
         let (failed, stream) = crate::product_ai_completion::resolve_delegate_chat_reply(
             Some(super::ProductAiLiveBackend::Anthropic),
             crate::ProductAiProviderPreference::Anthropic,
+            None,
             "what does this do?",
             "fn main() {}",
             "src/main.rs",

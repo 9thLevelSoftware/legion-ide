@@ -281,10 +281,26 @@ pub(crate) fn deterministic_assisted_edit_proposal_because(
         // First, because it is the line that explains every other line under
         // it. A reader who does not know why they got a fixture cannot make
         // sense of a proposal that inserts a comment.
-        source.details.insert(0, reason);
+        //
+        // Bounded, like the Delegate label and for the same reason: this is
+        // copied into `PreviewSummary.details` and persisted with every
+        // proposal, and the reason is built from configuration -- an
+        // environment-supplied base URL with a very long or malformed host.
+        // Only the headline above it was capped, so the detail was the
+        // unbounded half.
+        source
+            .details
+            .insert(0, bounded_label(reason, ASSIST_DETAIL_MAX_CHARS));
     }
     source
 }
+
+/// Most characters one proposal detail line may carry.
+///
+/// `PreviewSummary.details` is persisted with the proposal and rendered beside
+/// it. The reason is built from configuration, so its length is not ours to
+/// assume -- and the headline above it was capped while this was not.
+const ASSIST_DETAIL_MAX_CHARS: usize = 1_200;
 
 /// How long a headline may be before the proposal title truncates it anyway.
 ///
@@ -361,6 +377,7 @@ pub struct ProductAiStreamProjection {
 pub(crate) fn resolve_assisted_edit_proposal_text(
     backend: Option<ProductAiLiveBackend>,
     preference: crate::ProductAiProviderPreference,
+    anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     instruction_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -476,7 +493,7 @@ No explanation, no second block.";
                 // that was probed, because "not running" and "running somewhere
                 // else" look identical from here and have different fixes.
                 None => deterministic_assisted_edit_proposal_because(
-                    crate::local_ai_unavailable_reason(preference),
+                    crate::local_ai_unavailable_reason(preference, anthropic),
                 ),
             },
             None,
@@ -672,6 +689,7 @@ pub(crate) fn failed_live_assisted_edit_proposal(
 pub(crate) fn resolve_assisted_edit_proposal_text(
     _backend: Option<ProductAiLiveBackend>,
     _preference: crate::ProductAiProviderPreference,
+    _anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     _instruction_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -701,6 +719,7 @@ pub(crate) const DELEGATE_REPLY_LABEL_MAX_CHARS: usize = 1_200;
 pub(crate) fn resolve_delegate_chat_reply(
     backend: Option<ProductAiLiveBackend>,
     preference: ProductAiProviderPreference,
+    anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     prompt_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -761,7 +780,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
                     // said nothing about which endpoint was probed or whether it
                     // was even contacted. The diagnosis knows all of that; it was
                     // simply never asked on this path.
-                    None => match crate::local_ai_unavailable_reason(preference) {
+                    None => match crate::local_ai_unavailable_reason(preference, anthropic) {
                         Some(reason) => format!(
                             "{reason} (route={route_id} labels={}, {citation_count} citation(s))",
                             route_labels.join(",")
@@ -784,6 +803,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
 pub(crate) fn resolve_delegate_chat_reply(
     _backend: Option<ProductAiLiveBackend>,
     _preference: ProductAiProviderPreference,
+    _anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     _prompt_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -1144,6 +1164,30 @@ mod assist_placement_tests {
             "got {:?}",
             source.summary
         );
+    }
+
+    /// A proposal detail is bounded, like the headline above it.
+    ///
+    /// It is copied into `PreviewSummary.details` and persisted with every
+    /// proposal, and the reason is built from configuration -- an
+    /// environment-supplied base URL with a very long host. The headline was
+    /// capped and this was not, so the detail was the unbounded half.
+    #[test]
+    fn a_fallback_detail_is_bounded() {
+        let long_reason = format!(
+            "Ollama did not answer at http://{}:11434. Start Ollama.",
+            "x".repeat(50_000)
+        );
+
+        let source = deterministic_assisted_edit_proposal_because(Some(long_reason));
+
+        for detail in &source.details {
+            assert!(
+                detail.chars().count() <= ASSIST_DETAIL_MAX_CHARS,
+                "a persisted detail has a bound; got {} chars",
+                detail.chars().count()
+            );
+        }
     }
 
     /// A fixture asked for on purpose is not explained as a failure.

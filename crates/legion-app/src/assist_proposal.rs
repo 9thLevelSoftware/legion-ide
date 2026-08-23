@@ -279,7 +279,10 @@ impl AppComposition {
         // might be Anthropic. Ordering was the whole defect: the reviewer read
         // an accurate remote capability beside a manifest, an inspector and a
         // budget all still saying the buffer never leaves the machine.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
+        // The credential answer travels with the selection that produced it,
+        // rather than through a process-wide slot a concurrent run can
+        // overwrite between one request's selection and its own diagnosis.
+        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
         let (
             route_provider_id,
             route_model,
@@ -718,6 +721,7 @@ impl AppComposition {
             // the time it lands. Same rule as `consent_granted` on the job.
             let preference_for_worker = self.preferred_ai_provider;
             let instruction_for_worker = instruction_label.clone();
+            let anthropic_for_worker = anthropic_key_state.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
             let streaming_replay = legion_protocol::AgentReplayManifest {
                 run_id: run_id.clone(),
@@ -740,6 +744,7 @@ impl AppComposition {
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
                     live_backend,
                     preference_for_worker,
+                    anthropic_for_worker,
                     &instruction_for_worker,
                     &excerpt_for_worker,
                     &file_path,
@@ -847,6 +852,7 @@ impl AppComposition {
             None => resolve_assisted_edit_proposal_text(
                 live_backend,
                 self.preferred_ai_provider,
+                anthropic_key_state.clone(),
                 &instruction_label,
                 &buffer_excerpt,
                 &context.metadata.identity.canonical_path.0,
@@ -862,6 +868,7 @@ impl AppComposition {
             resolve_assisted_edit_proposal_text(
                 live_backend,
                 self.preferred_ai_provider,
+                anthropic_key_state.clone(),
                 &instruction_label,
                 &buffer_excerpt,
                 &context.metadata.identity.canonical_path.0,

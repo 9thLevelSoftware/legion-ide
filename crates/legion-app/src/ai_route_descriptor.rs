@@ -413,8 +413,11 @@ mod delegate_chat_route_honesty_tests {
     fn choosing_the_fixture_reports_nothing() {
         let _env = RouteEnv::cleared();
         assert!(
-            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Deterministic)
-                .is_none()
+            crate::local_ai_unavailable_reason(
+                crate::ProductAiProviderPreference::Deterministic,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -431,7 +434,7 @@ mod delegate_chat_route_honesty_tests {
             crate::ProductAiProviderPreference::Ollama,
             crate::ProductAiProviderPreference::LlamaCpp,
         ] {
-            let reason = crate::local_ai_unavailable_reason(preference)
+            let reason = crate::local_ai_unavailable_reason(preference, None)
                 .expect("a local preference that fell back owes an explanation");
             let lowered = reason.to_lowercase();
             assert!(
@@ -454,8 +457,9 @@ mod delegate_chat_route_honesty_tests {
         let ollama = super::displayable_endpoint(&super::ollama_network_target());
         let llama = super::displayable_endpoint(&super::llama_cpp_network_target());
 
-        let auto = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
-            .expect("auto that fell back owes an explanation");
+        let auto =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
         assert!(auto.contains(&ollama), "got {auto}");
         assert!(auto.contains(&llama), "got {auto}");
     }
@@ -475,8 +479,9 @@ mod delegate_chat_route_honesty_tests {
             "http://proxyuser:s3cret@127.0.0.1:11434/v1",
         );
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
-            .expect("ollama that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
 
         assert!(
             !reason.contains("s3cret") && !reason.contains("proxyuser"),
@@ -497,8 +502,9 @@ mod delegate_chat_route_honesty_tests {
             "http://127.0.0.1:11434/v1?access_token=s3cret",
         );
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
-            .expect("ollama that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
 
         assert!(
             !reason.contains("s3cret"),
@@ -546,6 +552,38 @@ mod delegate_chat_route_honesty_tests {
         assert!(!reason.contains("keyring could not be read"));
     }
 
+    /// The diagnosis reports the state its own selection found.
+    ///
+    /// The state used to live in a process-wide slot, so two `AppComposition`
+    /// instances issuing Anthropic requests concurrently could overwrite each
+    /// other's: one records `KeyringUnreadable`, the other records `Absent`,
+    /// and the first then explains its fallback with the second's answer --
+    /// which is the misleading message this change exists to remove, arriving
+    /// through the mechanism that removed it.
+    ///
+    /// Asserted by handing the diagnosis a state that cannot have come from
+    /// this machine's keyring. A global slot would have been overwritten by
+    /// any lookup running beside it; a parameter cannot be.
+    #[test]
+    fn the_diagnosis_reports_the_state_it_was_given() {
+        let _env = RouteEnv::cleared();
+
+        let reason = crate::local_ai_unavailable_reason(
+            crate::ProductAiProviderPreference::Anthropic,
+            Some(
+                crate::local_ai_diagnosis::AnthropicKeyState::KeyringUnreadable(
+                    "a state no lookup on this machine produced".to_string(),
+                ),
+            ),
+        )
+        .expect("anthropic that fell back owes an explanation");
+
+        assert!(
+            reason.contains("a state no lookup on this machine produced"),
+            "the caller's state is the one explained; got {reason}"
+        );
+    }
+
     /// A credential that is present is not reported as one that is missing.
     ///
     /// The diagnosis reads what the *selection* found, and a selection can fall
@@ -579,8 +617,9 @@ mod delegate_chat_route_honesty_tests {
         env.set("OLLAMA_BASE_URL", "http://192.0.2.1:11434");
         env.set("LEGION_LLAMA_CPP_BASE_URL", "http://192.0.2.2:8080/v1");
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
-            .expect("auto that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
 
         assert!(
             reason.starts_with("No local model server could be contacted"),
@@ -600,8 +639,9 @@ mod delegate_chat_route_honesty_tests {
     fn auto_still_says_answered_when_a_loopback_endpoint_was_probed() {
         let _env = RouteEnv::cleared();
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
-            .expect("auto that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto, None)
+                .expect("auto that fell back owes an explanation");
 
         assert!(
             reason.starts_with("No local model server answered"),
@@ -622,8 +662,9 @@ mod delegate_chat_route_honesty_tests {
             "http://legion-no-such-host.invalid:11434",
         );
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
-            .expect("ollama that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
 
         assert!(
             reason.contains("does not resolve"),
@@ -636,7 +677,7 @@ mod delegate_chat_route_honesty_tests {
     fn a_missing_remote_key_is_reported_as_a_credential_problem() {
         let _env = RouteEnv::cleared();
         let reason =
-            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Anthropic)
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Anthropic, None)
                 .expect("anthropic that fell back owes an explanation");
         assert!(reason.to_lowercase().contains("credential"));
     }
@@ -653,8 +694,9 @@ mod delegate_chat_route_honesty_tests {
         let env = RouteEnv::cleared();
         env.set("OLLAMA_BASE_URL", "http://192.168.1.50:11434");
 
-        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
-            .expect("ollama that fell back owes an explanation");
+        let reason =
+            crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama, None)
+                .expect("ollama that fell back owes an explanation");
 
         assert!(
             reason.contains("not a loopback address"),
@@ -1040,10 +1082,6 @@ mod delegate_chat_route_honesty_tests {
                 .iter()
                 .map(|name| (*name, std::env::var(name).ok()))
                 .collect();
-            // The credential lookup is cached across calls, so clearing the
-            // variables is not enough on its own: a previous test's answer
-            // would still be the one this test's diagnosis reports.
-            crate::local_ai_diagnosis::forget_anthropic_key_state();
             for name in ROUTE_ENV_VARS {
                 // SAFETY: `guard` is held and is moved into the returned value,
                 // so no other test in this binary reads or writes these
