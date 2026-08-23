@@ -221,13 +221,20 @@ jobs:
       # `plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md`
       # records rust-analyzer 1.97.1 timing out on a hosted runner.
       #
-      # Ten minutes is far above the observed cost -- the smoke's own internal
-      # waits are seconds -- so this only ever fires on a hang, and when it
-      # does the job fails in a way that names the step instead of looking
-      # like a stuck queue.
+      # Fifteen minutes against a measured worst case of 5m54s.
+      #
+      # That number is from the slowest platform on a cold cache: run
+      # 32600972258, windows-latest, step 22:56:09 -> 23:02:03. The job around
+      # it took 70m38s, and the two are easy to confuse -- most of that hour is
+      # the build and the gates, not this step.
+      #
+      # This is a hang detector, not a performance budget. A hang is unbounded,
+      # so any ceiling comfortably above the measured cost and far below the
+      # job's 180 does the job; 2.5x leaves room for a slower runner without
+      # ever making a healthy run a merge blocker.
       - name: xtask rust-analyzer-smoke (real server)
         if: steps.provision_ra.outcome == 'success'
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: cargo run -p xtask -- rust-analyzer-smoke
 
       - name: Record skipped rust-analyzer smoke
