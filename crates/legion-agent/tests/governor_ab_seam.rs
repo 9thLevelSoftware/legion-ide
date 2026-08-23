@@ -782,3 +782,54 @@ fn a_cached_result_resets_the_retry_counter() {
          limit of two: got {result:?}"
     );
 }
+
+/// A query directive is not advertised the edit tool, through the loop's path.
+///
+/// `tools_for_action` is unit-tested in `legion-ai`, and that test passes
+/// whether or not the loop still calls it. This drives the same
+/// `tool_defs_from_registry` the loop uses, so removing the narrowing from the
+/// loop fails here rather than nowhere.
+#[test]
+fn a_query_directive_is_not_advertised_the_edit_tool() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = TempDir::new().unwrap();
+    let scope = config(&dir).scope;
+
+    // SAFETY: holds `ENV_GUARD` across the env-mutating block, so no other test
+    // observes the variable mid-change.
+    unsafe {
+        std::env::set_var("LEGION_AI_GOVERNORS", "on");
+    }
+
+    let advertised: Vec<String> =
+        legion_agent::agent_loop::tool_definitions_for_query_tests(&scope)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+    assert!(
+        !advertised.iter().any(|name| name == "edit-as-proposal"),
+        "a question must not be offered the edit tool; advertised {advertised:?}"
+    );
+    assert!(
+        advertised.iter().any(|name| name == "read"),
+        "the reading tools are what answer the question; advertised {advertised:?}"
+    );
+
+    // The same scope, asked as work, keeps everything.
+    let for_work: Vec<String> = legion_agent::agent_loop::tool_definitions_for_tests(&scope)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        for_work.iter().any(|name| name == "edit-as-proposal"),
+        "narrowing is for queries only; advertised {for_work:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}

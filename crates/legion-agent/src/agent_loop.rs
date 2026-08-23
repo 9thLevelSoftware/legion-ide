@@ -261,12 +261,28 @@ fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinitio
     definition
 }
 
-/// The tool set as advertised to the model, for A/B seam assertions.
+/// The tool set advertised for a mutation directive, for A/B seam assertions.
 ///
-/// Exposed so a test can check that the *advertised* contract moves with the
-/// enforced one; the loop itself uses [`tool_defs_from_registry`].
+/// Answers one question: does the advertised contract move with the enforced
+/// one as the governor flag changes. It deliberately does **not** exercise
+/// intent narrowing — it always asks as `Mutate`, which is the wider set — and
+/// saying so matters, because for a `Query` directive the advertised set is now
+/// narrower than the scope and a helper claiming to compare the two would be
+/// describing something it never looks at.
+///
+/// [`tool_definitions_for_query_tests`] is the other half.
 pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
-    tool_defs_from_registry(scope)
+    tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Mutate)
+}
+
+/// The tool set advertised for a query directive.
+///
+/// The narrowing seam, exposed so a test can assert that a question is not
+/// offered the edit tool through the same path the loop uses -- rather than
+/// only through `tools_for_action` in isolation, which would pass even if the
+/// loop stopped calling it.
+pub fn tool_definitions_for_query_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+    tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Query)
 }
 
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
@@ -281,11 +297,26 @@ pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinit
 /// something the model merely might reach for: a benchmark run with
 /// `terminal-command` in the schema but not in the scope blocked on all 13
 /// tasks, because the model kept picking a branch that could only fail.
-fn tool_defs_from_registry(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+fn tool_defs_from_registry(
+    scope: &DelegatedTaskScope,
+    action: legion_ai::routing::ActionClass,
+) -> Vec<ToolDefinition> {
     let governed = legion_ai::governance::small_model_governors_enabled();
+    // The scope decides what is permitted; the turn's intent decides what is
+    // worth advertising within that. Behind the governor flag with the rest of
+    // the small-model behaviour, so `LEGION_AI_GOVERNORS=off` still measures
+    // the un-ported loop and the bench's A/B arms stay comparable.
+    let offered: Vec<legion_protocol::tools::LegionToolKind> = if governed {
+        legion_ai::routing::tools_for_action(action, &scope.allowed_tools)
+    } else {
+        scope.allowed_tools.clone()
+    };
     legion_protocol::tools::tool_schema_definitions()
         .into_iter()
-        .filter(|def| parse_tool_kind(&def.tool_name).is_some_and(|kind| scope.allows_tool(kind)))
+        .filter(|def| {
+            parse_tool_kind(&def.tool_name)
+                .is_some_and(|kind| scope.allows_tool(kind) && offered.contains(&kind))
+        })
         .map(|def| ToolDefinition {
             name: def.tool_name,
             description: def.description_label,
@@ -1434,7 +1465,17 @@ pub fn run_delegated_task_loop(
         u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
     };
 
-    let tool_defs = tool_defs_from_registry(&config.scope);
+    // What the task is asking for decides which tools it is shown.
+    //
+    // A directive that asked a question has no reading under which a workspace
+    // edit helps, and a small model offered one will eventually take it -- the
+    // same failure `tool_defs_from_registry` already documents for tools the
+    // scope forbids, one step earlier. Classified once from the task text
+    // rather than per turn: the task does not change intent halfway through,
+    // and re-deciding each turn would let a single reply talk the loop into a
+    // wider tool set than the task was admitted with.
+    let action_class = legion_ai::routing::classify_action(&config.initial_message);
+    let tool_defs = tool_defs_from_registry(&config.scope, action_class);
 
     // Initialize conversation with the user's task message.
     let mut turns: Vec<ToolConversationTurn> = vec![ToolConversationTurn {
