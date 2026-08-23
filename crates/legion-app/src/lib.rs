@@ -1823,17 +1823,28 @@ pub(crate) fn llama_cpp_model_label() -> String {
 /// Resolve the configured llama.cpp base URL.
 ///
 /// Reads the same three names in the same order as `LlamaCppProvider::from_env`
-/// -- product-prefixed, legacy product-prefixed, then bare. The Ollama helper
+/// -- product-prefixed, legacy product-prefixed, then bare -- and builds them
+/// from the same constants the client uses, so the two cannot drift into
+/// disagreeing about a name. The Ollama helper
 /// beside this one reads a single variable while its client reads more, and the
 /// comment on `ollama_loopback_reachable` records what that costs: a configured
 /// deployment probed at an address the request never uses. Copying the client's
 /// precedence is how the probe, the authorized target and the request stay one
 /// endpoint.
 pub(crate) fn llama_cpp_base_url_from_env() -> String {
+    // Built from the shared prefix constants rather than spelled out, because
+    // spelling them out is how this went wrong: the second name was written as
+    // `LEGION_AI_*` when the client's legacy prefix is `DEVIL`. A deployment
+    // setting `DEVIL_LLAMA_CPP_BASE_URL` was probed at the default while its
+    // requests went somewhere else -- the exact defect this function's own doc
+    // says it exists to prevent, introduced by the function itself.
     [
-        "LEGION_LLAMA_CPP_BASE_URL",
-        "LEGION_AI_LLAMA_CPP_BASE_URL",
-        "LLAMA_CPP_BASE_URL",
+        format!("{}_LLAMA_CPP_BASE_URL", legion_protocol::PRODUCT_ENV_PREFIX),
+        format!(
+            "{}_LLAMA_CPP_BASE_URL",
+            legion_protocol::LEGACY_PRODUCT_ENV_PREFIX
+        ),
+        "LLAMA_CPP_BASE_URL".to_string(),
     ]
     .into_iter()
     .find_map(|name| {
