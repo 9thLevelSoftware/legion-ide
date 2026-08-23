@@ -21,6 +21,13 @@
 pub struct PlanAnchor {
     enabled: bool,
     steps: Vec<String>,
+    /// Steps the model stated that the caps dropped entirely.
+    ///
+    /// Held so the reminder can say they exist. Without it the notice presents
+    /// the first twelve steps as "the plan you stated", and a model reading its
+    /// own plan back with the tail missing has been told the work ends at step
+    /// twelve.
+    omitted_steps: usize,
     turns_since_anchor: u32,
     reanchor_every: u32,
 }
@@ -63,6 +70,7 @@ impl PlanAnchor {
         Self {
             enabled,
             steps: Vec::new(),
+            omitted_steps: 0,
             turns_since_anchor: 0,
             reanchor_every: DEFAULT_REANCHOR_EVERY,
         }
@@ -77,10 +85,13 @@ impl PlanAnchor {
         if !self.enabled || !self.steps.is_empty() {
             return false;
         }
-        let steps = bounded_plan(parse_plan_steps(text));
+        let parsed = parse_plan_steps(text);
+        let stated = parsed.len();
+        let steps = bounded_plan(parsed);
         if steps.len() < MIN_PLAN_STEPS {
             return false;
         }
+        self.omitted_steps = stated - steps.len();
         self.steps = steps;
         true
     }
@@ -99,7 +110,7 @@ impl PlanAnchor {
             return None;
         }
         self.turns_since_anchor = 0;
-        Some(anchor_notice(&self.steps))
+        Some(anchor_notice(&self.steps, self.omitted_steps))
     }
 
     /// The captured plan, empty when none was stated.
@@ -111,6 +122,11 @@ impl PlanAnchor {
     pub fn has_plan(&self) -> bool {
         !self.steps.is_empty()
     }
+
+    /// How many stated steps the caps dropped from the held plan.
+    pub fn omitted_steps(&self) -> usize {
+        self.omitted_steps
+    }
 }
 
 /// The reminder text put back in front of the model.
@@ -120,10 +136,23 @@ impl PlanAnchor {
 /// a system voice it has been ignoring for ten turns. The last line matters as
 /// much as the list — a plan that turned out to be wrong has to be sayable, or
 /// this becomes a mechanism for holding a run to a bad idea.
-pub fn anchor_notice(steps: &[String]) -> String {
+pub fn anchor_notice(steps: &[String], omitted: usize) -> String {
     let mut notice = String::from("Reminder — the plan you stated for this task:\n");
     for (index, step) in steps.iter().enumerate() {
         notice.push_str(&format!("{}. {}\n", index + 1, step));
+    }
+    // Said out loud, because the alternative is a lie the model acts on.
+    //
+    // The caps exist so a reminder re-sent every few turns stays small, and a
+    // plan longer than they allow gets its tail dropped. Presenting what
+    // survived as "the plan you stated" tells a model on a long migration that
+    // the work finishes at step twelve, and it will finish there.
+    if omitted > 0 {
+        notice.push_str(&format!(
+            "…and {omitted} further step{} you stated, too long to repeat here. \
+             They are still yours to finish.\n",
+            if omitted == 1 { "" } else { "s" }
+        ));
     }
     notice.push_str(
         "\nContinue from where that plan stands. If it is no longer the right \
@@ -132,31 +161,58 @@ pub fn anchor_notice(steps: &[String]) -> String {
     notice
 }
 
+/// Smallest slice of the byte budget a step is guaranteed.
+///
+/// The budget used to be first-come: a step long enough to spend all of it
+/// returned a one-element plan, which [`PlanAnchor::capture`] then rejected for
+/// having fewer than [`MIN_PLAN_STEPS`] steps. An otherwise good plan whose
+/// opening step ran long got no anchoring at all -- and a verbose opening step
+/// is exactly what a small model writes when it is about to need anchoring.
+///
+/// Forty bytes is a short sentence. Enough that a reserved step still says
+/// something; small enough that reserving one for each of the twelve costs less
+/// than half the budget.
+pub const MIN_STEP_BYTES: usize = 40;
+
 /// Trim a captured plan to something worth re-sending every few turns.
 ///
 /// Steps beyond the cap are dropped and the remainder is truncated to the byte
 /// budget. Truncation is per step and marked, because a step cut off mid-word
 /// with no sign of it reads as a plan the model never wrote.
+///
+/// Each step spends only what it can without starving the ones behind it, so
+/// the shape of the plan survives a long step near the front. The steps this
+/// drops entirely are counted by the caller and named in the reminder.
 fn bounded_plan(steps: Vec<String>) -> Vec<String> {
+    let kept = steps.len().min(MAX_PLAN_STEPS);
     let mut bounded = Vec::new();
     let mut budget = MAX_PLAN_BYTES;
-    for step in steps.into_iter().take(MAX_PLAN_STEPS) {
-        if budget == 0 {
+    for (index, step) in steps.into_iter().take(kept).enumerate() {
+        // What the steps after this one are owed before this one may spend.
+        let reserved = (kept - index - 1) * MIN_STEP_BYTES;
+        let allowance = budget.saturating_sub(reserved);
+        if allowance == 0 {
             break;
         }
-        if step.len() <= budget {
+        if step.len() <= allowance {
             budget -= step.len();
             bounded.push(step);
             continue;
         }
-        let mut end = budget;
+        // The marker is part of what gets sent, so it is part of what gets
+        // counted. Charging only the text meant every truncated step overran
+        // the budget by three bytes, and twelve of them overran it by
+        // thirty-six -- a small lie about a number that exists to be exact.
+        let marker = '…'.len_utf8();
+        let mut end = allowance.saturating_sub(marker);
         while end > 0 && !step.is_char_boundary(end) {
             end -= 1;
         }
-        if end > 0 {
-            bounded.push(format!("{}…", &step[..end]));
+        if end == 0 {
+            break;
         }
-        budget = 0;
+        bounded.push(format!("{}…", &step[..end]));
+        budget -= end + marker;
     }
     bounded
 }
@@ -375,8 +431,81 @@ mod tests {
     /// holding a run to a bad idea.
     #[test]
     fn the_reminder_permits_replacing_the_plan() {
-        let notice = anchor_notice(&["read".to_string(), "edit".to_string()]);
+        let notice = anchor_notice(&["read".to_string(), "edit".to_string()], 0);
         assert!(notice.contains("no longer the right"));
+    }
+
+    /// A plan the caps trimmed does not present itself as complete.
+    ///
+    /// `.take(MAX_PLAN_STEPS)` drops the tail, and the notice used to call what
+    /// survived "the plan you stated". On a long migration that tells the model
+    /// the work ends at step twelve -- and this exists precisely to make a model
+    /// do what its plan says.
+    #[test]
+    fn a_trimmed_plan_says_that_steps_are_missing() {
+        let long: String = (1..=20)
+            .map(|index| format!("{index}. step number {index}\n"))
+            .collect();
+        let mut anchor = PlanAnchor::new(true);
+        assert!(anchor.capture(&long));
+
+        assert_eq!(anchor.steps().len(), MAX_PLAN_STEPS);
+        assert_eq!(anchor.omitted_steps(), 20 - MAX_PLAN_STEPS);
+
+        let notice = anchor_notice(anchor.steps(), anchor.omitted_steps());
+        assert!(
+            notice.contains("8 further steps"),
+            "the reminder must own what it left out; got {notice}"
+        );
+    }
+
+    /// A plan that fits says nothing about steps it did not drop.
+    #[test]
+    fn a_complete_plan_claims_nothing_was_omitted() {
+        let mut anchor = PlanAnchor::new(true);
+        assert!(anchor.capture(PLAN));
+
+        assert_eq!(anchor.omitted_steps(), 0);
+        let notice = anchor_notice(anchor.steps(), anchor.omitted_steps());
+        assert!(!notice.contains("further step"), "got {notice}");
+    }
+
+    /// One verbose opening step does not cost the whole plan.
+    ///
+    /// The budget was first-come, so a step longer than `MAX_PLAN_BYTES` spent
+    /// all of it and left a one-element plan -- which `capture` then rejected
+    /// for having fewer than two steps. An otherwise good multi-step plan got
+    /// no anchoring at all, and a long opening step is what a small model
+    /// writes when it is about to need anchoring most.
+    #[test]
+    fn a_long_first_step_does_not_starve_the_rest_of_the_plan() {
+        let text = format!(
+            "1. {}\n2. then run the tests\n3. then report what changed\n",
+            "consider every caller of this function in turn ".repeat(60)
+        );
+        let mut anchor = PlanAnchor::new(true);
+
+        assert!(
+            anchor.capture(&text),
+            "a three-step plan with one long step is still a plan"
+        );
+        assert_eq!(anchor.steps().len(), 3);
+        assert!(
+            anchor.steps()[1].contains("run the tests"),
+            "the steps behind the long one must survive; got {:?}",
+            anchor.steps()
+        );
+        assert!(
+            anchor.steps()[0].ends_with('…'),
+            "and the long one is marked as cut; got {:?}",
+            anchor.steps()[0]
+        );
+
+        let total: usize = anchor.steps().iter().map(String::len).sum();
+        assert!(
+            total <= MAX_PLAN_BYTES,
+            "the whole point is still a small reminder; got {total} bytes"
+        );
     }
 
     /// Disabled governors capture nothing and restate nothing.
