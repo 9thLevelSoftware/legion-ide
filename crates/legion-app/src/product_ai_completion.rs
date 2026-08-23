@@ -197,6 +197,16 @@ pub(crate) struct AssistedEditProposalSource {
     pub(crate) summary: String,
     pub(crate) details: Vec<String>,
     pub(crate) replacement: String,
+    /// Byte span in the buffer this replacement occupies.
+    ///
+    /// `(0, 0)` is an insertion at the top of the file, which is all this
+    /// path could express before: the model was asked for "the exact text to
+    /// insert at the top of the file" and its answer was placed at
+    /// `TextRange::byte(0, 0)`. Internally consistent and useless -- Assist
+    /// could prepend a comment and nothing else, for the fixture, for Ollama
+    /// and for Anthropic alike, which is the insertion path the roadmap says
+    /// a real model never ships through.
+    pub(crate) span: (usize, usize),
 }
 
 pub(crate) fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
@@ -208,6 +218,11 @@ pub(crate) fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSour
             "Proposal is registered only; app/editor/workspace own apply".to_string(),
         ],
         replacement: "/* phase4 local AI proposal */\n".to_string(),
+        // The fixture keeps its insertion, and honestly so: it is a canned
+        // comment, it says it is a canned comment, and prepending one is
+        // exactly what it claims to do. Only a live model is held to
+        // producing an edit that resolves.
+        span: (0, 0),
     }
 }
 
@@ -242,9 +257,20 @@ pub(crate) fn resolve_assisted_edit_proposal_text(
     AssistedEditProposalSource,
     Option<ProductAiStreamProjection>,
 ) {
-    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
-Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
-no markdown fences, no explanation.";
+    // A search/replace block, because that is the format the resolver already
+    // reads and the one small local models were measured against. The anchor
+    // has to be quoted from the file rather than described, which is what
+    // makes the edit checkable: `resolve_edit_span` refuses anything it
+    // cannot find exactly once.
+    let system = "You are Legion's Assist mode. Propose one small, reviewable edit. \
+Reply with exactly one search/replace block and nothing else:\n\n\
+<<<<<<< SEARCH\n\
+(the exact lines to replace, copied character-for-character from the file)\n\
+=======\n\
+(the replacement lines)\n\
+>>>>>>> REPLACE\n\n\
+The SEARCH text must appear exactly once in the file. \
+No markdown fences, no explanation, no second block.";
     let user = format!(
         "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
     );
@@ -260,15 +286,20 @@ no markdown fences, no explanation.";
         on_delta,
     ) {
         Some(completion) => {
-            let mut text = completion.text.clone();
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
             let stream = product_stream_from_completion(&completion, "assist.proposal");
+            let placement = resolve_assist_placement(buffer_excerpt, &completion.text);
             (
                 AssistedEditProposalSource {
                     provider_id: completion.provider_id.clone(),
-                    summary: format!("Assist edit proposal from {}", completion.provider_id),
+                    summary: match &placement {
+                        AssistPlacement::Resolved { .. } => {
+                            format!("Assist edit proposal from {}", completion.provider_id)
+                        }
+                        AssistPlacement::Unresolved { .. } => format!(
+                            "Assist edit from {} did not resolve",
+                            completion.provider_id
+                        ),
+                    },
                     details: vec![
                         format!("model={}", completion.model),
                         // The backend that actually answered, not the
@@ -281,9 +312,11 @@ no markdown fences, no explanation.";
                             completion.streamed,
                             completion.stream_chunks.len()
                         ),
+                        placement.detail(),
                         "Proposal is registered only; app/editor/workspace own apply".to_string(),
                     ],
-                    replacement: text,
+                    replacement: placement.replacement(),
+                    span: placement.span(),
                 },
                 Some(stream),
             )
@@ -304,6 +337,122 @@ no markdown fences, no explanation.";
             },
             None,
         ),
+    }
+}
+
+/// Where a live model's answer lands in the buffer, or why it does not.
+enum AssistPlacement {
+    /// The block resolved to a unique span.
+    Resolved {
+        span: (usize, usize),
+        replacement: String,
+        /// How the match was obtained, as a label rather than the resolver's
+        /// enum: `legion-ai` is an optional dependency (`ai` or `offline`),
+        /// and a type from it in this signature would make the whole Assist
+        /// path fail to compile in a build with neither.
+        outcome_label: String,
+    },
+    /// Nothing usable came back, and this says what.
+    Unresolved { reason: String },
+}
+
+impl AssistPlacement {
+    fn span(&self) -> (usize, usize) {
+        match self {
+            Self::Resolved { span, .. } => *span,
+            // An empty replacement over an empty span changes nothing.
+            Self::Unresolved { .. } => (0, 0),
+        }
+    }
+
+    fn replacement(&self) -> String {
+        match self {
+            Self::Resolved { replacement, .. } => replacement.clone(),
+            Self::Unresolved { .. } => String::new(),
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            Self::Resolved {
+                outcome_label,
+                span,
+                ..
+            } => format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
+            Self::Unresolved { reason } => format!("edit=unresolved: {reason}"),
+        }
+    }
+}
+
+/// Read the model's search/replace block and locate it in the buffer.
+///
+/// Resolved against the excerpt, and the spans that come back are still
+/// absolute buffer offsets: `bounded_by_bytes` returns a prefix, so the two
+/// coordinate systems agree for every byte the model was shown. Resolving
+/// against the excerpt is also the honest bound on uniqueness -- the model
+/// cannot anchor on text it never saw, and a duplicate past the cut is not
+/// something it could have disambiguated. It avoids copying a 100MB buffer
+/// into the worker thread as a side benefit, not as the reason.
+///
+/// A block that cannot be found, or that matches twice, produces no edit at
+/// all. That is the point of the change: the previous path took whatever came
+/// back and prepended it, so a model that misread the file still produced a
+/// confident-looking proposal that corrupted it. A proposal that changes
+/// nothing and says why is a worse outcome for the model and a much better one
+/// for the person reviewing it.
+#[cfg(any(feature = "ai", feature = "offline"))]
+fn resolve_assist_placement(buffer_excerpt: &str, answer: &str) -> AssistPlacement {
+    let blocks = legion_ai::patch::parse_edit_blocks_for_file(answer, "");
+    let Some(block) = blocks.first() else {
+        return AssistPlacement::Unresolved {
+            reason: "no search/replace block in the reply".to_string(),
+        };
+    };
+    if blocks.len() > 1 {
+        // Deliberately not "apply the first". Assist proposes one reviewable
+        // edit; silently dropping the rest would make the preview a partial
+        // account of what the model intended.
+        return AssistPlacement::Unresolved {
+            reason: format!(
+                "{} blocks in the reply; Assist proposes one edit at a time",
+                blocks.len()
+            ),
+        };
+    }
+    match legion_ai::patch::resolve_edit_span(buffer_excerpt, &block.old_str, &block.new_str) {
+        legion_ai::patch::PatchSpan::Resolved {
+            start,
+            end,
+            replacement,
+            outcome,
+        } => AssistPlacement::Resolved {
+            span: (start, end),
+            replacement,
+            outcome_label: format!("{outcome:?}"),
+        },
+        legion_ai::patch::PatchSpan::NoMatch(diagnostic) => AssistPlacement::Unresolved {
+            reason: diagnostic.message,
+        },
+        legion_ai::patch::PatchSpan::Ambiguous { occurrences } => AssistPlacement::Unresolved {
+            reason: format!("the quoted text appears {occurrences} times; it must be unique"),
+        },
+        legion_ai::patch::PatchSpan::ValidationError { reason } => {
+            AssistPlacement::Unresolved { reason }
+        }
+    }
+}
+
+/// Without `legion-ai` there is no resolver, so there is no edit.
+///
+/// Unreachable in practice -- a build with neither `ai` nor `offline` has no
+/// provider to answer with either -- but it must compile, and it must not
+/// fall back to inserting the reply at the top of the file. That fallback is
+/// the behaviour this whole change exists to remove; leaving it in one
+/// configuration would leave it in the product.
+#[cfg(not(any(feature = "ai", feature = "offline")))]
+fn resolve_assist_placement(_buffer_excerpt: &str, _answer: &str) -> AssistPlacement {
+    AssistPlacement::Unresolved {
+        reason: "this build has no patch resolver".to_string(),
     }
 }
 
@@ -429,5 +578,150 @@ pub(crate) fn product_stream_from_completion(
         streamed: completion.streamed,
         in_flight: false,
         text_preview: bounded_label(completion.text.as_str(), 480),
+    }
+}
+
+#[cfg(all(test, any(feature = "ai", feature = "offline")))]
+mod assist_placement_tests {
+    use super::*;
+
+    const FILE: &str = "fn main() {\n    println!(\"one\");\n    println!(\"two\");\n}\n";
+
+    fn block(old: &str, new: &str) -> String {
+        format!("<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n")
+    }
+
+    /// The edit lands where the model pointed, not at the top of the file.
+    ///
+    /// This is the whole point of the change. Assist asked for "the exact text
+    /// to insert at the top of the file" and placed the answer at
+    /// `TextRange::byte(0, 0)`, so the feature could prepend and nothing else --
+    /// for the fixture, for Ollama and for Anthropic alike. A span that starts
+    /// at 0 here means the regression is back.
+    #[test]
+    fn a_resolved_block_edits_where_the_model_pointed() {
+        let answer = block("    println!(\"two\");", "    println!(\"three\");");
+        let placement = resolve_assist_placement(FILE, &answer);
+
+        let (start, end) = placement.span();
+        assert!(
+            start > 0,
+            "the edit must land at the quoted text, not at the top of the file; got {start}..{end}"
+        );
+        // Exactly the quoted text, and not the newline after it: the span is
+        // the match, so the file keeps its own line ending and the diff is one
+        // line rather than two.
+        assert_eq!(
+            &FILE[start..end],
+            "    println!(\"two\");",
+            "the span must cover exactly the quoted text"
+        );
+        assert_eq!(placement.replacement(), "    println!(\"three\");");
+    }
+
+    /// Applying the resolved span to the buffer produces the intended file.
+    ///
+    /// The span and the replacement are handed to the proposal separately, so
+    /// a test that only checks the span could pass while the two disagree.
+    #[test]
+    fn the_resolved_span_and_replacement_compose_into_the_intended_file() {
+        let answer = block("    println!(\"one\");", "    println!(\"uno\");");
+        let placement = resolve_assist_placement(FILE, &answer);
+        let (start, end) = placement.span();
+
+        let mut applied = String::new();
+        applied.push_str(&FILE[..start]);
+        applied.push_str(&placement.replacement());
+        applied.push_str(&FILE[end..]);
+
+        assert_eq!(
+            applied,
+            "fn main() {\n    println!(\"uno\");\n    println!(\"two\");\n}\n"
+        );
+    }
+
+    /// An anchor that is not in the file proposes nothing at all.
+    ///
+    /// The old path took whatever came back and prepended it, so a model that
+    /// misread the file still produced a confident-looking proposal that
+    /// corrupted it. Changing nothing and saying why is the better failure.
+    #[test]
+    fn an_anchor_that_is_not_in_the_file_proposes_no_edit() {
+        let answer = block("    println!(\"nowhere\");", "    println!(\"x\");");
+        let placement = resolve_assist_placement(FILE, &answer);
+
+        assert_eq!(placement.span(), (0, 0));
+        assert!(
+            placement.replacement().is_empty(),
+            "an unresolved edit must replace nothing, or it corrupts the file"
+        );
+        assert!(
+            placement.detail().starts_with("edit=unresolved"),
+            "the reviewer has to be told why; got {:?}",
+            placement.detail()
+        );
+    }
+
+    /// An anchor that matches twice is refused rather than guessed at.
+    #[test]
+    fn an_ambiguous_anchor_proposes_no_edit() {
+        let repeated = "a();\nb();\na();\n";
+        let answer = block("a();", "c();");
+        let placement = resolve_assist_placement(repeated, &answer);
+
+        assert_eq!(placement.span(), (0, 0));
+        assert!(placement.replacement().is_empty());
+        assert!(
+            placement.detail().contains("2 times"),
+            "the reason should name the ambiguity; got {:?}",
+            placement.detail()
+        );
+    }
+
+    /// A reply with no block at all is not silently treated as text to insert.
+    #[test]
+    fn prose_with_no_block_proposes_no_edit() {
+        let placement = resolve_assist_placement(FILE, "Sure! You could rename the function.");
+
+        assert_eq!(placement.span(), (0, 0));
+        assert!(placement.replacement().is_empty());
+        assert!(
+            placement.detail().contains("no search/replace block"),
+            "got {:?}",
+            placement.detail()
+        );
+    }
+
+    /// Several blocks are refused, not silently reduced to the first.
+    ///
+    /// Assist proposes one reviewable edit; applying block one and dropping the
+    /// rest would make the preview a partial account of what the model meant.
+    #[test]
+    fn more_than_one_block_proposes_no_edit() {
+        let answer = format!(
+            "{}{}",
+            block("    println!(\"one\");", "    println!(\"uno\");"),
+            block("    println!(\"two\");", "    println!(\"dos\");")
+        );
+        let placement = resolve_assist_placement(FILE, &answer);
+
+        assert_eq!(placement.span(), (0, 0));
+        assert!(
+            placement.detail().contains("one edit at a time"),
+            "got {:?}",
+            placement.detail()
+        );
+    }
+
+    /// The deterministic fixture keeps prepending, and that stays honest.
+    ///
+    /// It is a canned comment that says it is a canned comment; inserting one
+    /// at the top is exactly what it claims to do. Only a live model is held to
+    /// producing an edit that resolves.
+    #[test]
+    fn the_fixture_proposal_still_inserts_at_the_top() {
+        let fixture = deterministic_assisted_edit_proposal();
+        assert_eq!(fixture.span, (0, 0));
+        assert!(!fixture.replacement.is_empty());
     }
 }

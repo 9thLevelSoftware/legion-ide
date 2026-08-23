@@ -245,10 +245,7 @@ pub fn resolve_edit_span_from_arguments(file_content: &str, arguments: &Value) -
 /// difference between replacing and deleting.
 fn newline_adjusted(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
     let mut replacement = new_str.to_string();
-    if !new_str.is_empty()
-        && !new_str.ends_with('\n')
-        && file_content[start..end].ends_with('\n')
-    {
+    if !new_str.is_empty() && !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
         replacement.push('\n');
     }
     replacement
@@ -456,6 +453,31 @@ const REPLACE_MARKER: &str = ">>>>>>> REPLACE";
 pub fn parse_edit_blocks(text: &str) -> Vec<EditBlock> {
     let mut blocks = parse_search_replace_blocks(text);
     blocks.extend(parse_diff_fences(text));
+    // A block whose path could not be inferred is dropped here, because a
+    // caller working across a whole workspace has nowhere to apply it.
+    blocks.retain(|block| !block.path.is_empty());
+    blocks
+}
+
+/// Parse edit blocks for a file the caller already knows.
+///
+/// [`parse_edit_blocks`] infers each block's path from the nearest non-empty
+/// line above it and discards any block where that fails. That is right when
+/// the model is choosing which file to edit. It is wrong when the file is
+/// already decided -- a single-file surface would be forcing the model to
+/// restate a path nobody needs, and the inference misfires anyway: in two
+/// consecutive blocks the second one's "path" is the first one's
+/// `>>>>>>> REPLACE` line, so a reply containing two edits parses as one and
+/// the extra edit vanishes silently.
+///
+/// Here the caller's path wins outright and nothing is dropped, so "how many
+/// edits did the model propose" has an honest answer.
+pub fn parse_edit_blocks_for_file(text: &str, path: &str) -> Vec<EditBlock> {
+    let mut blocks = parse_search_replace_blocks(text);
+    blocks.extend(parse_diff_fences(text));
+    for block in &mut blocks {
+        block.path = path.to_string();
+    }
     blocks
 }
 
@@ -514,13 +536,11 @@ fn parse_search_replace_blocks(text: &str) -> Vec<EditBlock> {
             continue;
         }
 
-        if !path.is_empty() {
-            blocks.push(EditBlock {
-                path,
-                old_str: old_lines.join("\n"),
-                new_str: new_lines.join("\n"),
-            });
-        }
+        blocks.push(EditBlock {
+            path,
+            old_str: old_lines.join("\n"),
+            new_str: new_lines.join("\n"),
+        });
         index = cursor + 1;
     }
     blocks

@@ -679,7 +679,21 @@ impl AppComposition {
                 file_id,
                 edits: legion_protocol::EditBatch {
                     edits: vec![legion_protocol::TextEdit {
-                        range: legion_protocol::TextRange::byte(0, 0),
+                        // Where the model's edit actually goes.
+                        //
+                        // This was `byte(0, 0)` for every proposal Assist has
+                        // ever made -- fixture, Ollama and Anthropic alike --
+                        // so the feature could prepend text and nothing else.
+                        // The span is resolved from a search/replace block
+                        // against the excerpt the model was shown, and an
+                        // unresolvable block yields `(0, 0)` with an empty
+                        // replacement: a proposal that changes nothing and
+                        // says why, rather than one that changes the wrong
+                        // thing confidently.
+                        range: legion_protocol::TextRange::byte(
+                            proposal_source.span.0 as u64,
+                            proposal_source.span.1 as u64,
+                        ),
                         replacement: proposal_source.replacement.clone(),
                     }],
                 },
