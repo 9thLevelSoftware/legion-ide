@@ -1476,6 +1476,8 @@ pub fn run_delegated_task_loop(
     // wider tool set than the task was admitted with.
     let action_class = legion_ai::routing::classify_action(&config.initial_message);
     let tool_defs = tool_defs_from_registry(&config.scope, action_class);
+    let mut plan_anchor =
+        crate::plan_anchor::PlanAnchor::new(legion_ai::governance::small_model_governors_enabled());
 
     // Initialize conversation with the user's task message.
     let mut turns: Vec<ToolConversationTurn> = vec![ToolConversationTurn {
@@ -2073,13 +2075,52 @@ pub fn run_delegated_task_loop(
                     });
                 }
 
+                // Capture the plan from the model's own words before the
+                // turn is filed away. First statement only -- a model that
+                // rewrites its plan mid-run is often already drifting, and
+                // adopting the rewrite would make this agree with the drift it
+                // exists to catch.
+                //
+                // The turn's text blocks are joined first, because a turn is one
+                // statement however many blocks it arrived in. Anthropic
+                // preserves every native text block separately, so a plan split
+                // across two of them was parsed as two lists: the anchor locked
+                // onto whichever block first held two steps and dropped the
+                // rest, or -- with one step per block -- captured nothing at
+                // all.
+                let assistant_text = response
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ToolTurnBlock::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                plan_anchor.capture(&assistant_text);
+
                 // Append the assistant's turn to conversation history.
                 turns.push(ToolConversationTurn {
                     role: "assistant".to_string(),
                     blocks: response.blocks,
                 });
 
-                // Append all tool results as a user turn.
+                // Put the plan back in front of the model on the interval.
+                //
+                // By turn ten the conversation is mostly file contents and
+                // diagnostics; the directive is far away and the model starts
+                // solving whatever the last tool output suggested. It does not
+                // announce that, which is why the other governors cannot see
+                // it -- idle detection sees progress, dedup sees distinct
+                // calls, retry counting sees successes.
+                //
+                // Carried on the same user turn as the tool results when there
+                // are any, so a reminder never becomes a turn of its own that
+                // the model has to answer.
+                let reanchor = plan_anchor.reanchor();
+                if let Some(notice) = reanchor {
+                    tool_result_blocks.push(ToolTurnBlock::Text(notice));
+                }
                 if !tool_result_blocks.is_empty() {
                     turns.push(ToolConversationTurn {
                         role: "user".to_string(),
