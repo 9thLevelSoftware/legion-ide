@@ -211,8 +211,23 @@ jobs:
         continue-on-error: true
         run: rustup component add rust-analyzer
 
+      # A ceiling on the one step that spawns something it does not control.
+      #
+      # Everything else in this job is cargo, which fails or finishes. This
+      # launches a real rust-analyzer and talks to it, and a language server
+      # that never answers leaves the step running until the job's own
+      # `timeout-minutes: 180` fires -- three hours during which the PR cannot
+      # merge and the queue behind it waits. There is precedent for the hang:
+      # `plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md`
+      # records rust-analyzer 1.97.1 timing out on a hosted runner.
+      #
+      # Ten minutes is far above the observed cost -- the smoke's own internal
+      # waits are seconds -- so this only ever fires on a hang, and when it
+      # does the job fails in a way that names the step instead of looking
+      # like a stuck queue.
       - name: xtask rust-analyzer-smoke (real server)
         if: steps.provision_ra.outcome == 'success'
+        timeout-minutes: 10
         run: cargo run -p xtask -- rust-analyzer-smoke
 
       - name: Record skipped rust-analyzer smoke
