@@ -217,19 +217,60 @@ fn bounded_plan(steps: Vec<String>) -> Vec<String> {
     bounded
 }
 
+/// Words in the text above a list that say the list is a plan.
+///
+/// Only consulted for bullet lists. A numbered list is an ordering the model
+/// wrote down; a bullet list is a set, and a set of findings looks exactly like
+/// a set of steps. "Found:\n- stale cache\n- missing guard" was being captured
+/// and then restated every fourth turn as "the plan you stated", steering the
+/// run toward incidental findings and locking out the real plan when it arrived.
+const PLAN_CUES: &[&str] = &[
+    "plan", "step", "approach", "i will", "i'll", "going to", "intend", "strategy",
+];
+
+/// One run of adjacent list lines, and how it marked itself.
+struct ListRun {
+    items: Vec<String>,
+    marker: ListMarker,
+    /// Index of the line the run starts on, for reading the text above it.
+    first_line: usize,
+}
+
+impl ListRun {
+    fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            marker: ListMarker::Bulleted,
+            first_line: 0,
+        }
+    }
+}
+
 /// Pull an ordered list of steps out of free model text.
 ///
 /// Takes the longest run of *consecutive* list lines rather than every list
 /// line in the reply. A model that writes a plan and then discusses it produces
 /// several unrelated lists, and concatenating them yields a plan it never
 /// stated — the run of adjacent lines is the one it wrote as a unit.
+///
+/// A bullet run additionally has to be introduced as a plan. The module's own
+/// argument for two items being enough is that "two is an ordering" — which is
+/// true of `1.` `2.` and simply not true of `-` `-`. A bullet list is a set,
+/// and a set of findings is shaped exactly like a set of steps, so the
+/// surrounding text has to say which one it is.
 pub fn parse_plan_steps(text: &str) -> Vec<String> {
-    let mut best: Vec<String> = Vec::new();
-    let mut current: Vec<String> = Vec::new();
+    let mut best = ListRun::empty();
+    let mut current = ListRun::empty();
 
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
         match list_item_body(line.trim()) {
-            Some(body) if !body.is_empty() => current.push(body),
+            Some((marker, body)) if !body.is_empty() => {
+                if current.items.is_empty() {
+                    current.marker = marker;
+                    current.first_line = index;
+                }
+                current.items.push(body);
+            }
             // A blank line inside a list is formatting, not a break: models
             // routinely double-space numbered steps.
             //
@@ -239,34 +280,65 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
             // placeholder step is a plan with a gap in it, not the end of a
             // plan.
             Some(_) => {}
-            None if line.trim().is_empty() && !current.is_empty() => {}
+            None if line.trim().is_empty() && !current.items.is_empty() => {}
             _ => {
-                if current.len() > best.len() {
-                    best = std::mem::take(&mut current);
+                if current.items.len() > best.items.len() {
+                    best = std::mem::replace(&mut current, ListRun::empty());
                 } else {
-                    current.clear();
+                    current = ListRun::empty();
                 }
             }
         }
     }
-    if current.len() > best.len() {
+    if current.items.len() > best.items.len() {
         best = current;
     }
-    best
+
+    if best.marker == ListMarker::Bulleted && !introduced_as_a_plan(text, best.first_line) {
+        return Vec::new();
+    }
+    best.items
 }
 
-/// The text of a list item, or `None` when the line is not one.
+/// Whether the text above line `first_line` announces a plan.
+///
+/// Everything above the list, not just the line immediately before it: models
+/// write "Here is my plan." and then a blank line and then the bullets, and a
+/// one-line lookback would miss it. Reading further up costs a false accept on
+/// a reply that discussed a plan and then listed something else, which is the
+/// cheaper mistake — the alternative is refusing to anchor a run that stated one.
+fn introduced_as_a_plan(text: &str, first_line: usize) -> bool {
+    text.lines()
+        .take(first_line)
+        .map(str::to_lowercase)
+        .any(|line| PLAN_CUES.iter().any(|cue| line.contains(cue)))
+}
+
+/// How a list line marks itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListMarker {
+    /// `1.` or `1)` — an ordering the model wrote down.
+    Ordered,
+    /// `-`, `*` or `•` — a set, which may or may not be a sequence.
+    Bulleted,
+}
+
+/// The text of a list item and its marker, or `None` when the line is not one.
 ///
 /// Accepts the markers models actually emit: `1.`, `1)`, `-`, `*`, `•`. A bare
 /// number with no delimiter is rejected deliberately — "2024 was the release
 /// year" is not step 2024.
-fn list_item_body(line: &str) -> Option<String> {
+///
+/// The marker is returned because the two kinds carry different evidence: a
+/// number is an order, a bullet is not, and only one of them is a plan on its
+/// own.
+fn list_item_body(line: &str) -> Option<(ListMarker, String)> {
     if let Some(rest) = line
         .strip_prefix("- ")
         .or_else(|| line.strip_prefix("* "))
         .or_else(|| line.strip_prefix("• "))
     {
-        return Some(rest.trim().to_string());
+        return Some((ListMarker::Bulleted, rest.trim().to_string()));
     }
     let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() || digits.len() > 3 {
@@ -274,7 +346,7 @@ fn list_item_body(line: &str) -> Option<String> {
     }
     let rest = &line[digits.len()..];
     let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
-    Some(rest.trim().to_string())
+    Some((ListMarker::Ordered, rest.trim().to_string()))
 }
 
 #[cfg(test)]
@@ -302,8 +374,64 @@ mod tests {
 
     #[test]
     fn bullet_markers_are_accepted() {
-        let steps = parse_plan_steps("- first thing\n- second thing\n");
+        let steps = parse_plan_steps("My plan:\n- first thing\n- second thing\n");
         assert_eq!(steps, vec!["first thing", "second thing"]);
+    }
+
+    /// A list of findings is not a plan just because it has two items.
+    ///
+    /// A bullet list is a set, and a set of findings is shaped exactly like a
+    /// set of steps. Capturing one locked it in permanently and restated it
+    /// every fourth turn as "the plan you stated" -- steering the run toward
+    /// incidental findings and shutting out the real plan when it arrived.
+    #[test]
+    fn a_bare_list_of_findings_is_not_captured_as_a_plan() {
+        assert!(
+            parse_plan_steps("Found:\n- stale cache\n- missing guard\n").is_empty(),
+            "nothing here says these are steps"
+        );
+
+        let mut anchor = PlanAnchor::new(true);
+        assert!(!anchor.capture("Found:\n- stale cache\n- missing guard\n"));
+        assert!(
+            !anchor.has_plan(),
+            "and the anchor stays free for a plan the model actually states"
+        );
+    }
+
+    /// A numbered list needs no introduction, because it is already an order.
+    ///
+    /// The module's argument for two items being enough is that "two is an
+    /// ordering". That holds for `1.` `2.` and does not hold for `-` `-`, which
+    /// is the whole reason only one of them needs the surrounding text.
+    #[test]
+    fn a_numbered_list_stands_on_its_own() {
+        assert_eq!(
+            parse_plan_steps("Found:\n1. stale cache\n2. missing guard\n"),
+            vec!["stale cache", "missing guard"]
+        );
+    }
+
+    /// The cue may be several lines above the bullets.
+    ///
+    /// Models write the sentence, then a blank line, then the list. A lookback
+    /// of one line would miss every one of them.
+    #[test]
+    fn a_cue_further_up_still_introduces_the_list() {
+        let text = "Here is my plan.\n\nBefore starting:\n\n- read the ledger\n- add the field\n";
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["read the ledger", "add the field"]
+        );
+    }
+
+    /// A rejected findings list does not block a real plan on a later turn.
+    #[test]
+    fn a_plan_stated_after_a_findings_list_is_still_captured() {
+        let mut anchor = PlanAnchor::new(true);
+        assert!(!anchor.capture("Found:\n- stale cache\n- missing guard\n"));
+        assert!(anchor.capture(PLAN));
+        assert_eq!(anchor.steps().len(), 3);
     }
 
     /// Blank lines inside a list do not end it.
