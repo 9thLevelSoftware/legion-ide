@@ -309,6 +309,11 @@ pub(crate) fn ollama_network_target() -> legion_protocol::NetworkTarget {
     network_target_from_base_url(&crate::ollama_base_url_from_env(), "localhost")
 }
 
+/// The llama.cpp endpoint, from the same configuration the client reads.
+pub(crate) fn llama_cpp_network_target() -> legion_protocol::NetworkTarget {
+    network_target_from_base_url(&crate::llama_cpp_base_url_from_env(), "localhost")
+}
+
 /// The network target, health and cost labels for a chosen backend.
 ///
 /// Split from the preference lookup on purpose. Resolving a preference probes
@@ -342,6 +347,15 @@ pub(crate) fn route_descriptor_for_backend(
             // has to say so; `WorkspaceMetadata` would describe a different
             // request than the one being made.
             legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata,
+        ),
+        Some(ProductAiLiveBackend::LlamaCpp) => (
+            // Derived from the configured base URL for the same reason the
+            // other arms are: the descriptor has to name the endpoint the
+            // excerpt goes to.
+            llama_cpp_network_target(),
+            "delegate.local.llama-cpp",
+            "local.free",
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
         ),
         Some(ProductAiLiveBackend::Ollama) => (
             // Derived from `OLLAMA_BASE_URL`, for the same reason the Anthropic
@@ -674,11 +688,19 @@ mod delegate_chat_route_honesty_tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     /// Every environment variable a product AI route reads.
-    const ROUTE_ENV_VARS: [&str; 4] = [
+    const ROUTE_ENV_VARS: [&str; 7] = [
         "LEGION_ANTHROPIC_BASE_URL",
         "DEVIL_ANTHROPIC_BASE_URL",
         "ANTHROPIC_BASE_URL",
         "OLLAMA_BASE_URL",
+        // A route variable is one that moves a route, and these three move the
+        // llama.cpp one. Left out of this list, a machine with any of them set
+        // -- a provider integration run, a developer pointing at a box on the
+        // LAN -- failed the default-route assertions for behaving exactly as it
+        // was configured to.
+        "LEGION_LLAMA_CPP_BASE_URL",
+        "DEVIL_LLAMA_CPP_BASE_URL",
+        "LLAMA_CPP_BASE_URL",
     ];
 
     /// Serialises the tests that touch the process environment.
@@ -709,7 +731,12 @@ mod delegate_chat_route_honesty_tests {
     /// the exclusion, because the borrow checker will not let it. `Drop` runs
     /// on the unwind too, so the restore does not depend on reaching the end of
     /// a test.
-    struct RouteEnv {
+    /// Shared with `llama_cpp_route_tests`, deliberately.
+    ///
+    /// One fixture means one lock. A second copy next door would take a second
+    /// lock and the two would interleave, which is the nondeterminism this
+    /// exists to remove.
+    pub(super) struct RouteEnv {
         previous: Vec<(&'static str, Option<String>)>,
         _guard: MutexGuard<'static, ()>,
     }
@@ -717,7 +744,7 @@ mod delegate_chat_route_honesty_tests {
     impl RouteEnv {
         /// Takes the lock, remembers every route variable, and clears them, so
         /// a test starts from a known environment rather than the developer's.
-        fn cleared() -> Self {
+        pub(super) fn cleared() -> Self {
             let guard = env_lock();
             let previous = ROUTE_ENV_VARS
                 .iter()
@@ -735,7 +762,7 @@ mod delegate_chat_route_honesty_tests {
             }
         }
 
-        fn set(&self, name: &str, value: &str) {
+        pub(super) fn set(&self, name: &str, value: &str) {
             // SAFETY: `self` owns the lock guard, so this mutation is exclusive.
             unsafe { std::env::set_var(name, value) };
         }
@@ -1098,5 +1125,102 @@ mod delegate_chat_route_honesty_tests {
         let target = network_target_from_base_url("https:///v1", "api.anthropic.com");
         assert_eq!(target.host, "api.anthropic.com");
         assert!(!target.host.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod llama_cpp_route_tests {
+    use super::delegate_chat_route_honesty_tests::RouteEnv;
+    use super::*;
+    use crate::ProductAiLiveBackend;
+
+    /// A llama.cpp route is described as local and free, like Ollama.
+    ///
+    /// This tuple is what a reviewer reads to decide whether an edit was
+    /// produced locally and at no cost. A loopback backend described as remote
+    /// would frighten people away from a free local model; described as remote
+    /// *metered* it would be a lie in the expensive direction. The mapping is
+    /// the part that must hold everywhere, which is why it is the part tested.
+    #[test]
+    fn the_llama_cpp_route_is_local_and_free() {
+        // The default route is only the default when nothing has moved it.
+        let _env = RouteEnv::cleared();
+        let (target, health, cost, privacy) =
+            route_descriptor_for_backend(Some(ProductAiLiveBackend::LlamaCpp));
+
+        assert_eq!(health, "delegate.local.llama-cpp");
+        assert_eq!(cost, "local.free");
+        assert_eq!(
+            privacy,
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            "nothing leaves the machine on a loopback route"
+        );
+        assert!(
+            is_loopback_host(&target.host),
+            "the default endpoint must be loopback; got {}",
+            target.host
+        );
+    }
+
+    /// The probe reads the names the client reads, in the order it reads them.
+    ///
+    /// The helper spelled the legacy prefix `LEGION_AI` while the client uses
+    /// `DEVIL`, so a deployment setting `DEVIL_LLAMA_CPP_BASE_URL` was probed
+    /// and described at the default while its requests went somewhere else --
+    /// the exact drift the helper exists to prevent.
+    ///
+    /// Asserted by setting each variable and calling the helper. The first
+    /// version of this test compared `format!("{}_LLAMA_CPP_BASE_URL", PREFIX)`
+    /// against `"LEGION_LLAMA_CPP_BASE_URL"`, which is what `format!` does and
+    /// what it will keep doing however the helper is spelled -- so the
+    /// regression it named would have sailed through it green.
+    #[test]
+    fn the_probe_reads_each_configured_env_var_in_order() {
+        let env = RouteEnv::cleared();
+
+        env.set("LLAMA_CPP_BASE_URL", "http://127.0.0.1:8083/v1");
+        assert!(
+            crate::llama_cpp_base_url_from_env().contains(":8083"),
+            "the bare name is read when nothing else is set"
+        );
+
+        env.set("DEVIL_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8082/v1");
+        assert!(
+            crate::llama_cpp_base_url_from_env().contains(":8082"),
+            "the legacy product prefix beats the bare name"
+        );
+
+        env.set("LEGION_LLAMA_CPP_BASE_URL", "http://127.0.0.1:8081/v1");
+        assert!(
+            crate::llama_cpp_base_url_from_env().contains(":8081"),
+            "and the product prefix beats the legacy one"
+        );
+    }
+
+    /// With nothing configured, the probe falls back to the documented default.
+    #[test]
+    fn the_probe_falls_back_to_the_documented_default() {
+        let _env = RouteEnv::cleared();
+
+        assert_eq!(
+            crate::llama_cpp_base_url_from_env(),
+            "http://localhost:8080/v1"
+        );
+    }
+
+    /// The descriptor names the configured endpoint, not the default one.
+    ///
+    /// The same rule the Ollama and Anthropic arms follow: a descriptor naming
+    /// the usual endpoint would misstate the destination for exactly the
+    /// deployments that moved it, and would then have the broker allowlist a
+    /// host the request never contacts.
+    #[test]
+    fn the_llama_cpp_route_follows_its_configuration() {
+        // Parsed directly rather than through the environment, so this test
+        // cannot be perturbed by another running beside it.
+        let target = network_target_from_base_url("http://127.0.0.1:9001/v1", "localhost");
+
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, Some(9001));
     }
 }

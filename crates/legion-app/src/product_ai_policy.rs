@@ -138,6 +138,33 @@ pub(crate) fn bounded_by_bytes(text: &str, max_bytes: usize) -> String {
     text[..end].to_string()
 }
 
+/// The buffer excerpt a model is shown, cut on a line boundary.
+///
+/// [`bounded_by_bytes`] cuts at a byte, which for a file over the budget lands
+/// mid-line as often as not -- and the model has no way to know. It sees the
+/// partial tail as a complete line, quotes it as SEARCH, and exact resolution
+/// finds that prefix exactly once and replaces it, leaving the unseen remainder
+/// of the line stuck to the end of the replacement. A corrupted line from an
+/// edit that looked unambiguous the whole way through.
+///
+/// So the excerpt ends where a line ends. Offsets stay absolute, because this
+/// is still a prefix of the buffer -- it is just a shorter one.
+///
+/// When the first line alone exceeds the budget there is no complete line to
+/// send, and the excerpt is empty. Assist then finds no anchor and declines,
+/// which is the right outcome: a minified file has no line for a model to quote
+/// back, and half of one is the case this exists to prevent.
+pub(crate) fn assist_buffer_excerpt(text: &str, max_bytes: usize) -> String {
+    let bounded = bounded_by_bytes(text, max_bytes);
+    if bounded.len() == text.len() {
+        return bounded;
+    }
+    match bounded.rfind('\n') {
+        Some(last_break) => bounded[..=last_break].to_string(),
+        None => String::new(),
+    }
+}
+
 /// The most tokens a request could consume, for declaration to the broker.
 ///
 /// A ceiling rather than an estimate of what this particular call will use,
@@ -171,8 +198,19 @@ pub(crate) fn declared_request_tokens(prompt_bytes: usize, completion_tokens: u3
 /// exists precisely to refuse a request that cannot say what it costs.
 pub(crate) fn declared_request_cost_cents(backend: ProductAiLiveBackend) -> Option<u64> {
     match backend {
-        ProductAiLiveBackend::Ollama => Some(0),
-        _ => None,
+        // Both local backends declare zero, and they have to declare the same
+        // thing because they cost the same thing. An organisation that allows
+        // `llama-cpp` and requires a cost declaration for `ai.provider.*` would
+        // otherwise have every Assist, Delegate and inline request refused by
+        // `BudgetCapPolicy` before invocation -- a loopback server on the
+        // operator's own machine, denied for an undeclared price it does not
+        // have. The route already calls it `local.free`; this is the same fact
+        // said where the broker reads it.
+        ProductAiLiveBackend::Ollama | ProductAiLiveBackend::LlamaCpp => Some(0),
+        // Anthropic is metered and its price is not known here. `None` is the
+        // honest answer, and refusing an undeclared metered call is the
+        // policy working.
+        ProductAiLiveBackend::Anthropic => None,
     }
 }
 
@@ -713,6 +751,50 @@ mod org_ceiling {
         );
     }
 
+    /// A truncated excerpt ends where a line ends.
+    ///
+    /// A byte cut lands mid-line, and the model has no way to see that. It
+    /// quotes the partial tail as SEARCH, exact resolution finds that prefix
+    /// exactly once, and the edit replaces it -- leaving the unseen remainder of
+    /// the line stuck to the replacement. A corrupted line from an edit that
+    /// looked unambiguous the whole way through.
+    #[test]
+    fn a_truncated_excerpt_never_ends_mid_line() {
+        let file = "alpha();\nbeta();\ngamma_is_a_long_one();\n";
+
+        let excerpt = crate::assist_buffer_excerpt(file, 20);
+
+        assert_eq!(excerpt, "alpha();\nbeta();\n");
+        assert!(
+            excerpt.ends_with('\n'),
+            "the model must not be shown half a line; got {excerpt:?}"
+        );
+        assert!(
+            file.starts_with(&excerpt),
+            "still a prefix, so resolved offsets stay absolute"
+        );
+    }
+
+    /// A file inside the budget is sent whole, trailing newline or not.
+    #[test]
+    fn a_short_file_is_not_trimmed() {
+        let file = "fn main() {}";
+
+        assert_eq!(crate::assist_buffer_excerpt(file, 4_000), file);
+    }
+
+    /// A first line longer than the budget leaves nothing to anchor on.
+    ///
+    /// Empty rather than half a line: a minified file has no line for a model
+    /// to quote back, and half of one is exactly what this prevents. Assist
+    /// finds no anchor and declines.
+    #[test]
+    fn a_first_line_over_the_budget_yields_no_excerpt() {
+        let minified = "a".repeat(500) + "\nsecond();\n";
+
+        assert!(crate::assist_buffer_excerpt(&minified, 100).is_empty());
+    }
+
     #[test]
     fn the_assist_declaration_covers_the_whole_prompt() {
         // The declaration counted only the excerpt while the prompt also carried
@@ -1046,6 +1128,82 @@ mod org_ceiling {
         assert_eq!(
             capability.cost_budget_label, "local.free",
             "a loopback route really is free and must keep saying so"
+        );
+    }
+
+    /// A local inline prediction is not reported as a remote metered one.
+    ///
+    /// The labels were derived from `provider_id == "ollama"`, so anything else
+    /// was called `byok`/`remote`. A llama.cpp prediction served from loopback
+    /// was therefore shown as remote and metered beside a route that had just
+    /// authorized it as local and free -- and "did the buffer leave the
+    /// machine" is the one question those labels exist to answer.
+    #[test]
+    fn every_local_backend_predicts_inline_as_local() {
+        for backend in [
+            crate::ProductAiLiveBackend::Ollama,
+            crate::ProductAiLiveBackend::LlamaCpp,
+        ] {
+            let (class, health, cost) =
+                crate::inline_prediction_route_labels(Some(backend), "some-provider");
+
+            assert_eq!(
+                class,
+                legion_protocol::AssistedAiProviderClass::LocalLoopback,
+                "{backend:?} serves from this machine"
+            );
+            assert!(
+                health.contains(&"local".to_string()),
+                "{backend:?} health must say local; got {health:?}"
+            );
+            assert_eq!(
+                cost,
+                vec!["local".to_string()],
+                "{backend:?} costs nothing to invoke"
+            );
+        }
+    }
+
+    /// A remote backend still says remote, so the check is not vacuous.
+    #[test]
+    fn a_remote_backend_predicts_inline_as_remote() {
+        let (class, health, cost) = crate::inline_prediction_route_labels(
+            Some(crate::ProductAiLiveBackend::Anthropic),
+            "anthropic",
+        );
+
+        assert_eq!(class, legion_protocol::AssistedAiProviderClass::ByokRemote);
+        assert!(health.contains(&"byok".to_string()), "got {health:?}");
+        assert_eq!(cost, vec!["remote".to_string()]);
+    }
+
+    /// Both local backends declare zero cost, because both cost zero.
+    ///
+    /// An organisation that allows `llama-cpp` and requires a cost declaration
+    /// for `ai.provider.*` would otherwise have every request refused by
+    /// `BudgetCapPolicy` before invocation -- a loopback server on the
+    /// operator's own machine, denied for an undeclared price it does not have.
+    /// The route already calls it `local.free`; this asserts the broker is told
+    /// the same thing.
+    #[test]
+    fn every_local_backend_declares_zero_cost() {
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::Ollama),
+            Some(0)
+        );
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::LlamaCpp),
+            Some(0),
+            "a local llama.cpp call costs what a local Ollama call costs"
+        );
+    }
+
+    /// A metered remote call declares nothing, and that is the honest answer.
+    #[test]
+    fn a_metered_remote_backend_declares_no_cost() {
+        assert_eq!(
+            super::declared_request_cost_cents(super::ProductAiLiveBackend::Anthropic),
+            None
         );
     }
 

@@ -11,9 +11,10 @@ use legion_protocol::{
     FileTreeNode, PreviewSummary, PrincipalId, ProposalCancellationReason, ProposalId,
     ProposalLifecycleState, ProposalPayload, ProposalRejectionReason, ProposalRequest,
     ProposalResponse, ProposalRollbackReason, ProposalVersionPreconditions, RedactionHint,
-    SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId, TextOffset, TextRange,
-    TimestampMillis, TrustDecisionContext, WorkspaceGeneration, WorkspaceId, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
+    SaveConflictPolicy, SaveFileProposal, SaveIntent, SnapshotId, StorageRepositoryRequest,
+    StorageRepositoryResponse, TextOffset, TextRange, TimestampMillis, TrustDecisionContext,
+    WorkspaceGeneration, WorkspaceId, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
 
@@ -946,6 +947,222 @@ fn assisted_ai_propose_is_proposal_only() {
         shell.assisted_ai_projection.requests[0].operation_class,
         legion_protocol::AssistedAiOperationClass::ProposeEdit
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Read back the durable audit record one Assist run left behind.
+///
+/// The tracker ledger is write-only from here, so the phase-4 runtime record is
+/// the terminal record a test can actually read -- which is also the record an
+/// audit reads.
+fn runtime_audit_record(
+    app: &AppComposition,
+    run_id: &legion_protocol::AgentRunId,
+) -> legion_protocol::Phase4RuntimeAuditRecord {
+    let route_id = run_id.0.replace("phase4-run-", "phase4-route-");
+    match app
+        .storage_port()
+        .handle(StorageRepositoryRequest::ReadPhase4RuntimeAuditRecord(
+            format!("phase4-runtime:{}:{route_id}", run_id.0),
+        ))
+        .expect("read phase4 runtime audit record")
+    {
+        StorageRepositoryResponse::Phase4RuntimeAuditRecord(record) => {
+            record.expect("the run must have left a runtime audit record")
+        }
+        other => panic!("expected a phase4 runtime audit record, got {other:?}"),
+    }
+}
+
+/// Set up an Assist workspace whose next run resolves against `answer`.
+fn assist_app_with_injected_reply(
+    root: &Path,
+    file_name: &str,
+    contents: &str,
+    answer: &str,
+) -> (AppComposition, BufferId) {
+    std::fs::write(root.join(file_name), contents).expect("seed file");
+    let mut app = AppComposition::new();
+    app.set_product_mode(AppProductMode::Assist);
+    // Fixture path: the synchronous one, which is where the seam is read.
+    app.set_preferred_ai_provider(legion_app::ProductAiProviderPreference::Deterministic);
+    let (_opened, _file_id, buffer_id, _node, _preconditions) =
+        opened_text_file(&mut app, root, file_name);
+    app.inject_assist_reply_for_test(answer);
+    (app, buffer_id)
+}
+
+/// A run that registers no proposal must not name one either.
+///
+/// The proposal id used to be allocated and written into the context manifest
+/// before anyone knew whether an edit existed. When the reply turned out to be
+/// unusable, the outcome and the replay and tracker records reported
+/// `proposal_id: None` while the manifest, the privacy inspector and the
+/// permission budget derived from it all named a proposal that was never
+/// registered -- an id an audit would go looking for and never find.
+#[test]
+fn an_unresolved_assist_reply_names_no_proposal_in_any_projection() {
+    let root = create_root();
+    let (mut app, buffer_id) = assist_app_with_injected_reply(
+        &root,
+        "unresolved.rs",
+        "fn main() {}\n",
+        "I would suggest refactoring this, but here is no block.",
+    );
+    let before = app
+        .editor()
+        .text(buffer_id)
+        .expect("initial editor")
+        .to_string();
+
+    let outcome = ai_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "add guard".to_string(),
+            selection: None,
+        })
+        .expect("assisted proposal starts"),
+    );
+
+    assert_eq!(
+        outcome.proposal_id, None,
+        "no edit resolved, so no proposal"
+    );
+    assert!(outcome.proposal_created.is_none());
+    assert_eq!(
+        outcome.context_manifest_projection.manifest.proposal_id, None,
+        "the manifest must not name a proposal that was never registered"
+    );
+    assert_eq!(
+        outcome.privacy_inspector_projection.proposal_id, None,
+        "and neither may anything derived from it"
+    );
+    assert_eq!(
+        app.editor().text(buffer_id).expect("editor after run"),
+        before,
+        "an unresolved run leaves the buffer alone"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An edit attempt that produced nothing is not recorded as an Explain.
+///
+/// The metadata-only path labelled every completed run
+/// `phase5.explain.metadata_ready`, which was true while Explain was the only
+/// operation that could reach it. A ProposeEdit run whose reply carried no
+/// usable edit arrives there too, and the label said the run had never been
+/// trying to edit anything -- while the reason it failed was dropped with the
+/// source.
+#[test]
+fn an_unresolved_assist_run_is_recorded_as_an_edit_that_did_not_resolve() {
+    let root = create_root();
+    let (mut app, _buffer_id) = assist_app_with_injected_reply(
+        &root,
+        "labelled.rs",
+        "fn main() {}\n",
+        "no block here at all",
+    );
+
+    let outcome = ai_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "add guard".to_string(),
+            selection: None,
+        })
+        .expect("assisted proposal starts"),
+    );
+
+    let record = runtime_audit_record(&app, &outcome.run_id);
+    assert_eq!(
+        record.outcome_label, "phase5.assist.edit_unresolved",
+        "an edit attempt that produced nothing is not an Explain"
+    );
+    assert!(
+        record
+            .labels
+            .iter()
+            .any(|label| label.contains("no search/replace block")),
+        "and the record must say why; got {:?}",
+        record.labels
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An edit that replaces text with itself is not offered for approval.
+///
+/// The span and the replacement are both non-empty, so the "changes nothing"
+/// guard -- which tests emptiness of both -- registered it. Approving it runs
+/// `EditorEngine::apply_edits`: version incremented, undo entry written, buffer
+/// marked dirty, text exactly as it was.
+#[test]
+fn an_assist_edit_that_replaces_text_with_itself_registers_no_proposal() {
+    let root = create_root();
+    let (mut app, _buffer_id) = assist_app_with_injected_reply(
+        &root,
+        "identity.rs",
+        "fn main() {\n    let total = 1;\n}\n",
+        "<<<<<<< SEARCH\n    let total = 1;\n=======\n    let total = 1;\n>>>>>>> REPLACE\n",
+    );
+
+    let outcome = ai_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "tidy the total".to_string(),
+            selection: None,
+        })
+        .expect("assisted proposal starts"),
+    );
+
+    assert_eq!(
+        outcome.proposal_id, None,
+        "an edit that changes no bytes is not approvable"
+    );
+    assert!(outcome.proposal_created.is_none());
+
+    let record = runtime_audit_record(&app, &outcome.run_id);
+    assert!(
+        record
+            .labels
+            .iter()
+            .any(|label| label.contains("identical to the text it would replace")),
+        "the record must say why it was withdrawn; got {:?}",
+        record.labels
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A deletion is still a real edit, and still becomes a proposal.
+///
+/// The guard that rejects no-ops has now been wrong in both directions once --
+/// first rejecting every deletion, then accepting identity edits -- so the
+/// surviving case is pinned beside the rejected ones.
+#[test]
+fn an_assist_deletion_still_registers_a_proposal() {
+    let root = create_root();
+    let (mut app, _buffer_id) = assist_app_with_injected_reply(
+        &root,
+        "deletion.rs",
+        "fn main() {\n    let unused = 1;\n}\n",
+        "<<<<<<< SEARCH\n    let unused = 1;\n=======\n>>>>>>> REPLACE\n",
+    );
+
+    let outcome = ai_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::StartAiProposal {
+            instruction_label: "drop the unused binding".to_string(),
+            selection: None,
+        })
+        .expect("assisted proposal starts"),
+    );
+
+    assert!(
+        outcome.proposal_id.is_some(),
+        "a deletion removes bytes, so it is an edit"
+    );
+    assert!(matches!(
+        outcome.proposal_created,
+        Some(ProposalResponse::Created(_))
+    ));
 
     let _ = std::fs::remove_dir_all(&root);
 }
