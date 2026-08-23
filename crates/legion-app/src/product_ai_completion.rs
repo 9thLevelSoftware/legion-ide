@@ -272,12 +272,51 @@ pub(crate) fn deterministic_assisted_edit_proposal_because(
 ) -> AssistedEditProposalSource {
     let mut source = deterministic_assisted_edit_proposal_base();
     if let Some(reason) = reason {
+        // The summary as well as the details, because the details do not
+        // travel. `bounded_proposal_title` reads only `preview.summary`, and
+        // `AssistedAiProposalPreviewSummary` carries neither field -- so a
+        // projection-only surface showed "Phase 4 local AI edit proposal" and
+        // the explanation reached nobody who had not opened the raw payload.
+        source.summary = format!("Fixture edit \u{2014} {}", reason_headline(&reason));
         // First, because it is the line that explains every other line under
         // it. A reader who does not know why they got a fixture cannot make
         // sense of a proposal that inserts a comment.
         source.details.insert(0, reason);
     }
     source
+}
+
+/// How long a headline may be before the proposal title truncates it anyway.
+///
+/// `bounded_proposal_title` caps at 120 characters and the prefix takes some of
+/// those, so anything longer is cut with nothing saying it was.
+const REASON_HEADLINE_MAX_BYTES: usize = 96;
+
+/// The first sentence of a reason, short enough to be a title.
+///
+/// Cut at `". "` rather than at `'.'`, because `127.0.0.1` is full of periods
+/// and the first one produces "Ollama did not answer at http://127". A newline
+/// ends it too: the Auto reason follows its opening sentence with one bullet
+/// per backend, and the bullets belong in the details where there is room.
+fn reason_headline(reason: &str) -> String {
+    let sentence = reason.find(". ");
+    let line = reason.find('\n');
+    let cut = match (sentence, line) {
+        (Some(sentence), Some(line)) => Some(sentence.min(line)),
+        (sentence, line) => sentence.or(line),
+    };
+    let first = cut
+        .map_or(reason, |end| &reason[..end])
+        .trim()
+        .trim_end_matches('.');
+    if first.len() <= REASON_HEADLINE_MAX_BYTES {
+        return first.to_string();
+    }
+    let mut end = REASON_HEADLINE_MAX_BYTES;
+    while end > 0 && !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &first[..end])
 }
 
 fn deterministic_assisted_edit_proposal_base() -> AssistedEditProposalSource {
@@ -1007,6 +1046,73 @@ mod assist_placement_tests {
         let (_span, _anchor, resolved, _detail) =
             parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
         assert!(!resolved.is_empty());
+    }
+
+    /// The reason a fixture answered reaches the title, not just the details.
+    ///
+    /// `bounded_proposal_title` reads only `preview.summary`, and
+    /// `AssistedAiProposalPreviewSummary` carries neither the summary nor the
+    /// details -- so a projection-only surface showed "Phase 4 local AI edit
+    /// proposal" and the explanation reached nobody who had not opened the raw
+    /// payload.
+    #[test]
+    fn the_fallback_reason_reaches_the_proposal_summary() {
+        let source = deterministic_assisted_edit_proposal_because(Some(
+            "Ollama did not answer at http://127.0.0.1:11434. Start Ollama, or set \
+             OLLAMA_BASE_URL if yours listens elsewhere."
+                .to_string(),
+        ));
+
+        assert!(
+            source
+                .summary
+                .contains("Ollama did not answer at http://127.0.0.1:11434"),
+            "the title must carry the endpoint, periods and all; got {:?}",
+            source.summary
+        );
+        assert!(
+            !source.summary.contains("Start Ollama"),
+            "the remedy belongs in the details, where there is room; got {:?}",
+            source.summary
+        );
+        assert!(
+            source
+                .details
+                .first()
+                .is_some_and(|line| line.contains("Start Ollama")),
+            "and it must still be there; got {:?}",
+            source.details
+        );
+    }
+
+    /// A headline stops at the first bullet, not at the end of the list.
+    #[test]
+    fn a_multi_line_reason_headlines_only_its_first_line() {
+        let source = deterministic_assisted_edit_proposal_because(Some(
+            "No local model server answered, so the deterministic fixture answered \
+             instead.\n- Ollama did not answer at http://127.0.0.1:11434.\n- A \
+             llama.cpp server did not answer at http://localhost:8080/v1."
+                .to_string(),
+        ));
+
+        assert!(
+            !source.summary.contains('\n'),
+            "a title is one line; got {:?}",
+            source.summary
+        );
+        assert!(
+            source.summary.contains("No local model server answered"),
+            "got {:?}",
+            source.summary
+        );
+    }
+
+    /// A fixture asked for on purpose is not explained as a failure.
+    #[test]
+    fn a_deliberate_fixture_keeps_its_plain_summary() {
+        let source = deterministic_assisted_edit_proposal_because(None);
+
+        assert_eq!(source.summary, "Phase 4 local AI edit proposal");
     }
 
     /// A deletion is a real edit and must survive the no-op guard.

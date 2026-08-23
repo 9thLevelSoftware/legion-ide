@@ -57,11 +57,20 @@ pub(crate) enum AnthropicKeyState {
 static LAST_ANTHROPIC_KEY_STATE: std::sync::Mutex<Option<AnthropicKeyState>> =
     std::sync::Mutex::new(None);
 
+/// The lock, with the poison rule in one place.
+///
+/// A test that fails while holding this poisons it, and the next reader still
+/// needs the value: the guard is a plain `Option`, so a panic cannot have left
+/// it half-written.
+fn lock_state() -> std::sync::MutexGuard<'static, Option<AnthropicKeyState>> {
+    LAST_ANTHROPIC_KEY_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Remember what a lookup found.
 fn record_anthropic_key_state(state: AnthropicKeyState) {
-    *LAST_ANTHROPIC_KEY_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
+    *lock_state() = Some(state);
 }
 
 /// Forget the last lookup, so a test's diagnosis cannot read another's answer.
@@ -72,17 +81,12 @@ fn record_anthropic_key_state(state: AnthropicKeyState) {
 /// clears it alongside the route variables for the same reason it clears those.
 #[cfg(test)]
 pub(crate) fn forget_anthropic_key_state() {
-    *LAST_ANTHROPIC_KEY_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *lock_state() = None;
 }
 
 /// What the last lookup found, if one has happened in this process.
 fn last_anthropic_key_state() -> Option<AnthropicKeyState> {
-    LAST_ANTHROPIC_KEY_STATE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+    lock_state().clone()
 }
 
 /// An Anthropic key supplied by the environment, in the order the client reads.
@@ -195,7 +199,11 @@ fn anthropic_unavailable_reason() -> String {
     // anything to say.
     let state = last_anthropic_key_state().unwrap_or_else(|| {
         resolve_anthropic_api_key();
-        last_anthropic_key_state().unwrap_or(AnthropicKeyState::Absent)
+        // Not `unwrap_or(Absent)`. A lookup that returns without recording is a
+        // refactor that dropped the call, and defaulting to Absent would print
+        // "no credential is configured" for a run whose real failure nobody
+        // asked about -- which is the exact false message this exists to remove.
+        last_anthropic_key_state().expect("resolve_anthropic_api_key must record its result")
     });
     anthropic_reason(&state)
 }
