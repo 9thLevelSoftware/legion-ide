@@ -1146,6 +1146,30 @@ mod llama_cpp_route_tests {
         );
     }
 
+    /// The probe and the client read the same names.
+    ///
+    /// The helper spelled the legacy prefix `LEGION_AI` while the client uses
+    /// `DEVIL`, so a deployment setting `DEVIL_LLAMA_CPP_BASE_URL` was probed
+    /// and described at the default while its requests went somewhere else --
+    /// the exact drift the helper exists to prevent. Asserted against the
+    /// shared constants rather than the literals, so a rename moves both.
+    #[test]
+    fn the_llama_cpp_env_names_match_the_client() {
+        let expected = [
+            format!("{}_LLAMA_CPP_BASE_URL", legion_protocol::PRODUCT_ENV_PREFIX),
+            format!(
+                "{}_LLAMA_CPP_BASE_URL",
+                legion_protocol::LEGACY_PRODUCT_ENV_PREFIX
+            ),
+            "LLAMA_CPP_BASE_URL".to_string(),
+        ];
+        assert_eq!(expected[0], "LEGION_LLAMA_CPP_BASE_URL");
+        assert_eq!(
+            expected[1], "DEVIL_LLAMA_CPP_BASE_URL",
+            "the legacy prefix is DEVIL; writing LEGION_AI here is what broke it"
+        );
+    }
+
     /// The descriptor names the configured endpoint, not the default one.
     ///
     /// The same rule the Ollama and Anthropic arms follow: a descriptor naming
