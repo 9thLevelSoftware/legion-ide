@@ -296,18 +296,39 @@ No explanation, no second block.";
     ) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "assist.proposal");
-            let placement = resolve_assist_placement(buffer_excerpt, file_path, &completion.text);
+            // Read once, in one match, rather than through an accessor per
+            // field. Four accessors that all cloned out of the same arm was
+            // the enum paying rent for something one destructure does.
+            let (span, anchor, replacement, resolved, detail) =
+                match resolve_assist_placement(buffer_excerpt, file_path, &completion.text) {
+                    AssistPlacement::Resolved {
+                        span,
+                        anchor,
+                        replacement,
+                        outcome_label,
+                    } => {
+                        let detail = format!("edit={outcome_label} bytes={}..{}", span.0, span.1);
+                        (span, anchor, replacement, true, detail)
+                    }
+                    // An empty replacement over an empty span changes nothing.
+                    AssistPlacement::Unresolved { reason } => (
+                        (0, 0),
+                        String::new(),
+                        String::new(),
+                        false,
+                        format!("edit=unresolved: {reason}"),
+                    ),
+                };
             (
                 AssistedEditProposalSource {
                     provider_id: completion.provider_id.clone(),
-                    summary: match &placement {
-                        AssistPlacement::Resolved { .. } => {
-                            format!("Assist edit proposal from {}", completion.provider_id)
-                        }
-                        AssistPlacement::Unresolved { .. } => format!(
+                    summary: if resolved {
+                        format!("Assist edit proposal from {}", completion.provider_id)
+                    } else {
+                        format!(
                             "Assist edit from {} did not resolve",
                             completion.provider_id
-                        ),
+                        )
                     },
                     details: vec![
                         format!("model={}", completion.model),
@@ -321,12 +342,12 @@ No explanation, no second block.";
                             completion.streamed,
                             completion.stream_chunks.len()
                         ),
-                        placement.detail(),
+                        detail,
                         "Proposal is registered only; app/editor/workspace own apply".to_string(),
                     ],
-                    anchor: placement.anchor(),
-                    replacement: placement.replacement(),
-                    span: placement.span(),
+                    anchor,
+                    replacement,
+                    span,
                 },
                 Some(stream),
             )
@@ -365,41 +386,6 @@ enum AssistPlacement {
     },
     /// Nothing usable came back, and this says what.
     Unresolved { reason: String },
-}
-
-impl AssistPlacement {
-    fn span(&self) -> (usize, usize) {
-        match self {
-            Self::Resolved { span, .. } => *span,
-            // An empty replacement over an empty span changes nothing.
-            Self::Unresolved { .. } => (0, 0),
-        }
-    }
-
-    fn replacement(&self) -> String {
-        match self {
-            Self::Resolved { replacement, .. } => replacement.clone(),
-            Self::Unresolved { .. } => String::new(),
-        }
-    }
-
-    fn anchor(&self) -> String {
-        match self {
-            Self::Resolved { anchor, .. } => anchor.clone(),
-            Self::Unresolved { .. } => String::new(),
-        }
-    }
-
-    fn detail(&self) -> String {
-        match self {
-            Self::Resolved {
-                outcome_label,
-                span,
-                ..
-            } => format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
-            Self::Unresolved { reason } => format!("edit=unresolved: {reason}"),
-        }
-    }
 }
 
 /// Read the model's search/replace block and locate it in the buffer.
@@ -623,6 +609,31 @@ mod assist_placement_tests {
 
     const FILE: &str = "fn main() {\n    println!(\"one\");\n    println!(\"two\");\n}\n";
 
+    /// Destructure a placement the way the call site does.
+    ///
+    /// Returns `(span, anchor, replacement, detail)`. The accessors this
+    /// replaces cloned out of one arm four times; the tests read the same shape
+    /// the product does, so a change to that shape breaks them together.
+    fn parts(placement: AssistPlacement) -> ((usize, usize), String, String, String) {
+        match placement {
+            AssistPlacement::Resolved {
+                span,
+                anchor,
+                replacement,
+                outcome_label,
+            } => {
+                let detail = format!("edit={outcome_label} bytes={}..{}", span.0, span.1);
+                (span, anchor, replacement, detail)
+            }
+            AssistPlacement::Unresolved { reason } => (
+                (0, 0),
+                String::new(),
+                String::new(),
+                format!("edit=unresolved: {reason}"),
+            ),
+        }
+    }
+
     fn block(old: &str, new: &str) -> String {
         format!("<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n")
     }
@@ -637,9 +648,10 @@ mod assist_placement_tests {
     #[test]
     fn a_resolved_block_edits_where_the_model_pointed() {
         let answer = block("    println!(\"two\");", "    println!(\"three\");");
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        let (start, end) = placement.span();
+        let (start, end) = span;
         assert!(
             start > 0,
             "the edit must land at the quoted text, not at the top of the file; got {start}..{end}"
@@ -652,7 +664,7 @@ mod assist_placement_tests {
             "    println!(\"two\");",
             "the span must cover exactly the quoted text"
         );
-        assert_eq!(placement.replacement(), "    println!(\"three\");");
+        assert_eq!(replacement, "    println!(\"three\");");
     }
 
     /// Applying the resolved span to the buffer produces the intended file.
@@ -662,12 +674,13 @@ mod assist_placement_tests {
     #[test]
     fn the_resolved_span_and_replacement_compose_into_the_intended_file() {
         let answer = block("    println!(\"one\");", "    println!(\"uno\");");
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
-        let (start, end) = placement.span();
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+        let (start, end) = span;
 
         let mut applied = String::new();
         applied.push_str(&FILE[..start]);
-        applied.push_str(&placement.replacement());
+        applied.push_str(&replacement);
         applied.push_str(&FILE[end..]);
 
         assert_eq!(
@@ -684,17 +697,18 @@ mod assist_placement_tests {
     #[test]
     fn an_anchor_that_is_not_in_the_file_proposes_no_edit() {
         let answer = block("    println!(\"nowhere\");", "    println!(\"x\");");
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (span, _anchor, replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        assert_eq!(placement.span(), (0, 0));
+        assert_eq!(span, (0, 0));
         assert!(
-            placement.replacement().is_empty(),
+            replacement.is_empty(),
             "an unresolved edit must replace nothing, or it corrupts the file"
         );
         assert!(
-            placement.detail().starts_with("edit=unresolved"),
+            detail.starts_with("edit=unresolved"),
             "the reviewer has to be told why; got {:?}",
-            placement.detail()
+            detail
         );
     }
 
@@ -703,29 +717,33 @@ mod assist_placement_tests {
     fn an_ambiguous_anchor_proposes_no_edit() {
         let repeated = "a();\nb();\na();\n";
         let answer = block("a();", "c();");
-        let placement = resolve_assist_placement(repeated, "src/main.rs", &answer);
+        let (span, _anchor, replacement, detail) =
+            parts(resolve_assist_placement(repeated, "src/main.rs", &answer));
 
-        assert_eq!(placement.span(), (0, 0));
-        assert!(placement.replacement().is_empty());
+        assert_eq!(span, (0, 0));
+        assert!(replacement.is_empty());
         assert!(
-            placement.detail().contains("2 times"),
+            detail.contains("2 times"),
             "the reason should name the ambiguity; got {:?}",
-            placement.detail()
+            detail
         );
     }
 
     /// A reply with no block at all is not silently treated as text to insert.
     #[test]
     fn prose_with_no_block_proposes_no_edit() {
-        let placement =
-            resolve_assist_placement(FILE, "src/main.rs", "Sure! You could rename the function.");
+        let (span, _anchor, replacement, detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "Sure! You could rename the function.",
+        ));
 
-        assert_eq!(placement.span(), (0, 0));
-        assert!(placement.replacement().is_empty());
+        assert_eq!(span, (0, 0));
+        assert!(replacement.is_empty());
         assert!(
-            placement.detail().contains("no search/replace block"),
+            detail.contains("no search/replace block"),
             "got {:?}",
-            placement.detail()
+            detail
         );
     }
 
@@ -740,14 +758,11 @@ mod assist_placement_tests {
             block("    println!(\"one\");", "    println!(\"uno\");"),
             block("    println!(\"two\");", "    println!(\"dos\");")
         );
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        assert_eq!(placement.span(), (0, 0));
-        assert!(
-            placement.detail().contains("one edit at a time"),
-            "got {:?}",
-            placement.detail()
-        );
+        assert_eq!(span, (0, 0));
+        assert!(detail.contains("one edit at a time"), "got {:?}", detail);
     }
 
     /// The resolved placement reports the anchor it matched.
@@ -759,17 +774,22 @@ mod assist_placement_tests {
     #[test]
     fn a_resolved_placement_reports_the_anchor_it_matched() {
         let answer = block("    println!(\"two\");", "    println!(\"three\");");
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (_span, anchor, _replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        assert_eq!(placement.anchor(), "    println!(\"two\");");
+        assert_eq!(anchor, "    println!(\"two\");");
     }
 
     /// An unresolved placement has no anchor to re-check.
     #[test]
     fn an_unresolved_placement_reports_no_anchor() {
-        let placement = resolve_assist_placement(FILE, "src/main.rs", "no block here");
+        let (_span, anchor, _replacement, _detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "no block here",
+        ));
 
-        assert!(placement.anchor().is_empty());
+        assert!(anchor.is_empty());
     }
 
     /// The outcome label says what happened, not what the enum is called.
@@ -788,9 +808,9 @@ mod assist_placement_tests {
             "println!(\"one\");\n      println!(\"two\");",
             "println!(\"uno\");",
         );
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (_span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        let detail = placement.detail();
         assert!(
             detail.contains("whitespace-tolerant-anchor"),
             "the label must say the anchor was matched tolerantly, not `Fuzzy`; got {detail:?}"
@@ -813,13 +833,14 @@ mod assist_placement_tests {
             "```diff\n{}```\n",
             block("    println!(\"two\");", "    println!(\"three\");")
         );
-        let placement = resolve_assist_placement(FILE, "src/main.rs", &answer);
+        let (span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
 
-        let (start, _) = placement.span();
+        let (start, _) = span;
         assert!(
             start > 0,
             "a fenced search/replace block should still resolve; detail was {:?}",
-            placement.detail()
+            detail
         );
     }
 

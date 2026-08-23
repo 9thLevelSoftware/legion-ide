@@ -11,16 +11,75 @@
 
 use crate::*;
 
-/// Count the anchor's occurrences, overlaps included.
+/// Why an anchor is not safe to edit on, or `None` when it is.
+///
+/// Two questions, because the resolver answers with two matching rules and a
+/// uniqueness check that only knows one of them is not a check.
+///
+/// An exact duplicate is the obvious case. The subtle one: when the span was
+/// found by whitespace-tolerant search, the anchor is *not present verbatim*
+/// anywhere -- so counting exact occurrences over the whole file returns zero,
+/// sails past `<= 1`, and the guard passes without having looked at anything.
+/// A second whitespace-variant match below the excerpt would go unseen, which
+/// is precisely the duplicate the model could not have disambiguated.
+///
+/// So the tolerant search runs too, and it runs for every outcome rather than
+/// only for tolerant ones: normalized matching is a superset of exact, and two
+/// sites differing only in indentation are two sites the model saw one of.
+///
+/// `find_whitespace_insensitive` already refuses ambiguity -- it returns `None`
+/// when a second normalized match exists -- so asking it about the whole file is
+/// the entire check. `None` cannot mean "not found" here: the anchor resolved
+/// against the excerpt, the excerpt is a prefix of this text, and an exact match
+/// is also a normalized one. So `None` means more than one.
 #[cfg(any(feature = "ai", feature = "offline"))]
-fn assist_anchor_occurrences(haystack: &str, needle: &str) -> usize {
-    legion_ai::patch::count_overlapping(haystack, needle)
+fn assist_anchor_ambiguity(haystack: &str, needle: &str) -> Option<String> {
+    let exact = legion_ai::patch::count_overlapping(haystack, needle);
+    if exact > 1 {
+        return Some(format!(
+            "the quoted text appears {exact} times in the file, but only once in \
+             the excerpt the model was shown"
+        ));
+    }
+    if legion_ai::patch::find_whitespace_insensitive(haystack, needle).is_none() {
+        return Some(
+            "the quoted text appears more than once in the file once whitespace is \
+             ignored, but only once in the excerpt the model was shown"
+                .to_string(),
+        );
+    }
+    None
 }
 
-/// Without the resolver there is no anchor to count.
+/// Without the resolver there is no anchor to check.
 #[cfg(not(any(feature = "ai", feature = "offline")))]
-fn assist_anchor_occurrences(_haystack: &str, _needle: &str) -> usize {
-    0
+fn assist_anchor_ambiguity(_haystack: &str, _needle: &str) -> Option<String> {
+    None
+}
+
+/// Withdraw an edit whose anchor is not unique in `full_text`.
+///
+/// Pure, and separated from the method that reads the buffer for exactly one
+/// reason: this is the safety net the change exists to add, and a net nothing
+/// can test is a net nobody knows is there. The method below is now the two
+/// lines that fetch the text.
+fn withdraw_if_anchor_not_unique(
+    source: AssistedEditProposalSource,
+    full_text: &str,
+) -> AssistedEditProposalSource {
+    if source.anchor.is_empty() {
+        return source;
+    }
+    let Some(reason) = assist_anchor_ambiguity(full_text, &source.anchor) else {
+        return source;
+    };
+    let mut source = source;
+    source.summary = format!("{} (anchor not unique)", source.summary);
+    source.details.push(format!("edit=withdrawn: {reason}"));
+    source.span = (0, 0);
+    source.replacement = String::new();
+    source.anchor = String::new();
+    source
 }
 
 /// Restate a route intent's byte coverage as the span the proposal edits.
@@ -57,26 +116,10 @@ impl AppComposition {
         buffer_id: BufferId,
         source: AssistedEditProposalSource,
     ) -> AssistedEditProposalSource {
-        if source.anchor.is_empty() {
-            return source;
-        }
         let Ok(full_text) = self.editor.text(buffer_id) else {
             return source;
         };
-        let occurrences = assist_anchor_occurrences(full_text, &source.anchor);
-        if occurrences <= 1 {
-            return source;
-        }
-        let mut source = source;
-        source.summary = format!("{} (anchor not unique)", source.summary);
-        source.details.push(format!(
-            "edit=withdrawn: the quoted text appears {occurrences} times in the file, \
-             but only once in the excerpt the model was shown"
-        ));
-        source.span = (0, 0);
-        source.replacement = String::new();
-        source.anchor = String::new();
-        source
+        withdraw_if_anchor_not_unique(source, full_text)
     }
     /// Run one Assist operation, from authorization to proposal or refusal.
     ///
@@ -984,5 +1027,143 @@ impl AppComposition {
             refusal: None,
             replay_manifest,
         })
+    }
+}
+
+#[cfg(all(test, any(feature = "ai", feature = "offline")))]
+mod assist_guard_tests {
+    use super::*;
+
+    fn source(anchor: &str) -> AssistedEditProposalSource {
+        AssistedEditProposalSource {
+            provider_id: "ollama".to_string(),
+            summary: "Assist edit proposal from ollama".to_string(),
+            details: vec!["model=test".to_string()],
+            anchor: anchor.to_string(),
+            replacement: "changed();".to_string(),
+            span: (10, 20),
+        }
+    }
+
+    /// A unique anchor is left alone.
+    #[test]
+    fn a_unique_anchor_keeps_its_edit() {
+        let file = "fn a() {}\nfn b() {}\n";
+        let kept = withdraw_if_anchor_not_unique(source("fn a() {}"), file);
+
+        assert_eq!(kept.span, (10, 20));
+        assert_eq!(kept.replacement, "changed();");
+    }
+
+    /// An anchor appearing twice verbatim withdraws the edit.
+    ///
+    /// This is the net the whole change exists to add: resolution saw only the
+    /// excerpt and reported a unique match, and the file disagrees.
+    #[test]
+    fn an_anchor_repeated_in_the_file_withdraws_the_edit() {
+        let file = "fn a() {}\nfn b() {}\nfn a() {}\n";
+        let withdrawn = withdraw_if_anchor_not_unique(source("fn a() {}"), file);
+
+        assert_eq!(withdrawn.span, (0, 0), "a withdrawn edit spans nothing");
+        assert!(withdrawn.replacement.is_empty());
+        assert!(withdrawn.anchor.is_empty());
+        assert!(
+            withdrawn.summary.contains("anchor not unique"),
+            "the summary must say so; got {:?}",
+            withdrawn.summary
+        );
+        assert!(
+            withdrawn
+                .details
+                .iter()
+                .any(|detail| detail.contains("appears 2 times")),
+            "the reviewer needs the count; got {:?}",
+            withdrawn.details
+        );
+    }
+
+    /// A duplicate that differs only in whitespace withdraws the edit too.
+    ///
+    /// The check that shipped first counted exact occurrences only. When the
+    /// span was found by whitespace-tolerant search the anchor is not present
+    /// verbatim anywhere, so that count returned zero, sailed past `<= 1`, and
+    /// the guard passed without having looked at anything -- doing nothing in
+    /// precisely the case it was added for.
+    #[test]
+    fn a_whitespace_variant_duplicate_withdraws_the_edit() {
+        let file = "    call(a, b);\nother();\n        call(a,   b);\n";
+        let withdrawn = withdraw_if_anchor_not_unique(source("call(a, b);"), file);
+
+        assert_eq!(
+            withdrawn.span,
+            (0, 0),
+            "two sites differing only in spacing are two sites the model saw one of"
+        );
+        assert!(
+            withdrawn
+                .details
+                .iter()
+                .any(|detail| detail.contains("whitespace is ignored")),
+            "the reason must say which rule found the duplicate; got {:?}",
+            withdrawn.details
+        );
+    }
+
+    /// A source with no edit is passed through untouched.
+    #[test]
+    fn a_source_with_no_anchor_is_left_alone() {
+        let mut empty = source("");
+        empty.span = (0, 0);
+        empty.replacement = "/* fixture */".to_string();
+        let kept = withdraw_if_anchor_not_unique(empty, "anything at all");
+
+        assert_eq!(kept.replacement, "/* fixture */");
+    }
+
+    /// The persisted contract names the span the proposal edits.
+    ///
+    /// It declared `ByteRange::new(0, 0)` -- true while every Assist edit was
+    /// an insertion at byte 0, and a false audit record the moment they stopped
+    /// being. An audit reads this to see what the run targeted.
+    #[test]
+    fn the_route_intent_is_restated_over_the_resolved_span() {
+        let intent = legion_protocol::AssistedAiProposalTargetIntent {
+            payload_kind: legion_protocol::ProposalPayloadKind::TextEdit,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: vec![ProposalAffectedTarget {
+                    target_id: "file:1".to_string(),
+                    kind: ProposalTargetKind::OpenBuffer,
+                    workspace_id: None,
+                    file_id: None,
+                    buffer_id: None,
+                    path: None,
+                    terminal_session_id: None,
+                    plugin_id: None,
+                    remote_authority: None,
+                    collaboration_session_id: None,
+                    byte_ranges: vec![legion_protocol::ByteRange::new(0, 0)],
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                }],
+                omitted_target_count: 0,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+            },
+            required_capability: CapabilityId("editor.write".to_string()),
+            risk_label: legion_protocol::ProposalRiskLabel::Low,
+            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+            labels: vec![],
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+
+        let restated = assist_intent_over_resolved_span(&intent, (42, 99));
+
+        for target in &restated.target_coverage.targets {
+            assert_eq!(
+                target.byte_ranges,
+                vec![legion_protocol::ByteRange::new(42, 99)],
+                "every target must name the range the proposal changes"
+            );
+        }
     }
 }
