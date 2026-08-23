@@ -134,11 +134,44 @@ pub(crate) fn local_ai_unavailable_reason(
         ProductAiProviderPreference::Ollama => Some(ollama_unavailable_reason()),
         ProductAiProviderPreference::LlamaCpp => Some(llama_cpp_unavailable_reason()),
         ProductAiProviderPreference::Auto => Some(format!(
-            "No local model server answered, so the deterministic fixture \
-             answered instead.\n- {}\n- {}",
+            "{}, so the deterministic fixture answered instead.\n- {}\n- {}",
+            auto_headline(),
             ollama_unavailable_reason(),
             llama_cpp_unavailable_reason(),
         )),
+    }
+}
+
+/// Auto's opening sentence, and it has to be true on its own.
+///
+/// This said "No local model server answered" whatever had happened -- and when
+/// both endpoints are non-loopback or unresolvable, neither was *contacted*, so
+/// nothing had the chance to answer or not. That sentence is also the only part
+/// of the reason that reaches a proposal title, because `reason_headline` takes
+/// the first line and leaves the per-backend bullets in the details. The one
+/// line a projection-only surface shows was the one line that could be wrong.
+///
+/// "Answered" is claimed only when something was actually probed. A mixed
+/// configuration -- one loopback, one not -- keeps it, because the loopback one
+/// was contacted and did not answer; the bullet beneath explains the other.
+fn auto_headline() -> &'static str {
+    let probed_anything = matches!(
+        probe_reach(
+            &crate::ai_route_descriptor::ollama_network_target(),
+            OLLAMA_DEFAULT_PORT
+        ),
+        ProbeReach::Loopback
+    ) || matches!(
+        probe_reach(
+            &crate::ai_route_descriptor::llama_cpp_network_target(),
+            LLAMA_CPP_DEFAULT_PORT
+        ),
+        ProbeReach::Loopback
+    );
+    if probed_anything {
+        "No local model server answered"
+    } else {
+        "No local model server could be contacted"
     }
 }
 

@@ -566,6 +566,49 @@ mod delegate_chat_route_honesty_tests {
         );
     }
 
+    /// Auto does not claim a server declined to answer when none was asked.
+    ///
+    /// The opening sentence was "No local model server answered" whatever had
+    /// happened, and it is the only part of the reason that reaches a proposal
+    /// title -- `reason_headline` takes the first line and leaves the
+    /// per-backend bullets in the details. So the one line a projection-only
+    /// surface shows was the one line that could be false.
+    #[test]
+    fn auto_says_contacted_rather_than_answered_when_nothing_was_probed() {
+        let env = RouteEnv::cleared();
+        env.set("OLLAMA_BASE_URL", "http://192.0.2.1:11434");
+        env.set("LEGION_LLAMA_CPP_BASE_URL", "http://192.0.2.2:8080/v1");
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
+            .expect("auto that fell back owes an explanation");
+
+        assert!(
+            reason.starts_with("No local model server could be contacted"),
+            "neither endpoint was probed, so neither declined to answer; got {reason}"
+        );
+        assert!(
+            reason.contains("not a loopback address"),
+            "and the bullets still say why; got {reason}"
+        );
+    }
+
+    /// A loopback endpoint that is simply down keeps the original wording.
+    ///
+    /// Without this the fix reads as "always say contacted", which would be the
+    /// same defect facing the other way.
+    #[test]
+    fn auto_still_says_answered_when_a_loopback_endpoint_was_probed() {
+        let _env = RouteEnv::cleared();
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
+            .expect("auto that fell back owes an explanation");
+
+        assert!(
+            reason.starts_with("No local model server answered"),
+            "the defaults are loopback, so they were contacted; got {reason}"
+        );
+    }
+
     /// A name that does not resolve is its own problem, and says so.
     ///
     /// Folding it into "not a loopback address" would send somebody to change a
