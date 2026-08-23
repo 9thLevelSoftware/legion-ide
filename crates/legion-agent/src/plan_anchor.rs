@@ -391,6 +391,17 @@ fn list_item_body(line: &str) -> Option<(ListMarker, String)> {
     }
     let rest = &line[digits.len()..];
     let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    // A delimiter has to be followed by space, or by nothing.
+    //
+    // `1.0` and `2.0` are a version number, and stripping the digit and the dot
+    // left `0` and `0` -- two ordered "steps", which need no planning cue, so a
+    // changelog line became the plan the run was held to for the rest of its
+    // life. Nothing follows the delimiter in `2.`, and that stays a step: an
+    // empty item is a plan with a gap in it, which the run parser already
+    // tolerates deliberately.
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
     Some((ListMarker::Ordered, rest.trim().to_string()))
 }
 
@@ -441,6 +452,37 @@ mod tests {
         assert!(
             !anchor.has_plan(),
             "and the anchor stays free for a plan the model actually states"
+        );
+    }
+
+    /// A version number is not a numbered list.
+    ///
+    /// `1.0` and `2.0` stripped down to `0` and `0` -- two ordered steps, which
+    /// need no planning cue -- so a changelog or a dependency list became the
+    /// plan the run was held to, and blocked the real one from ever being
+    /// captured.
+    #[test]
+    fn decimal_values_are_not_read_as_steps() {
+        assert!(
+            parse_plan_steps("Versions in play:\n1.0\n2.0\n").is_empty(),
+            "a version number is not a step"
+        );
+        assert!(
+            parse_plan_steps("serde 1.0.204\ntokio 1.40.0\n").is_empty(),
+            "and neither is a dependency line"
+        );
+    }
+
+    /// A step with nothing after its number is still a step.
+    ///
+    /// The empty item is deliberately tolerated -- "1. foo / 2. / 3. baz" is a
+    /// plan with a gap in it, not the end of a plan -- so the whitespace rule
+    /// must not take it out.
+    #[test]
+    fn an_empty_numbered_item_survives_the_whitespace_rule() {
+        assert_eq!(
+            parse_plan_steps("1. read\n2.\n3. verify\n"),
+            vec!["read", "verify"]
         );
     }
 

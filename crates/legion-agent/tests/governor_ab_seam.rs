@@ -889,26 +889,65 @@ unsafe fn planning_fixture(setting: &str) -> TempDir {
     dir
 }
 
+/// The same plan, split across two native text blocks mid-list.
+///
+/// Anthropic preserves every text content block separately, and the split that
+/// matters falls *between steps*: block one carries the introduction and step
+/// one, block two carries steps two and three. Parsed independently, block one
+/// has a single step and is refused, block two has two and is captured -- so the
+/// held plan starts at step two and the run is anchored to a plan missing its
+/// first instruction.
+fn split_planning_turn(
+    first: &str,
+    second: &str,
+    id: &str,
+    tool: &str,
+    input: serde_json::Value,
+) -> Vec<legion_ai::tool_calls::ToolTurnBlock> {
+    vec![
+        legion_ai::tool_calls::ToolTurnBlock::Text(first.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::Text(second.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::ToolUse {
+            id: id.to_string(),
+            name: tool.to_string(),
+            input,
+        },
+    ]
+}
+
 /// The four-turn script both plan tests drive.
 fn planning_script(
     provider_id: &str,
     expect_reminder: bool,
 ) -> legion_ai::tool_calls::ScriptedToolCallingProvider {
+    planning_script_from(
+        planning_turn(
+            STATED_PLAN,
+            "p1",
+            "read",
+            serde_json::json!({ "path": "a.txt" }),
+        ),
+        provider_id,
+        expect_reminder.then_some(REMINDER_MARKER),
+    )
+}
+
+/// The same script, over a caller-supplied opening turn and needle.
+fn planning_script_from(
+    opening: Vec<legion_ai::tool_calls::ToolTurnBlock>,
+    provider_id: &str,
+    expect: Option<&str>,
+) -> legion_ai::tool_calls::ScriptedToolCallingProvider {
     let mut builder = ScriptedToolCallingProviderBuilder::new()
         .turn(
-            planning_turn(
-                STATED_PLAN,
-                "p1",
-                "read",
-                serde_json::json!({ "path": "a.txt" }),
-            ),
+            opening,
             legion_ai::tool_calls::ToolCompletionStopReason::ToolUse,
         )
         .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
         .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
         .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }));
-    if expect_reminder {
-        builder = builder.expect_prior_result_contains(REMINDER_MARKER);
+    if let Some(needle) = expect {
+        builder = builder.expect_prior_result_contains(needle);
     }
     builder.end_turn("Done.").build(provider_id)
 }
@@ -939,6 +978,51 @@ fn a_stated_plan_is_reinjected_by_the_loop() {
     assert!(
         matches!(result, DelegatedTaskLoopResult::Completed { .. }),
         "expected Completed, got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}
+
+/// A plan split across text blocks is still one plan.
+///
+/// Anthropic keeps each native text block separate, so a model that writes an
+/// introduction and then its steps sends two. Parsing them independently meant
+/// the anchor took whichever block first held two steps -- or, with one step
+/// per block, nothing at all -- and then held that partial plan for the rest of
+/// the run.
+///
+/// Driven through the loop rather than the parser, because the joining happens
+/// in the loop and a `PlanAnchor` unit test cannot see it.
+#[test]
+fn a_plan_split_across_text_blocks_is_reinjected_whole() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("on") };
+
+    // The needle spans the notice header and its first step, which is text
+    // only `anchor_notice` produces. `REMINDER_MARKER` alone would not do:
+    // capturing steps two and three still emits a reminder, so a header-only
+    // assertion passes on exactly the partial plan this test exists to catch.
+    let provider = planning_script_from(
+        split_planning_turn(
+            "I will work in three steps:\n1. Read a.txt",
+            "2. Check the contents\n3. Report back\n",
+            "p1",
+            "read",
+            serde_json::json!({ "path": "a.txt" }),
+        ),
+        "split-plan-provider",
+        Some("the plan you stated for this task:\n1. Read a.txt"),
+    );
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "the reminder must carry a plan assembled from both blocks; got {result:?}"
     );
 
     unsafe {

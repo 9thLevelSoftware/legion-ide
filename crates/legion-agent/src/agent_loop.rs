@@ -2080,13 +2080,24 @@ pub fn run_delegated_task_loop(
                 // rewrites its plan mid-run is often already drifting, and
                 // adopting the rewrite would make this agree with the drift it
                 // exists to catch.
-                for block in &response.blocks {
-                    if let ToolTurnBlock::Text(text) = block
-                        && plan_anchor.capture(text)
-                    {
-                        break;
-                    }
-                }
+                //
+                // The turn's text blocks are joined first, because a turn is one
+                // statement however many blocks it arrived in. Anthropic
+                // preserves every native text block separately, so a plan split
+                // across two of them was parsed as two lists: the anchor locked
+                // onto whichever block first held two steps and dropped the
+                // rest, or -- with one step per block -- captured nothing at
+                // all.
+                let assistant_text = response
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ToolTurnBlock::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                plan_anchor.capture(&assistant_text);
 
                 // Append the assistant's turn to conversation history.
                 turns.push(ToolConversationTurn {
