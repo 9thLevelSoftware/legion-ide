@@ -548,11 +548,6 @@ mod tests {
         assert_eq!(governors.tool_failures("grep"), 2);
     }
 
-    /// Disabled governors record nothing and advise nothing.
-    ///
-    /// `LEGION_AI_GOVERNORS=off` has to leave the raw baseline measuring the
-    /// un-ported loop, or the bench's A/B arms stop being comparable.
-
     /// The streak clears however the call was answered.
     ///
     /// `note_tool_success` is called from two places in the loop: after a fresh
@@ -578,6 +573,10 @@ mod tests {
         );
     }
 
+    /// Disabled governors record nothing and advise nothing.
+    ///
+    /// `LEGION_AI_GOVERNORS=off` has to leave the raw baseline measuring the
+    /// un-ported loop, or the bench's A/B arms stop being comparable.
     #[test]
     fn a_disabled_governor_never_demotes() {
         let mut governors = LoopGovernors::new(false);
