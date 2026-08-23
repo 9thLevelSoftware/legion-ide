@@ -224,8 +224,14 @@ fn bounded_plan(steps: Vec<String>) -> Vec<String> {
 /// a set of steps. "Found:\n- stale cache\n- missing guard" was being captured
 /// and then restated every fourth turn as "the plan you stated", steering the
 /// run toward incidental findings and locking out the real plan when it arrived.
+/// Matched on whole words, not as substrings: "explanation" contains "plan",
+/// and "Here is an explanation of the findings:" was introducing a bullet list
+/// of findings as though the model had called it a plan. Plurals are listed
+/// rather than derived, because a suffix rule is the same substring bug with
+/// more steps.
 const PLAN_CUES: &[&str] = &[
-    "plan", "step", "approach", "i will", "i'll", "going to", "intend", "strategy",
+    "plan", "plans", "planning", "step", "steps", "approach", "i will", "i'll", "going to",
+    "intend", "intends", "strategy",
 ];
 
 /// One run of adjacent list lines, and how it marked itself.
@@ -260,6 +266,11 @@ impl ListRun {
 /// surrounding text has to say which one it is.
 pub fn parse_plan_steps(text: &str) -> Vec<String> {
     let mut best = ListRun::empty();
+    // The longest numbered run, kept separately so a bullet run that ties with
+    // it and then fails the cue check does not take it down as well. A reply
+    // opening with two bullets and following them with "Plan to fix:" and two
+    // numbered steps used to return nothing at all.
+    let mut best_ordered = ListRun::empty();
     let mut current = ListRun::empty();
 
     for (index, line) in text.lines().enumerate() {
@@ -281,23 +292,32 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
             // plan.
             Some(_) => {}
             None if line.trim().is_empty() && !current.items.is_empty() => {}
-            _ => {
-                if current.items.len() > best.items.len() {
-                    best = std::mem::replace(&mut current, ListRun::empty());
-                } else {
-                    current = ListRun::empty();
-                }
-            }
+            _ => finish_run(&mut current, &mut best, &mut best_ordered),
         }
     }
-    if current.items.len() > best.items.len() {
-        best = current;
-    }
+    finish_run(&mut current, &mut best, &mut best_ordered);
 
     if best.marker == ListMarker::Bulleted && !introduced_as_a_plan(text, best.first_line) {
-        return Vec::new();
+        // The bullets were not a plan. A numbered run elsewhere in the reply
+        // still might be, and discarding it because a longer list of findings
+        // came first would leave the run with no anchor at all.
+        return best_ordered.items;
     }
     best.items
+}
+
+/// Close the run in progress, updating both the overall and the ordered best.
+fn finish_run(current: &mut ListRun, best: &mut ListRun, best_ordered: &mut ListRun) {
+    if current.marker == ListMarker::Ordered && current.items.len() > best_ordered.items.len() {
+        best_ordered.items = current.items.clone();
+        best_ordered.marker = ListMarker::Ordered;
+        best_ordered.first_line = current.first_line;
+    }
+    if current.items.len() > best.items.len() {
+        *best = std::mem::replace(current, ListRun::empty());
+    } else {
+        *current = ListRun::empty();
+    }
 }
 
 /// Whether the text above line `first_line` announces a plan.
@@ -310,8 +330,35 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
 fn introduced_as_a_plan(text: &str, first_line: usize) -> bool {
     text.lines()
         .take(first_line)
-        .map(str::to_lowercase)
-        .any(|line| PLAN_CUES.iter().any(|cue| line.contains(cue)))
+        .any(line_states_a_plan)
+}
+
+/// Whether one line uses a cue as a word rather than as a run of letters.
+///
+/// The line is reduced to lowercase words separated by single spaces and padded
+/// at both ends, so a cue surrounded by spaces matches a word boundary on each
+/// side. Apostrophes survive the reduction because `i'll` is one of the cues;
+/// everything else non-alphanumeric becomes a separator, which is what lets
+/// "My plan:" match while "explanation" does not.
+fn line_states_a_plan(line: &str) -> bool {
+    let mut padded = String::with_capacity(line.len() + 2);
+    padded.push(' ');
+    let mut pending_space = false;
+    for character in line.chars() {
+        if character.is_alphanumeric() || character == '\'' {
+            if pending_space {
+                padded.push(' ');
+                pending_space = false;
+            }
+            padded.extend(character.to_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    padded.push(' ');
+    PLAN_CUES
+        .iter()
+        .any(|cue| padded.contains(&format!(" {cue} ")))
 }
 
 /// How a list line marks itself.
@@ -396,6 +443,54 @@ mod tests {
         assert!(
             !anchor.has_plan(),
             "and the anchor stays free for a plan the model actually states"
+        );
+    }
+
+    /// A cue has to be a word, not a run of letters inside one.
+    ///
+    /// "explanation" contains "plan", so "Here is an explanation of the
+    /// findings:" introduced a bullet list of findings as though the model had
+    /// called it a plan -- which is the same defect the cue check was added to
+    /// fix, arriving through the check itself.
+    #[test]
+    fn a_cue_inside_a_longer_word_does_not_introduce_a_plan() {
+        assert!(
+            parse_plan_steps(
+                "Here is an explanation of the findings:\n- stale cache\n- missing guard\n"
+            )
+            .is_empty(),
+            "explanation is not a plan"
+        );
+        assert!(
+            parse_plan_steps("The stepping stones:\n- one\n- two\n").is_empty(),
+            "stepping is not step"
+        );
+    }
+
+    /// The cue still matches next to punctuation, which is how models write it.
+    #[test]
+    fn a_cue_against_punctuation_still_counts() {
+        for intro in ["Plan:", "**My plan**", "(the approach)", "I'll do this:"] {
+            assert_eq!(
+                parse_plan_steps(&format!("{intro}\n- read\n- edit\n")),
+                vec!["read", "edit"],
+                "{intro:?} introduces a plan"
+            );
+        }
+    }
+
+    /// A findings list does not take the plan beside it down with it.
+    ///
+    /// The bullet run is longer or ties, so it wins `best`, fails the cue check
+    /// and returned nothing -- discarding the numbered plan the model actually
+    /// stated two lines later, and leaving the run with no anchor at all.
+    #[test]
+    fn a_numbered_plan_survives_a_findings_list_above_it() {
+        let text = "- read the ledger\n- check the field\nPlan to fix:\n1. update the field\n2. run the tests\n";
+
+        assert_eq!(
+            parse_plan_steps(text),
+            vec!["update the field", "run the tests"]
         );
     }
 
