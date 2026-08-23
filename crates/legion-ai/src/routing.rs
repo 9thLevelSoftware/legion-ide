@@ -121,14 +121,23 @@ const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", ", and ", "; ", " & "];
 /// carry no second clause; anything else — an unrecognised instruction, a
 /// question with work attached — is `Mutate`.
 ///
-/// Two earlier versions got this wrong in the same direction and are worth
-/// recording. The first defaulted to `Query` when no mutation verb appeared, so
-/// "Do the task." was handed a tool set with no way to do it. The second
-/// accepted a query word anywhere, so "Investigate and resolve the crash" lost
-/// its edit tool because `resolve` is in no verb list — and no verb list will
-/// ever hold all of `resolve`, `address`, `sort out`, `deal with`. Both were the
-/// exact failure this asymmetry exists to prevent, arriving through the code
-/// meant to prevent it.
+/// Three earlier versions got this wrong in the same direction, and the list is
+/// the argument for how conservative the rule now is. The first defaulted to
+/// `Query` when no mutation verb appeared, so "Do the task." was handed a tool
+/// set with no way to do it. The second accepted a query word anywhere, so
+/// "Investigate and resolve the crash" lost its edit tool because `resolve` is
+/// in no verb list — and none will ever hold all of `resolve`, `address`, `sort
+/// out`, `deal with`. The third accepted a trailing question mark as evidence,
+/// so "Can you resolve this crash?" lost it to politeness.
+///
+/// The reverse errors are real and deliberately tolerated. "Which command
+/// should I run?" and "Compare the parser and lexer" are both questions and
+/// both classify as `Mutate` — the first because `run` is a mutation signal,
+/// the second because a conjunction is read as a second clause. Each keeps an
+/// edit tool a question will not use, which costs tokens and one grammar
+/// branch. That is the whole trade: this side of the line is measured in
+/// tokens, the other side in tasks that cannot be completed, so the rule stays
+/// on this side of it.
 pub fn classify_action(directive: &str) -> ActionClass {
     let lowered = directive.to_lowercase();
     // An underscore is part of a word, not a separator.
@@ -161,10 +170,15 @@ pub fn classify_action(directive: &str) -> ActionClass {
     // no second clause. Both conditions are cheap to satisfy honestly and hard
     // to satisfy by accident, and everything else falls to `Mutate`, where an
     // unused tool costs tokens instead of the task.
+    // A question mark is not enough, and that was the hole.
+    //
+    // "Can you resolve this crash?" ends in one, opens with a word that is not
+    // interrogative, and contains no recognised mutation verb -- so the mark
+    // alone made it a query and the edit tool was withheld from a plain repair
+    // request. Politeness is not a signal about what is being asked for.
     let opens_as_a_question = words
         .first()
-        .is_some_and(|word| QUERY_SIGNALS.contains(word))
-        || lowered.trim_end().ends_with('?');
+        .is_some_and(|word| QUERY_SIGNALS.contains(word));
     let carries_a_second_clause = CLAUSE_JOINERS.iter().any(|joiner| lowered.contains(joiner));
     if opens_as_a_question && !carries_a_second_clause {
         return ActionClass::Query;
@@ -330,12 +344,44 @@ mod tests {
         );
     }
 
-    /// A trailing question mark is enough on its own.
+    /// A polite question asking for work is work.
+    ///
+    /// "Can you resolve this crash?" is a repair request wearing a question
+    /// mark. `resolve` is in no verb list and never will be, so the mark was
+    /// the only evidence and it was the wrong evidence -- politeness says
+    /// nothing about what is being asked for.
     #[test]
-    fn a_question_mark_marks_a_question() {
+    fn a_polite_request_for_work_is_a_mutation() {
+        for directive in [
+            "Can you resolve this crash?",
+            "Could you take a look at the parser and sort it out?",
+            "would you mind addressing the failing test?",
+        ] {
+            assert_eq!(
+                classify_action(directive),
+                ActionClass::Mutate,
+                "{directive:?} is asking for work"
+            );
+        }
+    }
+
+    /// Some plain questions keep the edit tool, and that is the accepted cost.
+    ///
+    /// "Which command should I run?" contains a mutation signal and
+    /// "Compare the parser and lexer" contains a conjunction, so both are
+    /// `Mutate`. Each keeps a tool a question will not use. Pinned rather than
+    /// hidden: this is the side of the trade the design chose, and a future
+    /// change that makes either a `Query` should have to notice it is moving
+    /// the line toward the failure mode that breaks tasks.
+    #[test]
+    fn some_questions_are_over_served_and_that_is_the_trade() {
         assert_eq!(
-            classify_action("is the ledger projection rebuilt per frame?"),
-            ActionClass::Query
+            classify_action("Which command should I run?"),
+            ActionClass::Mutate
+        );
+        assert_eq!(
+            classify_action("Compare the parser and lexer"),
+            ActionClass::Mutate
         );
     }
 
