@@ -1752,6 +1752,10 @@ pub fn run_delegated_task_loop(
                             // later cache hit hands the model exactly what a
                             // fresh call would have.
                             governors.record_execution(name, input, &bound.redacted_text);
+                            // A success ends this tool's failure streak. The
+                            // streak is consecutive, so working once is exactly
+                            // what makes the earlier failures not a pattern.
+                            governors.note_tool_success(name);
 
                             tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                 tool_use_id: id.clone(),
@@ -1830,6 +1834,21 @@ pub fn run_delegated_task_loop(
                                 {
                                     feedback_content
                                         .push_str(&crate::governors::read_first_hint(path));
+                                }
+                                // One tool failing repeatedly is information the
+                                // model cannot see: it gets each diagnostic
+                                // separately and nothing tells it they are the
+                                // same tool three times. `max_consecutive_retries`
+                                // counts across every tool and ends the run, which
+                                // cannot distinguish "stuck" from "this one tool
+                                // does not work here".
+                                if let Some(notice) = governors.note_tool_failure(name) {
+                                    feedback_content.push_str(
+                                        "
+
+",
+                                    );
+                                    feedback_content.push_str(&notice);
                                 }
                                 tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                     tool_use_id: id.clone(),
