@@ -27,6 +27,15 @@ use crate::*;
 /// only for tolerant ones: normalized matching is a superset of exact, and two
 /// sites differing only in indentation are two sites the model saw one of.
 ///
+/// How far the ambiguity scans count before they stop.
+///
+/// The decision needs only "more than one", so any cap above one is correct.
+/// Eight rather than two because the count reaches the reviewer -- "appears 3
+/// times" is a useful thing to read and "at least 2" is not -- and eight
+/// matches is still a bounded walk of a file that may be 100 MB.
+#[cfg(any(feature = "ai", feature = "offline"))]
+const ASSIST_MATCH_COUNT_CAP: usize = 8;
+
 /// Counted rather than found, and the difference is the whole buffer.
 ///
 /// `find_whitespace_insensitive` answers this too -- it returns `None` when a
@@ -37,12 +46,24 @@ use crate::*;
 ///
 /// `count_whitespace_insensitive` streams the same matching rules and stops at
 /// the second match, which is the only number this question needs.
+///
+/// The exact scan is capped for the same reason and was not, which made the
+/// streaming one only half a fix: a short anchor repeated a million times in a
+/// 100 MB buffer was counted a million times, on the app thread, to produce a
+/// number the reviewer reads as "more than one". The cap is generous enough
+/// that the number stays useful when it is small, and the message says "at
+/// least" when the scan stopped early rather than reporting the cap as a total.
 #[cfg(any(feature = "ai", feature = "offline"))]
 fn assist_anchor_ambiguity(haystack: &str, needle: &str) -> Option<String> {
-    let exact = legion_ai::patch::count_overlapping(haystack, needle);
+    let exact = legion_ai::patch::count_overlapping_up_to(haystack, needle, ASSIST_MATCH_COUNT_CAP);
     if exact > 1 {
+        let count = if exact >= ASSIST_MATCH_COUNT_CAP {
+            format!("at least {exact}")
+        } else {
+            exact.to_string()
+        };
         return Some(format!(
-            "the quoted text appears {exact} times in the file, but only once in \
+            "the quoted text appears {count} times in the file, but only once in \
              the excerpt the model was shown"
         ));
     }
@@ -1277,6 +1298,28 @@ mod assist_guard_tests {
                 .iter()
                 .any(|detail| detail.contains("appears 2 times")),
             "the reviewer needs the count; got {:?}",
+            withdrawn.details
+        );
+    }
+
+    /// A count past the cap is reported as a bound, not as a total.
+    ///
+    /// The scans stop early so a 100 MB buffer with a million matches does not
+    /// stall the app thread, and printing the cap as though it were the count
+    /// would trade the stall for a false number in front of a reviewer.
+    #[test]
+    fn a_count_past_the_cap_says_at_least() {
+        let file = "fn a() {}
+"
+        .repeat(40);
+        let withdrawn = withdraw_unapprovable_edit(source("fn a() {}"), &file);
+
+        assert!(
+            withdrawn
+                .details
+                .iter()
+                .any(|detail| detail.contains("at least 8 times")),
+            "the reviewer must be told the number is a bound; got {:?}",
             withdrawn.details
         );
     }

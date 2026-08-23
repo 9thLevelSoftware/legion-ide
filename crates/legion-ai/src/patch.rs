@@ -326,13 +326,29 @@ pub fn splice_replacement(file_content: &str, start: usize, end: usize, new_str:
 /// counts as one, and the edit would then be applied at the first site under
 /// a uniqueness guarantee that does not hold.
 pub fn count_overlapping(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() {
+    count_overlapping_up_to(haystack, needle, usize::MAX)
+}
+
+/// [`count_overlapping`], stopping once `cap` occurrences have been seen.
+///
+/// The resolver wants the true count: it decides between "found once", "found
+/// nowhere" and "ambiguous", and reports the number in the diagnostic. The
+/// whole-file uniqueness check wants only "is there a second one", and it runs
+/// on the app thread against a buffer that can be 100 MB. Counting every match
+/// in a file with millions of them stalls the UI to compute a number nobody
+/// reads -- the same defect the whitespace scan was capped for, one line above
+/// it and still uncapped.
+pub fn count_overlapping_up_to(haystack: &str, needle: &str, cap: usize) -> usize {
+    if needle.is_empty() || cap == 0 {
         return 0;
     }
     let mut count = 0usize;
     let mut from = 0usize;
     while let Some(offset) = haystack[from..].find(needle) {
         count += 1;
+        if count >= cap {
+            return count;
+        }
         let start = from + offset;
         // Advance one character, not one match, so overlaps are seen.
         from = start
@@ -876,6 +892,23 @@ line 2
             ),
             other => panic!("expected ValidationError, got {other:?}"),
         }
+    }
+
+    /// The capped count stops, and agrees with the uncapped one below the cap.
+    ///
+    /// A cap that changed the answer for a file with two matches would make the
+    /// uniqueness check wrong rather than fast.
+    #[test]
+    fn a_capped_count_stops_without_changing_the_answer() {
+        let many = "call();\n".repeat(500);
+
+        assert_eq!(count_overlapping_up_to(&many, "call();", 2), 2);
+        assert_eq!(count_overlapping_up_to(&many, "call();", 1), 1);
+        assert_eq!(count_overlapping(&many, "call();"), 500);
+
+        let once = "alpha();\ncall();\nbeta();\n";
+        assert_eq!(count_overlapping_up_to(once, "call();", 2), 1);
+        assert_eq!(count_overlapping_up_to(once, "absent", 2), 0);
     }
 
     #[test]
