@@ -1,10 +1,20 @@
 name: Legion Smoke
 
-# GP-1/2/3/4 golden-path headless smoke: open fixture repo → edit Rust → diagnostics →
+# GP-1/2/3/4/5 golden-path headless smoke: open fixture repo → edit Rust → diagnostics →
 # search → terminal cargo test → git workflow → evidence artifact (GP-1);
 # delegate mode scope/sandbox/kill/review flows (GP-2); full delegate task loop
 # with scope denial, sandbox teeth, orphan reap, and evidence TOML (GP-3);
-# automate multi-agent workflow harness and evidence TOML (GP-4).
+# automate multi-agent workflow harness and evidence TOML (GP-4); the manual
+# editing loop end to end — open, edit, save, highlight, terminal, commit
+# (the `golden-path-5` binary).
+#
+# NAME COLLISION, deliberately spelled out: the in-tree `golden-path-5` command
+# is the manual editing loop above. The production roadmap's Phase 6 exit gate
+# also says "GP-5", and there it means the **extension-constrained workflow**
+# (master plan v0.2 §GP-5: an approved extension enhances the editor but cannot
+# mutate files or reach the network unless policy allows, with inspectable
+# permissions). A third "GP-5" in master plan v0.1 mapped to the update drill.
+# This job proves the first of those three and neither of the others.
 #
 # This is an INDEPENDENT workflow: its failures do NOT block pull-request merges
 # unless the team explicitly adds it to a branch-protection required-check set.
@@ -227,6 +237,54 @@ jobs:
         with:
           name: gp4-report-${{ matrix.os }}
           path: target/golden-path/gp4_report.toml
+          if-no-files-found: warn
+
+  smoke-manual-loop:
+    name: Manual editing loop smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report available disk space
+        shell: bash
+        run: |
+          echo "=== disk space report ==="
+          if command -v df >/dev/null 2>&1; then
+            df -h . || true
+          else
+            echo "(df not available on this runner)"
+          fi
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/apt-install.sh --gui
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Run manual editing loop smoke
+        run: cargo run -p xtask -- golden-path-5
+
+      - name: Upload manual editing loop evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-loop-report-${{ matrix.os }}
+          path: target/golden-path/gp5_report.toml
           if-no-files-found: warn
 
   update-drill:
