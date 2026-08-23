@@ -107,7 +107,7 @@ const QUERY_SIGNALS: &[&str] = &[
 /// `sort out`, `deal with` are all missing and always will be -- so a second
 /// clause is treated as evidence of work rather than something to be
 /// recognised word by word.
-const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & "];
+const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & ", " - "];
 
 /// Punctuation that ends one instruction, and so may begin another.
 ///
@@ -117,18 +117,23 @@ const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & "];
 /// opening clause was ever classified, and `resolve` is in no verb list -- so
 /// both lost the edit tool for a repair the user asked for in as many words.
 ///
-/// Semicolons, commas and colons are here rather than in [`CLAUSE_JOINERS`]
-/// because a separator does not need a word after it to separate. This list has
-/// now been extended three times, once per punctuation mark somebody thought of
-/// -- period, then comma, then colon -- which is itself the argument for
-/// enumerating separators instead of verbs: the punctuation is finite, and the
-/// set of English words meaning "fix it" is not.
+/// Semicolons, commas, colons and dashes are here rather than in
+/// [`CLAUSE_JOINERS`] because a separator does not need a word after it to
+/// separate. This list has now been extended four times, once per punctuation
+/// mark somebody thought of -- period, comma, colon, dash -- which is itself
+/// the argument for enumerating separators instead of verbs: the punctuation is
+/// finite, and the set of English words meaning "fix it" is not.
+///
+/// The plain hyphen is **not** here, and cannot be: it joins words that are
+/// still words, so `re-run the tests` would read as two clauses on the strength
+/// of its spelling. A hyphen used as a dash is written with spaces around it,
+/// which is why `" - "` is a joiner instead.
 ///
 /// The cost is that "what does this do, exactly?" and "where is `Foo::bar`
 /// defined?" both read as two clauses and keep an edit tool they will not use.
 /// That is the same trade the rest of this module makes, and it falls on the
 /// side measured in tokens.
-const CLAUSE_ENDS: &[char] = &['.', '!', '?', '\n', ';', ',', ':'];
+const CLAUSE_ENDS: &[char] = &['.', '!', '?', '\n', ';', ',', ':', '\u{2013}', '\u{2014}'];
 
 /// Classify a directive as a query or a mutation.
 ///
@@ -412,6 +417,8 @@ mod tests {
             "Investigate the crash. Resolve it.",
             "Investigate the crash, resolve it.",
             "Investigate the crash: resolve it.",
+            "Investigate the crash \u{2014} resolve it.",
+            "Investigate the crash - resolve it.",
             "Explain the failure.\nThen make it stop.",
             "What does this function do? Rewrite it to be clearer.",
             "Review the parser; make it stop panicking.",
@@ -422,6 +429,21 @@ mod tests {
                 "{directive:?} carries a second instruction"
             );
         }
+    }
+
+    /// A hyphen inside a word is not a dash between clauses.
+    ///
+    /// `well-known` is one word however it is spelled, and reading its hyphen
+    /// as a clause separator would make every hyphenated phrase a second
+    /// instruction. (`re-run` would also be one word, but `run` is a mutation
+    /// signal and the word splitter treats hyphens as boundaries, so that one
+    /// is a mutation for a different and deliberate reason.)
+    #[test]
+    fn a_hyphenated_word_is_not_two_clauses() {
+        assert_eq!(
+            classify_action("where is the well-known helper defined"),
+            ActionClass::Query
+        );
     }
 
     /// One clause with a mark on the end is still one clause.
