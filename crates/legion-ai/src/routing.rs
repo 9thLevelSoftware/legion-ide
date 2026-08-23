@@ -107,7 +107,12 @@ const QUERY_SIGNALS: &[&str] = &[
 /// `sort out`, `deal with` are all missing and always will be -- so a second
 /// clause is treated as evidence of work rather than something to be
 /// recognised word by word.
-const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & ", " - "];
+///
+/// `" to "` and `" so "` are here for the purpose clause, which attaches work
+/// with no punctuation and no conjunction at all: "Investigate the crash to
+/// resolve it." The cost is that "how do I get to the config" keeps an edit tool
+/// it will not use, which is the trade this module makes everywhere.
+const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", " & ", " - ", " to ", " so "];
 
 /// Punctuation that ends one instruction, and so may begin another.
 ///
@@ -419,6 +424,8 @@ mod tests {
             "Investigate the crash: resolve it.",
             "Investigate the crash \u{2014} resolve it.",
             "Investigate the crash - resolve it.",
+            "Investigate the crash to resolve it.",
+            "Investigate the timeout so it stops happening.",
             "Explain the failure.\nThen make it stop.",
             "What does this function do? Rewrite it to be clearer.",
             "Review the parser; make it stop panicking.",
