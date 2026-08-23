@@ -1271,6 +1271,73 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
     found
 }
 
+/// How many whitespace-insensitive matches `old_str` has, up to `cap`.
+///
+/// The counting twin of [`find_whitespace_insensitive`], and it exists because
+/// of where the two get used. The finder resolves an edit against a 4 KB
+/// excerpt, so materialising the whole thing costs nothing. The uniqueness
+/// check runs against the **whole buffer** on the app thread, and the finder
+/// allocates three vectors and a normalized `String` per line to answer it --
+/// on a 100 MB file that is hundreds of megabytes of transient allocation to
+/// validate an anchor from four kilobytes, with the UI waiting.
+///
+/// So this streams. One line is normalized at a time, and the only state kept
+/// is how far each in-flight candidate has matched -- bounded by the needle,
+/// not by the file. Stops as soon as `cap` matches are found, because the
+/// caller only ever asks "more than one?".
+///
+/// The matching rules are the finder`s, deliberately and exactly: blank lines
+/// are tolerated inside a started match and not before it, a candidate may
+/// begin at any line, and matches may overlap. Two functions answering the same
+/// question differently would be worse than the allocation.
+pub fn count_whitespace_insensitive(file_content: &str, old_str: &str, cap: usize) -> usize {
+    let mut needle_normalizer = LineNormalizer::default();
+    let needle: Vec<String> = old_str
+        .lines()
+        .map(|line| needle_normalizer.normalize(line))
+        .filter(|line| !line.is_empty())
+        .collect();
+    if needle.is_empty() || cap == 0 {
+        return 0;
+    }
+
+    let mut file_normalizer = LineNormalizer::default();
+    // How many needle lines each in-flight candidate has matched. A candidate
+    // that has matched nothing is not kept: it is created and resolved within
+    // the line that would have started it.
+    let mut active: Vec<usize> = Vec::new();
+    let mut next: Vec<usize> = Vec::new();
+    let mut found = 0_usize;
+
+    for line in file_content.split_inclusive('\n') {
+        let normalized = file_normalizer.normalize(line);
+        if normalized.is_empty() {
+            // Formatting inside a match, and the end of nothing: every started
+            // candidate survives, and none can start here.
+            continue;
+        }
+        // A match may begin at any line, so this line is also a candidate start.
+        active.push(0);
+        next.clear();
+        for matched in active.drain(..) {
+            if needle[matched] != normalized {
+                continue;
+            }
+            let matched = matched + 1;
+            if matched == needle.len() {
+                found += 1;
+                if found >= cap {
+                    return found;
+                }
+            } else {
+                next.push(matched);
+            }
+        }
+        std::mem::swap(&mut active, &mut next);
+    }
+    found
+}
+
 /// Line normalizer whose literal state survives between lines.
 ///
 /// A Python triple-quoted string or a JavaScript template literal is still a
@@ -1364,6 +1431,62 @@ mod whitespace_tests {
         "    );\n",
         "}\n",
     );
+
+    /// The counting scan and the finder agree about what a match is.
+    ///
+    /// Two functions answering the same question differently would be worse
+    /// than the allocation the counting one exists to avoid, so the cases that
+    /// define the rules are asserted against both.
+    #[test]
+    fn counting_and_finding_agree_on_every_rule() {
+        let cases: &[(&str, &str, usize)] = &[
+            // Indentation drift matches, once.
+            ("fn a() {\n        call();\n}\n", "    call();", 1),
+            // Two sites differing only in spacing are two sites.
+            (
+                "    call(a, b);\nother();\n        call(a,   b);\n",
+                "call(a, b);",
+                2,
+            ),
+            // A real difference is not a match.
+            ("let total = 1;\n", "let total = 2;", 0),
+            // A blank line inside the region is formatting, not a break.
+            ("one();\n\ntwo();\n", "one();\ntwo();", 1),
+            // A blank line before the anchor is not absorbed into it.
+            ("\n\ntwo();\n", "one();\ntwo();", 0),
+        ];
+
+        for (file, needle, expected) in cases {
+            assert_eq!(
+                count_whitespace_insensitive(file, needle, 8),
+                *expected,
+                "count disagreed on {needle:?} in {file:?}"
+            );
+            assert_eq!(
+                find_whitespace_insensitive(file, needle).is_some(),
+                *expected == 1,
+                "the finder must resolve exactly the unique case; {needle:?} in {file:?}"
+            );
+        }
+    }
+
+    /// The scan stops as soon as the caller has its answer.
+    ///
+    /// The point of the cap: the uniqueness check only asks "more than one?",
+    /// and a 100 MB buffer should not be walked past the second match to say so.
+    #[test]
+    fn counting_stops_at_the_cap() {
+        let file = "call();\n".repeat(500);
+
+        assert_eq!(count_whitespace_insensitive(&file, "call();", 2), 2);
+        assert_eq!(count_whitespace_insensitive(&file, "call();", 1), 1);
+    }
+
+    /// An empty anchor counts nothing, as it finds nothing.
+    #[test]
+    fn counting_an_empty_anchor_finds_nothing() {
+        assert_eq!(count_whitespace_insensitive("anything\n", "", 4), 0);
+    }
 
     #[test]
     fn indentation_drift_still_matches() {

@@ -27,11 +27,16 @@ use crate::*;
 /// only for tolerant ones: normalized matching is a superset of exact, and two
 /// sites differing only in indentation are two sites the model saw one of.
 ///
-/// `find_whitespace_insensitive` already refuses ambiguity -- it returns `None`
-/// when a second normalized match exists -- so asking it about the whole file is
-/// the entire check. `None` cannot mean "not found" here: the anchor resolved
-/// against the excerpt, the excerpt is a prefix of this text, and an exact match
-/// is also a normalized one. So `None` means more than one.
+/// Counted rather than found, and the difference is the whole buffer.
+///
+/// `find_whitespace_insensitive` answers this too -- it returns `None` when a
+/// second normalized match exists -- but it materialises three vectors and a
+/// normalized `String` per line to do it. That is free against the 4 KB excerpt
+/// the resolver runs on, and it is hundreds of megabytes of transient
+/// allocation against a 100 MB buffer, on the app thread, with the UI waiting.
+///
+/// `count_whitespace_insensitive` streams the same matching rules and stops at
+/// the second match, which is the only number this question needs.
 #[cfg(any(feature = "ai", feature = "offline"))]
 fn assist_anchor_ambiguity(haystack: &str, needle: &str) -> Option<String> {
     let exact = legion_ai::patch::count_overlapping(haystack, needle);
@@ -41,7 +46,7 @@ fn assist_anchor_ambiguity(haystack: &str, needle: &str) -> Option<String> {
              the excerpt the model was shown"
         ));
     }
-    if legion_ai::patch::find_whitespace_insensitive(haystack, needle).is_none() {
+    if legion_ai::patch::count_whitespace_insensitive(haystack, needle, 2) > 1 {
         return Some(
             "the quoted text appears more than once in the file once whitespace is \
              ignored, but only once in the excerpt the model was shown"
