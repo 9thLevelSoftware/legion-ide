@@ -280,6 +280,29 @@ pub(crate) fn enforce_https_for_remote(base_url: &str) -> String {
     )
 }
 
+/// An endpoint as it may be shown to a person or written to a record.
+///
+/// Scheme, host and port, and nothing else. Userinfo, query and fragment are
+/// all places a credential lives -- a loopback service behind an authenticated
+/// proxy is configured as `http://user:token@127.0.0.1:11434`, and interpolating
+/// the raw environment value into a diagnosis put that token into a
+/// `PreviewSummary` retained under a metadata-only redaction hint.
+///
+/// Built from the [`legion_protocol::NetworkTarget`] rather than from the text,
+/// because the target is already the sanitized form every audit record carries.
+/// Deriving a second sanitized form from the same grammar is how this file lost
+/// a query, a set of IPv6 brackets and a proxy credential one at a time.
+pub(crate) fn displayable_endpoint(target: &legion_protocol::NetworkTarget) -> String {
+    match target.port {
+        Some(port) => format!(
+            "{}://{}:{port}",
+            target.scheme,
+            url_authority_host(&target.host)
+        ),
+        None => format!("{}://{}", target.scheme, url_authority_host(&target.host)),
+    }
+}
+
 /// A host as a URL authority writes it: an IPv6 literal wears its brackets.
 fn url_authority_host(host: &str) -> String {
     if host.contains(':') && !host.starts_with('[') {
@@ -428,13 +451,59 @@ mod delegate_chat_route_honesty_tests {
     #[test]
     fn a_local_reason_names_the_endpoint_it_probed() {
         let _env = RouteEnv::cleared();
-        let ollama = crate::ollama_base_url_from_env();
-        let llama = crate::llama_cpp_base_url_from_env();
+        let ollama = super::displayable_endpoint(&super::ollama_network_target());
+        let llama = super::displayable_endpoint(&super::llama_cpp_network_target());
 
         let auto = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Auto)
             .expect("auto that fell back owes an explanation");
-        assert!(auto.contains(&ollama));
-        assert!(auto.contains(&llama));
+        assert!(auto.contains(&ollama), "got {auto}");
+        assert!(auto.contains(&llama), "got {auto}");
+    }
+
+    /// A credential in a configured URL never reaches the diagnosis.
+    ///
+    /// The reason becomes a proposal's `PreviewSummary.details` and is retained
+    /// under a metadata-only redaction hint, so interpolating the environment
+    /// value verbatim wrote a proxy token into proposal history -- while the
+    /// parser three lines away was carefully stripping the same credential out
+    /// of the audit record.
+    #[test]
+    fn a_credential_in_the_configured_url_is_not_repeated_in_the_reason() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://proxyuser:s3cret@127.0.0.1:11434/v1",
+        );
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
+            .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            !reason.contains("s3cret") && !reason.contains("proxyuser"),
+            "the credential must not survive into the reason; got {reason}"
+        );
+        assert!(
+            reason.contains("http://127.0.0.1:11434"),
+            "and the endpoint must still be named; got {reason}"
+        );
+    }
+
+    /// The same, for a token carried in the query rather than the userinfo.
+    #[test]
+    fn a_query_token_is_not_repeated_in_the_reason() {
+        let env = RouteEnv::cleared();
+        env.set(
+            "OLLAMA_BASE_URL",
+            "http://127.0.0.1:11434/v1?access_token=s3cret",
+        );
+
+        let reason = crate::local_ai_unavailable_reason(crate::ProductAiProviderPreference::Ollama)
+            .expect("ollama that fell back owes an explanation");
+
+        assert!(
+            !reason.contains("s3cret"),
+            "a query token is a credential too; got {reason}"
+        );
     }
 
     /// A remote provider really is a credential problem, and says so.
