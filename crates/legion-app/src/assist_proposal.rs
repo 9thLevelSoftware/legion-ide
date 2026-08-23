@@ -791,6 +791,57 @@ impl AppComposition {
                 generated_at,
                 1,
             );
+        // An edit that changes nothing is not registered as a proposal.
+        //
+        // The unresolved path produced an empty replacement over an empty span,
+        // and registering that put a no-op into the proposal lifecycle -- where
+        // approving it is a real transaction: `EditorEngine::apply_edits`
+        // increments the buffer version, writes an undo entry, and marks the
+        // buffer dirty, all for text it did not change. Offering somebody a
+        // button that does that is worse than the prepend it replaced, because
+        // it looks like it worked.
+        //
+        // The run itself still happened, so everything describing it is kept:
+        // the route response, the manifest, the inspector and the budget are
+        // returned exactly as the streaming path returns them, and the reason
+        // the edit did not resolve is already in the source's details. Only the
+        // proposal is absent, because there is nothing to propose.
+        //
+        // The fixture is unaffected: it has an empty *span* and a non-empty
+        // replacement, which is a real insertion.
+        if proposal_source.replacement.is_empty() {
+            // The run is still replayable, and its manifest names no proposal
+            // because none exists. Built here rather than skipped: a run that
+            // happened and left no manifest is a hole in the trail, and the
+            // reason the edit did not resolve is only legible next to the route
+            // and manifest that produced it.
+            let replay_manifest = legion_protocol::AgentReplayManifest {
+                run_id: run_id.clone(),
+                transitions: agent.transitions().to_vec(),
+                context_manifests: vec![trust_reference(
+                    &context_manifest_projection.manifest.manifest_id,
+                    legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+                )],
+                provider_route_ids: vec![route_id.clone()],
+                proposal_ids: Vec::new(),
+                correlation_id: event_context.correlation_id,
+                causality_id: event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            return Ok(AppAiRunOutcome {
+                run_id,
+                proposal_id: None,
+                proposal_created: None,
+                route_response,
+                context_manifest_projection,
+                privacy_inspector_projection,
+                permission_budget_projection,
+                refusal: None,
+                replay_manifest,
+            });
+        }
         let output = legion_protocol::AssistedAiEditProposalOutput {
             output_id: format!("phase4-output-{}", event_context.correlation_id.0),
             request_id: format!("phase4-request-{}", event_context.correlation_id.0),

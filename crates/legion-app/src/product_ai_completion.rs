@@ -296,40 +296,43 @@ No explanation, no second block.";
     ) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "assist.proposal");
-            // Read once, in one match, rather than through an accessor per
-            // field. Four accessors that all cloned out of the same arm was
-            // the enum paying rent for something one destructure does.
-            let (span, anchor, replacement, resolved, detail) =
+            // Read once, in one match. Four accessors that all cloned out of
+            // the same arm was the enum paying rent for something one
+            // destructure does, and a `resolved` bool alongside it was paying
+            // twice -- the match already knows which arm it took, and the
+            // summary is the only thing that needed telling.
+            let (span, anchor, replacement, summary, detail) =
                 match resolve_assist_placement(buffer_excerpt, file_path, &completion.text) {
                     AssistPlacement::Resolved {
                         span,
                         anchor,
                         replacement,
                         outcome_label,
-                    } => {
-                        let detail = format!("edit={outcome_label} bytes={}..{}", span.0, span.1);
-                        (span, anchor, replacement, true, detail)
-                    }
-                    // An empty replacement over an empty span changes nothing.
+                    } => (
+                        span,
+                        anchor,
+                        replacement,
+                        format!("Assist edit proposal from {}", completion.provider_id),
+                        format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
+                    ),
+                    // An empty replacement over an empty span changes nothing,
+                    // and `finish_assisted_edit_proposal_registration` declines
+                    // to register it rather than offering an approvable no-op.
                     AssistPlacement::Unresolved { reason } => (
                         (0, 0),
                         String::new(),
                         String::new(),
-                        false,
+                        format!(
+                            "Assist edit from {} did not resolve",
+                            completion.provider_id
+                        ),
                         format!("edit=unresolved: {reason}"),
                     ),
                 };
             (
                 AssistedEditProposalSource {
                     provider_id: completion.provider_id.clone(),
-                    summary: if resolved {
-                        format!("Assist edit proposal from {}", completion.provider_id)
-                    } else {
-                        format!(
-                            "Assist edit from {} did not resolve",
-                            completion.provider_id
-                        )
-                    },
+                    summary,
                     details: vec![
                         format!("model={}", completion.model),
                         // The backend that actually answered, not the
@@ -842,6 +845,36 @@ mod assist_placement_tests {
             "a fenced search/replace block should still resolve; detail was {:?}",
             detail
         );
+    }
+
+    /// An unresolved edit is never registered as a proposal.
+    ///
+    /// It used to be, as an empty replacement over an empty span. Approving
+    /// that is a real transaction: `EditorEngine::apply_edits` increments the
+    /// buffer version, writes an undo entry, and marks the buffer dirty for
+    /// text it did not change -- a button that looks like it worked and did
+    /// nothing, which is worse than the prepend it replaced.
+    ///
+    /// Asserted at the source rather than through a run: an empty replacement
+    /// is the condition `finish_assisted_edit_proposal_registration` declines
+    /// on, so this pins the property that decision reads.
+    #[test]
+    fn an_unresolved_edit_carries_no_replacement_to_register() {
+        let (_span, _anchor, replacement, _detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "no block here",
+        ));
+        assert!(
+            replacement.is_empty(),
+            "an unresolved edit must carry nothing to apply, or a no-op reaches the              proposal lifecycle"
+        );
+
+        // And a resolved one does, so the guard cannot swallow real edits.
+        let answer = block("    println!(\"two\");", "    println!(\"three\");");
+        let (_span, _anchor, resolved, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+        assert!(!resolved.is_empty());
     }
 
     /// The deterministic fixture keeps prepending, and that stays honest.
