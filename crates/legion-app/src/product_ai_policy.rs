@@ -138,6 +138,33 @@ pub(crate) fn bounded_by_bytes(text: &str, max_bytes: usize) -> String {
     text[..end].to_string()
 }
 
+/// The buffer excerpt a model is shown, cut on a line boundary.
+///
+/// [`bounded_by_bytes`] cuts at a byte, which for a file over the budget lands
+/// mid-line as often as not -- and the model has no way to know. It sees the
+/// partial tail as a complete line, quotes it as SEARCH, and exact resolution
+/// finds that prefix exactly once and replaces it, leaving the unseen remainder
+/// of the line stuck to the end of the replacement. A corrupted line from an
+/// edit that looked unambiguous the whole way through.
+///
+/// So the excerpt ends where a line ends. Offsets stay absolute, because this
+/// is still a prefix of the buffer -- it is just a shorter one.
+///
+/// When the first line alone exceeds the budget there is no complete line to
+/// send, and the excerpt is empty. Assist then finds no anchor and declines,
+/// which is the right outcome: a minified file has no line for a model to quote
+/// back, and half of one is the case this exists to prevent.
+pub(crate) fn assist_buffer_excerpt(text: &str, max_bytes: usize) -> String {
+    let bounded = bounded_by_bytes(text, max_bytes);
+    if bounded.len() == text.len() {
+        return bounded;
+    }
+    match bounded.rfind('\n') {
+        Some(last_break) => bounded[..=last_break].to_string(),
+        None => String::new(),
+    }
+}
+
 /// The most tokens a request could consume, for declaration to the broker.
 ///
 /// A ceiling rather than an estimate of what this particular call will use,
@@ -711,6 +738,50 @@ mod org_ceiling {
              egress would still have let workspace text out",
             merged.network_policy.allowlist
         );
+    }
+
+    /// A truncated excerpt ends where a line ends.
+    ///
+    /// A byte cut lands mid-line, and the model has no way to see that. It
+    /// quotes the partial tail as SEARCH, exact resolution finds that prefix
+    /// exactly once, and the edit replaces it -- leaving the unseen remainder of
+    /// the line stuck to the replacement. A corrupted line from an edit that
+    /// looked unambiguous the whole way through.
+    #[test]
+    fn a_truncated_excerpt_never_ends_mid_line() {
+        let file = "alpha();\nbeta();\ngamma_is_a_long_one();\n";
+
+        let excerpt = crate::assist_buffer_excerpt(file, 20);
+
+        assert_eq!(excerpt, "alpha();\nbeta();\n");
+        assert!(
+            excerpt.ends_with('\n'),
+            "the model must not be shown half a line; got {excerpt:?}"
+        );
+        assert!(
+            file.starts_with(&excerpt),
+            "still a prefix, so resolved offsets stay absolute"
+        );
+    }
+
+    /// A file inside the budget is sent whole, trailing newline or not.
+    #[test]
+    fn a_short_file_is_not_trimmed() {
+        let file = "fn main() {}";
+
+        assert_eq!(crate::assist_buffer_excerpt(file, 4_000), file);
+    }
+
+    /// A first line longer than the budget leaves nothing to anchor on.
+    ///
+    /// Empty rather than half a line: a minified file has no line for a model
+    /// to quote back, and half of one is exactly what this prevents. Assist
+    /// finds no anchor and declines.
+    #[test]
+    fn a_first_line_over_the_budget_yields_no_excerpt() {
+        let minified = "a".repeat(500) + "\nsecond();\n";
+
+        assert!(crate::assist_buffer_excerpt(&minified, 100).is_empty());
     }
 
     #[test]

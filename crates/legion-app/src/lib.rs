@@ -26282,7 +26282,7 @@ impl AppComposition {
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         // The same bound the Delegate declaration counts, in the same unit.
-        let buffer_excerpt = bounded_by_bytes(&input.text, ASSIST_EXCERPT_MAX_BYTES);
+        let buffer_excerpt = assist_buffer_excerpt(&input.text, ASSIST_EXCERPT_MAX_BYTES);
         // Resolved before the route request so the capability decision, the
         // audit record and the bytes all describe the same destination.
         // The backend is resolved once and drives three things that have to

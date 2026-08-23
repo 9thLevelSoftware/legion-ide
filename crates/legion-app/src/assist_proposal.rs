@@ -622,7 +622,7 @@ impl AppComposition {
         // are two numbers that happen to agree, and taking characters while
         // declaring bytes made them disagree for anything but ASCII: four
         // thousand emoji are four thousand `char`s and sixteen thousand bytes.
-        let buffer_excerpt = bounded_by_bytes(
+        let buffer_excerpt = assist_buffer_excerpt(
             self.editor.text(context.buffer_id).unwrap_or(""),
             ASSIST_EXCERPT_MAX_BYTES,
         );
