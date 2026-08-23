@@ -38,10 +38,11 @@ pub mod governance {
 }
 
 pub mod redaction;
+/// Tool-calling DTOs, trait, and scripted test provider.
+pub mod routing;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.
 pub mod telemetry;
-/// Tool-calling DTOs, trait, and scripted test provider.
 pub mod tool_calls;
 
 pub use manifest::{
