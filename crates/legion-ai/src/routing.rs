@@ -109,6 +109,15 @@ const QUERY_SIGNALS: &[&str] = &[
 /// recognised word by word.
 const CLAUSE_JOINERS: &[&str] = &[" and ", " then ", ", and ", "; ", " & "];
 
+/// Characters that end a sentence, and so may start another instruction.
+///
+/// "Investigate the crash. Resolve it." carries its second instruction in a
+/// second sentence, which no conjunction check can see. A directive with more
+/// than one sentence is doing more than one thing, and only the first is
+/// being classified -- so the rest is treated as work rather than assumed
+/// harmless.
+const SENTENCE_ENDS: &[char] = &['.', '!', '?', '\n'];
+
 /// Classify a directive as a query or a mutation.
 ///
 /// Biased toward `Mutate`, and the asymmetry is the whole design. Offering a
@@ -179,11 +188,30 @@ pub fn classify_action(directive: &str) -> ActionClass {
     let opens_as_a_question = words
         .first()
         .is_some_and(|word| QUERY_SIGNALS.contains(word));
-    let carries_a_second_clause = CLAUSE_JOINERS.iter().any(|joiner| lowered.contains(joiner));
+    let carries_a_second_clause = CLAUSE_JOINERS
+        .iter()
+        .any(|joiner| lowered.contains(joiner))
+        || carries_a_second_sentence(&lowered);
     if opens_as_a_question && !carries_a_second_clause {
         return ActionClass::Query;
     }
     ActionClass::Mutate
+}
+
+/// Whether anything follows the first sentence.
+///
+/// Trailing punctuation on a single sentence does not count -- "where is this
+/// defined?" is one question with a mark on the end. What counts is text after
+/// a sentence ends, because that text is a second instruction the
+/// classification of the first says nothing about.
+fn carries_a_second_sentence(lowered: &str) -> bool {
+    lowered.find(SENTENCE_ENDS).is_some_and(|end| {
+        lowered[end..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .is_some_and(|width| !lowered[end + width..].trim().is_empty())
+    })
 }
 
 /// Narrow an allowed tool set to the ones a turn of this class can use.
@@ -363,6 +391,35 @@ mod tests {
                 "{directive:?} is asking for work"
             );
         }
+    }
+
+    /// A second sentence is a second instruction.
+    ///
+    /// "Investigate the crash. Resolve it." carries its work in a sentence no
+    /// conjunction check can see, and only the first sentence was being
+    /// classified. A directive doing two things has one of them unexamined.
+    #[test]
+    fn a_second_sentence_is_treated_as_work() {
+        for directive in [
+            "Investigate the crash. Resolve it.",
+            "Explain the failure.\nThen make it stop.",
+            "What does this function do? Rewrite it to be clearer.",
+        ] {
+            assert_eq!(
+                classify_action(directive),
+                ActionClass::Mutate,
+                "{directive:?} carries a second instruction"
+            );
+        }
+    }
+
+    /// One sentence with a mark on the end is still one sentence.
+    #[test]
+    fn trailing_punctuation_alone_is_not_a_second_sentence() {
+        assert_eq!(
+            classify_action("where is the proposal ledger defined?"),
+            ActionClass::Query
+        );
     }
 
     /// Some plain questions keep the edit tool, and that is the accepted cost.
