@@ -833,3 +833,150 @@ fn a_query_directive_is_not_advertised_the_edit_tool() {
         std::env::remove_var("LEGION_AI_GOVERNORS");
     }
 }
+
+/// A turn that says something and then calls a tool.
+///
+/// The plan arrives as assistant text in the same turn as the first tool call,
+/// which is how a model actually states one — `tool_use` alone carries no text
+/// for the anchor to read.
+fn planning_turn(
+    text: &str,
+    id: &str,
+    tool: &str,
+    input: serde_json::Value,
+) -> Vec<legion_ai::tool_calls::ToolTurnBlock> {
+    vec![
+        legion_ai::tool_calls::ToolTurnBlock::Text(text.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::ToolUse {
+            id: id.to_string(),
+            name: tool.to_string(),
+            input,
+        },
+    ]
+}
+
+const STATED_PLAN: &str = "I will work in three steps:\n\
+     1. Read a.txt\n\
+     2. Check the contents\n\
+     3. Report back\n";
+
+/// The plan the model stated comes back to it, through the real loop.
+///
+/// `PlanAnchor` is unit-tested in isolation, and those tests keep passing
+/// whether or not `run_delegated_task_loop` still calls it. This drives the
+/// loop: the model states a plan in turn one, works for three more turns, and
+/// the provider asserts on turn five that the plan text was in what it was
+/// handed.
+///
+/// `expect_prior_result_contains` is the mechanism, so the assertion runs
+/// inside the provider against the conversation the loop actually built rather
+/// than against a reconstruction of it afterwards.
+#[test]
+fn a_stated_plan_is_reinjected_by_the_loop() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = TempDir::new().unwrap();
+    // Four distinct files: the filler turns must be real work, and
+    // identical reads would be answered from the dedup cache instead of
+    // executing, so the turn count would not advance the way this needs.
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(dir.path().join(name), format!("contents of {name}\n")).unwrap();
+    }
+
+    // SAFETY: holds `ENV_GUARD` across the env-mutating block, so no other test
+    // observes the variable mid-change.
+    unsafe {
+        std::env::set_var("LEGION_AI_GOVERNORS", "on");
+    }
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .turn(
+            planning_turn(
+                STATED_PLAN,
+                "p1",
+                "read",
+                serde_json::json!({ "path": "a.txt" }),
+            ),
+            legion_ai::tool_calls::ToolCompletionStopReason::ToolUse,
+        )
+        .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
+        .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
+        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }))
+        // A phrase only `anchor_notice` produces. "Read a.txt" was the first
+        // needle and it matched the model's own turn-1 text, so the test
+        // passed with reinjection removed entirely -- it was asserting that
+        // the model had stated its plan, which it had, in the same
+        // conversation the assertion was searching.
+        .expect_prior_result_contains("Reminder \u{2014} the plan you stated")
+        .end_turn("Done.")
+        .build("plan-anchor-provider");
+
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    // The expectation inside the provider is the assertion: reaching Completed
+    // means it saw the reminder rather than panicking on its absence.
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed, got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}
+
+/// With governors off the loop restates nothing, and the run still completes.
+///
+/// The raw baseline has to measure the un-ported loop or the bench's A/B arms
+/// stop being comparable. Asserted through the loop for the same reason as
+/// above: a unit test cannot see whether the loop still consults the flag.
+#[test]
+fn a_disabled_run_does_not_reinject_a_plan() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = TempDir::new().unwrap();
+    // Four distinct files: the filler turns must be real work, and
+    // identical reads would be answered from the dedup cache instead of
+    // executing, so the turn count would not advance the way this needs.
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(dir.path().join(name), format!("contents of {name}\n")).unwrap();
+    }
+
+    // SAFETY: holds `ENV_GUARD` across the env-mutating block.
+    unsafe {
+        std::env::set_var("LEGION_AI_GOVERNORS", "off");
+    }
+
+    // No expectation: an unmet one panics, so absence is asserted by the run
+    // completing on a script that never mentions the plan again.
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .turn(
+            planning_turn(
+                STATED_PLAN,
+                "p1",
+                "read",
+                serde_json::json!({ "path": "a.txt" }),
+            ),
+            legion_ai::tool_calls::ToolCompletionStopReason::ToolUse,
+        )
+        .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
+        .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
+        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }))
+        .end_turn("Done.")
+        .build("plan-anchor-disabled-provider");
+
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed, got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}

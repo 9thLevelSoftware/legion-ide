@@ -34,6 +34,23 @@ pub struct PlanAnchor {
 /// the model actually needs to read.
 pub const DEFAULT_REANCHOR_EVERY: u32 = 4;
 
+/// Most steps a captured plan keeps.
+///
+/// The plan is re-sent every few turns, so its size is multiplied by the run.
+/// A model that answers with a long numbered section, over a 50-turn budget,
+/// would add tens of thousands of input tokens in reminders alone -- and the
+/// small-context providers this exists to help are exactly the ones that then
+/// start refusing requests whose tool output was tiny. A plan too long to
+/// restate is also too long to be anchoring anything.
+pub const MAX_PLAN_STEPS: usize = 12;
+
+/// Most bytes a captured plan keeps, across all steps.
+///
+/// A second bound because the first one is not enough: twelve steps of prose
+/// is still unbounded. Individual steps are truncated to fit rather than
+/// dropped, so a plan stays a plan.
+pub const MAX_PLAN_BYTES: usize = 1_200;
+
 /// Fewest steps a list must have before it counts as a plan.
 ///
 /// One bullet is a sentence with a dash in front of it. Two is an ordering, and
@@ -60,7 +77,7 @@ impl PlanAnchor {
         if !self.enabled || !self.steps.is_empty() {
             return false;
         }
-        let steps = parse_plan_steps(text);
+        let steps = bounded_plan(parse_plan_steps(text));
         if steps.len() < MIN_PLAN_STEPS {
             return false;
         }
@@ -115,6 +132,35 @@ pub fn anchor_notice(steps: &[String]) -> String {
     notice
 }
 
+/// Trim a captured plan to something worth re-sending every few turns.
+///
+/// Steps beyond the cap are dropped and the remainder is truncated to the byte
+/// budget. Truncation is per step and marked, because a step cut off mid-word
+/// with no sign of it reads as a plan the model never wrote.
+fn bounded_plan(steps: Vec<String>) -> Vec<String> {
+    let mut bounded = Vec::new();
+    let mut budget = MAX_PLAN_BYTES;
+    for step in steps.into_iter().take(MAX_PLAN_STEPS) {
+        if budget == 0 {
+            break;
+        }
+        if step.len() <= budget {
+            budget -= step.len();
+            bounded.push(step);
+            continue;
+        }
+        let mut end = budget;
+        while end > 0 && !step.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end > 0 {
+            bounded.push(format!("{}…", &step[..end]));
+        }
+        budget = 0;
+    }
+    bounded
+}
+
 /// Pull an ordered list of steps out of free model text.
 ///
 /// Takes the longest run of *consecutive* list lines rather than every list
@@ -130,6 +176,13 @@ pub fn parse_plan_steps(text: &str) -> Vec<String> {
             Some(body) if !body.is_empty() => current.push(body),
             // A blank line inside a list is formatting, not a break: models
             // routinely double-space numbered steps.
+            //
+            // An *empty item* -- "2." with nothing after it -- is the same
+            // thing and used to end the run, so "1. foo / 2. / 3. baz" captured
+            // only the first step and silently discarded the third. A
+            // placeholder step is a plan with a gap in it, not the end of a
+            // plan.
+            Some(_) => {}
             None if line.trim().is_empty() && !current.is_empty() => {}
             _ => {
                 if current.len() > best.len() {
@@ -202,6 +255,37 @@ mod tests {
     fn a_double_spaced_list_is_still_one_plan() {
         let steps = parse_plan_steps("1. first\n\n2. second\n\n3. third\n");
         assert_eq!(steps.len(), 3);
+    }
+
+    /// An empty step is a gap in a plan, not the end of one.
+    #[test]
+    fn an_empty_item_does_not_truncate_the_plan() {
+        assert_eq!(
+            parse_plan_steps("1. foo\n2. \n3. baz\n"),
+            vec!["foo", "baz"],
+            "the placeholder is dropped; the steps around it are not"
+        );
+    }
+
+    /// A plan too long to restate is not kept whole.
+    ///
+    /// It is re-sent every few turns, so its size is multiplied by the run --
+    /// and the small-context providers this exists to help are the ones that
+    /// start refusing requests because of it.
+    #[test]
+    fn an_oversized_plan_is_bounded() {
+        let long: String = (1..=40)
+            .map(|index| format!("{index}. {}\n", "step text ".repeat(20)))
+            .collect();
+        let mut anchor = PlanAnchor::new(true);
+        assert!(anchor.capture(&long));
+
+        assert!(anchor.steps().len() <= MAX_PLAN_STEPS);
+        let total: usize = anchor.steps().iter().map(String::len).sum();
+        assert!(
+            total <= MAX_PLAN_BYTES + 8,
+            "a reminder re-sent every few turns has to stay small; got {total} bytes"
+        );
     }
 
     /// The longest adjacent run wins, not every list line in the reply.

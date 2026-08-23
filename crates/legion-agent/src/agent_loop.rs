@@ -2107,14 +2107,13 @@ pub fn run_delegated_task_loop(
                 // are any, so a reminder never becomes a turn of its own that
                 // the model has to answer.
                 let reanchor = plan_anchor.reanchor();
-                if !tool_result_blocks.is_empty() || reanchor.is_some() {
-                    let mut blocks = tool_result_blocks;
-                    if let Some(notice) = reanchor {
-                        blocks.push(ToolTurnBlock::Text(notice));
-                    }
+                if let Some(notice) = reanchor {
+                    tool_result_blocks.push(ToolTurnBlock::Text(notice));
+                }
+                if !tool_result_blocks.is_empty() {
                     turns.push(ToolConversationTurn {
                         role: "user".to_string(),
-                        blocks,
+                        blocks: tool_result_blocks,
                     });
                 }
                 // Loop continues to next model turn.
